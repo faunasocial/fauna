@@ -178,4 +178,36 @@ public class ComposeMarkdownDecoratorTests
         var runs = ComposeMarkdownDecorator.BuildHideRuns(text, FaunaFfiMethods.DecorationMap(text), plan);
         Assert.Equal(text, ComposeMarkdownDecorator.VisibleText(text, runs));
     }
+
+    [Fact]
+    public void BuildHideRuns_LargeMarkerDenseBody_ConvertsEveryOffsetExactly()
+    {
+        // 20,000 × "é**b** " (8 UTF-8 bytes, 7 UTF-16 chars each) with the caret at the end: every
+        // `**` pair conceals, every "b" is bold. A per-offset walk from index 0 would make this
+        // decorations × length (~10^10 steps); the one-pass cursor keeps it linear, and the
+        // closed-form positions below prove the cursor lands exactly on each multibyte offset.
+        const int units = 20_000;
+        var text = string.Concat(Enumerable.Repeat("é**b** ", units));
+        var decos = FaunaFfiMethods.DecorationMap(text);
+        var plan = FaunaFfiMethods.ComposeDecorationPlan(text, (ulong)(units * 8));
+        var runs = ComposeMarkdownDecorator.BuildHideRuns(text, decos, plan);
+
+        var bold = runs.Where(r => r.Style == ComposeRunStyle.Bold).OrderBy(r => r.Start).ToList();
+        var conceal = runs.Where(r => r.Style == ComposeRunStyle.Conceal).OrderBy(r => r.Start).ToList();
+        Assert.Equal(units, bold.Count);
+        Assert.Equal(units * 2, conceal.Count);
+        for (int k = 0; k < units; k++)
+        {
+            Assert.Equal(new ComposeRun(k * 7 + 3, 1, ComposeRunStyle.Bold, 0), bold[k]);
+            Assert.Equal(new ComposeRun(k * 7 + 1, 2, ComposeRunStyle.Conceal, 0), conceal[2 * k]);
+            Assert.Equal(new ComposeRun(k * 7 + 4, 2, ComposeRunStyle.Conceal, 0), conceal[2 * k + 1]);
+        }
+    }
+
+    [Fact]
+    public void Utf8ByteToUtf16Index_PastTheEnd_ClampsToLength()
+    {
+        const string text = "café 👋 x";
+        Assert.Equal(text.Length, ComposeMarkdownDecorator.Utf8ByteToUtf16Index(text, 100));
+    }
 }

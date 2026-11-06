@@ -1,0 +1,28 @@
+{
+  "participants": [{ "name": "Friend One" }, { "name": "Test Owner" }],
+  "messages": [
+    {
+      "sender_name": "Test Owner",
+      "timestamp_ms": 1650000002000,
+      "content": "See you there",
+      "is_geoblocked_for_viewer": false
+    },
+    {
+      "sender_name": "Friend One",
+      "timestamp_ms": 1650000000000,
+      "content": "Ahoj! PÅ\u0099ijdeÅ¡?",
+      "photos": [
+        {
+          "uri": "your_instagram_activity/messages/inbox/friendone_17840000000000001/photos/img_1.jpg",
+          "creation_timestamp": 1650000000
+        }
+      ],
+      "reactions": [{ "reaction": "â\u009d¤", "actor": "Test Owner" }],
+      "is_geoblocked_for_viewer": false
+    }
+  ],
+  "title": "Friend One",
+  "is_still_participant": true,
+  "thread_path": "inbox/friendone_17840000000000001",
+  "magic_words": []
+}

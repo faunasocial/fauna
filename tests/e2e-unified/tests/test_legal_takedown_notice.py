@@ -34,7 +34,7 @@ the queue row's *open takedown* pre-fills the console's conversation half
 (``moderation.md`` § User-initiated reporting → Where it lands). The same
 journey witnesses ``admin-nest``'s single-message takedown. It reads the
 bubble's ``dm-message-legal-takedown`` tombstone (owner-approved 2026-10-16),
-so it runs on every app that tags it; the others skip as unbuilt.
+so it runs on every app.
 """
 
 import time
@@ -43,7 +43,6 @@ import uuid
 import pytest
 
 from clients.ws_rpc_admin_client import WsRpcAdminClient
-from helpers.app_surface import app_name, skip_unbuilt
 from helpers.connection import wait_until_online
 from helpers.conversations_restart import wait_replica_settled
 from helpers.mail_dedicated_nest import login_as_nest_admin
@@ -229,11 +228,6 @@ def _tombstones(seat):
     ]
 
 
-# The apps whose bubble tags its tombstone `dm-message-legal-takedown`; the
-# rest paint it untagged until their trickle-down lands.
-_TOMBSTONE_TAGGED_APPS = ("tui", "linux", "web", "android")
-
-
 @pytest.mark.real_conversations
 @pytest.mark.linux
 @pytest.mark.web
@@ -253,14 +247,6 @@ def test_a_message_taken_down_from_a_report_shows_the_notice_to_a_member_who_rea
     citation), confirm → the late reader opens their app and the thread shows
     the notice where the message would be, never its words, never an error."""
     author, reporter, reader = room_seats
-    if app_name(reader.app.driver) not in _TOMBSTONE_TAGGED_APPS:
-        skip_unbuilt(
-            reader.app.driver,
-            surface="dm-message-legal-takedown",
-            detail="the conversation bubble paints the legal-takedown tombstone "
-            "without its ui.yaml id (moderation.md § Legal takedown → App render)",
-            tracked="",
-        )
     token = uuid.uuid4().hex[:10]
     words = f"takedownbody{token}"
     reference = f"CourtOrder-{token}"

@@ -70,6 +70,10 @@ def _retained(row: dict) -> bool:
 @pytest.mark.tui
 @pytest.mark.web
 @pytest.mark.linux
+@pytest.mark.macos
+@pytest.mark.ios
+@pytest.mark.android
+@pytest.mark.windows
 @pytest.mark.feature("notifications")
 def test_dismiss_deletes_one_row_and_clear_all_deletes_the_rest(
     logged_in_app, nest_instance, test_user
@@ -185,6 +189,8 @@ def test_dismiss_deletes_one_row_and_clear_all_deletes_the_rest(
 
 
 @pytest.mark.tui
+@pytest.mark.macos
+@pytest.mark.ios
 @pytest.mark.feature("notifications")
 def test_dismissing_a_knock_takes_its_doorbell_row_with_it(
     logged_in_app, nest_instance, test_user

@@ -931,6 +931,15 @@ thread_local! {
     /// that pin the crossed resolution; the default clocks are untouched.
     static LOCAL_WRITE_PREDATES_PEER_RECORD: std::cell::Cell<bool> =
         const { std::cell::Cell::new(false) };
+    /// The PRE-2026-10-28 re-assert door: production re-drove the ordinary
+    /// upload, whose "already synced and recorded" skip returned without a
+    /// row whenever local's bytes were the recorded head — and a latest-wins
+    /// adopt stamps the adopted bytes recorded. The model's re-assert minted
+    /// its row unconditionally, which is why this oracle stayed green while
+    /// a live native seat pair quiesced swapped. Set only by the refutation
+    /// record that pins the old door; the forced door ships.
+    static REASSERT_SKIPS_RECORDED_BYTES: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
 }
 
 /// Process one row for a causal seat. Returns what the seat publishes, if
@@ -1061,6 +1070,18 @@ fn causal_apply(
             // CURRENT bytes as a fresh resolution at its current anchor —
             // the new log-tail row is covering by construction wherever the
             // stranded one was in content, and the fleet converges on it.
+            // The re-assert is FORCED past the upload's already-recorded skip
+            // (`engine.rs::reassert_own_tail`): the bytes it re-asserts are
+            // routinely the recorded head already.
+            if REASSERT_SKIPS_RECORDED_BYTES.with(std::cell::Cell::get)
+                && seat.last_recorded.as_ref() == Some(&seat.local)
+            {
+                trace(t, || {
+                    "  -> own stale-declined tail: re-assert swallowed (local already recorded)"
+                        .to_string()
+                });
+                return CApply::Done(None);
+            }
             trace(t, || {
                 "  -> own stale-declined tail: re-asserting local at the current anchor".to_string()
             });
@@ -3762,6 +3783,44 @@ fn a_reverts_own_held_bytes_do_not_park_a_covering_peer_edit() {
 /// the seats quiesced with their bodies exchanged.
 #[test]
 fn crossed_latest_wins_resolutions_converge_on_one_body() {
+    let (seats, bodies) = crossed_clash_schedule();
+    assert_eq!(
+        seats[0],
+        seats[1],
+        "the seats quiesced on DIFFERENT bodies (a={:?}, b={:?}) — the crossed \
+         resolutions never converged",
+        String::from_utf8_lossy(&seats[0]),
+        String::from_utf8_lossy(&seats[1])
+    );
+    assert!(
+        bodies.contains(&seats[0]),
+        "the converged body is a writer's"
+    );
+}
+
+/// **The refutation record of the pre-2026-10-28 re-assert door** (a live
+/// native seat pair at `clash`, 2026-10-28). The same crossed schedule, with
+/// the re-assert swallowed whenever local is already the recorded head — as
+/// production's was, riding the upload's "already synced and recorded" skip:
+/// each seat's stale-declined own tail re-asserts nothing, and the seats
+/// quiesce on each other's body. The live agent logs end exactly so:
+/// `self-echo: own tail declined stale — re-asserted local` on both seats,
+/// no upload after it, no later row.
+#[test]
+fn crossed_resolutions_quiesce_swapped_when_the_re_assert_skips_recorded_bytes() {
+    REASSERT_SKIPS_RECORDED_BYTES.with(|c| c.set(true));
+    let (seats, bodies) = crossed_clash_schedule();
+    REASSERT_SKIPS_RECORDED_BYTES.with(|c| c.set(false));
+    assert_eq!(
+        (seats[0].clone(), seats[1].clone()),
+        (bodies[1].clone(), bodies[0].clone()),
+        "under the old door the seats quiesce SWAPPED (a holds b's body, b holds a's)"
+    );
+}
+
+/// The crossed `clash` schedule both pins above drive; returns each seat's
+/// quiesced local body and the two writers' bodies.
+fn crossed_clash_schedule() -> ([Vec<u8>; 2], [Vec<u8>; 2]) {
     LOCAL_WRITE_PREDATES_PEER_RECORD.with(|c| c.set(true));
     let base = b"clash: base\n".to_vec();
     let bodies = [b"clash: from a\n".to_vec(), b"clash: from b\n".to_vec()];
@@ -3835,16 +3894,8 @@ fn crossed_latest_wins_resolutions_converge_on_one_body() {
         "the schedule never quiesced ({} rows)",
         nest.len()
     );
-    assert_eq!(
-        seats[0].local,
-        seats[1].local,
-        "the seats quiesced on DIFFERENT bodies (a={:?}, b={:?}) — the crossed \
-         resolutions never converged",
-        String::from_utf8_lossy(&seats[0].local),
-        String::from_utf8_lossy(&seats[1].local)
-    );
-    assert!(
-        bodies.contains(&seats[0].local),
-        "the converged body must be one of the writers' bodies"
-    );
+    (
+        [seats[0].local.clone(), seats[1].local.clone()],
+        [bodies[0].clone(), bodies[1].clone()],
+    )
 }

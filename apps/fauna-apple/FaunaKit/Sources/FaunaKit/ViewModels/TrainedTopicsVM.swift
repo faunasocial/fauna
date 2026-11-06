@@ -62,15 +62,26 @@ public final class TrainedTopicsVM {
         if fresh != rows { rows = fresh }
     }
 
-    /// Create a new trained factor named `name` (trimmed; a blank create is a
-    /// client-side no-op — the boundary's own `BlankName` error is a defensive
-    /// fallback that should never actually fire from this guard).
+    /// A blank (all-whitespace) name is refused here, before the round trip,
+    /// with the boundary's own `BlankName` sentence — the one tui and linux
+    /// paint — never a silent no-op that leaves the user wondering why nothing
+    /// happened (topic-factors.md § Authoring surface & picker, outcome 13).
+    /// Returns the trimmed name, or nil once the refusal is painted.
+    private func nonBlank(_ name: String) -> String? {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            errorMessage = mapError(FfiTrainedTopicsError.BlankName)
+            return nil
+        }
+        return trimmed
+    }
+
+    /// Create a new trained factor named `name` (trimmed; blank is refused by
+    /// `nonBlank`).
     public func create(name: String) async {
-        guard let api else { return }
+        guard let trimmed = nonBlank(name), let api else { return }
         gestureEpoch += 1
         defer { gestureEpoch += 1 }
-        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return }
         do {
             rows = try await api.trainedTopicsCreate(name: trimmed)
             clearErrorAfterSuccess()
@@ -79,14 +90,12 @@ public final class TrainedTopicsVM {
         }
     }
 
-    /// Rename an existing factor's display name (trimmed; blank is a no-op,
+    /// Rename an existing factor's display name (trimmed; blank is refused,
     /// same guard as `create`).
     public func rename(id: Data, name: String) async {
-        guard let api else { return }
+        guard let trimmed = nonBlank(name), let api else { return }
         gestureEpoch += 1
         defer { gestureEpoch += 1 }
-        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return }
         do {
             rows = try await api.trainedTopicsRename(id: id, name: trimmed)
             clearErrorAfterSuccess()

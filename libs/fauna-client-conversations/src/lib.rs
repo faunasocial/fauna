@@ -179,10 +179,9 @@ pub use custody_ceremony_glue::{
     custody_mint_candidates, mint_candidates_from_channels,
 };
 
-/// Test-only tracing capture for the drain-side Welcome-ingest-failure pin — a crate-local copy of
-/// `fauna_client_mls_sync::test_tracing`'s `capture_tracing_at_info`, whose
-/// own doc says equivalents stay crate-local by design rather than becoming a
-/// shared test-support crate.
+/// Test-only tracing capture for the drain-side Welcome-ingest-failure pin — kept crate-local because it
+/// records all event fields and has an async thread-local twin; the
+/// message-only shared capture is `fauna_test_tracing`.
 #[cfg(test)]
 mod test_tracing;
 
@@ -5353,8 +5352,11 @@ impl fauna_client_index::ContactCorpusRead for NestContactCorpus {
         // Derived once for the whole corpus read — the book listing AND every
         // book's card page below reuse it instead of each paying its own
         // X-Wing keygen .
-        let dav_keys =
-            fauna_client_carddav::DavRecipientKeys::from_mseks(&keys.msek, &keys.prior_mseks);
+        let dav_keys = fauna_client_carddav::DavRecipientKeys::from_mseks(
+            fauna_client_carddav::DavKind::Card,
+            &keys.msek,
+            &keys.prior_mseks,
+        );
         let books = carddav
             .list_addressbooks_decoded(
                 fauna_protocol::bridge_routing::ListAddressbooksRequest {
@@ -6562,8 +6564,11 @@ impl NestMailIndexLauncher {
         let Some(keys) = self.keys.get().await else {
             return;
         };
-        let dav_keys =
-            fauna_client_carddav::DavRecipientKeys::from_mseks(&keys.msek, &keys.prior_mseks);
+        let dav_keys = fauna_client_carddav::DavRecipientKeys::from_mseks(
+            fauna_client_carddav::DavKind::Card,
+            &keys.msek,
+            &keys.prior_mseks,
+        );
         let enumeration = NestContactsEnumeration {
             nest: Arc::clone(&self.nest),
             keys,

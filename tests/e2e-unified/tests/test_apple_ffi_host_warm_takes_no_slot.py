@@ -63,7 +63,7 @@ def test_apple_ffi_host_flavor_cargo_step_is_freshness_gated_outside_the_slot():
         "must take no build slot)"
     )
     gate_pos = joined.index("build-if-stale.py")
-    slot_pos = joined.index("{{slot_build}}", gate_pos)
+    slot_pos = joined.index("{{slot_build", gate_pos)  # plain or declared-write
     cargo_pos = joined.index(cargo_needle, gate_pos)
     assert gate_pos < slot_pos < cargo_pos, (
         "order must be build-if-stale (freshness) OUTSIDE {{slot_build}} "
@@ -177,14 +177,16 @@ def test_mac_debug_swift_build_is_freshness_gated_outside_the_slot():
     body = _recipe_body(_JUSTFILE.read_text(encoding="utf-8"), "mac-debug")
     assert body, "mac-debug recipe not found"
     joined = " ".join(body.split())
-    swift_needle = "swift build --package-path apps/fauna-apple --product FaunaMacOS"
+    # the gated build line carries the debug SwiftPM flags (`{{swiftpm_debug}}`: no dSYM); the
+    # earlier `--show-bin-path` probe has none and sits before the gate
+    swift_needle = "swift build {{swiftpm_debug}} --package-path apps/fauna-apple --product FaunaMacOS"
     assert swift_needle in joined, "mac-debug must build the FaunaMacOS product"
     assert "build-if-stale.py" in joined and "--stamp" in joined, (
         "mac-debug's swift build step must be gated by build-if-stale --stamp "
         "(a warm tree must take no build slot)"
     )
     gate_pos = joined.index("build-if-stale.py")
-    slot_pos = joined.index("{{slot_build}}", gate_pos)
+    slot_pos = joined.index("{{slot_build", gate_pos)  # plain or declared-write
     swift_pos = joined.index(swift_needle, gate_pos)
     assert gate_pos < slot_pos < swift_pos, (
         "order must be build-if-stale (freshness) OUTSIDE {{slot_build}} "
@@ -287,13 +289,13 @@ def test_full_flavor_dirty_tree_reads_its_stamps_before_the_slot():
     cargo_check = joined.index('build-if-stale.py --check -q --stamp "$CARGO_STAMP"', fast)
     bindgen_check = joined.index('build-if-stale.py --check -q --stamp "$BINDGEN_STAMP"', cargo_check)
     done = joined.index("exit 0", bindgen_check)
-    slot = joined.index("{{slot_build}} just _apple-ffi-build-impl")
+    slot = joined.index("{{slot_build_ffi}} just _apple-ffi-build-impl")
     assert fast < cargo_check < bindgen_check < done < slot, (
         "the stamp reads come first and decide the exit, holding no slot"
     )
     code = [ln for ln in body.splitlines() if not ln.strip().startswith("#")]
     code_joined = " ".join(" ".join(code).split())
-    assert code_joined.count("{{slot_build}}") == 1, "the impl call is the recipe's one slot"
+    assert code_joined.count("{{slot_build") == 1, "the impl call is the recipe's one slot"
     window = joined[cargo_check:bindgen_check]
     for source in ("--source libs", "--source Cargo.lock", "--source rust-toolchain.toml"):
         assert source in window, f"the cargo stamp must be read against {source}"

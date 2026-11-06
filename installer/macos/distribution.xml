@@ -65,11 +65,13 @@ function appComponentSupported() {
          identity they share with the desktop app is stable across updates
          (installers/tui.md § The ratified channel, user ruling 2026-09-26).
          Installs to /usr/local/bin beside the sync component's agent. The
-         choice's description is the installer's user-facing text; naming
-         fauna-cli there is a public-texts request, not this comment's. -->
+         choice's description is the installer's user-facing text, a public
+         text (public-texts round 7). -->
+    <!-- public-text: macos-installer-descriptions -->
     <choice id="social.fauna.tui"
             title="Fauna Terminal App"
-            description="The terminal (text-mode) Fauna app, usable over SSH. Installs fauna-tui to /usr/local/bin.">
+            description="The terminal (text-mode) Fauna app, usable over SSH, and fauna-cli, the program an AI assistant runs to work in Fauna. Installs fauna-tui and fauna-cli to /usr/local/bin.">
+    <!-- public-text-end: macos-installer-descriptions -->
         <pkg-ref id="social.fauna.tui"/>
     </choice>
     <choice id="social.fauna.bridge"

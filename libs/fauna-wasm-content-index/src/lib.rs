@@ -117,6 +117,14 @@ fn panic_hook_start() {
     fauna_wasm_panic_hook::install("fauna-wasm-content-index");
 }
 
+/// Hand this chunk's `tracing` to the SPA's `logMessage`, so a shared crate's
+/// log line running in this chunk reaches Settings → Logs (see
+/// [`fauna_wasm_panic_hook::forward_tracing`]; the SPA's `joinChunk` calls it).
+#[wasm_bindgen(js_name = setLogSink)]
+pub fn set_log_sink(sink: js_sys::Function) {
+    fauna_wasm_panic_hook::forward_tracing(sink);
+}
+
 /// Test-only: deliberately panics, so an e2e can assert the hook above really
 /// names this chunk in the browser console — a headless witness, not a
 /// review-only claim. Compiled out of every non-`test-helpers` build.

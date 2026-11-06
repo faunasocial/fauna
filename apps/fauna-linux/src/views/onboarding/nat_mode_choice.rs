@@ -230,12 +230,8 @@ fn submit_nat_mode(m: Arc<OnboardingMachine>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fauna_onboarding_machine::{OnboardingMachine, OnboardingObserver};
-
-    struct NopObs;
-    impl OnboardingObserver for NopObs {
-        fn on_changed(&self) {}
-    }
+    use fauna_onboarding_machine::OnboardingMachine;
+    use fauna_onboarding_machine::observer::NullObserver;
 
     use crate::testid::widget_names;
 
@@ -243,7 +239,7 @@ mod tests {
     #[test]
     fn page_exposes_all_ui_yaml_ids() {
         crate::testid::run_on_gtk_thread(|| {
-            let m = OnboardingMachine::new(Arc::new(NopObs));
+            let m = OnboardingMachine::new(Arc::new(NullObserver));
             let (root, refresh) = build(m);
             refresh();
             let names = widget_names(&root);

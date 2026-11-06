@@ -13,9 +13,14 @@
 //!   client mints the KeyBlob).
 //! - **Unbound payment**: mint a post-payment claim code (idempotent per
 //!   provider `external_ref` — providers redeliver webhooks).
+//! - **The purchase**: every payment records the stable per-purchase
+//!   references it names (`purchase_refs` → `payment_purchases`) against its
+//!   binding — the bound buyer or the minted claim — so a renewal extends,
+//!   and a refund or dispute (its own provider event, with its own id and no
+//!   checkout binding) voids, by the purchase.
 //! - **Refund/dispute**: void the paid window (`valid_until`) wherever the
 //!   entitlement currently lives (active subscriber row, pending request
-//!   marker, unredeemed claim). No revocation list anywhere.
+//!   marker, claim). No revocation list anywhere.
 //!
 //! Mirrors the `invite_core` split: this module is `fauna_protocol`-free; the
 //! WS-RPC handler layer (`payment_handlers`) and the HTTP webhook ingress
@@ -96,15 +101,131 @@ pub async fn apply_payment(
     let payee = &entitlement.payee.0;
     let valid_until = valid_until_of(entitlement);
 
-    match &entitlement.buyer {
-        Buyer::Actor(buyer) => {
+    // A purchase seen before (a renewal, a redelivery under a new event id,
+    // or — only while the mapping names no product — the checkout completing
+    // after its first invoice) resolves to the binding it already has: the
+    // bound buyer, the redeemer of its claim, or its still-open claim, which
+    // the renewal re-stamps. With a product set, a first invoice arriving
+    // before its checkout names no product and no recorded purchase, so the
+    // ingress acknowledges and drops it and the checkout mints.
+    let mut buyer = entitlement.buyer.clone();
+    if matches!(buyer, Buyer::Unbound)
+        && let Some(found) = resolve_purchase(state, entitlement, valid_until).await?
+    {
+        match found {
+            PurchaseBinding::Buyer(b) => buyer = Buyer::Actor(fauna_core::identity::ActorId(b)),
+            PurchaseBinding::OpenClaim { code } => {
+                return Ok(PaymentApplied::ClaimExists { code });
+            }
+        }
+    }
+
+    match &buyer {
+        Buyer::Actor(b) => {
             let queued =
-                grant_paid_entitlement(state, payee, &buyer.0, &entitlement.tier, valid_until)
-                    .await?;
+                grant_paid_entitlement(state, payee, &b.0, &entitlement.tier, valid_until).await?;
+            record_purchase(state, entitlement, Some(&b.0), None).await?;
             Ok(PaymentApplied::Granted { queued })
         }
-        Buyer::Unbound => mint_claim(state, entitlement, valid_until).await,
+        Buyer::Unbound => {
+            let applied = mint_claim(state, entitlement, valid_until).await?;
+            record_purchase(state, entitlement, None, Some(&entitlement.external_ref)).await?;
+            Ok(applied)
+        }
     }
+}
+
+/// What a purchase reference an earlier payment recorded is bound to.
+enum PurchaseBinding {
+    /// The bound buyer, or the actor who redeemed the purchase's claim.
+    Buyer([u8; 32]),
+    /// The purchase's claim is still unredeemed (and has just been re-stamped
+    /// with this payment's window).
+    OpenClaim { code: String },
+}
+
+/// Resolve an unbound payment through the purchase it names
+/// (`payment_purchases`), if an earlier payment recorded one.
+async fn resolve_purchase(
+    state: &Arc<AppState>,
+    entitlement: &PaymentEntitlement,
+    valid_until: Option<i64>,
+) -> Result<Option<PurchaseBinding>, GrantError> {
+    let payee = &entitlement.payee.0;
+    let Some(purchase) = state
+        .db
+        .find_payment_purchase(payee, &entitlement.provider, &entitlement.purchase_refs)
+        .await
+        .map_err(internal)?
+    else {
+        return Ok(None);
+    };
+    if let Some(b) = purchase
+        .buyer_actor_id
+        .as_deref()
+        .and_then(|b| <[u8; 32]>::try_from(b).ok())
+    {
+        return Ok(Some(PurchaseBinding::Buyer(b)));
+    }
+    let Some(ext) = purchase.claim_external_ref.as_deref() else {
+        return Ok(None);
+    };
+    let Some(claim) = state
+        .db
+        .find_payment_claim_by_external_ref(payee, &entitlement.provider, ext)
+        .await
+        .map_err(internal)?
+    else {
+        return Ok(None);
+    };
+    if claim.voided_at.is_some() {
+        // A voided claim binds nothing: this payment is a fresh purchase.
+        return Ok(None);
+    }
+    if let Some(r) = claim
+        .redeemed_by
+        .as_deref()
+        .and_then(|r| <[u8; 32]>::try_from(r).ok())
+    {
+        return Ok(Some(PurchaseBinding::Buyer(r)));
+    }
+    if state
+        .db
+        .renew_payment_claim(&claim.code, valid_until, entitlement.return_ref.as_deref())
+        .await
+        .map_err(internal)?
+    {
+        record_purchase(state, entitlement, None, Some(ext)).await?;
+        return Ok(Some(PurchaseBinding::OpenClaim { code: claim.code }));
+    }
+    // Redeemed or voided between the read and the stamp: read it again on
+    // the next delivery; this one mints afresh rather than guess.
+    Ok(None)
+}
+
+/// Record every purchase reference this payment named against its binding.
+async fn record_purchase(
+    state: &Arc<AppState>,
+    entitlement: &PaymentEntitlement,
+    buyer: Option<&[u8; 32]>,
+    claim_external_ref: Option<&str>,
+) -> Result<(), GrantError> {
+    if entitlement.purchase_refs.is_empty() {
+        return Ok(());
+    }
+    state
+        .db
+        .record_payment_purchase(
+            &entitlement.payee.0,
+            &entitlement.provider,
+            &entitlement.purchase_refs,
+            &entitlement.tier,
+            entitlement.product_reference.as_deref(),
+            buyer,
+            claim_external_ref,
+        )
+        .await
+        .map_err(internal)
 }
 
 /// The `payments.unlock.purchase` [`GateOp`] for a waist entitlement — the
@@ -452,50 +573,98 @@ async fn admit_pending_invite_request(
     Ok(())
 }
 
+/// What applying a refund did.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct RefundApplied {
+    /// Whether anything was voided (`false` = the event was authentic but
+    /// matched nothing — e.g. a refund for an unknown payment; acknowledged,
+    /// no action).
+    pub acted: bool,
+    /// Every buyer whose paid window was voided — the actors a membership
+    /// lapse reconcile must look at (monetization.md § Pillar 4 Rail C).
+    pub voided_buyers: Vec<[u8; 32]>,
+}
+
 /// Apply a refund/dispute: void the paid window wherever the entitlement
-/// currently lives. Returns `true` if anything was voided (`false` = the
-/// event was authentic but matched nothing — e.g. a refund for an unknown
-/// payment; acknowledged, no action).
+/// currently lives.
 ///
 /// Takes the same waist value [`apply_payment`] does — a refund names exactly
 /// the entitlement it voids, so the mechanism produces one shape for both
-/// verbs.
+/// verbs. It finds that entitlement two ways: by the **purchase** the refund
+/// names (`purchase_refs` → `payment_purchases`: a provider's refund or
+/// dispute is its own event, carrying no checkout binding and a delivery id
+/// of its own), and by the claim minted for the very event id it carries (a
+/// mechanism whose refund names the payment's own id, as the fake provider's
+/// does).
 pub async fn apply_refund(
     state: &Arc<AppState>,
     entitlement: &PaymentEntitlement,
-) -> Result<bool, GrantError> {
+) -> Result<RefundApplied, GrantError> {
     let author_id = &entitlement.payee.0;
     let provider_kind = entitlement.provider.as_str();
-    let tier_name = entitlement.tier.as_str();
-    let external_ref = entitlement.external_ref.as_str();
-    let buyer_id = match &entitlement.buyer {
+    let mut out = RefundApplied::default();
+
+    // The purchase arm: the binding an earlier payment recorded.
+    if let Some(purchase) = state
+        .db
+        .find_payment_purchase(author_id, provider_kind, &entitlement.purchase_refs)
+        .await
+        .map_err(internal)?
+    {
+        let mut buyer = purchase
+            .buyer_actor_id
+            .as_deref()
+            .and_then(|b| <[u8; 32]>::try_from(b).ok());
+        if let Some(ext) = purchase.claim_external_ref.as_deref()
+            && let Some(claim) = state
+                .db
+                .find_payment_claim_by_external_ref(author_id, provider_kind, ext)
+                .await
+                .map_err(internal)?
+        {
+            let (claim_acted, redeemer) = void_claim_row(state, &claim).await?;
+            out.acted |= claim_acted;
+            buyer = buyer.or(redeemer);
+        }
+        if let Some(b) = buyer {
+            out.acted |= void_entitlement_window(state, author_id, &b, &purchase.tier_name).await?;
+            out.voided_buyers.push(b);
+        }
+        out.acted |= state
+            .db
+            .void_payment_purchase_refs(author_id, provider_kind, &entitlement.purchase_refs)
+            .await
+            .map_err(internal)?
+            > 0;
+    }
+
+    // The event-id arm: a claim minted for this payment: void it if
+    // unredeemed; if already redeemed, fall through to void the redeemer's
+    // entitlement.
+    let mut voided_buyer: Option<[u8; 32]> = match &entitlement.buyer {
         Buyer::Actor(a) => Some(a.0),
         Buyer::Unbound => None,
     };
-
-    let mut acted = false;
-
-    // A claim minted for this payment: void it if unredeemed; if already
-    // redeemed, fall through to void the redeemer's entitlement.
-    let mut voided_buyer: Option<[u8; 32]> = buyer_id;
     if let Some(claim) = state
         .db
-        .find_payment_claim_by_external_ref(author_id, provider_kind, external_ref)
+        .find_payment_claim_by_external_ref(author_id, provider_kind, &entitlement.external_ref)
         .await
         .map_err(internal)?
     {
         let (claim_acted, redeemer) = void_claim_row(state, &claim).await?;
-        acted |= claim_acted;
+        out.acted |= claim_acted;
         if redeemer.is_some() {
             voided_buyer = redeemer;
         }
     }
-
     if let Some(buyer) = voided_buyer {
-        acted |= void_entitlement_window(state, author_id, &buyer, tier_name).await?;
+        out.acted |= void_entitlement_window(state, author_id, &buyer, &entitlement.tier).await?;
+        if !out.voided_buyers.contains(&buyer) {
+            out.voided_buyers.push(buyer);
+        }
     }
 
-    Ok(acted)
+    Ok(out)
 }
 
 /// The claim arm a refund and an author's void ([`void_claim`]) share: stamp
@@ -703,6 +872,8 @@ pub async fn redeem_claim(
         valid_until_secs: claim.valid_until.map(|s| s.max(0) as u64),
         external_ref: claim.external_ref.clone(),
         return_ref: None,
+        purchase_refs: Vec::new(),
+        product_reference: None,
     };
     let queued = match apply_payment(state, &entitlement)
         .await
@@ -897,8 +1068,10 @@ mod tests {
             valid_until_secs: None,
             external_ref: "pay_r".into(),
             return_ref: None,
+            purchase_refs: Vec::new(),
+            product_reference: None,
         };
-        assert!(apply_refund(&state, &refund).await.unwrap());
+        assert!(apply_refund(&state, &refund).await.unwrap().acted);
         let claim = db.get_payment_claim("CODE-BOUND").await.unwrap().unwrap();
         assert!(claim.voided_at.is_some(), "a refunded bound code is voided");
         assert!(claim.redeemed_at.is_some(), "the binding stays on record");
@@ -1048,6 +1221,8 @@ mod tests {
             valid_until_secs: None,
             external_ref: format!("ref-{tier}"),
             return_ref: None,
+            purchase_refs: Vec::new(),
+            product_reference: None,
         };
 
         // The offered tier enqueues, as it always has.
@@ -1105,6 +1280,234 @@ mod tests {
                 Err(GrantError::TierNotFound)
             ),
             "a hidden tier never mints a claim — the same answer the grant gives"
+        );
+    }
+
+    // ── A Stripe purchase, end to end ──────
+    //
+    // Each event below goes through the real adapter (`StripeProvider::verify`
+    // over a signed body) and the waist, exactly as the webhook ingress feeds
+    // the engine — because the defect lived BETWEEN them: the adapter set every
+    // event's `external_ref` to its own `evt_` id, and the refund looked the
+    // claim up by that id, so a refund never found its checkout.
+
+    const STRIPE_SECRET: &str = "whsec_row_3723";
+
+    fn stripe_event(
+        author: [u8; 32],
+        evt: &str,
+        ty: &str,
+        object: serde_json::Value,
+    ) -> (fauna_payments::PaymentEventKind, PaymentEntitlement) {
+        use fauna_payments::PaymentProvider;
+        let body = serde_json::to_vec(&serde_json::json!({
+            "id": evt, "type": ty, "data": { "object": object },
+        }))
+        .unwrap();
+        let now = now_epoch_secs() as u64;
+        let headers = fauna_payments::WebhookHeaders::from_pairs([(
+            fauna_payments::stripe::SIGNATURE_HEADER,
+            fauna_payments::stripe::signature_header(STRIPE_SECRET, now, &body),
+        )]);
+        let ev = fauna_payments::stripe::StripeProvider
+            .verify(STRIPE_SECRET, &headers, &body, now)
+            .expect("a signed Stripe body verifies");
+        let mapping = fauna_payments::TierMapping {
+            tier: "gold".into(),
+            product: None,
+        };
+        let e = PaymentEntitlement::from_verified_event(
+            "stripe",
+            fauna_core::identity::ActorId(author),
+            &ev,
+            &mapping,
+        )
+        .expect("the single mapping covers it");
+        (ev.kind, e)
+    }
+
+    async fn stripe_state(author: [u8; 32]) -> (Arc<CacheDb>, Arc<AppState>) {
+        let db = Arc::new(CacheDb::open_in_memory().unwrap());
+        db.create_subscription_tier(
+            &author, "gold", 1, None, None, None, false, None, None, false,
+        )
+        .await
+        .unwrap();
+        let state = Arc::new(AppState::for_test(db.clone()));
+        (db, state)
+    }
+
+    fn minted_code(applied: PaymentApplied) -> String {
+        match applied {
+            PaymentApplied::ClaimMinted { code } => code,
+            other => panic!("expected a minted claim, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_stripe_refund_after_an_unbound_checkout_voids_that_checkouts_claim() {
+        let author = [0xA1; 32];
+        let (db, state) = stripe_state(author).await;
+        let (kind, paid) = stripe_event(
+            author,
+            "evt_checkout",
+            "checkout.session.completed",
+            serde_json::json!({ "id": "cs_1", "payment_status": "paid", "payment_intent": "pi_1" }),
+        );
+        assert_eq!(kind, fauna_payments::PaymentEventKind::Payment);
+        let code = minted_code(apply_payment(&state, &paid).await.unwrap());
+        // The visitor redeems it on the web (the bound code opens the paywall).
+        let buyer = [0xB2; 32];
+        assert!(db.redeem_payment_claim(&code, &buyer).await.unwrap());
+
+        // The refund is its own event: its own `evt_`, a charge object, no
+        // `client_reference_id` — it names the purchase only by its intent.
+        let (kind, refund) = stripe_event(
+            author,
+            "evt_refund",
+            "charge.refunded",
+            serde_json::json!({ "id": "ch_1", "payment_intent": "pi_1" }),
+        );
+        assert_eq!(kind, fauna_payments::PaymentEventKind::Refund);
+        let applied = apply_refund(&state, &refund).await.unwrap();
+        assert!(applied.acted, "the refund found the checkout's purchase");
+        assert_eq!(applied.voided_buyers, vec![buyer]);
+        let claim = db.get_payment_claim(&code).await.unwrap().unwrap();
+        assert!(claim.voided_at.is_some(), "the claim stops opening the web");
+
+        // A dispute on an UNREDEEMED claim voids it outright.
+        let (_, paid2) = stripe_event(
+            author,
+            "evt_checkout2",
+            "checkout.session.completed",
+            serde_json::json!({ "id": "cs_2", "payment_status": "paid", "payment_intent": "pi_2" }),
+        );
+        let code2 = minted_code(apply_payment(&state, &paid2).await.unwrap());
+        let (_, dispute) = stripe_event(
+            author,
+            "evt_dispute",
+            "charge.dispute.created",
+            serde_json::json!({ "id": "dp_1", "charge": "ch_2", "payment_intent": "pi_2" }),
+        );
+        assert!(apply_refund(&state, &dispute).await.unwrap().acted);
+        let claim2 = db.get_payment_claim(&code2).await.unwrap().unwrap();
+        assert!(claim2.voided_at.is_some() && claim2.redeemed_at.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_stripe_refund_after_a_bound_checkout_voids_the_buyers_entitlement() {
+        let author = [0xA1; 32];
+        let buyer = [0xB3; 32];
+        let (_db, state) = stripe_state(author).await;
+        let (_, paid) = stripe_event(
+            author,
+            "evt_checkout",
+            "checkout.session.completed",
+            serde_json::json!({ "id": "cs_1", "payment_status": "paid", "payment_intent": "pi_1",
+                                "client_reference_id": hex::encode(buyer) }),
+        );
+        assert_eq!(
+            apply_payment(&state, &paid).await.unwrap(),
+            PaymentApplied::Granted { queued: true }
+        );
+        let (_, refund) = stripe_event(
+            author,
+            "evt_refund",
+            "charge.refunded",
+            serde_json::json!({ "id": "ch_1", "payment_intent": "pi_1" }),
+        );
+        let applied = apply_refund(&state, &refund).await.unwrap();
+        assert!(applied.acted, "the pending payment marker is dropped");
+        assert_eq!(applied.voided_buyers, vec![buyer]);
+    }
+
+    #[tokio::test]
+    async fn a_delayed_payment_mints_on_success_and_its_failure_voids_the_claim() {
+        let author = [0xA1; 32];
+        let (db, state) = stripe_state(author).await;
+        let object = serde_json::json!({ "id": "cs_1", "payment_status": "unpaid",
+                                         "payment_intent": "pi_1" });
+        // The unpaid completion is no payment: the engine is never reached.
+        let (kind, _) = stripe_event(
+            author,
+            "evt_c",
+            "checkout.session.completed",
+            object.clone(),
+        );
+        assert_eq!(kind, fauna_payments::PaymentEventKind::Ignored);
+        assert!(db.list_payment_claims(&author).await.unwrap().is_empty());
+
+        let (kind, settled) = stripe_event(
+            author,
+            "evt_ok",
+            "checkout.session.async_payment_succeeded",
+            object.clone(),
+        );
+        assert_eq!(kind, fauna_payments::PaymentEventKind::Payment);
+        let code = minted_code(apply_payment(&state, &settled).await.unwrap());
+        // The return door finds it by the session id.
+        assert_eq!(
+            db.find_payment_claim_by_return_ref(&author, "stripe", "cs_1")
+                .await
+                .unwrap()
+                .map(|c| c.code),
+            Some(code.clone())
+        );
+
+        let (kind, failed) = stripe_event(
+            author,
+            "evt_fail",
+            "checkout.session.async_payment_failed",
+            object,
+        );
+        assert_eq!(kind, fauna_payments::PaymentEventKind::Refund);
+        assert!(apply_refund(&state, &failed).await.unwrap().acted);
+        let claim = db.get_payment_claim(&code).await.unwrap().unwrap();
+        assert!(claim.voided_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn a_renewal_extends_the_purchases_open_claim_instead_of_minting_another() {
+        let author = [0xA1; 32];
+        let (db, state) = stripe_state(author).await;
+        let (_, paid) = stripe_event(
+            author,
+            "evt_checkout",
+            "checkout.session.completed",
+            serde_json::json!({ "id": "cs_1", "payment_status": "paid", "subscription": "sub_1" }),
+        );
+        let code = minted_code(apply_payment(&state, &paid).await.unwrap());
+        let (_, renewal) = stripe_event(
+            author,
+            "evt_invoice",
+            "invoice.paid",
+            serde_json::json!({ "id": "in_2", "subscription": "sub_1", "payment_intent": "pi_2",
+                                "current_period_end": 1_900_000_000u64 }),
+        );
+        assert_eq!(
+            apply_payment(&state, &renewal).await.unwrap(),
+            PaymentApplied::ClaimExists { code: code.clone() }
+        );
+        assert_eq!(db.list_payment_claims(&author).await.unwrap().len(), 1);
+        let claim = db.get_payment_claim(&code).await.unwrap().unwrap();
+        assert_eq!(claim.valid_until, Some(1_900_000_000));
+
+        // A refund of the renewal's charge names its intent, which the
+        // renewal recorded against the same purchase.
+        let (_, refund) = stripe_event(
+            author,
+            "evt_refund",
+            "charge.refunded",
+            serde_json::json!({ "id": "ch_2", "payment_intent": "pi_2" }),
+        );
+        assert!(apply_refund(&state, &refund).await.unwrap().acted);
+        assert!(
+            db.get_payment_claim(&code)
+                .await
+                .unwrap()
+                .unwrap()
+                .voided_at
+                .is_some()
         );
     }
 }

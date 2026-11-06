@@ -18,7 +18,6 @@ one, which is exactly the difference between rendering a number and rendering
 import pytest
 
 from clients.ws_rpc_admin_client import WsRpcAdminClient
-from helpers.app_surface import skip_unbuilt
 from helpers.waiting import wait_until
 from i18n.strings import S
 
@@ -30,31 +29,7 @@ from tests.test_family import _shared_family, family_pair  # noqa: F401
 pytestmark = [pytest.mark.tier2, pytest.mark.tier_3]
 
 
-def _require_surface(app) -> None:
-    """tui shipped this surface first (2026-08-11); linux/web/android/macos/ios
-    landed their legs of the six-app trickle-down; windows closed the set
-    2026-08-26."""
-    if not (
-        app.driver.is_tui()
-        or app.driver.is_linux()
-        or app.driver.is_web()
-        or app.driver.is_android()
-        or app.driver.is_macos()
-        or app.driver.is_ios()
-        or app.driver.is_windows()
-    ):
-        skip_unbuilt(
-            app.driver,
-            surface="feature-limits-section",
-            detail="the feature plane's transparency screen; the shared "
-            "derivations (fauna-client-features + its UniFFI/wasm faces) are "
-            "landed, so the remaining per-app work is a lift, not a build",
-            tracked="",
-        )
-
-
 def _open(app):
-    _require_surface(app)
     app.settings._navigate_subpage("status")
     try:
         app.settings.wait_for_feature_limits()
@@ -227,7 +202,6 @@ def test_an_admin_limit_reaches_the_screen_naming_the_admin(
     admin limit would silently change what every later test in this module sees
     (`e2e-conventions.md`'s standing warning about order-dependent fixtures).
     """
-    _require_surface(logged_in_app)
     admin_limit = 5
 
     _set_admin_policy(
@@ -286,7 +260,6 @@ def test_a_feature_the_admin_turned_off_shows_restricted_with_its_reason(
     why-line's ABSENCE on a fresh account; this is its presence, which is the
     half a screen that silently dropped restricted rows would fail.
     """
-    _require_surface(logged_in_app)
     _set_admin_policy(nest_instance, "p2p-share", {"availability": "deny"})
     try:
         # Re-enter so the nav edge re-fetches `fauna.features.status`, then poll
@@ -336,31 +309,6 @@ P2P_ROW = 2
 OPS_DAY_CELL = 0
 
 
-def _require_authoring(app) -> None:
-    """tui is the lead app for the authoring half (2026-09-27); the other six
-    follow in their batched trickle-down — each arm that lands widens the
-    admitted set below (linux, web, android, then windows)."""
-    _require_surface(app)
-    if not (
-        app.driver.is_tui()
-        or app.driver.is_linux()
-        or app.driver.is_web()
-        or app.driver.is_android()
-        or app.driver.is_windows()
-        or app.driver.is_macos()
-        or app.driver.is_ios()
-    ):
-        skip_unbuilt(
-            app.driver,
-            surface="feature-policy-editor",
-            detail="the feature-limits authoring editor (the admin Nest page host "
-            "and the self-limits control); its logic is the shared "
-            "fauna_client_features::PolicyEditor behind UniFFI + wasm faces, so "
-            "the per-app work is painting and forwarding keystrokes",
-            tracked="",
-        )
-
-
 def _set_self_limit(nest_instance, user, feature: str, policy: dict | None) -> None:
     """Author (or clear) `user`'s OWN document — the clean-slate guard only."""
     with WsRpcAdminClient(
@@ -375,7 +323,6 @@ def _set_self_limit(nest_instance, user, feature: str, policy: dict | None) -> N
 
 
 def _open_admin_feature_limits(admin_app) -> None:
-    _require_authoring(admin_app)
     admin_app.admin.navigate_nest()
     try:
         admin_app.admin.wait_for_feature_limits()
@@ -530,7 +477,6 @@ def test_you_set_your_own_limit_and_the_row_above_binds_without_renavigating(
     editor = app.feature_policy_editor
     _set_self_limit(nest_instance, test_user, "p2p-share", None)
     try:
-        _require_authoring(app)
         _open(app)
         row = app.settings.wait_for_feature_limit_row(
             P2P_ROW, lambda r: r.get("own_summary") == S.features.authored_none
@@ -613,7 +559,6 @@ def test_the_editor_writes_disable_offline_and_are_never_queued(
         {"availability": "limit", "operations": {"per_day": 50}},
     )
     try:
-        _require_authoring(app)
         _open(app)
         app.settings.wait_for_feature_limit_row(
             P2P_ROW, lambda r: r.get("own_summary") == S.features.authored_limited_one
@@ -705,7 +650,6 @@ def test_a_guardian_limits_a_feature_for_one_child_and_the_child_sees_who_set_it
     from conftest import _login_app_as
 
     app = admin_app
-    app.family.require_feature_limits_supported()
     guardian_identity, ward_identity, _guardian_handle, ward_handle = family_pair
     editor = app.feature_policy_editor
     admin_bound = 5
@@ -828,7 +772,6 @@ def test_a_feature_the_nest_is_too_old_for_is_hidden_not_an_error(
     so each half opens a fresh app session rather than re-reading the page.
     """
     app = admin_app
-    app.family.require_feature_limits_supported()
     guardian_identity, _ward_identity, _guardian_handle, ward_handle = family_pair
     _withhold_capability(nest_instance, "subscriptions", True)
     try:

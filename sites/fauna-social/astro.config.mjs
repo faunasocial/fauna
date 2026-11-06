@@ -37,6 +37,16 @@ export default defineConfig({
   site: 'https://fauna.social',
   output: 'static',
   integrations: [watchCopySources()],
+  // Page URLs carry no trailing slash (`/privacy`, not `/privacy/`;
+  // front-door.md § Public-vhost topology): Astro.url, and so the canonical
+  // and og:url, come out slash-less. The pages stay directory pages
+  // (`privacy/index.html`), which both hosts serve at the slash-less URL and
+  // answer a slashed one with a permanent redirect to it.
+  trailingSlash: 'never',
+  build: { format: 'directory' },
+  // /official-apps moved to /apps on 2026-10-24 (the old name suggested that
+  // unofficial apps exist); links already out there keep working.
+  redirects: { '/official-apps': '/apps' },
   // Out of node_modules, which the build sandbox never lets a build write
   // (build-system.md § The Deno build sandbox).
   cacheDir: './.cache/astro',

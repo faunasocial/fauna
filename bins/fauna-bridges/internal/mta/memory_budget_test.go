@@ -159,16 +159,20 @@ func TestDataBudgetSourceShareLeavesRoomForOtherSources(t *testing.T) {
 	}
 }
 
-// The share is keyed on the IPv4 address or the IPv6 /64 — one IPv6 host
-// holds a /64, so per-address keying would give it 2^64 shares — and
-// loopback (the in-container dials) is exempt, as for the per-IP caps.
+// The share is keyed on the IPv4 address or the IPv6 /48 — one IPv6 site
+// holds a /56 or a /48, so per-address or per-/64 keying would give it 2^64
+// or 256 shares — and loopback (the in-container
+// dials) is exempt, as for the per-IP caps.
 func TestDataShareKey(t *testing.T) {
 	t.Parallel()
 	if a, b := dataShareKey("2001:db8:1:2::1"), dataShareKey("2001:db8:1:2:ffff::9"); a != b {
 		t.Errorf("one /64 gave two keys: %q, %q", a, b)
 	}
-	if a, b := dataShareKey("2001:db8:1:2::1"), dataShareKey("2001:db8:1:3::1"); a == b {
-		t.Errorf("two /64s shared the key %q", a)
+	if a, b := dataShareKey("2001:db8:1:2::1"), dataShareKey("2001:db8:1:ff00::1"); a != b {
+		t.Errorf("one /48 gave two keys: %q, %q", a, b)
+	}
+	if a, b := dataShareKey("2001:db8:1::1"), dataShareKey("2001:db8:2::1"); a == b {
+		t.Errorf("two /48s shared the key %q", a)
 	}
 	if a, b := dataShareKey("192.0.2.1"), dataShareKey("192.0.2.2"); a == b {
 		t.Errorf("two IPv4 addresses shared the key %q", a)
@@ -230,6 +234,85 @@ func TestInboundTricklingDataPastTheDeadlineIsDropped(t *testing.T) {
 	if err != nil {
 		t.Errorf("a sender at the minimum rate was cut off after %d bytes: %v", len(raw), err)
 	}
+}
+
+// Many /64s of one /56 — the residential default
+// delegation — each with one transaction grown to the size cap cannot
+// together hold the budget: they are one source, holding its share or one
+// sole transaction past it, and another source's message still fits.
+func TestDataBudgetOneSlash56CannotHoldTheBudget(t *testing.T) {
+	t.Parallel()
+	const limit = 16 * dataReadChunk
+	const sizeCap = 6 * dataReadChunk
+	budget := newDataBudget(limit)
+	var charges []*dataCharge
+	for i := 1; i <= 7; i++ {
+		c := budget.open(dataShareKey(fmt.Sprintf("2001:db8:0:%x::1", i)))
+		for c.held < sizeCap && c.grow(dataReadChunk) == nil {
+		}
+		charges = append(charges, c)
+	}
+	held := budget.inUse()
+	if held > max(budget.share, sizeCap) {
+		t.Errorf("seven /64s of one /56 hold %d, want at most one source's %d", held, max(budget.share, sizeCap))
+	}
+	victim := budget.open(dataShareKey("203.0.113.9"))
+	if err := victim.grow(limit / 2); err != nil {
+		t.Errorf("another source's DATA was refused while one /56 held %d of %d: %v", held, limit, err)
+	}
+	victim.close()
+	for _, c := range charges {
+		c.close()
+	}
+	if got := budget.inUse(); got != 0 {
+		t.Errorf("in use after every close: %d, want 0", got)
+	}
+}
+
+// A transfer that front-loads its bytes and then trickles is dropped within the same bound however much it sent first: bytes
+// sent ahead of the minimum rate bank at most the grace.
+func TestFrontLoadedTrickleIsDroppedWithinTheGrace(t *testing.T) {
+	t.Parallel()
+	for _, front := range []int{1 << 20, 32 << 20} {
+		clk := newFakeClock(time.Unix(1_700_000_000, 0))
+		budget := newDataBudget(64 << 20)
+		budget.now = clk.Now
+		charge := budget.open("192.0.2.1")
+		r := &frontLoadedReader{clk: clk, front: front, step: 29 * time.Second}
+		_, err := readDataWithinBudget(r, 0, charge)
+		charge.close()
+		if !errors.Is(err, errDataTooSlow) {
+			t.Fatalf("front-load %d: got %v, want errDataTooSlow", front, err)
+		}
+		if held := time.Duration(r.trickled) * r.step; held > dataDeadlineGrace+2*r.step {
+			t.Errorf("front-load %d: trickled for %v after the burst, past the %v grace", front, held, dataDeadlineGrace)
+		}
+	}
+}
+
+// frontLoadedReader yields front bytes at once, then one byte per step of the
+// fake clock, never EOF.
+type frontLoadedReader struct {
+	clk      *fakeClock
+	front    int
+	step     time.Duration
+	sent     int
+	trickled int
+}
+
+func (f *frontLoadedReader) Read(p []byte) (int, error) {
+	n := 1
+	if f.sent < f.front {
+		n = min(len(p), f.front-f.sent)
+	} else {
+		f.clk.Advance(f.step)
+		f.trickled++
+	}
+	for i := range p[:n] {
+		p[i] = 'f'
+	}
+	f.sent += n
+	return n, nil
 }
 
 // clockedReader yields chunk bytes (1 when zero) per Read, advancing the fake

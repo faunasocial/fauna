@@ -22,12 +22,19 @@ public struct QuotaBar: View {
         return .accentColor
     }
 
+    /// The painted "used / max" text (the shared `byte_size` rendering) — also what
+    /// a quota row's automation read publishes, so the driver reads the string the
+    /// user sees.
+    public static func usageText(used: Int, max: Int) -> String {
+        "\(ValueFormat.byteSize(used)) / \(ValueFormat.byteSize(max))"
+    }
+
     public var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack {
                 Text(label)
                 Spacer()
-                Text("\(ValueFormat.byteSize(used)) / \(ValueFormat.byteSize(max))")
+                Text(Self.usageText(used: used, max: max))
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .accessibilityIdentifier(Ids.settingsStorageText)

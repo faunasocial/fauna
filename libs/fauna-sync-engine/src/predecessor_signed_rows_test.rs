@@ -508,18 +508,6 @@ fn successor_engine(uri: &str, watch: &std::path::Path) -> SyncEngine {
     engine
 }
 
-/// A Library blob sealed under the bare `key`, as a thumbnail rests.
-fn store_blob(
-    store: &crate::test_support::BlobStore,
-    plaintext: &[u8],
-    key: &BackupKey,
-) -> ContentHash {
-    let sealed = fauna_core::crypto::encrypt_backup_chunk(key, plaintext).unwrap();
-    let hex = blake3::hash(&sealed).to_hex().to_string();
-    store.blobs.lock().unwrap().insert(hex.clone(), sealed);
-    ContentHash::from_digest_raw(fauna_core::hex32::decode(&hex).unwrap())
-}
-
 /// How many sealed artifacts the store holds — a refused re-seal adds none.
 fn stored(store: &crate::test_support::BlobStore) -> (usize, usize, usize) {
     (
@@ -769,7 +757,7 @@ async fn a_forged_link_binds_no_predecessor_on_the_engine() {
     assert!(engine.reader_binding().account_predecessors.is_empty());
 }
 
-// ── The corpus re-seal's thumbnail move (ruling (8)(c), the bare-key arm) ────
+// ── The corpus re-seal's thumbnail re-seal (ruling (8)(c)) ──────────────────
 
 fn later_predecessor() -> ActorKeypair {
     ActorKeypair::from_secret([0x53; 32])
@@ -811,11 +799,13 @@ async fn admit_predecessor_row(engine: &SyncEngine, manifest: ContentHash) {
     assert_eq!(kept.len(), 1, "admitted as signed by the predecessor");
 }
 
-/// **The attack, on the corpus re-seal's thumbnail move**: the recorded
-/// thumbnail of a head a predecessor signed is moved onto the current root
-/// only when it opens under that signer's own root (or an earlier one) — one
-/// a LATER retired root sealed is not moved, the pointer dropping, while the
-/// same head's thumbnail under the signer's own root moves.
+/// **The attack, on the corpus re-seal's thumbnail re-seal**: the recorded
+/// thumbnail manifest of a head a predecessor signed is re-sealed onto the
+/// current root only when it opens under that signer's own root (or an
+/// earlier one) — the thumbnail rests as its file rests, so the file's signer
+/// bound is its bound. One a LATER retired root sealed is not moved, the
+/// pointer dropping, while the same head's thumbnail under the signer's own
+/// root moves.
 #[tokio::test]
 async fn a_predecessor_signed_thumbnail_under_a_later_root_is_not_moved() {
     for (thumbnail_key, moves) in [(later_predecessor_key(), false), (predecessor_key(), true)] {
@@ -830,7 +820,8 @@ async fn a_predecessor_signed_thumbnail_under_a_later_root_is_not_moved() {
         let pixels: Vec<u8> = (0..1_200u32).map(|i| (i % 97) as u8).collect();
         let manifest =
             store_sealed_fixture(&store, &body, &predecessor_key().convergent_chunk_root());
-        let thumbnail = store_blob(&store, &pixels, &thumbnail_key);
+        let thumbnail =
+            store_sealed_fixture(&store, &pixels, &thumbnail_key.convergent_chunk_root());
         seed_synced_entry(&engine, "inherited.bin", &body, manifest);
         engine
             .db()
@@ -840,18 +831,24 @@ async fn a_predecessor_signed_thumbnail_under_a_later_root_is_not_moved() {
 
         engine.reseal_predecessor_sealed().await.unwrap();
 
+        let posted = store.posted_manifests.lock().unwrap().clone();
         assert_eq!(
-            store.blob_posts(),
-            usize::from(moves),
-            "the thumbnail moves only off a root its record's signer may reach (moves: {moves})"
+            posted.len(),
+            1 + usize::from(moves),
+            "the file re-seals, and the thumbnail moves only off a root its record's \
+             signer may reach (moves: {moves})"
         );
         if moves {
-            let moved = store.last_blob_hash.lock().unwrap().clone().unwrap();
-            let sealed = store.blobs.lock().unwrap().get(&moved).cloned().unwrap();
-            assert_eq!(
-                fauna_core::crypto::decrypt_backup_chunk(&successor_key(), &sealed).unwrap(),
-                pixels
-            );
+            let opened = fauna_core::file_download::download_file_bytes_by_manifest(
+                &engine.blob_fetcher(),
+                &fauna_core::file_download::FileDownloadKeys::owner(successor_key()),
+                posted[1],
+                None,
+                "inherited.bin",
+            )
+            .await
+            .expect("the moved thumbnail opens under the successor's root alone");
+            assert_eq!(opened, pixels);
         }
     }
 }

@@ -57,13 +57,15 @@ TEAM_ID = "7457N3M72H"
 #: prompt-free only under a Team-ID-prefixed group id (measured 2026-08-23,
 #: first-signed-build matrix). iOS uses the base id verbatim.
 MACOS_APP_GROUP = TEAM_ID + "." + APP_GROUP
-#: The macOS app's SECOND, app-only group: the keychain access group
-#: `KeychainStore`'s data-protection-plane rows live in (decided 2026-08-25). Not
-#: the shared group on purpose — the sandboxed File Provider appex is entitled to
-#: that one, and it must never be able to read the identity seed. Keychain-only
-#: (no container dir is ever resolved for it); macOS-only (iOS rows stay in the
-#: app's default application-identifier group, which already excludes the appex).
-MACOS_ACCOUNT_KEYCHAIN_GROUP = TEAM_ID + ".group.social.fauna.account"
+#: The keychain access group macOS's `KeychainStore` addresses its
+#: data-protection-plane rows through: the family App ID, the one group a Mac's
+#: and an iPhone's rows share (`ios.md` § Credential Storage, *Across the
+#: Mac/iPhone line*). iOS names no group — its rows sit in the bundle's default
+#: access group, which IS this App ID on a signed build.
+ACCOUNT_KEYCHAIN_GROUP = TEAM_ID + ".social.fauna.fauna"
+#: The app-only app group that App ID replaced (retired 2026-10-30, no build ever
+#: reached it). Derived, so no tree carries the spelling this file pins absent.
+RETIRED_ACCOUNT_APP_GROUP = MACOS_APP_GROUP.removesuffix("shared") + "account"
 WATCH_APP_GROUP = "group.social.fauna.watchkit"
 KEYCHAIN_PUSH = "social.fauna.push"
 KEYCHAIN_FILE_PROVIDER = "social.fauna.fileprovider"
@@ -112,11 +114,10 @@ APP_GROUPS_KEY = "com.apple.security.application-groups"
 #: Every entitlements file that must name an app group, and the EXACT list its
 #: platform takes (macOS: Team-ID-prefixed; iOS: the base id). An appex declares
 #: BOTH the entitlement (grants the container) and
-#: `NSExtensionFileProviderDocumentGroup` (selects it for the replica). The macOS
-#: app alone also names the account keychain group; an appex never does.
+#: `NSExtensionFileProviderDocumentGroup` (selects it for the replica).
 APP_GROUP_PLISTS = [
     ("apps/fauna-apple/Fauna-macOS/Fauna-macOS.entitlements",
-     APP_GROUPS_KEY, [MACOS_APP_GROUP, MACOS_ACCOUNT_KEYCHAIN_GROUP]),
+     APP_GROUPS_KEY, [MACOS_APP_GROUP]),
     ("apps/fauna-apple/Fauna-iOS/Resources/Fauna-iOS.entitlements",
      APP_GROUPS_KEY, [APP_GROUP]),
     ("apps/fauna-apple/Fauna-FileProvider/Fauna-FileProvider.entitlements",
@@ -124,8 +125,7 @@ APP_GROUP_PLISTS = [
     ("apps/fauna-apple/Fauna-FileProvider/Fauna-FileProvider-iOS.entitlements",
      APP_GROUPS_KEY, [APP_GROUP]),
     # The widget appex reads the unread-count snapshot the app writes into the
-    # shared container, and nothing else — the same shared group, never the
-    # account keychain group (below).
+    # shared container, and nothing else — the same shared group.
     ("apps/fauna-apple/Fauna-Widget/Fauna-Widget.entitlements",
      APP_GROUPS_KEY, [MACOS_APP_GROUP]),
     ("apps/fauna-apple/Fauna-Widget/Fauna-Widget-iOS.entitlements",
@@ -142,19 +142,8 @@ APP_GROUP_PLISTS = [
 #: `agent_sigterm.rs::the_agent_binary_boots_in_the_user_domain_and_never_creates_the_container`.
 SYNC_AGENT_ENTITLEMENTS = "installer/macos/fauna-sync-agent.entitlements"
 
-#: Every entitlements file that is NOT the macOS app: none may name the account
-#: keychain group, or the identity seed becomes readable from that process —
-#: for the File Provider appex, the exact least-privilege boundary
-#: `on-demand-files-apple.md` § Apple File Provider binding draws ("BackupKey + bearer,
-#: never the seed").
-NOT_ACCOUNT_KEYCHAIN_PLISTS = [
-    "apps/fauna-apple/Fauna-iOS/Resources/Fauna-iOS.entitlements",
-    "apps/fauna-apple/Fauna-FileProvider/Fauna-FileProvider.entitlements",
-    "apps/fauna-apple/Fauna-FileProvider/Fauna-FileProvider-iOS.entitlements",
-    "apps/fauna-apple/Fauna-Widget/Fauna-Widget.entitlements",
-    "apps/fauna-apple/Fauna-Widget/Fauna-Widget-iOS.entitlements",
-    SYNC_AGENT_ENTITLEMENTS,
-]
+#: The entitlement that would let a target name another target's access group.
+KEYCHAIN_ACCESS_GROUPS_KEY = "keychain-access-groups"
 
 #: Each File Provider appex flavor's Info.plist must select the SAME container
 #: its own entitlements grant — a mismatch puts the replica in a container the
@@ -206,17 +195,46 @@ def test_the_sync_agent_carries_no_app_group_claim():
     )
 
 
-@pytest.mark.parametrize("rel", NOT_ACCOUNT_KEYCHAIN_PLISTS, ids=os.path.basename)
-def test_only_the_macos_app_is_entitled_to_the_account_keychain_group(rel):
-    groups = _read_plist(rel).get(APP_GROUPS_KEY, [])
-    assert MACOS_ACCOUNT_KEYCHAIN_GROUP not in groups, (
-        f"{rel} is entitled to {MACOS_ACCOUNT_KEYCHAIN_GROUP!r}, the access group "
-        f"the identity seed lives in on macOS; only Fauna-macOS.entitlements may "
-        f"name it — an appex or the agent reading the seed breaks the "
-        f"least-privilege boundary of on-demand-files-apple.md § Apple File Provider "
-        f"binding."
+def _entitlements_files() -> list[str]:
+    tracked = subprocess.run(
+        ["git", "ls-files", "apps/fauna-apple", "installer"],
+        capture_output=True, text=True, check=True, cwd=REPO,
+    ).stdout.split("\n")
+    return [rel for rel in tracked if rel.endswith(".entitlements")]
+
+
+def test_no_entitlements_file_widens_the_account_keychain_boundary():
+    # The identity seed's boundary rests on App IDs (`ios.md` § Credential
+    # Storage, *Across the Mac/iPhone line*): the app's access group is its own
+    # App ID, which no other target can name unless an entitlements file grants a
+    # `keychain-access-groups` list — an appex or the agent reading the seed
+    # breaks the least-privilege boundary of on-demand-files-apple.md § Apple
+    # File Provider binding.
+    files = _entitlements_files()
+    assert "apps/fauna-apple/Fauna-macOS/Fauna-macOS.entitlements" in files
+    assert SYNC_AGENT_ENTITLEMENTS in files
+    for rel in files:
+        assert KEYCHAIN_ACCESS_GROUPS_KEY not in _read_plist(rel), (
+            f"{rel} claims {KEYCHAIN_ACCESS_GROUPS_KEY}, which reaches past the "
+            f"target's own App ID (and gets any profile-less build killed at launch)"
+        )
+        assert RETIRED_ACCOUNT_APP_GROUP not in _read(rel), (
+            f"{rel} names the retired {RETIRED_ACCOUNT_APP_GROUP!r}"
+        )
+
+
+def test_every_appex_has_its_own_app_id():
+    # No appex shares the app's App ID, and so its access group: each is a
+    # strict extension of the family bundle id. Fauna Kids is its own record.
+    pbxproj = _read("apps/fauna-apple/Fauna.xcodeproj/project.pbxproj")
+    declared = set(re.findall(r"PRODUCT_BUNDLE_IDENTIFIER = \"?([\w.]+)\"?;", pbxproj))
+    appexes = declared - {SHIPPING_BUNDLE_ID, KIDS_BUNDLE_ID}
+    assert appexes, "the .xcodeproj declares no appex — re-point this pin"
+    strays = sorted(b for b in appexes if not b.startswith(f"{SHIPPING_BUNDLE_ID}."))
+    assert not strays, (
+        f"{strays} are not strict extensions of {SHIPPING_BUNDLE_ID!r}, so the "
+        f"account keychain group's boundary no longer holds for them"
     )
-    assert MACOS_ACCOUNT_KEYCHAIN_GROUP not in _read(rel)
 
 
 @pytest.mark.parametrize(
@@ -264,13 +282,14 @@ def test_rust_and_swift_owners_agree_on_the_app_group():
     assert f'appGroup = "{APP_GROUP}"' in swift
     assert f'APPLE_WATCHKIT_APP_GROUP: &str = "{WATCH_APP_GROUP}"' in rust
     assert f'watchAppGroup = "{WATCH_APP_GROUP}"' in swift
-    assert f'APPLE_MACOS_ACCOUNT_KEYCHAIN_GROUP: &str = "{MACOS_ACCOUNT_KEYCHAIN_GROUP}"' in rust
-    assert f'accountKeychainGroup = "{MACOS_ACCOUNT_KEYCHAIN_GROUP}"' in swift
+    assert ACCOUNT_KEYCHAIN_GROUP == f"{TEAM_ID}.{SHIPPING_BUNDLE_ID}"
+    assert f'APPLE_ACCOUNT_KEYCHAIN_GROUP: &str = "{ACCOUNT_KEYCHAIN_GROUP}"' in rust
+    assert f'accountKeychainGroup = "{ACCOUNT_KEYCHAIN_GROUP}"' in swift
     # `KeychainStore` addresses the data-protection plane through the shared
     # owner, never a re-hardcoded literal.
     store = _read("apps/fauna-apple/FaunaKit/Sources/FaunaKit/Core/KeychainStore.swift")
     assert "AppleIdentifiers.accountKeychainGroup" in store
-    assert MACOS_ACCOUNT_KEYCHAIN_GROUP not in store
+    assert ACCOUNT_KEYCHAIN_GROUP not in store
 
 
 def test_the_dependency_free_nse_repeats_the_shared_values_exactly():
@@ -452,6 +471,86 @@ def test_the_background_scheduler_never_swallows_a_submit_error():
 
 
 # ---------------------------------------------------------------------------
+# 2b. The Fauna Kids app's Info.plist (the `Fauna-Kids-iOS` target) is the main
+#     iOS Info.plist minus photo backup and nothing else. Photo backup is not in
+#     the kids app's *Kept* set (account-age-band.md § The account age band, the
+#     kids-app bullet, item (4)), so the kids plist asks for no photo-library
+#     access and permits no photo-backup task; the custodian pull (the *Kept*
+#     backups page) and the widget refresh stay, and so do their two background
+#     modes. `just apple-kids-check` reads the PACKAGED kids plist back; this pins
+#     the tracked one on every machine.
+# ---------------------------------------------------------------------------
+
+IOS_INFO_PLIST = "apps/fauna-apple/Fauna-iOS/Resources/Info.plist"
+KIDS_INFO_PLIST = "apps/fauna-apple/Fauna-iOS/Resources/Info-Kids.plist"
+#: The background task ids the kids build neither registers nor permits.
+KIDS_EXCISED_BG_TASK_IDS = {"social.fauna.sync.upload"}
+#: The Info.plist keys the kids build drops — photo backup's usage string.
+KIDS_EXCISED_PLIST_KEYS = {"NSPhotoLibraryUsageDescription"}
+
+
+def test_the_kids_plist_is_the_main_plist_minus_photo_backup():
+    main = _read_plist(IOS_INFO_PLIST)
+    kids = _read_plist(KIDS_INFO_PLIST)
+    assert KIDS_EXCISED_PLIST_KEYS <= set(main), (
+        f"the main iOS plist no longer carries {sorted(KIDS_EXCISED_PLIST_KEYS - set(main))} "
+        f"— the kids excision below is vacuous; update KIDS_EXCISED_PLIST_KEYS"
+    )
+    expected = {k: v for k, v in main.items() if k not in KIDS_EXCISED_PLIST_KEYS}
+    expected["BGTaskSchedulerPermittedIdentifiers"] = [
+        i for i in main["BGTaskSchedulerPermittedIdentifiers"] if i not in KIDS_EXCISED_BG_TASK_IDS
+    ]
+    assert kids == expected, (
+        f"{KIDS_INFO_PLIST} must equal {IOS_INFO_PLIST} minus "
+        f"{sorted(KIDS_EXCISED_PLIST_KEYS)} and the {sorted(KIDS_EXCISED_BG_TASK_IDS)} task id, "
+        f"key for key — a change to the main plist goes into the kids one too. "
+        f"Differing keys: {sorted(k for k in set(kids) | set(expected) if kids.get(k) != expected.get(k))}"
+    )
+
+
+def test_the_kids_plist_declares_the_mode_each_kept_task_needs():
+    kept = BG_TASK_IDS - KIDS_EXCISED_BG_TASK_IDS
+    declared = set(_read_plist(KIDS_INFO_PLIST).get("UIBackgroundModes", []))
+    needed = {BG_TASK_MODE[i] for i in kept}
+    assert declared & set(BG_TASK_CLASS_MODE.values()) == needed, (
+        f"the kids plist's UIBackgroundModes {sorted(declared)} must be exactly what its "
+        f"kept tasks {sorted(kept)} need ({sorted(needed)})"
+    )
+
+
+def _gate_above(text: str, needle: str) -> str:
+    """The innermost `#if` line enclosing the one occurrence of `needle`."""
+    assert text.count(needle) == 1, f"expected exactly one {needle!r}"
+    depth, lines = 0, text.split(needle, 1)[0].splitlines()
+    for line in reversed(lines):
+        stripped = line.strip()
+        if stripped.startswith("#endif"):
+            depth += 1
+        elif stripped.startswith("#if"):
+            if depth == 0:
+                return stripped
+            depth -= 1
+    return ""
+
+
+@pytest.mark.parametrize("rel, needle", [
+    ("apps/fauna-apple/FaunaKit/Sources/FaunaKit/Core/BackgroundScheduler.swift",
+     "forTaskWithIdentifier: Self.uploadTaskId"),
+    ("apps/fauna-apple/FaunaKit/Sources/FaunaKit/Core/BackgroundScheduler.swift",
+     "static let uploadTaskId ="),
+    ("apps/fauna-apple/FaunaKit/Sources/FaunaExtensionKit/AppleIdentifiers.swift",
+     'public static let upload = "social.fauna.sync.upload"'),
+], ids=["registration", "scheduler-id", "identifier"])
+def test_the_photo_task_is_compiled_out_of_the_kids_build(rel, needle):
+    # Registering an id the plist does not permit is a launch-time failure, so the
+    # kids build must not even name the photo-backup task.
+    assert _gate_above(_read(rel), needle).startswith("#if !FAUNA_KIDS"), (
+        f"{rel}: `{needle}` is not inside an `#if !FAUNA_KIDS` block — the kids "
+        f"Info.plist permits no such task, so the kids build would register it and fail"
+    )
+
+
+# ---------------------------------------------------------------------------
 # 3. The launchd label the app kickstarts must equal the one the .pkg installs.
 # ---------------------------------------------------------------------------
 
@@ -462,11 +561,51 @@ def test_the_installed_launch_agent_label_is_the_one_the_app_kickstarts():
 
     swift = _read("apps/fauna-apple/FaunaKit/Sources/FaunaExtensionKit/AppleIdentifiers.swift")
     assert f'syncAgentLaunchAgent = "{SYNC_AGENT_LABEL}"' in swift
-    spawner = _read("apps/fauna-apple/Fauna-macOS/Sync/SyncAgentSpawner.swift")
-    assert "AppleIdentifiers.syncAgentLaunchAgent" in spawner, (
-        "the spawner must consume the shared label — a spawner naming a label "
-        "the postinstall never wrote kickstarts a job launchd has not loaded, "
-        "which fails silently and looks like an agent that will not start."
+    # The writer the app and fauna-tui share (`agent_spawner.rs`'s launchd arm):
+    # a spawner naming a label the postinstall never wrote kickstarts a job
+    # launchd has not loaded, which fails silently and looks like an agent that
+    # will not start.
+    spawner = _read("libs/fauna-client-sync/src/agent_spawner.rs")
+    assert f'pub const LAUNCH_AGENT_LABEL: &str = "{SYNC_AGENT_LABEL}";' in spawner
+    app = _read("apps/fauna-apple/Fauna-macOS/App/FaunaMacApp.swift")
+    assert "FfiLaunchdAgentSpawner()" in app, (
+        "the macOS app must launch the agent through the shared Rust launchd "
+        "writer — a second (Swift) writer with its own target resolution "
+        "rewrites and re-bootstraps the job whenever tui wrote it last."
+    )
+
+
+# What the shared Rust writer renders (`agent_spawner.rs::launchd_plist_contents`,
+# pinned whole by its `the_plist_is_the_pkg_shape_byte_for_byte` unit test) — the
+# same bytes, so a box whose plist the `.pkg` wrote is already current and the
+# first convergence tick neither rewrites nor re-bootstraps it.
+_SHARED_PLIST_SHAPE = """<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>social.fauna.sync-agent</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>${AGENT_EXEC}</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+</dict>
+</plist>"""
+
+
+def test_the_pkg_writes_the_shared_writers_plist_byte_for_byte():
+    postinstall = _read("installer/macos/scripts/sync/postinstall")
+    m = re.search(r"PLIST_CONTENT=\$\(cat <<EOF\n(.*?)\nEOF\n\)", postinstall, re.S)
+    assert m, "the sync postinstall's PLIST_CONTENT heredoc moved — re-point this pin"
+    assert m.group(1) == _SHARED_PLIST_SHAPE, (
+        "the .pkg's LaunchAgent plist drifted from the shared Rust writer's — every "
+        ".pkg box would be rewritten and re-bootstrapped by the app or tui on its "
+        "first tick; change both or neither"
     )
 
 
@@ -596,8 +735,8 @@ def test_no_apple_surface_carries_the_retired_domain_outside_a_sweep_path():
 
 
 # ---------------------------------------------------------------------------
-# 5. Export compliance: `ITSAppUsesNonExemptEncryption` declared on both app
-#    targets, deliberately absent from the three appex targets — App Store
+# 5. Export compliance: `ITSAppUsesNonExemptEncryption` declared `false` on the
+#    app targets, deliberately absent from the three appex targets — App Store
 #    Connect's encryption declaration is read from the containing app's
 #    Info.plist, not an embedded extension's.
 # ---------------------------------------------------------------------------
@@ -605,6 +744,7 @@ def test_no_apple_surface_carries_the_retired_domain_outside_a_sweep_path():
 EXPORT_COMPLIANCE_APP_PLISTS = [
     "apps/fauna-apple/Fauna-macOS/Resources/Info.plist",
     "apps/fauna-apple/Fauna-iOS/Resources/Info.plist",
+    "apps/fauna-apple/Fauna-iOS/Resources/Info-Kids.plist",
 ]
 
 EXPORT_COMPLIANCE_APPEX_PLISTS = [
@@ -621,10 +761,13 @@ EXPORT_COMPLIANCE_APPEX_PLISTS = [
 )
 def test_export_compliance_key_declared_on_app_targets(rel):
     info = _read_plist(rel)
-    assert info.get("ITSAppUsesNonExemptEncryption") is True, (
-        f"{rel} must declare ITSAppUsesNonExemptEncryption = true — Fauna ships "
-        f"its own encryption (MLS, sealed-at-rest), not merely OS-provided "
-        f"facilities, per docs/goal/architecture/export-compliance.md § What "
+    assert info.get("ITSAppUsesNonExemptEncryption") is False, (
+        f"{rel} must declare ITSAppUsesNonExemptEncryption = false — Apple's "
+        f"key asks whether the encryption is exempt from export documentation "
+        f"requirements, and App Store Connect's questionnaire (standard "
+        f"algorithms only, no France) answered that no documents are needed; "
+        f"a `true` without an ITSEncryptionExportComplianceCode fails upload "
+        f"validation. Per docs/goal/architecture/export-compliance.md § What "
         f"each store form answers."
     )
 
@@ -698,6 +841,7 @@ def test_both_apple_apps_ship_the_one_family_bundle_id():
 @pytest.mark.parametrize("rel", [
     "apps/fauna-apple/Fauna-macOS/Resources/Info.plist",
     "apps/fauna-apple/Fauna-iOS/Resources/Info.plist",
+    "apps/fauna-apple/Fauna-iOS/Resources/Info-Kids.plist",
 ])
 def test_no_app_plist_carries_a_retired_bundle_leaf(rel):
     text = _read(rel)
@@ -757,15 +901,18 @@ def test_the_e2e_ios_bundle_id_matches_the_shipping_app():
     assert f'BUNDLE_ID = "{shipping}"' in driver
 
     # conftest must DERIVE the synthetic bundle's id from the driver, never
-    # repeat it — and must rewrite the plist every build.
+    # repeat it — and the shared wrapper must rewrite the plist every build.
     conftest = _read("tests/e2e-unified/conftest.py")
+    bundle = _read("tests/e2e-unified/helpers/ios_app_bundle.py")
     assert "from drivers.ios import BUNDLE_ID as IOS_BUNDLE_ID" in conftest
-    assert "<key>CFBundleIdentifier</key><string>{IOS_BUNDLE_ID}</string>" in conftest, (
+    assert "write_app_bundle(app_dir, exe, IOS_BUNDLE_ID)" in conftest
+    assert "from drivers.ios import BUNDLE_ID\n" in _read("tests/e2e-unified/helpers/prev_build.py")
+    assert "<key>CFBundleIdentifier</key><string>{bundle_id}</string>" in bundle, (
         "the e2e iOS bundle must take its id from drivers.ios.BUNDLE_ID; a second "
         "literal here is exactly the drift that made the suite prove an app "
         "nobody installs."
     )
-    assert 'if not info_plist.exists():' not in conftest, (
+    assert 'if not info_plist.exists():' not in bundle, (
         "the synthetic Info.plist must be written UNCONDITIONALLY. `derived/` "
         "survives across runs, so a guarded write serves a bundle stamped with "
         "the PREVIOUS id while the driver launches the new one: simctl install "
@@ -861,3 +1008,157 @@ def test_device_signing_lives_only_in_the_ios_release_configs():
     assert pbxproj.count("CODE_SIGN_STYLE = Manual;") >= 2, (
         "both project-level configs must keep CODE_SIGN_STYLE = Manual."
     )
+
+
+#: The main iOS app's PROFILE-BACKED entitlements — restricted keys a signature
+#: may claim only when the embedded profile's App ID carries the matching
+#: Developer-portal capability (installers/ios.md § Signing: a profile is a
+#: snapshot of its App ID's capabilities). The `social.fauna.fauna` App ID has
+#: held Push Notifications, Declared Age Range and App Attest since 2026-10-07.
+#: App Attest names `production`: the nest accepts both environments
+#: (`age_attest.rs::verify_app_attest`'s aaguid check).
+IOS_APP_ENTITLEMENTS = "apps/fauna-apple/Fauna-iOS/Resources/Fauna-iOS.entitlements"
+IOS_PROFILE_BACKED_ENTITLEMENTS = {
+    "aps-environment": "production",
+    "com.apple.developer.declared-age-range": True,
+    "com.apple.developer.devicecheck.appattest-environment": "production",
+}
+
+
+def test_the_ios_app_declares_its_profile_backed_entitlements():
+    ents = _read_plist(IOS_APP_ENTITLEMENTS)
+    declared = {k: ents.get(k) for k in IOS_PROFILE_BACKED_ENTITLEMENTS}
+    assert declared == IOS_PROFILE_BACKED_ENTITLEMENTS, (
+        f"{IOS_APP_ENTITLEMENTS} declares {declared}, want "
+        f"{IOS_PROFILE_BACKED_ENTITLEMENTS}: without them APNs registration "
+        f"fails (apps/common.md § Push Notifications) and the store-age arm's "
+        f"DeclaredAgeRange read and App Attest assertion throw "
+        f"(behavior/account-age-band.md D3/D5)."
+    )
+
+
+@pytest.mark.parametrize(
+    "rel", [rel for rel, _, _ in APP_GROUP_PLISTS if rel != IOS_APP_ENTITLEMENTS],
+    ids=os.path.basename,
+)
+def test_no_other_target_claims_the_ios_apps_profile_backed_entitlements(rel):
+    # Each of these targets signs against a profile (or a Developer ID) whose
+    # App ID does NOT carry these capabilities, and a restricted key the
+    # profile lacks fails the signature outright — for the macOS app it breaks
+    # Developer-ID signing of the shipped .pkg/.dmg (apps/common.md § Push
+    # Notifications).
+    claimed = sorted(set(_read_plist(rel)) & set(IOS_PROFILE_BACKED_ENTITLEMENTS))
+    assert not claimed, f"{rel} claims {claimed}, which its signing profile does not back"
+
+
+# ---------------------------------------------------------------------------
+# What App Store Connect's upload validation demands of the iOS app bundle
+# (installers/ios.md § Upload mechanics). The first upload, of the 0.1.5
+# store-safe build on 2026-11-01, was refused before a byte reached the store
+# for exactly these: no app icon (CFBundleIconName, the 120/152 tiers), no
+# supported interface orientations. No local build checks either —
+# xcodebuild archives and exports a bundle without them — so they are pinned.
+# ---------------------------------------------------------------------------
+
+#: The Fauna-iOS app target's Debug and Release configs.
+IOS_APP_CONFIGS = ("FB0000000000000000000020", "FB0000000000000000000021")
+IOS_APP_ICONSET = "apps/fauna-apple/Fauna-iOS/Resources/Assets.xcassets/AppIcon.appiconset"
+_ALL_FOUR_ORIENTATIONS = {
+    "UIInterfaceOrientationPortrait",
+    "UIInterfaceOrientationPortraitUpsideDown",
+    "UIInterfaceOrientationLandscapeLeft",
+    "UIInterfaceOrientationLandscapeRight",
+}
+
+
+@pytest.mark.parametrize("config", IOS_APP_CONFIGS)
+def test_the_ios_app_compiles_its_app_icon_set(config):
+    pbx = _read("apps/fauna-apple/Fauna.xcodeproj/project.pbxproj")
+    settings = _build_configs(pbx)[config]
+    # The setting both compiles the set and writes CFBundleIconName.
+    assert "ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;" in settings, (
+        f"Fauna-iOS config {config} must name the AppIcon set — without it the "
+        f"bundle has no CFBundleIconName and App Store Connect refuses the upload"
+    )
+    # ...and the catalog is in the iOS app target's Resources phase.
+    phase = re.search(
+        r"FB000000000000000000001A /\* Resources \*/ = \{.*?files = \((.*?)\);", pbx, re.S,
+    )
+    assert phase and "Assets.xcassets in Resources" in phase.group(1)
+
+
+@pytest.mark.parametrize("config", IOS_APP_CONFIGS)
+def test_the_ios_app_declares_its_interface_orientations(config):
+    settings = _build_configs(_read("apps/fauna-apple/Fauna.xcodeproj/project.pbxproj"))[config]
+    ipad = re.search(r'INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "([^"]*)";', settings)
+    iphone = re.search(r'INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "([^"]*)";', settings)
+    # TARGETED_DEVICE_FAMILY "1,2" with iPad multitasking needs all four.
+    assert ipad and set(ipad.group(1).split()) == _ALL_FOUR_ORIENTATIONS, settings
+    assert iphone and iphone.group(1).split(), settings
+    assert set(iphone.group(1).split()) <= _ALL_FOUR_ORIENTATIONS, iphone.group(1)
+
+
+IOS_PRIVACY_MANIFEST = "apps/fauna-apple/Fauna-iOS/Resources/PrivacyInfo.xcprivacy"
+#: The Resources phases of the bundles that link FaunaKit + FaunaFFI and so call
+#: required-reason APIs: the Fauna-iOS app and its File Provider extension.
+_PRIVACY_MANIFEST_PHASES = {
+    "Fauna-iOS": "FB000000000000000000001A",
+    "Fauna-iOS-FileProvider": "FB000000000000000000001B",
+}
+#: Required-reason API category -> the reason code that matches the use.
+_REQUIRED_REASONS = {
+    "NSPrivacyAccessedAPICategoryUserDefaults": ["CA92.1"],
+    "NSPrivacyAccessedAPICategoryFileTimestamp": ["C617.1"],
+    "NSPrivacyAccessedAPICategoryDiskSpace": ["E174.1"],
+}
+
+
+@pytest.mark.parametrize("target", sorted(_PRIVACY_MANIFEST_PHASES))
+def test_the_privacy_manifest_is_copied_into_the_bundle(target):
+    pbx = _read("apps/fauna-apple/Fauna.xcodeproj/project.pbxproj")
+    assert 'path = "Fauna-iOS/Resources/PrivacyInfo.xcprivacy"' in pbx
+    phase = re.search(
+        rf"{_PRIVACY_MANIFEST_PHASES[target]} /\* Resources \*/ = \{{.*?files = \((.*?)\);", pbx, re.S,
+    )
+    assert phase and "PrivacyInfo.xcprivacy in Resources" in phase.group(1), (
+        f"{target}'s Resources phase must copy PrivacyInfo.xcprivacy — App Store "
+        f"Connect checks required-reason API declarations at upload"
+    )
+
+
+def test_the_privacy_manifest_declares_every_required_reason_api():
+    manifest = _read_plist(IOS_PRIVACY_MANIFEST)
+    assert manifest["NSPrivacyTracking"] is False
+    assert manifest.get("NSPrivacyTrackingDomains", []) == []
+    declared = {
+        e["NSPrivacyAccessedAPIType"]: e["NSPrivacyAccessedAPITypeReasons"]
+        for e in manifest["NSPrivacyAccessedAPITypes"]
+    }
+    assert declared == _REQUIRED_REASONS, declared
+    for entry in manifest["NSPrivacyCollectedDataTypes"]:
+        assert entry["NSPrivacyCollectedDataTypeTracking"] is False, entry
+        assert entry["NSPrivacyCollectedDataTypePurposes"] == [
+            "NSPrivacyCollectedDataTypePurposeAppFunctionality"
+        ], entry
+
+
+def test_the_photo_library_purpose_string_names_the_nest():
+    text = _read_plist("apps/fauna-apple/Fauna-iOS/Resources/Info.plist")[
+        "NSPhotoLibraryUsageDescription"
+    ]
+    assert "nest" in text and "node" not in text, text
+
+
+def test_the_ios_app_icon_is_one_opaque_1024_image():
+    import json
+
+    contents = json.loads(_read(f"{IOS_APP_ICONSET}/Contents.json"))
+    images = contents["images"]
+    assert len(images) == 1 and images[0]["size"] == "1024x1024", images
+    with open(os.path.join(_repo_root(), IOS_APP_ICONSET, images[0]["filename"]), "rb") as f:
+        png = f.read()
+    assert png[:8] == b"\x89PNG\r\n\x1a\n"
+    width, height = int.from_bytes(png[16:20], "big"), int.from_bytes(png[20:24], "big")
+    assert (width, height) == (1024, 1024), (width, height)
+    # App Store Connect refuses an icon with an alpha channel: colour type 2 (RGB).
+    assert png[25] == 2, f"the iOS icon must be RGB with no alpha (colour type 2), got {png[25]}"

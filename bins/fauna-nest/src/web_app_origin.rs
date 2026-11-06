@@ -10,7 +10,8 @@
 //! into that derivation and answers HTTP with it. The share-link viewer
 //! (`GET /share/<token>` on a navigation request — `share-links.md` § The
 //! private-file extension) follows the same choice through the same
-//! [`WebAppOriginProbe`] — it is served by [`app_router`] itself
+//! [`WebAppOriginProbe`] — it is served by [`entry_router`], the same
+//! redirect over its one build entry with no app-shell fallback
 //! (`share_routes::private_viewer`).
 
 use std::sync::Arc;
@@ -88,7 +89,7 @@ pub async fn apply_web_app_origin_change(
 /// invariant-#5 security headers, so they ride every answer, the redirect's
 /// included.
 pub(crate) fn app_router(static_dir: Option<&str>, probe: WebAppOriginProbe) -> axum::Router {
-    use axum::http::{HeaderValue, StatusCode, header};
+    use axum::http::StatusCode;
     use axum::response::IntoResponse;
 
     // A path that names no file is the app's page (the app routes it in the
@@ -110,24 +111,8 @@ pub(crate) fn app_router(static_dir: Option<&str>, probe: WebAppOriginProbe) -> 
             let probe = probe.clone();
             let serve_dir = serve_dir.clone();
             async move {
-                let path_and_query = original
-                    .path_and_query()
-                    .map_or_else(|| original.path(), |pq| pq.as_str());
-                if let Some(location) = probe().redirect_for(path_and_query)
-                    && let Ok(location) = HeaderValue::from_str(&location)
-                {
-                    // 302, never 301/308: a browser caches a permanent redirect,
-                    // and an admin who moves back to bundled could not undo it
-                    // for users who already followed it. `no-store` for the same
-                    // reason.
-                    return (
-                        StatusCode::FOUND,
-                        [
-                            (header::LOCATION, location),
-                            (header::CACHE_CONTROL, HeaderValue::from_static("no-store")),
-                        ],
-                    )
-                        .into_response();
+                if let Some(redirect) = central_redirect(&probe, &original) {
+                    return redirect;
                 }
                 match serve_dir {
                     Some((mut with_page, mut assets_only)) => {
@@ -149,6 +134,88 @@ pub(crate) fn app_router(static_dir: Option<&str>, probe: WebAppOriginProbe) -> 
                 }
             }
         },
+    )
+}
+
+/// One named entry of the SPA build (`entry`, a file in `static_dir`), under
+/// the same web-app-origin choice as [`app_router`] — the central `302` when
+/// the probe says so — but served WITHOUT the app-shell fallback: a build
+/// missing the entry answers `503`, never `index.html`. The share-link viewer
+/// is served through it (`share_routes::private_viewer`): its page exists so
+/// that no app code runs where a link key sits in the address bar
+/// (`share-links.md` § The private-file extension, rules 3 and 4), so a
+/// mis-built static dir fails closed rather than load the root layout beside
+/// the key.
+pub(crate) fn entry_router(
+    static_dir: Option<&str>,
+    probe: WebAppOriginProbe,
+    entry: &'static str,
+) -> axum::Router {
+    use axum::http::{HeaderValue, StatusCode, header};
+    use axum::response::IntoResponse;
+
+    let serve_file = static_dir
+        .map(|dir| tower_http::services::ServeFile::new(std::path::Path::new(dir).join(entry)));
+    axum::Router::new().fallback(
+        move |axum::extract::OriginalUri(original): axum::extract::OriginalUri,
+              req: axum::extract::Request| {
+            let probe = probe.clone();
+            let serve_file = serve_file.clone();
+            async move {
+                if let Some(redirect) = central_redirect(&probe, &original) {
+                    return redirect;
+                }
+                let Some(mut serve_file) = serve_file else {
+                    return StatusCode::NOT_FOUND.into_response();
+                };
+                use tower_service::Service;
+                let resp = match serve_file.call(req).await {
+                    Ok(resp) => resp,
+                    Err(e) => match e {},
+                };
+                if resp.status() == StatusCode::NOT_FOUND {
+                    tracing::error!(
+                        entry,
+                        "the SPA build in static_dir lacks this entry; refusing rather than \
+                         serving the app shell in its place"
+                    );
+                    return (
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        [(header::CACHE_CONTROL, HeaderValue::from_static("no-store"))],
+                        "this nest's web app build is missing the page for this link",
+                    )
+                        .into_response();
+                }
+                resp.map(axum::body::Body::new).into_response()
+            }
+        },
+    )
+}
+
+/// The central-mode `302` for `original`, when the probe says central.
+fn central_redirect(
+    probe: &WebAppOriginProbe,
+    original: &axum::http::Uri,
+) -> Option<axum::response::Response> {
+    use axum::http::{HeaderValue, StatusCode, header};
+    use axum::response::IntoResponse;
+
+    let path_and_query = original
+        .path_and_query()
+        .map_or_else(|| original.path(), |pq| pq.as_str());
+    let location = HeaderValue::from_str(&probe().redirect_for(path_and_query)?).ok()?;
+    // 302, never 301/308: a browser caches a permanent redirect, and an admin
+    // who moves back to bundled could not undo it for users who already
+    // followed it. `no-store` for the same reason.
+    Some(
+        (
+            StatusCode::FOUND,
+            [
+                (header::LOCATION, location),
+                (header::CACHE_CONTROL, HeaderValue::from_static("no-store")),
+            ],
+        )
+            .into_response(),
     )
 }
 

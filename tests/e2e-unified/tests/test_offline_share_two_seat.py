@@ -30,11 +30,16 @@ and this file therefore asserts on **surfaces**, polling each to a named
 generous budget (convention 14). Nothing here asserts that anything took a
 particular amount of time.
 
-⚠ What a green run does NOT prove: content transfer. v1's scope ends at
-admission — the set's machinery is adopted and the scope lists — because the
-group serve door still checks the folder family only (`account-data-plane.md`
-§ Implementation status today: content transfer waits on group content-kind
-sealing). Bytes are the sealing slice's journey, not this one's.
+Content transfer is one journey here, not all of them: most tests end at
+admission — the set's machinery is adopted and the scope lists.
+`test_a_file_added_to_a_set_shared_in_person_arrives_with_the_nest_stopped`
+goes on: both seats bind a folder under the set through the group-scope row's
+`folder-location-*` form, the nest stops, and a file the sharer writes lands
+in the recipient's folder over the group content plane (`group-set.md` §
+Build design — the group set). It runs only on the apps whose group-scope row
+carries that form (`_GROUP_BIND_APPS`), and its transfer leg is gated on the
+`group-set-feed` surface: until a share seat serves its group feed, every
+member's pull is refused and that leg skips as unbuilt after the binds.
 """
 
 import os
@@ -44,10 +49,11 @@ import time
 import pytest
 
 from common.nest import start_nest_in_place, stop_nest
-from conftest import _apply_r14_trust_env, get_available_apps
+from conftest import _apply_r14_trust_env, _apply_share_plane_env, get_available_apps
 from drivers import create_driver
-from helpers.app_surface import skip_environment
+from helpers.app_surface import require_surface, skip_environment
 from helpers.diagnostics import strip_ansi
+from helpers.macos_firewall import seat_firewall_note
 from helpers.trust_seed_witness import await_a_tip_sealed_row
 from i18n.strings import S
 
@@ -125,7 +131,45 @@ def _seat(nest, app_path, app_name, name, request):
         ),
     }
     _apply_r14_trust_env(environment, nest, request)
-    driver.launch({"app_path": app_path, "url": nest["url"], "environment": environment})
+    # The share plane's e2e cadence and its debug targets: a set shared in
+    # person is served, lifted and pulled by that plane's group leg, and at
+    # the production 60 s tick a transfer journey waits minutes per pass.
+    # Inert for a seat with no group scope.
+    _apply_share_plane_env(environment, app_name)
+    config = {"app_path": app_path, "url": nest["url"], "environment": environment}
+    if app_name == "windows":
+        # Each seat its OWN sync agent — pipe, state and binary. tui and linux
+        # get that from the private HOME/XDG world above; windows rendezvouses
+        # on a machine-global pipe, and this launch config never passes through
+        # the session-wide pin, so without it neither seat runs an agent at all
+        # and a folder bound under the set is never served (2026-10-30: both
+        # binds rendered, the bind push read "Sync service is not running").
+        from helpers.sync_seats import isolate_windows_sync_agent
+
+        isolate_windows_sync_agent(
+            config,
+            root=request.getfixturevalue("tmp_path_factory").mktemp(f"offline-share-{name}"),
+            seat=name,
+            agent_bin=request.getfixturevalue("sync_agent_binary"),
+        )
+    elif app_name == "macos":
+        # The seat's OWN agent is the whole of the group set here: on macos the
+        # e2e login starts the provisioner only under this flag, and the share
+        # plane starts inside the provisioner, so without it a seat has neither.
+        # The socket needs no naming (the driver's private HOME relocates it);
+        # the pin keeps the bare-name fallback off the box's installed agent.
+        # The plane also needs a conversations session, which a patch login
+        # builds only behind the real-conversations gate — closed, the plane
+        # gives up after its 180 s wait and no feed is ever served (2026-10-31:
+        # the ceremony and both binds green, the file never arrived). Set per
+        # seat, not by marker: the marker's reach is the whole session.
+        from helpers.sync_seats import pin_macos_seat_sync_agent
+
+        environment["FAUNA_E2E_REAL_CONVERSATIONS"] = "1"
+        pin_macos_seat_sync_agent(
+            config, agent_bin=request.getfixturevalue("macos_sync_agent_binary")
+        )
+    driver.launch(config)
     driver.set_state(
         {
             "session": {
@@ -272,7 +316,11 @@ def _seat_state(label, app):
     is usually not the side that broke: an initiator whose dial failed leaves
     the recipient with a perfectly clean, perfectly empty page. So every
     failure here quotes both seats — status, error element, and the tail of
-    the app's own log (convention 6: the failure diagnoses itself).
+    the app's own log (convention 6: the failure diagnoses itself). The dial is
+    inbound on the far seat, and a macOS firewall holding it leaves the dialer
+    only a timeout, so a seat's binary the firewall would hold is named here too
+    (2026-10-31: 6 of 8 red on tui, read as an app bug until the firewall's own
+    log was opened).
     """
     try:
         status = app.backups.offline_share_status()
@@ -285,7 +333,7 @@ def _seat_state(label, app):
     # The code carries where this seat said it can be reached, so a dial that
     # never lands names the candidates it was aimed at.
     try:
-        code = app.backups.offline_share_own_code()
+        code = app.driver.get_text("offline-share-own-code").strip()
     except Exception as e:  # the panel may be closed by the time we look
         code = f"<unreadable: {e}>"
     try:
@@ -300,7 +348,8 @@ def _seat_state(label, app):
     tail = "\n      ".join(interesting[-12:]) or "(nothing in the log)"
     return (
         f"  {label}: status={status!r} error={error!r}\n"
-        f"      code={code!r}\n      {tail}"
+        f"      code={code!r}\n      {tail}\n"
+        + seat_firewall_note(app.driver, label)
     )
 
 
@@ -397,6 +446,14 @@ def test_a_co_present_ceremony_lists_the_shared_set_on_both_seats(ceremony_seats
 
     Every link is asserted separately so a red names itself rather than landing
     as one opaque "the folder never appeared".
+    """
+    _share_in_person(ceremony_seats)
+
+
+def _share_in_person(ceremony_seats):
+    """Run the online ceremony end to end, asserting every link, and return
+    each seat's one folder row text — `(recipient_row, initiator_row)` — so a
+    journey that goes on to USE the shared set finds it by what the page shows.
     """
     initiator, initiator_actor, recipient, recipient_actor = ceremony_seats
 
@@ -508,6 +565,7 @@ def test_a_co_present_ceremony_lists_the_shared_set_on_both_seats(ceremony_seats
         f"ceremony stopped rides error-message, never this element "
         f"(error={initiator.error_text()!r})"
     )
+    return rows[0], initiator_rows[0]
 
 
 def _refuses_connections(host, port):
@@ -668,6 +726,226 @@ def test_a_co_present_ceremony_completes_while_the_nest_is_unreachable(
         )
     finally:
         start_nest_in_place(nest_instance)
+
+
+#: Apps whose group-scope folder row carries the `folder-location-*` binding
+#: form, so a seat can bind a local folder under a set shared in person. tui
+#: led (`group-set.md` § Build design — the group set), linux, windows and
+#: macos followed; the other apps' rows are label-only today and join this
+#: tuple with their lift.
+_GROUP_BIND_APPS = ("tui", "linux", "windows", "macos")
+
+
+def _group_bind_apps():
+    available = get_available_apps()
+    return [c for c in _GROUP_BIND_APPS if c in available]
+
+
+GROUP_TRANSFER_BUDGET_S = 240.0
+"""For a file written at the sharer to land in the recipient's bound folder
+with no nest: the sharer's lift, the recipient's group pump tick, the dial and
+the fold. Generous, never a timing assertion (convention 14)."""
+
+
+def _read_or_none(path):
+    try:
+        return path.read_text()
+    except OSError:
+        return None
+
+
+@pytest.mark.parametrize("offline_share_app", _group_bind_apps())
+# Documented-long (convention 9): a whole ceremony, two binds and a transfer.
+@pytest.mark.timeout(1200)
+@pytest.mark.feature("offline-sharing")
+def test_a_file_added_to_a_set_shared_in_person_arrives_with_the_nest_stopped(
+    ceremony_seats, nest_instance, tmp_path
+):
+    """Outcome 3 of the offline-sharing page: after an in-person share, a file
+    one person adds reaches the other straight from the sharer's device.
+
+    `p2p.md` § Cross-user shared-set transfer and the group set's build design
+    (`group-set.md` § Build design — the group set): a folder bound
+    under a group scope runs an engine with no nest leg — its writes are
+    lifted into the group plane and the recipient's group pump pulls them
+    from the sharer's serve. So the nest is stopped BEFORE the file is
+    written, and the port is checked refusing at both ends: a file that
+    arrives can only have come from the other device.
+
+    The ceremony and both binds run with the nest up — the ceremony's own
+    offline claim is the unreachable-nest journey above, and this one asks a
+    different question: does content move once the set is shared?
+    """
+    from helpers.folder_content import (
+        agent_diagnosis,
+        atomic_write,
+        bind_location_under_set,
+    )
+    from helpers.waiting import wait_until
+
+    initiator, _initiator_actor, recipient, _recipient_actor = ceremony_seats
+
+    recipient_row, initiator_row = _share_in_person(ceremony_seats)
+
+    # ── Both people bind a folder under the set, through the row's own form.
+    # The row's label is the set's name, else its short id — the same scope on
+    # both seats, but each is found by what its own page shows.
+    sharer_folder = tmp_path / "sharer"
+    sharer_folder.mkdir()
+    receiver_folder = tmp_path / "receiver"
+    receiver_folder.mkdir()
+    bind_location_under_set(initiator, initiator_row, sharer_folder, seat="sharer")
+    bind_location_under_set(recipient, recipient_row, receiver_folder, seat="receiver")
+
+    # The transfer needs each seat to serve its group feed to the other. Gated
+    # HERE, not at the top, so the ceremony and both binds above keep running
+    # as live proof of the group row's binding form while the feed is unbuilt.
+    require_surface(initiator.driver, "group-set-feed")
+
+    host = nest_instance.get("bind_host", "127.0.0.1")
+    port = nest_instance["port"]
+
+    # The session-scoped nest must come back whatever happens below.
+    stop_nest(nest_instance, graceful=True)
+    try:
+        assert _refuses_connections(host, port), (
+            f"the nest still answers on {host}:{port} after stop_nest — a file "
+            "arriving would then prove nothing about the other device"
+        )
+
+        name = f"in-person-{os.urandom(3).hex()}.txt"
+        payload = f"added after sharing in person — {os.urandom(8).hex()}\n"
+        atomic_write(sharer_folder / name, payload)
+
+        wait_until(
+            lambda: _read_or_none(receiver_folder / name) == payload,
+            GROUP_TRANSFER_BUDGET_S,
+            interval=1.0,
+            diagnose=lambda: (
+                f"[receiver] {name}: "
+                + (
+                    "NEVER ARRIVED"
+                    if _read_or_none(receiver_folder / name) is None
+                    else "content mismatch: got "
+                    f"{_read_or_none(receiver_folder / name)!r}"
+                )
+                + " with the nest stopped. The links: the sharer's engine "
+                "lifting its write into the group plane, the receiver's group "
+                "pump reaching the sharer's serve, and the fold into the bound "
+                "folder.\n"
+                + agent_diagnosis(initiator, "sharer")
+                + "\n"
+                + agent_diagnosis(recipient, "receiver")
+            ),
+        )
+
+        # Read again at the END: a nest that came back mid-transfer would make
+        # the arrival a nest-mediated result wearing an offline name.
+        assert _refuses_connections(host, port), (
+            f"the nest came back on {host}:{port} during the transfer, so the "
+            "arrival above is not evidence of a peer-to-peer one"
+        )
+    finally:
+        start_nest_in_place(nest_instance)
+
+
+@pytest.mark.parametrize("offline_share_app", _group_bind_apps())
+# Documented-long (convention 9): a whole ceremony, two binds, a conflict that
+# converges and a restore that converges again.
+@pytest.mark.timeout(1200)
+@pytest.mark.feature("offline-sharing")
+def test_a_concurrent_edit_is_reviewed_on_the_losing_seat_and_its_version_restored(
+    ceremony_seats, tmp_path
+):
+    """Outcome 7 of the offline-sharing page: two people save one file at once.
+
+    `group-set.md` § Build design — the group set, decision 9. The plane keeps
+    the later save on both seats; the seat whose save lost keeps its edit and
+    lists a review row on its Folders page, read from the set's own state
+    through the sync agent, since no nest holds a group set's conflicts. "Use
+    the other version" re-publishes the kept edit, which then stands on both
+    seats. Which seat loses is the plane's to decide, so the test reads it off
+    the file the two converge on.
+    """
+    from helpers.folder_content import (
+        agent_diagnosis,
+        atomic_write,
+        bind_location_under_set,
+    )
+    from helpers.waiting import wait_until
+
+    initiator, _initiator_actor, recipient, _recipient_actor = ceremony_seats
+    recipient_row, initiator_row = _share_in_person(ceremony_seats)
+
+    sharer_folder = tmp_path / "sharer"
+    sharer_folder.mkdir()
+    receiver_folder = tmp_path / "receiver"
+    receiver_folder.mkdir()
+    bind_location_under_set(initiator, initiator_row, sharer_folder, seat="sharer")
+    bind_location_under_set(recipient, recipient_row, receiver_folder, seat="receiver")
+    require_surface(initiator.driver, "group-set-feed")
+
+    def diagnose():
+        return (
+            f"sharer={_read_or_none(sharer_folder / name)!r} "
+            f"receiver={_read_or_none(receiver_folder / name)!r}\n"
+            + agent_diagnosis(initiator, "sharer")
+            + "\n"
+            + agent_diagnosis(recipient, "receiver")
+        )
+
+    name = f"both-saved-{os.urandom(3).hex()}.txt"
+    sharer_edit = f"the sharer's edit — {os.urandom(8).hex()}\n"
+    receiver_edit = f"the receiver's edit — {os.urandom(8).hex()}\n"
+    # Milliseconds apart, far inside one lift and one pump tick, so neither
+    # save can have been made over the other: the two rows are concurrent.
+    atomic_write(sharer_folder / name, sharer_edit)
+    atomic_write(receiver_folder / name, receiver_edit)
+
+    def converged():
+        kept = _read_or_none(sharer_folder / name)
+        return kept is not None and kept == _read_or_none(receiver_folder / name)
+
+    wait_until(
+        converged, GROUP_TRANSFER_BUDGET_S, interval=1.0, diagnose=diagnose
+    )
+    winner_edit = _read_or_none(sharer_folder / name)
+    assert winner_edit in (sharer_edit, receiver_edit), diagnose()
+    sharer_lost = winner_edit == receiver_edit
+    loser, winner = (initiator, recipient) if sharer_lost else (recipient, initiator)
+    loser_edit = sharer_edit if sharer_lost else receiver_edit
+
+    # The losing seat lists the row, by the page's own status poll.
+    loser.backups.navigate_folders()
+    wait_until(
+        lambda: loser.driver.count("conflict-resolve-button") == 1,
+        GROUP_TRANSFER_BUDGET_S,
+        interval=1.0,
+        diagnose=lambda: f"no review row on the losing seat; {diagnose()}",
+    )
+    assert name in loser.driver.get_text("conflict-file-info", index=0)
+    assert loser.driver.is_visible("conflict-type-badge")
+    # The winner lost nothing, so it has nothing to review.
+    winner.backups.navigate_folders()
+    assert winner.driver.count("conflict-resolve-button") == 0
+
+    loser.driver.click("conflict-resolve-button", index=0)
+    wait_until(
+        lambda: _read_or_none(sharer_folder / name) == loser_edit
+        and _read_or_none(receiver_folder / name) == loser_edit,
+        GROUP_TRANSFER_BUDGET_S,
+        interval=1.0,
+        diagnose=lambda: f"the restored edit did not reach both seats; {diagnose()}",
+    )
+    # A used row leaves the list, and overwriting the winner's save asks the
+    # winner nothing: it was an ordinary edit over the version it held.
+    wait_until(
+        lambda: loser.driver.count("conflict-resolve-button") == 0,
+        30.0,
+        interval=1.0,
+        diagnose=lambda: f"the used row stayed; error={loser.error_text()!r}",
+    )
+    assert winner.driver.count("conflict-resolve-button") == 0
 
 
 @pytest.mark.feature("offline-sharing")

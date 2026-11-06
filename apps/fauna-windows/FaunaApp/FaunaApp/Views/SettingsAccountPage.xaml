@@ -176,7 +176,6 @@
                  the Status sub-page, settings.md § Navigation model). -->
             <StackPanel Spacing="12">
                 <TextBlock Style="{StaticResource SubtitleTextBlockStyle}"
-                           AutomationProperties.AutomationId="{x:Bind ids:Ids.AccountSettingsLink}"
                            Text="{loc:Localize Key=common/identity}" />
 
                 <Grid RowSpacing="8">
@@ -267,17 +266,17 @@
 
                     <!-- The post-succession group sweep's own lines, at the TOP of the
                          section — tui's order (settings.md § Recovery kit → The sweep's
-                         own lines). ID-less prose, like tui's chrome: the ceremony's
-                         central claim is asserted as STATE (data.succession_sweep), never
-                         read off the screen, and there is deliberately no ui.yaml id for
-                         either line or for the header/status pair above them either.
-                         Collapsed (not counted by FlaUI) when there is nothing to show —
-                         an ordinary sign-in that did not just run a ceremony, or a
-                         succession over zero groups. -->
+                         own lines). The two lines carry their approved ids
+                         (recovery-kit-sweep-status, recovery-kit-sweep-unvouched-status).
+                         Each is Collapsed (not counted by FlaUI) when its line is null —
+                         an ordinary sign-in that did not just run a ceremony, a
+                         succession over zero groups, or an empty roster. -->
                     <StackPanel x:Name="SweepChromePanel" Visibility="Collapsed" Spacing="4">
                         <TextBlock x:Name="SweepOutcomeText" Visibility="Collapsed"
+                                   AutomationProperties.AutomationId="{x:Bind ids:Ids.RecoveryKitSweepStatus}"
                                    TextWrapping="Wrap" Opacity="0.7" FontSize="12" />
                         <TextBlock x:Name="SweepUnattestedText" Visibility="Collapsed"
+                                   AutomationProperties.AutomationId="{x:Bind ids:Ids.RecoveryKitSweepUnvouchedStatus}"
                                    TextWrapping="Wrap" Opacity="0.7" FontSize="12" />
                         <!-- Gated on owesWork, deliberately NOT on whether this device can
                              retry — hiding it where the retry cannot run would leave the

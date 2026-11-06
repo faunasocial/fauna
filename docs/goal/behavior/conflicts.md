@@ -51,6 +51,23 @@ manifests).
   format: chunk boundaries are storage arithmetic, not semantic units — a
   spliced manifest is a file state no author ever had.
 
+**Where the loser rests follows the family (ruled 2026-10-30).**
+The model above names no keeper, because on a folder set there is only one: the nest, which retains every loser as a
+version when it lands the resolved report. A group set
+([`group-set.md`](group-set.md) § Build design — the
+group set) has no nest, and its plane keeps one live row per path per writer,
+so there **the loser's author is the retention seat**: the replica about to
+overwrite its own lifted edit with the plane's winner retains that edit first,
+lists the review row the nest would have held when the winner's author did not
+derive from that edit — a group row names the head it wrote over, that doc's
+decision 10 — and only then writes. The
+mechanics, the restore re-point in plane terms and the bounds — the three-way
+merge moves to the loser's next row; a winning delete is applied after the
+retention rather than declined, because the retention answers the only reason
+to decline, and the base a row names decides whether the row is listed, never
+whether the delete applies — are that doc's decisions 9 and 10. Every claim
+of this section holds on both families; only the seat differs.
+
 **Delete-vs-edit (ratified 2026-07-29).** A deletion is a change, so a remote
 delete racing local content falls under the conflict definition above — but its
 resolution is **forced, not policy**: local content the nest lacks always wins
@@ -276,7 +293,17 @@ contract has five clauses:
   undecidable (the edit-frontier honestly counts an unprovable reissue's
   seq; the tail's stamp honestly under-claims its own unechoed novelty;
   neither side can be fixed), and clause 1 applied reflexively converts it
-  into a fresh, decidable log-tail row the whole fleet converges onto.
+  into a fresh, decidable log-tail row the whole fleet converges onto. (A
+  row another door recorded under this device's id is no such tail: it
+  carries no anchor, and [`file-versions.md`](file-versions.md) § Restore,
+  ordering 1 owes it.)
+  The republish is a NEW row even when those bytes are already recorded —
+  a latest-wins adopt stamps the adopted bytes recorded, which is exactly
+  the crossed-resolution case (each of two seats adopts the other's edit,
+  each own winner echoes back stale-declined) — so no "already recorded,
+  nothing to upload" short-circuit may swallow it: behind one, both seats
+  quiesced on each other's body (a live native seat pair,
+  2026-10-28).
   **(iv) The echo whose bytes no seat serves is ACCOUNTED FROM ITS
   MANIFEST, and where it would re-adopt it RE-ASSERTS (ruled 2026-10-09).** An own echo's bytes come from the
   local file while it still hashes to the manifest, else from the byte plane
@@ -813,7 +840,7 @@ is what the declined `spawn_blocking` at both call sites
 > and `…_for_an_unwatermarked_create` (red-first against the pre-ruling
 > judge: anchor 0, the barrier row never written) beside the withheld-count
 > pin, which still asserts the hold; the daemon's
-> `ws_client::tests::a_counted_own_row_releases_the_causal_hold_on_a_fresh_bind`
+> `ws_client::tests::a_counted_own_row_releases_the_causal_hold_on_a_fresh_bind` (removed with the daemon, 2026-10-02)
 > (the hold with nothing counted, the sibling judgement once the pre-pass
 > has counted); the oracle's
 > `merge_convergence_test::a_fresh_binds_counted_own_row_releases_the_defer_cap`
@@ -857,7 +884,7 @@ is what the declined `spawn_blocking` at both call sites
 > quiescence), the engine's
 > `create_arm_local_conflict_test::a_reverts_own_held_bytes_do_not_park_a_covering_peer_edit`
 > and the daemon's
-> `ws_client::tests::a_reverts_own_held_bytes_do_not_hold_a_covering_peer_edit`
+> `ws_client::tests::a_reverts_own_held_bytes_do_not_hold_a_covering_peer_edit` (removed with the daemon, 2026-10-02)
 > (both red-first: the cap/hold with the anchor unmoved), the predicate's
 > unit test, and the full model suite green.
 > ⚠ **THE WATERMARK BOUND — the receiver's half of the lower-bound law
@@ -911,7 +938,7 @@ is what the declined `spawn_blocking` at both call sites
 > forged row paired with its honest sibling, both judges); the engine's
 > `create_arm_local_conflict_test::a_forged_watermark_does_not_repark_a_fresh_binds_counted_own_row`
 > and the daemon's
-> `ws_client::tests::a_forged_watermark_does_not_rehold_a_fresh_bind` (the
+> `ws_client::tests::a_forged_watermark_does_not_rehold_a_fresh_bind` (removed with the daemon, 2026-10-02; the
 > fresh-bind pins above with the peer's claim forged to `i64::MAX`;
 > red-first: the cap/hold with the anchor unmoved).
 > ⚠ **THE SAME-ANCHOR RULING (2026-08-05 — the leg-4a remainder, RULED; this
@@ -1003,7 +1030,7 @@ is what the declined `spawn_blocking` at both call sites
 > resolved report's transactional loser-retention row is attributed to the
 > reporting device, and applied as if from a peer it fast-forwards the
 > just-merged file back to the losing candidate. Pinned tier_1 by
-> `a_self_echo_advances_the_base_only_while_local_matches` (ws_client) and
+> `a_self_echo_advances_the_base_only_while_local_matches` (ws_client, removed with the daemon 2026-10-02) and
 > tier_3 by `tests/platform/sync/test_text_merge.py::
 > test_text_merge_concurrent_edits`, whose final assertion (head row == the
 > reported winner) is exactly the clause-3 outcome — do not weaken it to
@@ -1204,7 +1231,9 @@ is what the declined `spawn_blocking` at both call sites
 
 > **Status (2026-10-12): BUILT — shared half, nest half and the tui witness.** The engine reports both sites (the apply-stage refusal through `report_conflict_ws`, the sealed-path refusal through `report_sealed_skip_ws`, details sealed by `label_custody::seal_conflict_details_by_hash`), keeps the reply in `sync_conflicts.nest_id` and re-sends an unacknowledged report or cure resolve on every catch-up pass (`flush_skip_reports`); the verbatim-winner apply keys on `CONFLICT_KINDS_WITH_PROPAGATED_WINNER` only, and (built 2026-10-10) only on such a row stamped with its landed chooser report's nest id (`has_unresolved_winner_conflict_for_path`, pinned by `unpublished_conflict_row_test`); a landed later change cures the row (`cure_skipped_path`) — a create/modify, and (built 2026-10-11) a remote delete at every applied point: the resident pull's arm (file unlinked, or no local file at all, the common shape of a skipped create) and both of `apply_folded_delete`'s applied outcomes plus its no-row case, never a declined or kept delete (the copy is still behind); the shared fold renders the badge, the name-less row and the skipping device's label, and (built 2026-10-12) drops a cured row from the review list although the page fetches resolved rows (`fold_skipped_changes`, pinned by `a_cured_skipped_change_clears_from_the_review_list`). The nest half is built (2026-10-11): `report_conflict_signed` answers the existing id for an unresolved `catchup_failed` row of the same (set, device, `path_hash`), and `delete_device` resolves the device's unresolved `catchup_failed` rows in its transaction (pinned by `catchup_failed_report_dedupes_per_set_device_path` and `delete_device_resolves_its_catchup_failed_reports`). The e2e witness is built on tui (2026-10-12): `tests/e2e-unified/tests/test_filesync_seat_catchup.py` reads both skip sites' reports off the nest's `conflicts.list` and the seat's own Folders review list (*Not applied*, the seat named, the sealed-path row name-less), then cures the readable one with a later version and sees it leave both. The other six apps render the same shared fold.
 
-## Implementation status today (2026-07-11)
+## Implementation status today
+
+**A group set's loser is retained by its author — the engine half BUILT (2026-10-30); the review list on a group set BUILT on tui (2026-10-31), the other apps owed.** The build, what it refined and what is open are owned by [`group-set.md`](group-set.md) § Build design — the group set, the status paragraph's *Built, the retention (decision 9)*.
 
 **The byte-less own echo is BUILT (2026-10-09).** `SyncEngine::apply_self_echo` accounts a row whose bytes neither the local file nor the byte plane yields from the opened manifest (frontier, the content-licensed edit-frontier via `file_hash`, the manifest memory, no hold), leaves the base where it was, and re-asserts local in place of a re-adopt it cannot fetch — § Concurrent resolution, clause 5, refinement (iv); pinned by `self_echo_local_body_test` (a metadata-only echo of a superseded own write against a nest that 404s every chunk is accounted and the local edit untouched; an own covering tail that would re-adopt re-asserts).
 
@@ -1228,11 +1257,11 @@ conflict row and no merge**; with a **foreign** base it declares a conflict wher
 and with a foreign base that happens to equal the local bytes it reads "no local change" and
 overwrites a genuinely diverged edit silently. Only the middle one is recoverable.
 
-**The fix is a construction, not a rule:** each daemon's cache is a per-`(device, folder)`
+**The fix was a construction, not a rule (daemon record; the daemon and `ws_client` no longer exist):** each daemon's cache was a per-`(device, folder)`
 subdirectory of the configured root (`ws_client::scoped_cache_dir`), applied to an explicitly
 configured root as well as the default. Nothing is carried in from the root: the flat pre-scoping
 cache predates the compat-remnant sweep (`../architecture/compat-remnant-sweep.md` § Program
-4), so every scope starts empty. Pinned by
+4), so every scope starts empty. Pinned (until the daemon's removal) by
 `ws_client::tests::the_scoped_cache_dir_is_stable_per_daemon_and_distinct_between_daemons` and
 `::the_startup_sequence_carries_and_sweeps_nothing_from_the_root`.
 
@@ -1246,7 +1275,7 @@ two copies of the retention rule means a future tightening can land on one host 
 and the symptom is not a crash but a three-way merge that silently degrades to latest-wins on one
 host only. **No at-rest change** — `CausalStore` derives byte-identical filenames over the same flat
 directory, which is what keeps the irrecoverable path-keyed entries above out of the question.
-Pinned by `ws_client::tests::the_daemon_and_the_engine_are_one_ledger`, which reads each host's
+Pinned (until the daemon's removal) by `ws_client::tests::the_daemon_and_the_engine_are_one_ledger`, which reads each host's
 writes through the other across the prune boundary, and by the daemon's own unshared statement of
 the on-disk key names (`ws_client::ledger_entry_key`, test-only since the collapse) — so a rename on
 the shared side cannot silently orphan a daemon's ancestors.
@@ -1443,7 +1472,26 @@ word "legacy" was pre-sweep, and it left the code comments the same day.
 > `winning_manifest_hash` against the recorded candidates (`fauna.sync.bad_candidate`
 > otherwise), records the winner, and **propagates it by writing a `sync_changes`
 > row** (`change_type = "modify"`, attributed to the winning candidate's device
-> so that device self-echo-skips while every other downloads). The legacy
+> so that device self-echo-skips while every other downloads). The row is
+> minted under the chooser's actor, so a candidate naming one of the
+> CHOOSER's own devices is minted only when that device's word attests it —
+> the conflict's reporting device (bound to its reporter at the report door),
+> counted only when the reporting ACTOR the conflict row records
+> (`sync_conflicts.reporter_actor_id`, written by the report door) is the
+> chooser, or a change row that device recorded under the chooser's actor for this
+> path and manifest — else the resolve refuses `fauna.sync.bad_candidate`,
+> mints nothing and leaves the conflict open (2026-11-04): a
+> writer member's report cannot make the owner's device take a version as
+> its own echo. The reporting-device arm is bound to the actor, not the
+> device bytes (2026-11-04): device registrations are keyed by
+> (actor, device), so a member may register the owner's device id under its
+> own actor and report "from" it; a conflict row with no reporter recorded
+> falls through to the change-row arm. Refusing a device id another actor
+> already holds at registration was weighed and not taken: a device id is a
+> client-asserted random id not tied to an actor ([`file-sync.md`](file-sync.md)
+> § 1. Device Registration), so a first-registrant rule would let whoever
+> registers an id first squat it, while the bind at the attestation closes
+> the forgery wherever the id came from. Candidates naming another actor's device mint unchanged. The legacy
 > mark-only path (`winning_manifest_hash == None`) is preserved. **Daemon
 > apply half (Slice 3a, 2026-06-01):** the fauna-sync daemon now applies the
 > propagated winner on catch-up — when a `changes.list` `modify` lands for a

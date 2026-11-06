@@ -9,9 +9,8 @@
 //! count. The numbers are allocation sizes, not timings, so the verdict does
 //! not depend on machine load.
 
-use std::alloc::{GlobalAlloc, Layout, System};
+use fauna_alloc_probe::PeakLive;
 use std::io::{Cursor, Write};
-use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
 
 use fauna_archive::facebook::FacebookParser;
 use fauna_archive::model::{Category, Entity};
@@ -21,54 +20,8 @@ use fauna_archive::source::VecSource;
 use zip::CompressionMethod;
 use zip::write::SimpleFileOptions;
 
-struct Counting;
-
-static LIVE: AtomicUsize = AtomicUsize::new(0);
-static PEAK: AtomicUsize = AtomicUsize::new(0);
-
-fn grew(by: usize) {
-    let now = LIVE.fetch_add(by, Relaxed) + by;
-    PEAK.fetch_max(now, Relaxed);
-}
-
-// SAFETY: every call forwards to `System` unchanged; the counters only observe.
-unsafe impl GlobalAlloc for Counting {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        let ptr = unsafe { System.alloc(layout) };
-        if !ptr.is_null() {
-            grew(layout.size());
-        }
-        ptr
-    }
-
-    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        unsafe { System.dealloc(ptr, layout) };
-        LIVE.fetch_sub(layout.size(), Relaxed);
-    }
-
-    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        let moved = unsafe { System.realloc(ptr, layout, new_size) };
-        if !moved.is_null() {
-            if new_size >= layout.size() {
-                grew(new_size - layout.size());
-            } else {
-                LIVE.fetch_sub(layout.size() - new_size, Relaxed);
-            }
-        }
-        moved
-    }
-}
-
 #[global_allocator]
-static COUNTING: Counting = Counting;
-
-/// The most bytes live at once while `f` runs, above what was live before it.
-fn peak_during(f: impl FnOnce()) -> usize {
-    let base = LIVE.load(Relaxed);
-    PEAK.store(base, Relaxed);
-    f();
-    PEAK.load(Relaxed) - base
-}
+static ALLOC: PeakLive = PeakLive;
 
 /// Bytes of JSON each member carries that no model field keeps — the part of
 /// a member only its parsed `serde_json::Value` holds.
@@ -109,7 +62,7 @@ fn thread_archive(members: usize) -> VecSource {
 fn drain(src: &VecSource, category: Category) -> (usize, usize, usize) {
     let mut reader = ArchiveReader::open(src).unwrap();
     let (mut ok, mut err) = (0, 0);
-    let peak = peak_during(|| {
+    let peak = PeakLive::peak_during(|| {
         for item in FacebookParser.stream(&mut reader, category) {
             match item {
                 Ok(Entity::Thread(_) | Entity::Message(_)) => ok += 1,

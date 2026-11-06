@@ -445,6 +445,48 @@ public class ProfileViewModelTests
         Assert.StartsWith("https://nest.example", vm.ProviderWebhookUrl);
     }
 
+    // ── The §4 return-URL display (monetization.md § Pillar 2 → Visitor entitlement
+    //    doors, ruling (2)): built on the creator's web-site origin, never HomeUrl ──
+
+    [Fact]
+    public async Task ProviderReturnUrl_IsEmptyWithoutAWebSiteOrigin()
+    {
+        var rpc = new MockNestRpcClient { HomeUrl = "https://nest.example" };
+        var vm = new ProfileViewModel(rpc, "abcd1234");
+        vm.ProviderFormKind = "fake";
+        Assert.Equal("", vm.ProviderReturnUrl);   // nothing resolved yet
+
+        // The mock nest cannot build a web client: a failed resolve reads as "no public
+        // web address" — dead, not silently live on the nest's own URL.
+        await vm.HydrateSiteOriginAsync("alice");
+        Assert.Equal("", vm.ProviderReturnUrl);
+
+        // A site with no public origin (subdomains off, no custom domain) has none either.
+        await vm.HydrateSiteOriginAsync("alice", new FakeWebClient { SubdomainState = false });
+        Assert.Equal("", vm.ProviderReturnUrl);
+    }
+
+    [Fact]
+    public async Task ProviderReturnUrl_IsTheSharedReturnUrlForEachKindOnTheSiteOrigin()
+    {
+        var rpc = new MockNestRpcClient { HomeUrl = "https://nest.example" };
+        var vm = new ProfileViewModel(rpc, "abcd1234");
+        var web = new FakeWebClient { SubdomainState = true, NestServingDomain = "example.test" };
+
+        await vm.HydrateSiteOriginAsync("alice", web);
+
+        var origin = FaunaFfiMethods.WebSiteLinkView(
+            System.Array.Empty<uniffi.fauna_client_web.WebDomainRow>(), true, "alice", "example.test").@origin;
+        Assert.False(string.IsNullOrEmpty(origin));
+        Assert.NotEmpty(vm.KnownProviderKinds);
+        foreach (var kind in vm.KnownProviderKinds)
+        {
+            vm.ProviderFormKind = kind;
+            Assert.Equal(FaunaFfiMethods.PaymentsReturnUrl(origin!, kind), vm.ProviderReturnUrl);
+            Assert.DoesNotContain("nest.example", vm.ProviderReturnUrl);
+        }
+    }
+
     [Fact]
     public async Task SaveProviderFormAsync_DispatchesSetWithFormValuesAndHidesForm()
     {
@@ -515,6 +557,75 @@ public class ProfileViewModelTests
         await vm.MintClaimAsync();
 
         Assert.DoesNotContain("PaymentsClaimsMint", rpc.Calls);
+    }
+
+    [Fact]
+    public async Task VoidClaimAsync_FirstPressArmsSecondPressVoidsAndRehydrates()
+    {
+        var rpc = SeededRpc();
+        rpc.NextClaims = new[] { MockNestRpcClient.MakeClaim("CODE1", "gold") };
+        var vm = new ProfileViewModel(rpc, "deadbeef");
+        await vm.HydrateAsync();
+        Assert.True(vm.Claims[0].CanVoid);
+        Assert.False(vm.Claims[0].Armed);
+
+        await vm.VoidClaimAsync("CODE1");
+
+        Assert.True(vm.Claims[0].Armed);
+        Assert.DoesNotContain("PaymentsClaimsVoid", rpc.Calls);
+        var listsBefore = rpc.Calls.Count(c => c == "PaymentsClaimsList");
+
+        await vm.VoidClaimAsync("CODE1");
+
+        Assert.Equal("CODE1", rpc.LastClaimsVoid);
+        Assert.Equal(listsBefore + 1, rpc.Calls.Count(c => c == "PaymentsClaimsList"));
+        Assert.False(vm.Claims[0].Armed);   // the landed re-read disarms
+    }
+
+    [Fact]
+    public async Task VoidClaimAsync_KeepDisarmsWithoutCallingTheNest()
+    {
+        var rpc = SeededRpc();
+        rpc.NextClaims = new[] { MockNestRpcClient.MakeClaim("CODE1", "gold") };
+        var vm = new ProfileViewModel(rpc, "deadbeef");
+        await vm.HydrateAsync();
+        await vm.VoidClaimAsync("CODE1");
+
+        vm.CancelVoidClaim();
+
+        Assert.False(vm.Claims[0].Armed);
+        Assert.DoesNotContain("PaymentsClaimsVoid", rpc.Calls);
+    }
+
+    [Fact]
+    public async Task VoidClaimAsync_ClaimNotFoundRereadsInsteadOfErroring()
+    {
+        var rpc = SeededRpc();
+        rpc.NextClaims = new[] { MockNestRpcClient.MakeClaim("CODE1", "gold") };
+        var vm = new ProfileViewModel(rpc, "deadbeef");
+        await vm.HydrateAsync();
+        await vm.VoidClaimAsync("CODE1");
+        var listsBefore = rpc.Calls.Count(c => c == "PaymentsClaimsList");
+        rpc.ClaimsVoidError = new InvalidOperationException("fauna.payments.claim_not_found");
+
+        await vm.VoidClaimAsync("CODE1");
+
+        Assert.Null(vm.ErrorMessage);
+        Assert.Contains("PaymentsClaimsVoid", rpc.Calls);
+        Assert.Equal(listsBefore + 1, rpc.Calls.Count(c => c == "PaymentsClaimsList"));
+        Assert.False(vm.Claims[0].Armed);
+    }
+
+    [Fact]
+    public async Task HydrateAsync_VoidedClaimOffersNoVoidButton()
+    {
+        var rpc = SeededRpc();
+        rpc.NextClaims = new[] { MockNestRpcClient.MakeClaim("CODE1", "gold", voidedAt: 5) };
+        var vm = new ProfileViewModel(rpc, "deadbeef");
+
+        await vm.HydrateAsync();
+
+        Assert.False(vm.Claims[0].CanVoid);
     }
 
 #endif   // PAYMENTS

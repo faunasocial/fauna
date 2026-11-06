@@ -232,12 +232,15 @@ private struct ModerationQueueRow: View {
                         facts: ModerationQueueVM.badgeFacts(
                             category: row.category,
                             confidencePerMille: row.confidencePerMille,
-                            action: row.action))
+                            action: row.action,
+                            issuerNest: row.issuerNest))
                     // The enforcement action taken, via the shared discriminant →
-                    // label map (co-located with the enum in `fauna_core::obligation`).
-                    // `nil` for a local detection — blank action column.
-                    if let action = row.action {
-                        Text(renderLocalizedText(obligationActionLabel(action: action)))
+                    // label map (co-located with the enum in `fauna_core::obligation`),
+                    // suffixed with the shared `issued_by` on a row another nest
+                    // delivered. `nil` for a local detection — blank action column.
+                    if let actionLine = ModerationQueueVM.actionLine(
+                        action: row.action, issuedBy: row.issuedBy) {
+                        Text(actionLine)
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }

@@ -189,9 +189,14 @@ public func openPaymentURL(_ url: String, setError: (String) -> Void) {
 /// macOS branch at all) stays at its own call site, out of scope here; a
 /// macOS call to this function is simply a no-op.
 public enum ShareSheet {
-    public static func present(items: [Any]) {
+    /// `onDismiss` runs once the sheet closes, shared or cancelled — the place a
+    /// caller deletes a temporary file it handed over (the SSH door key).
+    public static func present(items: [Any], onDismiss: (() -> Void)? = nil) {
         #if os(iOS)
         let activityVC = UIActivityViewController(activityItems: items, applicationActivities: nil)
+        if let onDismiss {
+            activityVC.completionWithItemsHandler = { _, _, _, _ in onDismiss() }
+        }
         if let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
            let rootVC = windowScene.windows.first?.rootViewController {
             rootVC.present(activityVC, animated: true)

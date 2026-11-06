@@ -42,7 +42,7 @@ HANDLE_DOMAIN = "fauna.test"
 @pytest.mark.feature("atproto")
 def test_did_plc_mint_end_to_end(nest_binary, atproto_bridge_e2e_binary, tmp_path_factory):
     from clients.ws_rpc_admin_client import WsRpcAdminClient
-    from common.auth import register_handled_actor
+    from helpers.admin_wire import admit_adult
     from conftest import _make_nest, _repo_root
     from helpers.bridge_enrollment import approve_bridge
     from drivers.port_util import (
@@ -91,9 +91,7 @@ def test_did_plc_mint_end_to_end(nest_binary, atproto_bridge_e2e_binary, tmp_pat
         # USER-class transition kind — the production enable path; the senior
         # rotation pubkey is the client-generated half of the ratified
         # custody split — its secret never leaves a real client). ──
-        alice = register_handled_actor(
-            nest["port"], handle="alice", domain=HANDLE_DOMAIN, base_url=nest["url"]
-        )
+        alice = admit_adult(nest, "alice", domain=HANDLE_DOMAIN, token=True)
         alice_ws = WsRpcAdminClient(
             nest["url"],
             actor_id=alice["actor_id_bytes"],

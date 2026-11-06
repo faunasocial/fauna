@@ -149,6 +149,9 @@ struct FeedFormView: View {
                         ForEach(FeedCreateForm.builtinFactors, id: \.value) { option in
                             Text(renderLocalizedText(option.label)).tag(option.value)
                         }
+                        ForEach(form.subscribedLabelerOptions) { option in
+                            Text(option.label).tag(option.key)
+                        }
                         ForEach(form.trainedFactorOptions) { option in
                             Text(option.label).tag(option.key)
                         }
@@ -221,6 +224,9 @@ struct FeedFormView: View {
         // best-effort (mirrors windows' `AppendTrainedTopicFactorsAsync`; a
         // fetch fault just leaves the picker short, never blocks feed creation).
         .task {
+            form.subscribedLabelerOptions = await vm.subscribedLabelerFactors().map {
+                TrainedFactorOption(key: $0, label: $0)
+            }
             let rows = await vm.trainedFactorRows()
             form.trainedFactorOptions = rows.compactMap { row in
                 row.factorKey.map { TrainedFactorOption(key: $0, label: row.name) }

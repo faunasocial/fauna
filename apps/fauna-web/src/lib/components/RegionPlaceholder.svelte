@@ -8,6 +8,10 @@
   // / `nest_rules::placeholder`. A region's placeholder carries `region` and the
   // authority's name; a nest's carries the nest's `domain`.
   //
+  // `sealedNote` adds the sealed-item sentence (`region.sealed_note`) after the
+  // frame, INSIDE `region-blocked-notice` — the shared decision
+  // (`regionSealedNote`), true only on an end-to-end conversation's bubble.
+  //
   // `data-verdict` carries the verb so the convention-17 walks
   // (`regionBlockRenderForTest`, `nestBlockRenderForTest`) count painted BLOCK
   // placeholders — tui's `VERDICT_ATTR`.
@@ -18,10 +22,12 @@
   let {
     placeholder,
     onreveal,
+    sealedNote = false,
     class: klass = 'content-policy-collapse',
   }: {
     placeholder: ItemPlaceholder;
     onreveal?: () => void;
+    sealedNote?: boolean;
     class?: string;
   } = $props();
 
@@ -49,7 +55,7 @@
       >{t.nest_rules.reveal_button}</button>
     {/if}
   {:else}
-    <span class="muted" data-testid={IDS.REGION_BLOCKED_NOTICE} data-verdict={placeholder.verb}>{notice}</span>
+    <span class="muted" data-testid={IDS.REGION_BLOCKED_NOTICE} data-verdict={placeholder.verb}>{notice}{#if sealedNote}<span class="sealed-note">{t.region.sealed_note}</span>{/if}</span>
     <span class="muted small" data-testid={IDS.REGION_BLOCKED_AUTHORITY}>{placeholder.authorityName}</span>
     <span class="muted small" data-testid={IDS.REGION_BLOCKED_REASON}>{placeholder.reason}</span>
     {#if placeholder.verb === 'collapse'}
@@ -63,6 +69,9 @@
 </div>
 
 <style>
+  .sealed-note {
+    display: block;
+  }
   .region-placeholder {
     display: flex;
     flex-direction: column;

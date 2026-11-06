@@ -37,7 +37,7 @@ use std::collections::{HashMap, HashSet};
 
 use fauna_core::scoring::cues::{
     CUE_LONG_DWELL_VISIBLE_PM, CUE_MAX_SAMPLE_CREDIT_MS, CUE_MIN_VISIBLE_SAMPLES,
-    CUE_SKIP_VISIBLE_PM,
+    CUE_SKIP_VISIBLE_PM, played_per_mille,
 };
 
 use crate::cues::CueObservation;
@@ -146,6 +146,15 @@ pub struct CueRow {
     /// rather than reading the position at the tick, is what catches the last
     /// frame of a play that ends between two ticks. The fold here turns the
     /// takes back into the exposure's peak.
+    ///
+    /// A shell may instead leave the unread maximum to the tracker: noting each
+    /// player reading through [`CueTracker::note_played`] and passing `None`
+    /// here, the tracker keeps its own held peak for the post. Either way a
+    /// media row's reading joins the post's held peak, folded into the
+    /// exposure on every sample and taken only when the post's exposure is
+    /// emitted — so a reading made while the card sat under the skip gate
+    /// waits for the next emitted exposure instead of being dropped (media
+    /// rows only).
     pub media_played_pm: Option<u32>,
 }
 
@@ -189,6 +198,17 @@ pub struct CueTracker {
     /// [`CueTracker::probe_for_test`].
     #[cfg(any(test, debug_assertions, feature = "test-helpers"))]
     last_probe: Option<(Vec<CueRow>, f64, f64)>,
+    /// Each post's highest played per-mille not yet carried by an emitted
+    /// exposure — noted through [`CueTracker::note_played`], or carried by a
+    /// media row's own [`CueRow::media_played_pm`]. Folded into the post's
+    /// exposure on every sample, **taken at emit**: a reading that arrived while
+    /// the card sat under the skip gate waits for the post's next emitted
+    /// exposure instead of being dropped.
+    unread_played_pm: HashMap<String, u32>,
+    /// Posts whose inline player is engaged right now
+    /// ([`CueTracker::note_playing`]) — a media row of one is attended whatever
+    /// its visible fraction.
+    engaged: HashSet<String>,
 }
 
 /// The two readings a frozen tracker uses in place of the ones the shell
@@ -212,6 +232,46 @@ impl CueTracker {
             test_clock: None,
             #[cfg(any(test, debug_assertions, feature = "test-helpers"))]
             last_probe: None,
+            unread_played_pm: HashMap::new(),
+            engaged: HashSet::new(),
+        }
+    }
+
+    /// An inline player's reading on `post_id`'s media — `position` and
+    /// `duration` in any one unit, clamped by the shared
+    /// [`played_per_mille`] (no reading while the duration is unknown). The
+    /// tracker keeps the peak until the post's exposure is emitted — folded
+    /// into it on every sample that measures the post's media row, taken at
+    /// emit ([`CueRow::media_played_pm`]'s contract): call it on every progress
+    /// event the player reports, its end included, so the last frame of a play
+    /// that ends between two ticks still counts.
+    pub fn note_played(&mut self, post_id: &str, position: f64, duration: f64) {
+        let Some(pm) = played_per_mille(position, duration) else {
+            return;
+        };
+        let peak = self
+            .unread_played_pm
+            .entry(post_id.to_string())
+            .or_insert(pm);
+        *peak = (*peak).max(pm);
+    }
+
+    /// Whether `post_id`'s inline player is engaged — `true` when the player
+    /// activates (the tap; still loading counts) and when it plays or resumes,
+    /// `false` when it pauses, ends, errors or is torn down. A shell relays its
+    /// player's own transitions and never decides attention itself.
+    ///
+    /// A play is attention: while engaged, the post's media row is treated as
+    /// a sample at skip-visibility whatever its visible fraction (the exposure
+    /// opens, counts the sample and accrues skip-visibility dwell; long dwell
+    /// still follows geometry alone) and is never ended
+    /// [`ExposureEnd::ScrolledPast`] by its geometry. Engagement noted on a
+    /// non-media row is ignored.
+    pub fn note_playing(&mut self, post_id: &str, playing: bool) {
+        if playing {
+            self.engaged.insert(post_id.to_string());
+        } else {
+            self.engaged.remove(post_id);
         }
     }
 
@@ -257,6 +317,38 @@ impl CueTracker {
     ) -> Vec<CueObservation> {
         #[cfg(any(test, debug_assertions, feature = "test-helpers"))]
         let (mono_now_ms, wall_now_ms) = self.clock_readings(mono_now_ms, wall_now_ms);
+        // Every media row's reading joins its post's held peak, and the held
+        // peak (noted through `note_played`, or carried here) is what the row
+        // reads — kept, not taken: it is taken only when the post's exposure is
+        // emitted, so a reading made while the card sat under the skip gate
+        // waits for the exposure that carries it.
+        let folded: Vec<CueRow>;
+        let rows: &[CueRow] = if self.unread_played_pm.is_empty()
+            && !rows
+                .iter()
+                .any(|r| r.is_media && r.media_played_pm.is_some())
+        {
+            rows
+        } else {
+            folded = rows
+                .iter()
+                .map(|row| {
+                    let mut row = row.clone();
+                    if row.is_media {
+                        if let Some(pm) = row.media_played_pm {
+                            let held = self
+                                .unread_played_pm
+                                .entry(row.post_id.clone())
+                                .or_insert(pm);
+                            *held = (*held).max(pm);
+                        }
+                        row.media_played_pm = self.unread_played_pm.get(&row.post_id).copied();
+                    }
+                    row
+                })
+                .collect();
+            &folded
+        };
         #[cfg(any(test, debug_assertions, feature = "test-helpers"))]
         {
             self.last_probe = Some((rows.to_vec(), viewport_start, viewport_end));
@@ -298,11 +390,18 @@ impl CueTracker {
             return Vec::new();
         }
 
+        // An engaged media row is attended: a sample at skip-visibility
+        // whatever its fraction, never ended by its geometry.
+        let mut attended: HashSet<&str> = HashSet::new();
         for row in rows {
             let Some(&fraction_pm) = measured.get(row.post_id.as_str()) else {
                 continue;
             };
-            if fraction_pm < CUE_SKIP_VISIBLE_PM {
+            let is_attended = row.is_media && self.engaged.contains(&row.post_id);
+            if is_attended {
+                attended.insert(row.post_id.as_str());
+            }
+            if fraction_pm < CUE_SKIP_VISIBLE_PM && !is_attended {
                 continue;
             }
             let entry = self
@@ -343,8 +442,13 @@ impl CueTracker {
             .filter_map(|id| {
                 let key = id.as_str();
                 let end = match measured.get(key) {
-                    // Positively measured out of the viewport.
-                    Some(&fraction) if fraction < CUE_SKIP_VISIBLE_PM => ExposureEnd::ScrolledPast,
+                    // Positively measured out of the viewport, and not
+                    // attended by a play.
+                    Some(&fraction)
+                        if fraction < CUE_SKIP_VISIBLE_PM && !attended.contains(key) =>
+                    {
+                        ExposureEnd::ScrolledPast
+                    }
                     Some(_) => return None,
                     None if unmeasurable.contains(key) => return None,
                     // Its post left the loaded window entirely (a feed switch,
@@ -367,7 +471,7 @@ impl CueTracker {
             .into_iter()
             .filter_map(|(id, end)| self.entries.remove_entry(&id).map(|(id, d)| (id, d, end)))
             .collect();
-        finish(left, wall_now_ms)
+        self.emit(left, wall_now_ms)
     }
 
     /// Everything tracked has left the viewport (the page unmapped, navigated
@@ -383,7 +487,37 @@ impl CueTracker {
             .drain()
             .map(|(id, d)| (id, d, ExposureEnd::Drained))
             .collect();
-        finish(all, wall_now_ms)
+        let out = self.emit(all, wall_now_ms);
+        // A page leave forgets what no exposure carried, and every engagement.
+        self.unread_played_pm.clear();
+        self.engaged.clear();
+        out
+    }
+
+    /// Finish the exposures that left: a media exposure carries its post's
+    /// held peak (folded once more, for a row that left unmeasured), and the
+    /// held peak is taken for every post whose exposure is emitted — never for
+    /// one the noise floor dropped, which waits for the next.
+    fn emit(
+        &mut self,
+        left: Vec<(String, DwellState, ExposureEnd)>,
+        wall_now_ms: u64,
+    ) -> Vec<CueObservation> {
+        let left = left
+            .into_iter()
+            .map(|(id, mut d, end)| {
+                if d.is_media {
+                    d.media_played_pm =
+                        max_opt(d.media_played_pm, self.unread_played_pm.get(&id).copied());
+                }
+                (id, d, end)
+            })
+            .collect();
+        let out = finish(left, wall_now_ms);
+        for o in &out {
+            self.unread_played_pm.remove(&o.content_id);
+        }
+        out
     }
 }
 
@@ -489,6 +623,7 @@ impl CueTracker {
                 dwell_ms_at_long_visibility: d.dwell_ms_at_long_visibility,
                 visible_samples: d.visible_samples,
                 media_played_pm: d.media_played_pm,
+                playing: d.is_media && self.engaged.contains(id),
             })
             .collect();
         exposures.sort_by(|a, b| a.post_id.cmp(&b.post_id));
@@ -540,6 +675,9 @@ pub struct CueProbeExposure {
     /// The peak playback per-mille folded so far — what the media arm of
     /// `watch-complete` will read at emit.
     pub media_played_pm: Option<u32>,
+    /// Whether the exposure is attended by a play right now — its post's
+    /// player engaged ([`CueTracker::note_playing`]) on a media row.
+    pub playing: bool,
 }
 
 /// Apply the single-sample noise floor and assemble the [`CueObservation`]s,
@@ -982,6 +1120,214 @@ mod tests {
     }
 
     #[test]
+    fn a_noted_play_is_taken_at_emit() {
+        let mut t = hold();
+        tick(&mut t, vec![row_at("p", 1000).media(true)], &["p"], 0);
+        t.note_played("p", 2.0, 5.0);
+        t.note_played("p", 4.5, 5.0);
+        t.note_played("p", 1.0, 5.0); // a rewind keeps the peak
+        t.note_played("q", 5.0, 5.0); // another post's player
+        t.note_played("p", 3.0, 0.0); // no duration yet: no reading
+        tick(&mut t, vec![row_at("p", 1000).media(true)], &["p"], 250);
+        tick(&mut t, vec![row_at("p", 1000).media(true)], &["p"], 500);
+        let left = t.drain_all(0);
+        assert_eq!(left[0].media_played_pm, Some(900), "the peak, taken once");
+
+        // Taken: a scroll back to the finished video credits no second play.
+        tick(&mut t, vec![row_at("p", 1000).media(true)], &["p"], 750);
+        tick(&mut t, vec![row_at("p", 1000).media(true)], &["p"], 1000);
+        let again = t.drain_all(0);
+        assert_eq!(again[0].media_played_pm, None);
+    }
+
+    // ── A play is attention ──────────────────────────────────────────────────
+
+    #[test]
+    fn an_engaged_media_row_under_the_skip_gate_stays_tracked_and_keeps_its_peak() {
+        // The measured windows scenario: the tapped card grows with its player
+        // and falls under the gate at the tap, then plays to its end.
+        let mut t = hold();
+        let card = |pm: u32| row_at("p", pm).media(true);
+        tick(&mut t, vec![card(1000)], &["p"], 0);
+        tick(&mut t, vec![card(1000)], &["p"], 250);
+        t.note_playing("p", true);
+        let mut now = 250;
+        for pos in [1.0, 2.0, 3.0, 4.0] {
+            t.note_played("p", pos, 4.0);
+            now += 250;
+            assert!(
+                tick(&mut t, vec![card(400)], &["p"], now).is_empty(),
+                "attended: never left"
+            );
+        }
+        t.note_playing("p", false);
+        let left = tick(&mut t, vec![card(400)], &["p"], now + 250);
+        assert_eq!(left.len(), 1);
+        assert_eq!(left[0].ended_by, ExposureEnd::ScrolledPast);
+        assert_eq!(left[0].media_played_pm, Some(1000));
+        assert_eq!(
+            left[0].dwell_ms_at_skip_visibility,
+            250 + 4 * 250,
+            "the engaged samples count"
+        );
+        assert_eq!(left[0].dwell_ms_at_long_visibility, 250);
+    }
+
+    #[test]
+    fn a_play_opens_an_exposure_on_a_never_tracked_row_under_the_gate() {
+        let mut t = hold();
+        t.note_playing("p", true);
+        tick(&mut t, vec![row_at("p", 100).media(true)], &["p"], 0);
+        assert_eq!(t.tracked_post_ids(), vec!["p".to_string()]);
+        tick(&mut t, vec![row_at("p", 100).media(true)], &["p"], 250);
+        let left = t.drain_all(0);
+        assert_eq!(left.len(), 1);
+        assert_eq!(left[0].dwell_ms_at_skip_visibility, 250);
+    }
+
+    #[test]
+    fn an_engaged_row_accrues_skip_visibility_dwell_but_not_long_dwell_under_the_gate() {
+        let mut t = hold();
+        t.note_playing("p", true);
+        for now in [0, 250, 500] {
+            tick(
+                &mut t,
+                vec![row_at("p", SKIP_PM - 100).media(true)],
+                &["p"],
+                now,
+            );
+        }
+        let left = t.drain_all(0);
+        assert_eq!(left[0].dwell_ms_at_skip_visibility, 500);
+        assert_eq!(left[0].dwell_ms_at_long_visibility, 0);
+    }
+
+    #[test]
+    fn a_peak_noted_under_the_gate_and_not_engaged_is_stamped_on_the_next_emitted_exposure() {
+        let mut t = hold();
+        t.note_played("p", 3.0, 5.0);
+        tick(&mut t, vec![row_at("p", 100).media(true)], &["p"], 0);
+        assert_eq!(t.tracked(), 0, "under the gate, not engaged: no exposure");
+        // A shell keeping its own store passes its taken reading on the row.
+        tick(
+            &mut t,
+            vec![row_at("p", 100).media(true).played(800)],
+            &["p"],
+            250,
+        );
+        tick(&mut t, vec![row_at("p", 1000).media(true)], &["p"], 500);
+        tick(&mut t, vec![row_at("p", 1000).media(true)], &["p"], 750);
+        let left = tick(&mut t, vec![row_at("p", 0).media(true)], &["p"], 1000);
+        assert_eq!(
+            left[0].media_played_pm,
+            Some(800),
+            "neither reading was lost"
+        );
+    }
+
+    #[test]
+    fn a_peak_held_by_a_noise_floor_drop_waits_for_the_next_emitted_exposure() {
+        let mut t = hold();
+        t.note_played("p", 5.0, 5.0);
+        tick(&mut t, vec![row_at("p", 1000).media(true)], &["p"], 0);
+        assert!(tick(&mut t, vec![row_at("p", 0).media(true)], &["p"], 250).is_empty());
+        tick(&mut t, vec![row_at("p", 1000).media(true)], &["p"], 500);
+        tick(&mut t, vec![row_at("p", 1000).media(true)], &["p"], 750);
+        assert_eq!(t.drain_all(0)[0].media_played_pm, Some(1000));
+    }
+
+    #[test]
+    fn drain_all_forgets_engagement_and_held_peaks() {
+        let mut t = hold();
+        t.note_playing("p", true);
+        t.note_played("p", 5.0, 5.0);
+        t.drain_all(0);
+        // Under the gate after the drain: no longer attended, no exposure,
+        // and the next exposure carries no stale peak.
+        tick(&mut t, vec![row_at("p", 100).media(true)], &["p"], 0);
+        assert_eq!(t.tracked(), 0);
+        tick(&mut t, vec![row_at("p", 1000).media(true)], &["p"], 250);
+        tick(&mut t, vec![row_at("p", 1000).media(true)], &["p"], 500);
+        assert_eq!(t.drain_all(0)[0].media_played_pm, None);
+    }
+
+    #[test]
+    fn engagement_on_a_non_media_row_is_ignored() {
+        let mut t = hold();
+        t.note_playing("p", true);
+        tick(&mut t, vec![row_at("p", 100)], &["p"], 0);
+        tick(&mut t, vec![row_at("p", 100)], &["p"], 250);
+        assert_eq!(t.tracked(), 0);
+        assert!(t.drain_all(0).is_empty());
+    }
+
+    #[test]
+    fn absence_an_engaged_row_disposed_by_the_container_ends_scrolled_past_with_its_peak() {
+        let mut t = absence();
+        let card = |pm: u32| row_at("p", pm).media(true);
+        tick(&mut t, vec![card(1000), row_at("q", 1000)], &["p", "q"], 0);
+        tick(
+            &mut t,
+            vec![card(1000), row_at("q", 1000)],
+            &["p", "q"],
+            250,
+        );
+        t.note_playing("p", true);
+        t.note_played("p", 1.0, 2.0);
+        let left = tick(&mut t, vec![row_at("q", 1000)], &["p", "q"], 500);
+        assert_eq!(left.len(), 1);
+        assert_eq!(left[0].content_id, "p");
+        assert_eq!(left[0].ended_by, ExposureEnd::ScrolledPast);
+        assert_eq!(left[0].media_played_pm, Some(500));
+    }
+
+    #[test]
+    fn disengaging_a_row_above_the_gate_changes_nothing() {
+        let run = |disengage: bool| {
+            let mut t = hold();
+            let card = || row_at("p", LONG_PM + 100).media(true);
+            tick(&mut t, vec![card()], &["p"], 0);
+            t.note_playing("p", true);
+            tick(&mut t, vec![card()], &["p"], 250);
+            if disengage {
+                t.note_playing("p", false);
+            }
+            assert!(tick(&mut t, vec![card()], &["p"], 500).is_empty());
+            t.drain_all(0)
+        };
+        assert_eq!(run(true), run(false));
+    }
+
+    #[test]
+    fn the_probe_shows_an_exposure_attended_by_a_play() {
+        let mut t = hold();
+        t.note_playing("p", true);
+        tick(
+            &mut t,
+            vec![row_at("p", 400).media(true), row_at("q", 1000)],
+            &["p", "q"],
+            0,
+        );
+        let probe = t.probe_for_test();
+        let playing: Vec<(&str, bool)> = probe
+            .exposures
+            .iter()
+            .map(|e| (e.post_id.as_str(), e.playing))
+            .collect();
+        assert_eq!(playing, vec![("p", true), ("q", false)]);
+    }
+
+    #[test]
+    fn a_noted_play_is_never_folded_into_a_non_media_row() {
+        let mut t = hold();
+        t.note_played("p", 5.0, 5.0);
+        tick(&mut t, vec![row_at("p", 1000)], &["p"], 0);
+        tick(&mut t, vec![row_at("p", 1000)], &["p"], 250);
+        let left = t.drain_all(0);
+        assert_eq!(left[0].media_played_pm, None);
+    }
+
+    #[test]
     fn a_non_playing_row_carries_no_playback_reading() {
         let mut t = hold();
         tick(&mut t, vec![row_at("p", 1000)], &["p"], 0);
@@ -1188,6 +1534,7 @@ mod tests {
                 dwell_ms_at_long_visibility: 9_000,
                 visible_samples: 13,
                 media_played_pm: None,
+                playing: false,
             }]
         );
         let left = tick(&mut t, vec![row_at("a", 0)], &["a"], 123);

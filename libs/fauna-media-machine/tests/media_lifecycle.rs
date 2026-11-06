@@ -6,14 +6,14 @@
 
 use std::sync::Arc;
 
-use fauna_core::crypto::{BackupKey, encrypt_backup_chunk};
+use fauna_core::crypto::BackupKey;
 use fauna_media_machine::nest_api::MediaApiError;
 use fauna_media_machine::nest_api::fake::FAKE_PREDECESSOR_ID;
 use fauna_media_machine::observer::CountingObserver;
 use fauna_media_machine::{
-    FakeMediaBlobFetcher, FakeMediaBlobUploader, FakeMediaNestApi, FolderKeyResolver,
-    MediaBlobFetcher, MediaBlobUploader, MediaFolder, MediaItem, MediaMachine, MediaNestCall,
-    MediaSnapshot, ResolvedCustody, ResolvedFolderKeys,
+    FakeMediaBlobUploader, FakeMediaNestApi, FolderKeyResolver, MediaBlobUploader, MediaFolder,
+    MediaItem, MediaMachine, MediaNestCall, MediaSnapshot, ResolvedCustody, ResolvedFolderKeys,
+    SettlePolicy,
 };
 
 fn item(folder: &str, path: &str, size: i64, updated: i64) -> MediaItem {
@@ -80,7 +80,7 @@ async fn refresh_populates_default_all_media_view() {
     let observer = CountingObserver::new();
     let api = Arc::new(FakeMediaNestApi::new());
     api.set_snapshot(fixture());
-    let machine = MediaMachine::new(observer.clone(), api, None, None, None, None);
+    let machine = MediaMachine::new(observer.clone(), api, None, None, None);
 
     // Before refresh: empty.
     assert!(machine.snapshot().items.is_empty());
@@ -110,7 +110,7 @@ async fn view_state_setters_re_derive_the_page() {
     let observer = CountingObserver::new();
     let api = Arc::new(FakeMediaNestApi::new());
     api.set_snapshot(fixture());
-    let machine = MediaMachine::new(observer.clone(), api, None, None, None, None);
+    let machine = MediaMachine::new(observer.clone(), api, None, None, None);
     machine.refresh(None).await;
 
     // Filter to one set.
@@ -150,7 +150,7 @@ async fn view_state_setters_re_derive_the_page() {
 async fn empty_aggregate_renders_empty() {
     let observer = CountingObserver::new();
     let api = Arc::new(FakeMediaNestApi::new()); // default empty snapshot
-    let machine = MediaMachine::new(observer, api, None, None, None, None);
+    let machine = MediaMachine::new(observer, api, None, None, None);
     machine.refresh(None).await;
     let snap = machine.snapshot();
     assert!(snap.items.is_empty());
@@ -171,7 +171,7 @@ async fn a_page_that_has_never_refreshed_is_not_loaded() {
     let observer = CountingObserver::new();
     let api = Arc::new(FakeMediaNestApi::new());
     api.set_snapshot(fixture());
-    let machine = MediaMachine::new(observer, api, None, None, None, None);
+    let machine = MediaMachine::new(observer, api, None, None, None);
 
     let snap = machine.snapshot();
     assert!(snap.items.is_empty(), "nothing read yet");
@@ -185,7 +185,7 @@ async fn a_page_that_has_never_refreshed_is_not_loaded() {
 async fn a_successful_refresh_that_finds_nothing_is_loaded_and_empty() {
     let observer = CountingObserver::new();
     let api = Arc::new(FakeMediaNestApi::new()); // default empty snapshot
-    let machine = MediaMachine::new(observer, api, None, None, None, None);
+    let machine = MediaMachine::new(observer, api, None, None, None);
     machine.refresh(None).await;
 
     let snap = machine.snapshot();
@@ -203,7 +203,7 @@ async fn a_failed_first_refresh_leaves_the_page_unloaded() {
     api.fail(MediaApiError::Transient {
         detail: "network down".into(),
     });
-    let machine = MediaMachine::new(observer, api.clone(), None, None, None, None);
+    let machine = MediaMachine::new(observer, api.clone(), None, None, None);
     machine.refresh(None).await;
 
     let snap = machine.snapshot();
@@ -228,7 +228,7 @@ async fn loaded_never_regresses_once_a_later_refresh_fails() {
     let observer = CountingObserver::new();
     let api = Arc::new(FakeMediaNestApi::new());
     api.set_snapshot(fixture());
-    let machine = MediaMachine::new(observer, api.clone(), None, None, None, None);
+    let machine = MediaMachine::new(observer, api.clone(), None, None, None);
     machine.refresh(None).await;
     assert!(machine.snapshot().loaded);
 
@@ -245,12 +245,249 @@ async fn loaded_never_regresses_once_a_later_refresh_fails() {
     assert!(snap.loaded, "still loaded — the rows are right there");
 }
 
+// ── a read that holds rows back for want of custody is not a complete read ───
+//
+// Right after sign-in, before the account runtime has assembled, the row judge
+// can verify no signed row: `fauna.media.list` returns, every row held back
+// (`ProjectionTally::held`), and an own set's sealed name opens under no
+// custody yet. Committing that as a loaded page painted `media-empty-state`
+// over a user's media and refused an upload with `media.error_no_set` ("create a
+// folder first") although the folder existed (`ui/README.md` § List pages:
+// loading is not empty, rule 2; `media.md` § Errors & edge cases).
+
+/// A settle that spends milliseconds: these tests prove the shape, not the
+/// production budget.
+fn fast_settle(budget_ms: u64) -> SettlePolicy {
+    SettlePolicy {
+        first: std::time::Duration::from_millis(1),
+        cap: std::time::Duration::from_millis(2),
+        budget: std::time::Duration::from_millis(budget_ms),
+    }
+}
+
+fn media_reads(api: &FakeMediaNestApi) -> usize {
+    api.calls()
+        .iter()
+        .filter(|c| matches!(c, MediaNestCall::MediaSnapshot))
+        .count()
+}
+
+#[tokio::test]
+async fn a_read_holding_rows_back_is_re_read_until_complete_before_the_page_loads() {
+    let observer = CountingObserver::new();
+    let api = Arc::new(FakeMediaNestApi::new());
+    api.set_snapshot(fixture());
+    api.set_folders(vec![folder("docs"), folder("photos")]);
+    api.hold_media_reads(2);
+    let machine = MediaMachine::new(observer, api.clone(), None, None, None);
+    machine.set_settle_policy(fast_settle(5_000));
+
+    machine.refresh(None).await;
+
+    let snap = machine.snapshot();
+    assert_eq!(
+        media_reads(&api),
+        3,
+        "two held reads, then the complete one — the page re-read rather than \
+         settle for a listing whose rows were held back"
+    );
+    assert!(snap.loaded, "the complete read loads the page");
+    assert_eq!(snap.items.len(), 3, "the held rows are back");
+}
+
+#[tokio::test]
+async fn while_rows_are_held_the_page_is_not_loaded() {
+    let observer = CountingObserver::new();
+    let api = Arc::new(FakeMediaNestApi::new());
+    api.set_snapshot(fixture());
+    api.hold_media_reads(usize::MAX);
+    let machine = MediaMachine::new(observer, api.clone(), None, None, None);
+    machine.set_settle_policy(SettlePolicy {
+        first: std::time::Duration::from_millis(20),
+        cap: std::time::Duration::from_millis(20),
+        budget: std::time::Duration::from_secs(60),
+    });
+
+    let settling = {
+        let machine = machine.clone();
+        tokio::spawn(async move { machine.refresh(None).await })
+    };
+    tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+    let snap = machine.snapshot();
+    assert!(snap.items.is_empty(), "every row is held back");
+    assert!(
+        !snap.loaded,
+        "a read that held rows back is not 'nothing here' — no app may paint \
+         media-empty-state over it"
+    );
+
+    // Custody arrives; the next read (a nav re-entry, say) supersedes the
+    // settle and loads the page with the rows.
+    api.hold_media_reads(0);
+    machine.refresh(None).await;
+    let snap = machine.snapshot();
+    assert!(snap.loaded);
+    assert_eq!(snap.items.len(), 3);
+    tokio::time::timeout(std::time::Duration::from_secs(5), settling)
+        .await
+        .expect("the superseded settle stops")
+        .expect("joined");
+    assert!(machine.snapshot().loaded, "and nothing un-loads it");
+}
+
+#[tokio::test]
+async fn a_read_held_for_ever_loads_the_page_once_the_settle_budget_is_spent() {
+    let observer = CountingObserver::new();
+    let api = Arc::new(FakeMediaNestApi::new());
+    api.set_snapshot(fixture());
+    api.hold_media_reads(usize::MAX);
+    let machine = MediaMachine::new(observer, api.clone(), None, None, None);
+    machine.set_settle_policy(fast_settle(10));
+
+    machine.refresh(None).await;
+
+    let snap = machine.snapshot();
+    assert!(
+        snap.loaded,
+        "a row held for ever is absent, never a page that spins for ever"
+    );
+    assert!(snap.items.is_empty());
+    assert!(media_reads(&api) > 1, "it re-read before giving up");
+}
+
+#[tokio::test]
+async fn an_incomplete_read_on_a_loaded_page_does_not_re_settle() {
+    let observer = CountingObserver::new();
+    let api = Arc::new(FakeMediaNestApi::new());
+    api.set_snapshot(fixture());
+    let machine = MediaMachine::new(observer, api.clone(), None, None, None);
+    machine.set_settle_policy(fast_settle(5_000));
+    machine.refresh(None).await;
+    assert!(machine.snapshot().loaded);
+
+    api.hold_media_reads(1);
+    let before = media_reads(&api);
+    machine.refresh(None).await;
+    assert_eq!(
+        media_reads(&api) - before,
+        1,
+        "the settle is the FIRST load's (rule 2 is about the first read); a \
+         later refresh is one read"
+    );
+    assert!(machine.snapshot().loaded, "monotonic");
+}
+
+#[tokio::test]
+async fn an_upload_after_a_held_first_read_finds_the_users_folder() {
+    // The win e2e red's flow: the first read after sign-in holds the media
+    // rows AND loses the own folder (its folder list read failed in the same
+    // window), and the user presses Upload.
+    let observer = CountingObserver::new();
+    let api = Arc::new(FakeMediaNestApi::new());
+    api.set_folders(vec![folder("photos")]);
+    api.hold_media_reads(1);
+    api.fail_folder_reads(1);
+    let uploader = Arc::new(FakeMediaBlobUploader::new("beef"));
+    let machine = MediaMachine::new(
+        observer,
+        api.clone(),
+        Some(uploader.clone() as Arc<dyn MediaBlobUploader>),
+        None,
+        None,
+    );
+    machine.set_settle_policy(fast_settle(5_000));
+    machine.refresh(None).await;
+
+    machine
+        .upload_selected(
+            "dev-1".into(),
+            "c.jpg".into(),
+            b"raw".to_vec(),
+            KEY.to_vec(),
+        )
+        .await;
+
+    assert_eq!(
+        recorded_member(&api),
+        Some(("photos".into(), "c.jpg".into())),
+        "the user's folder is the target — never 'create a folder first'"
+    );
+    assert!(machine.snapshot().error.is_none());
+}
+
+#[tokio::test]
+async fn an_upload_pressed_before_the_first_read_completes_settles_first() {
+    // Upload pressed while the page has not loaded: the gesture settles the
+    // read itself rather than resolve a target from nothing.
+    let observer = CountingObserver::new();
+    let api = Arc::new(FakeMediaNestApi::new());
+    api.set_folders(vec![folder("photos")]);
+    api.fail_folder_reads(2);
+    let uploader = Arc::new(FakeMediaBlobUploader::new("beef"));
+    let machine = MediaMachine::new(
+        observer,
+        api.clone(),
+        Some(uploader.clone() as Arc<dyn MediaBlobUploader>),
+        None,
+        None,
+    );
+    machine.set_settle_policy(fast_settle(5_000));
+
+    machine
+        .upload_selected(
+            "dev-1".into(),
+            "c.jpg".into(),
+            b"raw".to_vec(),
+            KEY.to_vec(),
+        )
+        .await;
+
+    assert_eq!(
+        recorded_member(&api),
+        Some(("photos".into(), "c.jpg".into()))
+    );
+}
+
+#[tokio::test]
+async fn an_upload_whose_folders_never_load_is_not_refused_as_no_folder() {
+    let observer = CountingObserver::new();
+    let api = Arc::new(FakeMediaNestApi::new());
+    api.set_folders(vec![folder("photos")]);
+    api.fail_folder_reads(usize::MAX);
+    let uploader = Arc::new(FakeMediaBlobUploader::new("beef"));
+    let machine = MediaMachine::new(
+        observer,
+        api.clone(),
+        Some(uploader.clone() as Arc<dyn MediaBlobUploader>),
+        None,
+        None,
+    );
+    machine.set_settle_policy(fast_settle(10));
+
+    machine
+        .upload_selected(
+            "dev-1".into(),
+            "c.jpg".into(),
+            b"raw".to_vec(),
+            KEY.to_vec(),
+        )
+        .await;
+
+    assert_eq!(recorded_member(&api), None, "nothing uploaded");
+    let err = machine.snapshot().error.expect("a page error");
+    assert_ne!(
+        err.key, "media.error_no_set",
+        "an incomplete read cannot say the user has no folder"
+    );
+    assert_eq!(err.key, "media.error_refresh");
+}
+
 #[tokio::test]
 async fn refresh_failure_keeps_prior_data_and_sets_error() {
     let observer = CountingObserver::new();
     let api = Arc::new(FakeMediaNestApi::new());
     api.set_snapshot(fixture());
-    let machine = MediaMachine::new(observer, api.clone(), None, None, None, None);
+    let machine = MediaMachine::new(observer, api.clone(), None, None, None);
     machine.refresh(None).await;
     assert_eq!(machine.snapshot().items.len(), 3);
 
@@ -377,7 +614,6 @@ async fn upload_seals_posts_records_then_refreshes() {
         Some(uploader.clone() as Arc<dyn MediaBlobUploader>),
         None,
         None,
-        None,
     );
 
     let raw = b"the original picked file bytes".to_vec();
@@ -450,7 +686,7 @@ async fn upload_without_uploader_reports_unsupported() {
     let observer = CountingObserver::new();
     let api = Arc::new(FakeMediaNestApi::new());
     // No blob uploader wired (web today) → upload is unsupported.
-    let machine = MediaMachine::new(observer, api.clone(), None, None, None, None);
+    let machine = MediaMachine::new(observer, api.clone(), None, None, None);
 
     machine
         .upload(
@@ -481,7 +717,6 @@ async fn upload_bad_key_length_is_rejected_before_sealing() {
         observer,
         api.clone(),
         Some(uploader.clone() as Arc<dyn MediaBlobUploader>),
-        None,
         None,
         None,
     );
@@ -515,7 +750,6 @@ async fn upload_record_failure_sets_error() {
         observer,
         api.clone(),
         Some(uploader.clone() as Arc<dyn MediaBlobUploader>),
-        None,
         None,
         None,
     );
@@ -558,7 +792,7 @@ async fn delete_tombstones_then_refreshes_without_an_uploader() {
     let observer = CountingObserver::new();
     let api = Arc::new(FakeMediaNestApi::new());
     // Delete is pure WS-RPC — works with no blob uploader (native + wasm alike).
-    let machine = MediaMachine::new(observer, api.clone(), None, None, None, None);
+    let machine = MediaMachine::new(observer, api.clone(), None, None, None);
 
     machine
         .delete("photos".into(), "dev-1".into(), "photos/b.png".into())
@@ -593,7 +827,7 @@ async fn delete_failure_sets_error() {
     api.fail_writes(MediaApiError::NotFound {
         detail: "no such member".into(),
     });
-    let machine = MediaMachine::new(observer, api.clone(), None, None, None, None);
+    let machine = MediaMachine::new(observer, api.clone(), None, None, None);
 
     machine
         .delete("photos".into(), "dev-1".into(), "photos/b.png".into())
@@ -624,7 +858,7 @@ async fn delete_failure_sets_error() {
 async fn a_keyed_machines_delete_tombstone_seals_under_the_owner_root() {
     let observer = CountingObserver::new();
     let api = Arc::new(FakeMediaNestApi::new());
-    let machine = MediaMachine::new(observer, api.clone(), None, None, None, None);
+    let machine = MediaMachine::new(observer, api.clone(), None, None, None);
     machine.set_owner_backup_key(KEY.to_vec());
 
     machine
@@ -646,7 +880,7 @@ async fn a_keyed_machines_delete_tombstone_seals_under_the_owner_root() {
 async fn a_keyed_machines_restore_re_point_seals_under_the_owner_root() {
     let observer = CountingObserver::new();
     let api = Arc::new(FakeMediaNestApi::new());
-    let machine = MediaMachine::new(observer, api.clone(), None, None, None, None);
+    let machine = MediaMachine::new(observer, api.clone(), None, None, None);
     machine.set_owner_backup_key(KEY.to_vec());
 
     machine
@@ -664,6 +898,8 @@ async fn a_keyed_machines_restore_re_point_seals_under_the_owner_root() {
                 pruned: false,
                 purge_after: None,
                 folder_id: None,
+                thumbnail_hash: None,
+                deposited_by: None,
             },
         )
         .await;
@@ -702,7 +938,7 @@ async fn an_unkeyed_machines_restore_seals_nothing_so_the_post_flip_nest_refuses
     let observer = CountingObserver::new();
     let api = Arc::new(FakeMediaNestApi::new());
     // Deliberately NO `set_owner_backup_key` — that omission is the test.
-    let machine = MediaMachine::new(observer, api.clone(), None, None, None, None);
+    let machine = MediaMachine::new(observer, api.clone(), None, None, None);
 
     machine
         .restore_version(
@@ -719,6 +955,8 @@ async fn an_unkeyed_machines_restore_seals_nothing_so_the_post_flip_nest_refuses
                 pruned: false,
                 purge_after: None,
                 folder_id: None,
+                thumbnail_hash: None,
+                deposited_by: None,
             },
         )
         .await;
@@ -761,7 +999,7 @@ async fn a_keyed_machines_delete_refresh_still_renders_the_sets_sealed_rows() {
         items: vec![sealed_item("photos", "photos/survivor.jpg", "")],
         ..Default::default()
     });
-    let machine = MediaMachine::new(observer, api.clone(), None, None, None, None);
+    let machine = MediaMachine::new(observer, api.clone(), None, None, None);
     machine.set_owner_backup_key(KEY.to_vec());
 
     machine
@@ -791,7 +1029,7 @@ async fn a_keyed_machines_delete_refresh_still_renders_the_sealed_set_name() {
         items: vec![sealed_set_item("Family photos", "photos/survivor.jpg")],
         ..Default::default()
     });
-    let machine = MediaMachine::new(observer, api.clone(), None, None, None, None);
+    let machine = MediaMachine::new(observer, api.clone(), None, None, None);
     machine.set_owner_backup_key(KEY.to_vec());
 
     machine
@@ -823,7 +1061,7 @@ async fn a_keyed_machines_restore_refresh_still_renders_the_sealed_row() {
         items: vec![sealed_set_item("Family photos", "photos/restored.jpg")],
         ..Default::default()
     });
-    let machine = MediaMachine::new(observer, api.clone(), None, None, None, None);
+    let machine = MediaMachine::new(observer, api.clone(), None, None, None);
     machine.set_owner_backup_key(KEY.to_vec());
 
     machine
@@ -841,6 +1079,8 @@ async fn a_keyed_machines_restore_refresh_still_renders_the_sealed_row() {
                 pruned: false,
                 purge_after: None,
                 folder_id: None,
+                thumbnail_hash: None,
+                deposited_by: None,
             },
         )
         .await;
@@ -874,7 +1114,6 @@ async fn a_bound_sets_delete_tombstone_seals_under_the_content_root_not_the_owne
     let machine = MediaMachine::new(
         CountingObserver::new(),
         api.clone(),
-        None,
         None,
         None,
         Some(resolver as Arc<dyn FolderKeyResolver>),
@@ -933,7 +1172,6 @@ async fn a_bound_sets_gesture_with_unresolvable_keys_records_plaintext_only() {
         api.clone(),
         None,
         None,
-        None,
         Some(resolver as Arc<dyn FolderKeyResolver>),
     );
     machine.set_owner_backup_key(KEY.to_vec());
@@ -977,7 +1215,6 @@ async fn upload_selected_targets_the_filter_set() {
         Some(uploader.clone() as Arc<dyn MediaBlobUploader>),
         None,
         None,
-        None,
     );
     machine.refresh(None).await; // populate raw so folders() == [docs, photos]
     machine.set_filter(Some("photos".into()));
@@ -1015,7 +1252,6 @@ async fn upload_selected_all_media_defaults_to_first_set() {
         Some(uploader.clone() as Arc<dyn MediaBlobUploader>),
         None,
         None,
-        None,
     );
     machine.refresh(None).await; // all-media view (filter == None) by default
 
@@ -1047,7 +1283,6 @@ async fn upload_selected_with_no_set_sets_error_and_uploads_nothing() {
         Some(uploader.clone() as Arc<dyn MediaBlobUploader>),
         None,
         None,
-        None,
     );
     // No refresh → no readable set has media → nothing to default the target to.
     machine
@@ -1069,27 +1304,64 @@ async fn upload_selected_with_no_set_sets_error_and_uploads_nothing() {
     );
     assert!(uploader.posts().is_empty(), "nothing sealed / POSTed");
     assert!(uploader.chunks().is_empty(), "nothing sealed / POSTed");
-    assert!(api.calls().is_empty(), "nothing recorded, no refresh");
+    // The page had never loaded, so the gesture read it first — "no folder"
+    // is only said of a complete read — and recorded nothing.
+    assert!(
+        api.calls()
+            .iter()
+            .all(|c| matches!(c, MediaNestCall::MediaSnapshot | MediaNestCall::ListFolders)),
+        "nothing recorded — only the page's own read: {:?}",
+        api.calls()
+    );
 }
 
-// ── producer: a real image yields a companion-thumbnail blob + recorded hash ──
+// ── producer: a real image yields a thumbnail manifest + recorded hash ───────
 //
 // These run under the test-only `process_media` feature (the self dev-dep), so
 // `process_media` actually renders a thumbnail — the native-client producer
-// posture. They prove `MediaMachine::upload` POSTs the thumbnail as its own
-// blob beside the file's chunks and records its hash on the member (the gate-(B) producer the five
-// per-app folders-UI efforts consume; media.md § State & data shape).
+// posture. A thumbnail rests as its file rests (`media.md` § Encryption at rest
+// → *A thumbnail rests as its file rests*): `MediaMachine::upload` seals it
+// through the file's own pipeline under the file's root and records the
+// thumbnail MANIFEST's hash on the member — never a blob-store blob.
+
+/// The manifest an upload posted that is NOT `file_hex` — the thumbnail's —
+/// opened through the shared walk under `keys` at `stamp`.
+async fn open_posted_thumbnail(
+    uploader: &FakeMediaBlobUploader,
+    thumb_hex: &str,
+    keys: &fauna_core::file_download::FileDownloadKeys,
+    stamp: Option<u64>,
+) -> anyhow::Result<Vec<u8>> {
+    fauna_core::file_download::download_file_bytes_by_manifest(
+        &fetcher_over(uploader),
+        keys,
+        fauna_core::data::ContentHash::from_digest_raw(hex_decode32(thumb_hex)),
+        stamp.map(fauna_core::blob_seal::SealStamp::Version),
+        "photos/c.png",
+    )
+    .await
+}
+
+/// The `thumbnail_hash` the one recorded member carried.
+fn recorded_thumbnail(api: &FakeMediaNestApi) -> Option<String> {
+    api.calls()
+        .into_iter()
+        .find_map(|c| match c {
+            MediaNestCall::RecordMember { thumbnail_hash, .. } => Some(thumbnail_hash),
+            _ => None,
+        })
+        .expect("a member was recorded")
+}
 
 #[tokio::test]
-async fn upload_of_an_image_posts_a_thumbnail_blob_and_records_its_hash() {
+async fn upload_of_an_image_records_a_thumbnail_manifest_under_the_owner_root() {
     let observer = CountingObserver::new();
     let api = Arc::new(FakeMediaNestApi::new());
-    let uploader = Arc::new(FakeMediaBlobUploader::new("cafef00d"));
+    let uploader = Arc::new(FakeMediaBlobUploader::new("never-a-blob"));
     let machine = MediaMachine::new(
         observer.clone(),
         api.clone(),
         Some(uploader.clone() as Arc<dyn MediaBlobUploader>),
-        None,
         None,
         None,
     );
@@ -1105,60 +1377,63 @@ async fn upload_of_an_image_posts_a_thumbnail_blob_and_records_its_hash() {
             KEY.to_vec(),
         )
         .await;
-
-    // The file goes over the chunk routes; the thumbnail stays a blob of its
-    // own — the ONE blob POST (`media.md` § Encryption at rest → *One at-rest
-    // shape*: a derived view only this page reads), sealed, never the JPEG.
-    posted_file(&uploader);
-    let posts = uploader.posts();
-    assert_eq!(
-        posts.len(),
-        1,
-        "the companion thumbnail is the only blob POST"
-    );
-    let thumb = &posts[0].1;
-    assert_ne!(&thumb[..2], &[0xFF, 0xD8], "the thumbnail rests sealed");
-    let opened = fauna_core::crypto::decrypt_backup_chunk(&BackupKey::from_bytes(KEY), thumb)
-        .expect("sealed under the owner key the page's fetch_thumbnail opens");
-    assert_eq!(&opened[..2], &[0xFF, 0xD8], "a JPEG thumbnail");
-
-    // The member carries the companion thumbnail's hash (the fake returns its
-    // canned hash; the real nest content-addresses it).
-    let recorded_thumb = api
-        .calls()
-        .into_iter()
-        .find_map(|c| match c {
-            MediaNestCall::RecordMember { thumbnail_hash, .. } => Some(thumbnail_hash),
-            _ => None,
-        })
-        .expect("a member was recorded");
-    assert_eq!(
-        recorded_thumb.as_deref(),
-        Some("cafef00d"),
-        "the companion thumbnail's hash rides the record → fauna.media.list"
-    );
     assert!(
         machine.snapshot().error.is_none(),
         "success clears the error"
     );
+
+    // Two manifests over the chunk routes — the file's, then its thumbnail's —
+    // and no blob POST at all.
+    assert!(
+        uploader.posts().is_empty(),
+        "a thumbnail is never a blob-store blob"
+    );
+    let manifests = uploader.manifests();
+    assert_eq!(
+        manifests.len(),
+        2,
+        "the file's manifest, then the thumbnail's"
+    );
+    let thumb_hex = recorded_thumbnail(&api).expect("an image records a thumbnail");
+    assert_eq!(
+        thumb_hex,
+        hex::encode(manifests[1].0),
+        "the record names the thumbnail's MANIFEST"
+    );
+    assert_sealed_chunks(&uploader.chunks(), &[]);
+
+    // The file's own reader opens it: the owner walk, unstamped.
+    let owner = fauna_core::file_download::FileDownloadKeys::owner(BackupKey::from_bytes(KEY));
+    let opened = open_posted_thumbnail(&uploader, &thumb_hex, &owner, None)
+        .await
+        .expect("the owner walk opens the thumbnail");
+    assert_eq!(&opened[..2], &[0xFF, 0xD8], "a JPEG thumbnail");
+    // And nothing else does: it rests sealed, not in the clear.
+    open_posted_thumbnail(
+        &uploader,
+        &thumb_hex,
+        &fauna_core::file_download::FileDownloadKeys::default(),
+        None,
+    )
+    .await
+    .expect_err("an owner-only thumbnail rests sealed");
 }
 
 #[tokio::test]
 async fn upload_of_a_small_image_records_no_thumbnail() {
     let observer = CountingObserver::new();
     let api = Arc::new(FakeMediaNestApi::new());
-    let uploader = Arc::new(FakeMediaBlobUploader::new("cafef00d"));
+    let uploader = Arc::new(FakeMediaBlobUploader::new("never-a-blob"));
     let machine = MediaMachine::new(
         observer,
         api.clone(),
         Some(uploader.clone() as Arc<dyn MediaBlobUploader>),
         None,
         None,
-        None,
     );
 
     // A 100×100 image is under the 300px threshold → no thumbnail produced, so
-    // only the primary is POSTed and the record carries `thumbnail_hash = None`.
+    // only the file's manifest is posted and the record carries none.
     machine
         .upload(
             "photos".into(),
@@ -1170,19 +1445,104 @@ async fn upload_of_a_small_image_records_no_thumbnail() {
         .await;
 
     posted_file(&uploader);
-    assert!(
-        uploader.posts().is_empty(),
-        "no thumbnail → no blob POST at all"
+    assert!(uploader.posts().is_empty(), "no blob POST at all");
+    assert_eq!(
+        recorded_thumbnail(&api),
+        None,
+        "no thumbnail → no recorded hash"
     );
-    let recorded_thumb = api
-        .calls()
-        .into_iter()
-        .find_map(|c| match c {
-            MediaNestCall::RecordMember { thumbnail_hash, .. } => Some(thumbnail_hash),
-            _ => None,
-        })
-        .expect("a member was recorded");
-    assert_eq!(recorded_thumb, None, "no thumbnail → no recorded hash");
+}
+
+/// A content-keyed set's thumbnail rests under the set's current generation,
+/// stamped like its file — so every member and the WebDAV mount open it
+/// (the shared album keeps its tiles), and the owner root does not.
+#[tokio::test]
+async fn upload_of_an_image_into_a_served_set_seals_its_thumbnail_under_the_generation() {
+    let content_key = [0x5a; 32];
+    let keys = serve_keys(3, content_key);
+    let api = Arc::new(FakeMediaNestApi::new());
+    let uploader = Arc::new(FakeMediaBlobUploader::new("never-a-blob"));
+    let resolver = Arc::new(FakeFolderKeyResolver::served("served", Some(keys.clone())));
+    let machine = MediaMachine::new(
+        CountingObserver::new(),
+        api.clone(),
+        Some(uploader.clone() as Arc<dyn MediaBlobUploader>),
+        None,
+        Some(resolver as Arc<dyn FolderKeyResolver>),
+    );
+
+    machine
+        .upload(
+            "served".into(),
+            "dev-1".into(),
+            "photos/c.png".into(),
+            build_png(400, 400),
+            KEY.to_vec(),
+        )
+        .await;
+    assert!(
+        machine.snapshot().error.is_none(),
+        "{:?}",
+        machine.snapshot().error
+    );
+
+    let thumb_hex = recorded_thumbnail(&api).expect("a content-keyed set records a thumbnail");
+    let member = fauna_core::file_download::FileDownloadKeys {
+        content_keys: Some(keys),
+        served: true,
+        ..Default::default()
+    };
+    let opened = open_posted_thumbnail(&uploader, &thumb_hex, &member, Some(3))
+        .await
+        .expect("the set's keys open the thumbnail at its stamp");
+    assert_eq!(&opened[..2], &[0xFF, 0xD8], "a JPEG thumbnail");
+    let owner = fauna_core::file_download::FileDownloadKeys::owner(BackupKey::from_bytes(KEY));
+    open_posted_thumbnail(&uploader, &thumb_hex, &owner, None)
+        .await
+        .expect_err("never under the owner root");
+}
+
+/// A declassified folder's thumbnail rests as its file does: plaintext chunks
+/// behind a plaintext manifest, which a keyless walk opens.
+#[tokio::test]
+async fn upload_of_an_image_into_a_declassified_folder_posts_a_plaintext_thumbnail() {
+    let api = Arc::new(FakeMediaNestApi::new());
+    api.set_folders(vec![public_folder("site")]);
+    let uploader = Arc::new(FakeMediaBlobUploader::new("never-a-blob"));
+    let machine = MediaMachine::new(
+        CountingObserver::new(),
+        api.clone(),
+        Some(uploader.clone() as Arc<dyn MediaBlobUploader>),
+        None,
+        None,
+    );
+    machine.refresh(None).await;
+
+    machine
+        .upload(
+            "site".into(),
+            "dev-1".into(),
+            "photos/c.png".into(),
+            build_png(400, 400),
+            KEY.to_vec(),
+        )
+        .await;
+    assert!(machine.snapshot().error.is_none());
+
+    let thumb_hex = recorded_thumbnail(&api).expect("a public folder records a thumbnail");
+    let opened = open_posted_thumbnail(
+        &uploader,
+        &thumb_hex,
+        &fauna_core::file_download::FileDownloadKeys::default(),
+        None,
+    )
+    .await
+    .expect("a keyless walk opens a public folder's thumbnail");
+    assert_eq!(
+        &opened[..2],
+        &[0xFF, 0xD8],
+        "a JPEG thumbnail, in the clear"
+    );
 }
 
 // Build a `w`×`h` PNG in memory, so the tests carry no opaque binary
@@ -1190,96 +1550,127 @@ async fn upload_of_a_small_image_records_no_thumbnail() {
 // canonical body instead of a hand-rolled local copy).
 use fauna_media::test_fixtures::build_png;
 
-// ── fetch_thumbnail (the shared media-thumbnail render: fetch + decrypt) ──────
+// ── fetch_thumbnail (the shared media-thumbnail render: the file's walk) ──────
 
-/// AEAD-seal `plaintext` under `key` with the producer's primitive — the exact
-/// bytes the nest stores for a Library-audience thumbnail, so `fetch_thumbnail`
-/// must fetch *and decrypt* to recover the original.
-fn sealed(plaintext: &[u8], key: &[u8; 32]) -> Vec<u8> {
-    encrypt_backup_chunk(&BackupKey::from_bytes(*key), plaintext).expect("seal fixture")
+/// `bytes` sealed through the one whole-file pipeline under `seal_root` (an
+/// owner root, a content-key generation with its stamp, or `None` for
+/// plaintext), stocked into `fetcher`; the manifest's hex hash.
+fn stock_manifest(
+    fetcher: &mut FakeDownloadFetcher,
+    seal_root: Option<([u8; 32], Option<u64>)>,
+    bytes: &[u8],
+) -> String {
+    let sealed = fauna_core::blob_seal::seal_blob(
+        bytes,
+        seal_root.map(|(k, v)| (k, v.map(fauna_core::blob_seal::SealStamp::Version))),
+    )
+    .expect("seal");
+    for (store_key, body) in sealed.chunks {
+        fetcher.put(&store_key, body);
+    }
+    fetcher.put(&sealed.manifest_hash, sealed.manifest_bytes);
+    hex::encode(sealed.manifest_hash.digest())
 }
 
-/// The nest content-addresses a stored blob by lowercase-hex `blake3(bytes)`
-/// (`bins/fauna-nest/src/blob_routes.rs` POST → `hex::encode(blake3(stored))`),
-/// which becomes the `MediaItem.thumbnail_hash` a client fetches by. Mirror it so
-/// the render tests pass a *real* content hash the machine's content-address
-/// check accepts, not a placeholder.
-fn content_hash_hex(sealed_bytes: &[u8]) -> String {
-    blake3::hash(sealed_bytes).to_hex().to_string()
+/// The owner [`KEY`]'s convergent chunk root, unstamped — an owner-only set's.
+fn owner_root(key: &[u8; 32]) -> Option<([u8; 32], Option<u64>)> {
+    Some((BackupKey::from_bytes(*key).convergent_chunk_root(), None))
+}
+
+/// A listed `photos` item naming `thumb_hex` as its thumbnail.
+fn thumbnail_item(path: &str, thumb_hex: &str) -> MediaItem {
+    MediaItem {
+        thumbnail_hash: Some(thumb_hex.to_string()),
+        ..item("photos", path, 10, 100)
+    }
+}
+
+/// A machine over `items`, reading bytes off `fetcher`, refreshed under [`KEY`].
+async fn thumbnail_machine(
+    items: Vec<MediaItem>,
+    fetcher: FakeDownloadFetcher,
+    resolver: Option<Arc<dyn FolderKeyResolver>>,
+) -> (Arc<MediaMachine>, Arc<FakeMediaNestApi>) {
+    let api = Arc::new(FakeMediaNestApi::new());
+    api.set_snapshot(MediaSnapshot {
+        items,
+        ..Default::default()
+    });
+    let machine = MediaMachine::new(
+        CountingObserver::new(),
+        api.clone(),
+        None,
+        Some(Arc::new(fetcher) as Arc<dyn fauna_core::file_download::BlobFetcher>),
+        resolver,
+    );
+    machine.refresh(Some(KEY.to_vec())).await;
+    (machine, api)
 }
 
 #[tokio::test]
-async fn fetch_thumbnail_fetches_then_decrypts_the_sealed_blob() {
+async fn fetch_thumbnail_opens_the_rows_manifest_under_the_owner_root() {
     // The plaintext stands in for the decoded JPEG bytes a client paints.
     let plaintext = b"decoded thumbnail JPEG bytes".to_vec();
-    let sealed_bytes = sealed(&plaintext, &KEY);
-    let hash = content_hash_hex(&sealed_bytes);
-    let fetcher = Arc::new(FakeMediaBlobFetcher::new(sealed_bytes));
-    let machine = MediaMachine::new(
-        CountingObserver::new(),
-        Arc::new(FakeMediaNestApi::new()),
-        None,
-        Some(fetcher.clone() as Arc<dyn MediaBlobFetcher>),
-        None,
-        None,
-    );
+    let mut fetcher = FakeDownloadFetcher::default();
+    let hash = stock_manifest(&mut fetcher, owner_root(&KEY), &plaintext);
+    let (machine, _) =
+        thumbnail_machine(vec![thumbnail_item("photos/a.jpg", &hash)], fetcher, None).await;
 
     let bytes = machine
-        .fetch_thumbnail(hash.clone(), KEY.to_vec())
+        .fetch_thumbnail(hash, KEY.to_vec())
         .await
-        .expect("fetch + decrypt succeeds");
-
-    assert_eq!(
-        bytes, plaintext,
-        "the sealed blob is decrypted back to plaintext"
-    );
-    assert_eq!(
-        fetcher.fetches(),
-        vec![hash],
-        "fetched direct-by-hash with the item's thumbnail_hash"
-    );
+        .expect("the file's walk opens the thumbnail");
+    assert_eq!(bytes, plaintext);
 }
 
 #[tokio::test]
-async fn fetch_thumbnail_rejects_a_content_hash_mismatch() {
-    // The client asks for thumbnail A's content hash, but a malicious / buggy
-    // nest serves a DIFFERENT blob B that is *also* sealed under the owner's own
-    // backup key — so B decrypts cleanly (the AEAD tag alone can't catch the
-    // swap; the frame carries no AAD binding it to a hash). The content-address
-    // check (`blake3(fetched) == requested hash`) is the one thing that rejects
-    // the substitution, so the client never renders the wrong owner image.
-    let wanted = b"the thumbnail the client asked for".to_vec();
-    let substituted = b"a DIFFERENT owner-sealed thumbnail".to_vec();
-    let wanted_hash = content_hash_hex(&sealed(&wanted, &KEY));
-    // The fetcher returns blob B, sealed under the SAME owner key so decrypt
-    // would succeed — only the content-address check stands between it and paint.
-    let fetcher = Arc::new(FakeMediaBlobFetcher::new(sealed(&substituted, &KEY)));
-    let machine = MediaMachine::new(
-        CountingObserver::new(),
-        Arc::new(FakeMediaNestApi::new()),
-        None,
-        Some(fetcher.clone() as Arc<dyn MediaBlobFetcher>),
-        None,
-        None,
-    );
+async fn fetch_thumbnail_of_a_hash_no_listed_item_names_is_refused() {
+    // No row → no custody to open it under, and none is guessed.
+    let mut fetcher = FakeDownloadFetcher::default();
+    let hash = stock_manifest(&mut fetcher, owner_root(&KEY), b"an unlisted tile");
+    let (machine, _) = thumbnail_machine(Vec::new(), fetcher, None).await;
 
     let err = machine
-        .fetch_thumbnail(wanted_hash, KEY.to_vec())
+        .fetch_thumbnail(hash, KEY.to_vec())
         .await
-        .expect_err("a substituted owner-sealed blob is rejected by content address");
-    assert!(
-        matches!(err, MediaApiError::BadRequest { .. }),
-        "content-hash mismatch → non-retryable BadRequest, got {err:?}"
+        .expect_err("a hash no row names does not open");
+    assert!(matches!(err, MediaApiError::NotFound { .. }), "{err:?}");
+}
+
+#[tokio::test]
+async fn fetch_thumbnail_rejects_a_substituted_manifest() {
+    // The client asks for thumbnail A's manifest, but a malicious / buggy nest
+    // serves a DIFFERENT manifest B — also sealed under the owner's own root,
+    // so every chunk would open cleanly. The walk's manifest address check
+    // (`blake3(fetched) == requested hash`) is what rejects the substitution.
+    let mut honest = FakeDownloadFetcher::default();
+    let wanted = stock_manifest(&mut honest, owner_root(&KEY), b"the thumbnail asked for");
+    let mut lying = FakeDownloadFetcher::default();
+    let other = stock_manifest(&mut lying, owner_root(&KEY), b"a DIFFERENT owner tile");
+    let other_bytes = lying
+        .get(&fauna_core::data::ContentHash::from_digest_raw(
+            hex_decode32(&other),
+        ))
+        .unwrap();
+    lying.put(
+        &fauna_core::data::ContentHash::from_digest_raw(hex_decode32(&wanted)),
+        other_bytes,
     );
+    let (machine, _) =
+        thumbnail_machine(vec![thumbnail_item("photos/a.jpg", &wanted)], lying, None).await;
+
+    machine
+        .fetch_thumbnail(wanted, KEY.to_vec())
+        .await
+        .expect_err("a substituted manifest is rejected by its address");
 }
 
 #[tokio::test]
 async fn fetch_thumbnail_without_a_fetcher_is_unsupported() {
-    // No blob fetcher wired (web today) → a Transient "not supported", no panic.
+    // No download fetcher wired → a Transient "not supported", no panic.
     let machine = MediaMachine::new(
         CountingObserver::new(),
         Arc::new(FakeMediaNestApi::new()),
-        None,
         None,
         None,
         None,
@@ -1293,170 +1684,111 @@ async fn fetch_thumbnail_without_a_fetcher_is_unsupported() {
 }
 
 #[tokio::test]
-async fn fetch_thumbnail_rejects_a_wrong_key_length() {
-    let fetcher = Arc::new(FakeMediaBlobFetcher::new(sealed(b"x", &KEY)));
-    let machine = MediaMachine::new(
-        CountingObserver::new(),
-        Arc::new(FakeMediaNestApi::new()),
-        None,
-        Some(fetcher.clone() as Arc<dyn MediaBlobFetcher>),
-        None,
-        None,
-    );
+async fn fetch_thumbnail_rejects_bad_inputs_before_fetching() {
+    let (machine, _) = thumbnail_machine(Vec::new(), FakeDownloadFetcher::default(), None).await;
 
     let err = machine
-        .fetch_thumbnail("deadbeef".into(), vec![0u8; 16])
+        .fetch_thumbnail("ab".repeat(32), vec![0u8; 16])
         .await
         .expect_err("a 16-byte key is rejected");
     assert!(matches!(err, MediaApiError::BadRequest { .. }));
-    assert!(
-        fetcher.fetches().is_empty(),
-        "a bad key fails fast — no fetch is attempted"
-    );
-}
-
-#[tokio::test]
-async fn fetch_thumbnail_surfaces_a_fetch_error() {
-    let fetcher = Arc::new(FakeMediaBlobFetcher::new(sealed(b"x", &KEY)));
-    fetcher.fail(MediaApiError::NotFound {
-        detail: "no such blob".into(),
-    });
-    let machine = MediaMachine::new(
-        CountingObserver::new(),
-        Arc::new(FakeMediaNestApi::new()),
-        None,
-        Some(fetcher.clone() as Arc<dyn MediaBlobFetcher>),
-        None,
-        None,
-    );
-
     let err = machine
-        .fetch_thumbnail("deadbeef".into(), KEY.to_vec())
+        .fetch_thumbnail("not hex".into(), KEY.to_vec())
         .await
-        .expect_err("a fetch failure surfaces");
-    assert!(matches!(err, MediaApiError::NotFound { .. }));
-}
-
-#[tokio::test]
-async fn fetch_thumbnail_with_the_wrong_key_fails_decrypt() {
-    // Sealed under KEY, but the client supplies a different owner key — the AEAD
-    // tag check rejects it. A non-retryable BadRequest (not Transient). The hash
-    // is the blob's *real* content hash, so the content-address check passes and
-    // this genuinely exercises the decrypt-failure path (not the address check).
-    const OTHER_KEY: [u8; 32] = [9u8; 32];
-    let sealed_bytes = sealed(b"secret thumb", &KEY);
-    let hash = content_hash_hex(&sealed_bytes);
-    let fetcher = Arc::new(FakeMediaBlobFetcher::new(sealed_bytes));
-    let machine = MediaMachine::new(
-        CountingObserver::new(),
-        Arc::new(FakeMediaNestApi::new()),
-        None,
-        Some(fetcher.clone() as Arc<dyn MediaBlobFetcher>),
-        None,
-        None,
-    );
-
-    let err = machine
-        .fetch_thumbnail(hash, OTHER_KEY.to_vec())
-        .await
-        .expect_err("wrong key → decrypt fails");
+        .expect_err("a malformed hash is rejected");
     assert!(matches!(err, MediaApiError::BadRequest { .. }));
 }
 
-// ── the raw-AEAD Library plane's predecessor candidates (identity succession) ─
+#[tokio::test]
+async fn fetch_thumbnail_with_the_wrong_key_fails_closed() {
+    // Sealed under another owner's root, read with this account's key.
+    const OTHER_KEY: [u8; 32] = [9u8; 32];
+    let mut fetcher = FakeDownloadFetcher::default();
+    let hash = stock_manifest(&mut fetcher, owner_root(&OTHER_KEY), b"secret thumb");
+    let (machine, _) =
+        thumbnail_machine(vec![thumbnail_item("photos/a.jpg", &hash)], fetcher, None).await;
+
+    machine
+        .fetch_thumbnail(hash, KEY.to_vec())
+        .await
+        .expect_err("wrong root → the walk refuses to open");
+}
+
+/// A member of a shared set paints the set's tiles: the thumbnail opens under
+/// the set's content keys at the row's stamp — the same custody as the file.
+#[tokio::test]
+async fn fetch_thumbnail_of_a_shared_sets_item_opens_under_its_content_keys() {
+    let content_key = [0x42; 32];
+    let plaintext = b"the shared album's tile".to_vec();
+    let mut fetcher = FakeDownloadFetcher::default();
+    let hash = stock_manifest(&mut fetcher, Some((content_key, Some(1))), &plaintext);
+    let resolver: Arc<dyn FolderKeyResolver> = Arc::new(FakeFolderKeyResolver::bound(
+        "photos",
+        Some(fauna_core::folder_keys::FolderContentKeys::genesis(
+            content_key,
+            1_000,
+        )),
+    ));
+    let (machine, _) = thumbnail_machine(
+        vec![MediaItem {
+            content_key_version: Some(1),
+            ..thumbnail_item("photos/a.jpg", &hash)
+        }],
+        fetcher,
+        Some(resolver),
+    )
+    .await;
+
+    let bytes = machine
+        .fetch_thumbnail(hash, KEY.to_vec())
+        .await
+        .expect("a member opens the shared set's tile");
+    assert_eq!(bytes, plaintext);
+}
+
+// ── identity succession: an inherited tile opens on the chunk plane ──────────
 //
 // `succession-aftermath.md` § Re-key scope's `BackupKey` corpus row: a succession
 // re-points corpus *ownership* but moves no seal, so a successor's inherited
-// thumbnails still rest under the PREDECESSOR's key while the successor
-// derives its own. The chunk plane got its read candidates in leg 5's read
-// half (`FileDownloadKeys::predecessor_backup_keys`), but that field reaches
-// only the chunk walk — a thumbnail is a separate raw-AEAD seal under the bare
-// `BackupKey`, so it needs its own candidates or the successor's whole
-// inherited grid renders dark.
+// thumbnails still rest under the PREDECESSOR's root while the successor
+// derives its own. A thumbnail is a manifest like its file, so it opens through
+// the same `FileDownloadKeys::predecessor_backup_keys` the corpus does.
 
 /// The predecessor's retired owner key, distinct from the successor's [`KEY`].
 const RETIRED_KEY: [u8; 32] = [11u8; 32];
 
 #[tokio::test]
 async fn fetch_thumbnail_opens_a_predecessor_sealed_thumbnail() {
-    // The thumbnail was sealed by the RETIRED identity; the successor renders it
-    // with its OWN current key in hand. Without the candidate loop this is the
-    // dark-library break — a decrypt failure indistinguishable from corruption.
     let plaintext = b"decoded thumbnail JPEG bytes".to_vec();
-    let sealed_bytes = sealed(&plaintext, &RETIRED_KEY);
-    let hash = content_hash_hex(&sealed_bytes);
-    let fetcher = Arc::new(FakeMediaBlobFetcher::new(sealed_bytes));
-    let machine = MediaMachine::new(
-        CountingObserver::new(),
-        Arc::new(FakeMediaNestApi::new()),
-        None,
-        Some(fetcher.clone() as Arc<dyn MediaBlobFetcher>),
-        None,
-        None,
-    );
+    let mut fetcher = FakeDownloadFetcher::default();
+    let hash = stock_manifest(&mut fetcher, owner_root(&RETIRED_KEY), &plaintext);
+    let (machine, _) =
+        thumbnail_machine(vec![thumbnail_item("photos/a.jpg", &hash)], fetcher, None).await;
     machine.set_predecessor_backup_keys(vec![RETIRED_KEY.to_vec()]);
 
     let bytes = machine
         .fetch_thumbnail(hash, KEY.to_vec())
         .await
         .expect("the retired root opens what it sealed");
-
     assert_eq!(
         bytes, plaintext,
-        "the successor renders the thumbnail it inherited"
+        "the successor renders the tile it inherited"
     );
-}
-
-#[tokio::test]
-async fn fetch_thumbnail_still_rejects_a_substitution_with_predecessors_offered() {
-    // The candidate loop must NOT weaken the content-address anchor. The frame
-    // carries no AAD, so an extra key only widens *which root may open already
-    // address-verified bytes* — it can never widen *which bytes are served*.
-    // Both blobs here are sealed under the retired root, so the swap would
-    // decrypt cleanly; only the address check rejects it.
-    let wanted_hash = content_hash_hex(&sealed(b"the thumbnail asked for", &RETIRED_KEY));
-    let fetcher = Arc::new(FakeMediaBlobFetcher::new(sealed(
-        b"a DIFFERENT retired-sealed thumbnail",
-        &RETIRED_KEY,
-    )));
-    let machine = MediaMachine::new(
-        CountingObserver::new(),
-        Arc::new(FakeMediaNestApi::new()),
-        None,
-        Some(fetcher.clone() as Arc<dyn MediaBlobFetcher>),
-        None,
-        None,
-    );
-    machine.set_predecessor_backup_keys(vec![RETIRED_KEY.to_vec()]);
-
-    let err = machine
-        .fetch_thumbnail(wanted_hash, KEY.to_vec())
-        .await
-        .expect_err("the address check rejects the swap, predecessors or not");
-    assert!(matches!(err, MediaApiError::BadRequest { .. }));
 }
 
 #[tokio::test]
 async fn fetch_thumbnail_with_no_predecessors_still_fails_on_a_foreign_key() {
     // The fail-closed control: an account that never succeeded offers no extra
-    // candidates, so a blob under a key it does not hold stays unreadable.
-    let sealed_bytes = sealed(b"secret thumb", &RETIRED_KEY);
-    let hash = content_hash_hex(&sealed_bytes);
-    let fetcher = Arc::new(FakeMediaBlobFetcher::new(sealed_bytes));
-    let machine = MediaMachine::new(
-        CountingObserver::new(),
-        Arc::new(FakeMediaNestApi::new()),
-        None,
-        Some(fetcher.clone() as Arc<dyn MediaBlobFetcher>),
-        None,
-        None,
-    );
+    // candidates, so a tile under a root it does not hold stays unreadable.
+    let mut fetcher = FakeDownloadFetcher::default();
+    let hash = stock_manifest(&mut fetcher, owner_root(&RETIRED_KEY), b"secret thumb");
+    let (machine, _) =
+        thumbnail_machine(vec![thumbnail_item("photos/a.jpg", &hash)], fetcher, None).await;
 
-    let err = machine
+    machine
         .fetch_thumbnail(hash, KEY.to_vec())
         .await
         .expect_err("no predecessors → no extra candidate");
-    assert!(matches!(err, MediaApiError::BadRequest { .. }));
 }
 
 // ── download_file (the full-file walk over the download seam) ────────────────
@@ -1692,7 +2024,8 @@ impl FolderKeyResolver for FakeFolderKeyResolver {
                 Ok(self.content_keyed())
             }
             fauna_core::folder_keys::FolderRef::Local(_) => Ok(ResolvedCustody::owner_only()),
-            fauna_core::folder_keys::FolderRef::Foreign(_) => {
+            fauna_core::folder_keys::FolderRef::Foreign(_)
+            | fauna_core::folder_keys::FolderRef::Group(_) => {
                 anyhow::bail!("no set with that identity")
             }
         }
@@ -1723,7 +2056,6 @@ async fn download_file_member_decrypts_a_shared_set_via_content_keys() {
     let machine = MediaMachine::new(
         CountingObserver::new(),
         Arc::new(FakeMediaNestApi::new()),
-        None,
         None, // the shared read comes from the walk alone
         Some(Arc::new(fetcher) as Arc<dyn fauna_core::file_download::BlobFetcher>),
         Some(resolver as Arc<dyn FolderKeyResolver>),
@@ -1767,7 +2099,6 @@ async fn download_file_member_without_the_generation_fails_closed() {
     let machine = MediaMachine::new(
         CountingObserver::new(),
         Arc::new(FakeMediaNestApi::new()),
-        None,
         None,
         Some(Arc::new(fetcher) as Arc<dyn fauna_core::file_download::BlobFetcher>),
         Some(resolver as Arc<dyn FolderKeyResolver>),
@@ -1852,7 +2183,6 @@ async fn an_unbound_owned_sets_download_never_touches_the_foreign_fetchers() {
         CountingObserver::new(),
         Arc::new(FakeMediaNestApi::new()),
         None,
-        None,
         Some(Arc::new(fetcher) as Arc<dyn fauna_core::file_download::BlobFetcher>),
         Some(resolver as Arc<dyn FolderKeyResolver>),
     );
@@ -1898,7 +2228,6 @@ async fn a_genuinely_foreign_set_downloads_through_the_foreign_fetchers() {
         CountingObserver::new(),
         Arc::new(FakeMediaNestApi::new()),
         None,
-        None,
         None, // no home fetcher at all — the foreign route is the only way
         Some(resolver as Arc<dyn FolderKeyResolver>),
     );
@@ -1929,7 +2258,6 @@ fn machine_with_download(fetcher: FakeDownloadFetcher) -> Arc<MediaMachine> {
     MediaMachine::new(
         CountingObserver::new(),
         Arc::new(FakeMediaNestApi::new()),
-        None,
         None,
         Some(Arc::new(fetcher) as Arc<dyn fauna_core::file_download::BlobFetcher>),
         None,
@@ -1998,7 +2326,6 @@ async fn download_file_reads_its_chunks_for_the_items_folder() {
         CountingObserver::new(),
         Arc::new(FakeMediaNestApi::new()),
         None,
-        None,
         Some(Arc::new(fetcher) as Arc<dyn fauna_core::file_download::BlobFetcher>),
         Some(resolver as Arc<dyn FolderKeyResolver>),
     );
@@ -2061,7 +2388,6 @@ async fn download_file_hints_the_row_of_the_items_own_set() {
     let machine = MediaMachine::new(
         CountingObserver::new(),
         api.clone(),
-        None,
         None,
         Some(Arc::new(fetcher.clone()) as Arc<dyn fauna_core::file_download::BlobFetcher>),
         None,
@@ -2169,7 +2495,6 @@ async fn download_file_opens_a_shared_sets_item_under_its_own_rows_custody() {
         CountingObserver::new(),
         api,
         None,
-        None,
         Some(Arc::new(fetcher) as Arc<dyn fauna_core::file_download::BlobFetcher>),
         Some(shared_row_resolver(content_key)),
     );
@@ -2236,7 +2561,6 @@ async fn sealed_labels_of_a_same_named_shared_set_render_under_its_own_custody()
         api,
         None,
         None,
-        None,
         Some(shared_row_resolver(content_key)),
     );
 
@@ -2290,7 +2614,6 @@ async fn signer_ledger_keeps_a_same_named_pair_apart() {
         CountingObserver::new(),
         api,
         None,
-        None,
         Some(Arc::new(fetcher) as Arc<dyn fauna_core::file_download::BlobFetcher>),
         None,
     );
@@ -2314,14 +2637,16 @@ async fn signer_ledger_keeps_a_same_named_pair_apart() {
         .expect_err("another writer's row is offered none of the owner family");
 }
 
-/// The declassification verdict is the item's own row's: the own `photos`
-/// rests unsealed, the shared one does not, so the shared item's thumbnail is
-/// opened — never handed back raw as the own set's public bytes.
+/// A thumbnail opens under its own ROW's custody: the own `photos` rests
+/// unsealed, the shared one is content-keyed, so the shared item's tile opens
+/// under the shared set's content keys — never read as the own set's public
+/// bytes, never under the owner root the name resolves to.
 #[tokio::test]
-async fn thumbnail_of_a_shared_item_is_not_mistaken_for_the_own_sets_public_bytes() {
+async fn thumbnail_of_a_shared_item_opens_under_its_own_rows_custody() {
+    let content_key = [0x42; 32];
     let plaintext = b"decoded thumbnail JPEG bytes".to_vec();
-    let sealed_bytes = sealed(&plaintext, &KEY);
-    let hash = content_hash_hex(&sealed_bytes);
+    let mut fetcher = FakeDownloadFetcher::default();
+    let hash = stock_manifest(&mut fetcher, Some((content_key, Some(1))), &plaintext);
     let api = Arc::new(FakeMediaNestApi::new());
     let mut rows = same_named_rows();
     rows[0].rests_unsealed = true;
@@ -2330,6 +2655,7 @@ async fn thumbnail_of_a_shared_item_is_not_mistaken_for_the_own_sets_public_byte
         items: vec![MediaItem {
             thumbnail_hash: Some(hash.clone()),
             folder_id: Some(SHARED_ROW),
+            content_key_version: Some(1),
             ..item("photos", "beach.jpg", 10, 100)
         }],
         ..Default::default()
@@ -2338,9 +2664,8 @@ async fn thumbnail_of_a_shared_item_is_not_mistaken_for_the_own_sets_public_byte
         CountingObserver::new(),
         api,
         None,
-        Some(Arc::new(FakeMediaBlobFetcher::new(sealed_bytes)) as Arc<dyn MediaBlobFetcher>),
-        None,
-        None,
+        Some(Arc::new(fetcher) as Arc<dyn fauna_core::file_download::BlobFetcher>),
+        Some(shared_row_resolver(content_key)),
     );
     machine.refresh(None).await;
 
@@ -2348,7 +2673,7 @@ async fn thumbnail_of_a_shared_item_is_not_mistaken_for_the_own_sets_public_byte
         .fetch_thumbnail(hash, KEY.to_vec())
         .await
         .expect("the shared item's thumbnail opens");
-    assert_eq!(got, plaintext, "opened, not returned as public bytes");
+    assert_eq!(got, plaintext, "opened under the shared row's content keys");
 }
 
 /// No download seam wired → a Transient "not supported", no panic — the same
@@ -2358,7 +2683,6 @@ async fn download_file_without_a_fetcher_is_unsupported() {
     let machine = MediaMachine::new(
         CountingObserver::new(),
         Arc::new(FakeMediaNestApi::new()),
-        None,
         None,
         None,
         None,
@@ -2472,7 +2796,7 @@ async fn refresh_renders_the_path_from_the_seal_with_the_plaintext_scrubbed() {
         items: vec![sealed_item("photos", "photos/eviction_notice.pdf", "")],
         ..Default::default()
     });
-    let machine = MediaMachine::new(observer, api, None, None, None, None);
+    let machine = MediaMachine::new(observer, api, None, None, None);
 
     machine.refresh(Some(KEY.to_vec())).await;
 
@@ -2499,7 +2823,7 @@ async fn refresh_omits_a_sealed_only_row_for_a_keyless_reader() {
         ],
         ..Default::default()
     });
-    let machine = MediaMachine::new(observer, api, None, None, None, None);
+    let machine = MediaMachine::new(observer, api, None, None, None);
 
     machine.refresh(None).await;
 
@@ -2523,7 +2847,7 @@ async fn refresh_omits_a_sealed_only_row_for_the_wrong_key() {
         items: vec![sealed_item("photos", "photos/a.jpg", "")],
         ..Default::default()
     });
-    let machine = MediaMachine::new(observer, api, None, None, None, None);
+    let machine = MediaMachine::new(observer, api, None, None, None);
 
     machine.refresh(Some([9u8; 32].to_vec())).await;
 
@@ -2541,7 +2865,7 @@ async fn a_keyless_refresh_still_lists_sealed_rows_that_kept_their_plaintext() {
         items: vec![sealed_item("photos", "photos/a.jpg", "photos/a.jpg")],
         ..Default::default()
     });
-    let machine = MediaMachine::new(observer, api, None, None, None, None);
+    let machine = MediaMachine::new(observer, api, None, None, None);
 
     machine.refresh(None).await;
 
@@ -2566,7 +2890,7 @@ async fn the_render_salts_from_the_wire_path_hash_not_the_plaintext() {
         )],
         ..Default::default()
     });
-    let machine = MediaMachine::new(observer, api, None, None, None, None);
+    let machine = MediaMachine::new(observer, api, None, None, None);
 
     machine.refresh(Some(KEY.to_vec())).await;
 
@@ -2624,7 +2948,6 @@ async fn refresh_renders_a_bound_shared_sets_label_under_its_content_keys() {
     let machine = MediaMachine::new(
         observer,
         api,
-        None,
         None,
         None,
         Some(resolver as Arc<dyn FolderKeyResolver>),
@@ -2698,7 +3021,7 @@ async fn refresh_renders_the_set_name_from_the_seal_with_the_plaintext_scrubbed(
         )],
         ..Default::default()
     });
-    let machine = MediaMachine::new(observer, api, None, None, None, None);
+    let machine = MediaMachine::new(observer, api, None, None, None);
 
     machine.refresh(Some(KEY.to_vec())).await;
 
@@ -2763,7 +3086,6 @@ async fn refresh_renders_a_scrubbed_bound_set_beside_an_owned_one_by_folder_hash
         api,
         None,
         None,
-        None,
         Some(
             Arc::new(FakeFolderKeyResolver::bound(shared, Some(content)))
                 as Arc<dyn FolderKeyResolver>,
@@ -2815,7 +3137,7 @@ async fn a_reader_sent_no_set_name_pair_still_lists_on_the_plaintext() {
         }],
         ..Default::default()
     });
-    let machine = MediaMachine::new(observer, api, None, None, None, None);
+    let machine = MediaMachine::new(observer, api, None, None, None);
 
     machine.refresh(None).await;
 
@@ -2850,7 +3172,7 @@ async fn refresh_omits_a_row_whose_set_name_this_reader_cannot_open() {
         }],
         ..Default::default()
     });
-    let machine = MediaMachine::new(observer, api, None, None, None, None);
+    let machine = MediaMachine::new(observer, api, None, None, None);
 
     // Wrong key: opens neither axis.
     machine.refresh(Some([9u8; 32].to_vec())).await;
@@ -2889,7 +3211,7 @@ async fn the_set_name_render_salts_from_the_wire_hash_not_the_plaintext() {
         }],
         ..Default::default()
     });
-    let machine = MediaMachine::new(observer, api, None, None, None, None);
+    let machine = MediaMachine::new(observer, api, None, None, None);
 
     machine.refresh(Some(KEY.to_vec())).await;
 
@@ -2920,7 +3242,7 @@ async fn a_brand_new_empty_set_is_offered_as_a_filter_option() {
         folder("photos"),
         folder("fresh"), // just created, still empty
     ]);
-    let machine = MediaMachine::new(observer.clone(), api, None, None, None, None);
+    let machine = MediaMachine::new(observer.clone(), api, None, None, None);
 
     machine.refresh(None).await;
 
@@ -2946,7 +3268,6 @@ async fn uploading_into_a_selected_empty_set_records_into_that_set() {
         observer.clone(),
         api.clone(),
         Some(uploader.clone()),
-        None,
         None,
         None,
     );
@@ -2999,7 +3320,6 @@ async fn with_only_empty_sets_the_upload_default_still_finds_a_target() {
         Some(uploader.clone()),
         None,
         None,
-        None,
     );
     machine.refresh(None).await;
 
@@ -3045,7 +3365,6 @@ async fn a_sealed_fresh_folder_renders_and_is_uploaded_into_by_its_name() {
         Some(uploader.clone()),
         None,
         None,
-        None,
     );
     machine.set_owner_backup_key(KEY.to_vec());
     machine.refresh(Some(KEY.to_vec())).await;
@@ -3081,9 +3400,16 @@ async fn a_sealed_folder_no_key_opens_is_not_offered() {
     let api = Arc::new(FakeMediaNestApi::new());
     api.set_snapshot(MediaSnapshot::default());
     api.set_folders(vec![sealed_folder(7, "Holiday"), folder("plain")]);
-    let machine = MediaMachine::new(CountingObserver::new(), api, None, None, None, None);
+    let machine = MediaMachine::new(CountingObserver::new(), api, None, None, None);
+    // An own set no custody opens may be custody not read YET, so the first
+    // load settles before it gives up on it (`SettlePolicy`); shortened here.
+    machine.set_settle_policy(fast_settle(10));
     machine.refresh(None).await;
     assert_eq!(machine.snapshot().folders, vec!["plain".to_string()]);
+    assert!(
+        machine.snapshot().loaded,
+        "and the page still loads once the settle gives up"
+    );
 }
 
 /// A control-plane row as the nest lists a set created sealed: the plaintext
@@ -3112,7 +3438,6 @@ async fn every_own_folder_is_an_upload_default_candidate() {
         observer.clone(),
         api.clone(),
         Some(uploader.clone()),
-        None,
         None,
         None,
     );
@@ -3147,15 +3472,20 @@ async fn a_failed_option_list_read_leaves_the_browse_working() {
     // matters. A transient failure degrades to the
     // item-derived options rather than erroring the whole page.
     let observer = CountingObserver::new();
-    let api = Arc::new(FakeOptionListFailure {
-        inner: FakeMediaNestApi::new(),
+    let api = Arc::new(DelegatingFake {
+        option_list_fails: true,
+        ..DelegatingFake::default()
     });
     api.inner.set_snapshot(fixture());
-    let machine = MediaMachine::new(observer.clone(), api, None, None, None, None);
+    let machine = MediaMachine::new(observer.clone(), api, None, None, None);
+    // A lost list makes the read incomplete, so the first load settles before
+    // it degrades (`SettlePolicy`); shortened here.
+    machine.set_settle_policy(fast_settle(10));
 
     machine.refresh(None).await;
     let snap = machine.snapshot();
     assert!(snap.error.is_none(), "the page still renders");
+    assert!(snap.loaded, "loaded once the settle gives up on the list");
     assert_eq!(snap.items.len(), 3, "the browse is intact");
     assert_eq!(
         snap.folders,
@@ -3164,23 +3494,197 @@ async fn a_failed_option_list_read_leaves_the_browse_working() {
     );
 }
 
-/// A seam whose media read succeeds but whose option-list read fails — the
-/// transient-failure shape the fake's shared error fixture cannot
-/// express (it fails both).
-#[derive(Debug)]
-struct FakeOptionListFailure {
+/// Spin until the fake has logged `n` media reads.
+async fn media_reads_started(api: &DelegatingFake, n: usize) {
+    while media_reads(&api.inner) < n {
+        tokio::task::yield_now().await;
+    }
+}
+
+/// Let every spawned task run until it parks.
+async fn settle_tasks() {
+    for _ in 0..200 {
+        tokio::task::yield_now().await;
+    }
+}
+
+#[tokio::test]
+async fn a_refresh_asked_while_a_read_runs_returns_after_a_trailing_read_that_started_after_it() {
+    // The gesture contract the read gate keeps: a refresh asked while a read
+    // is in flight (a delete's re-read during a push-driven one, say) starts
+    // no second read beside it — and returns only once a read that STARTED
+    // AFTER it has committed, so the page shows the write it followed. The
+    // read already in flight still lands and loads the page.
+    let observer = CountingObserver::new();
+    let api = Arc::new(DelegatingFake::default());
+    api.inner
+        .set_folders(vec![folder("docs"), folder("photos")]);
+    let (release_old, old_gate) = tokio::sync::oneshot::channel();
+    api.held_reads.lock().unwrap().push_back((
+        MediaSnapshot {
+            items: vec![item("docs", "docs/notes.txt", 30, 100)],
+            ..Default::default()
+        },
+        old_gate,
+    ));
+    let machine = MediaMachine::new(observer.clone(), api.clone(), None, None, None);
+
+    let older = tokio::spawn({
+        let machine = machine.clone();
+        async move { machine.refresh(None).await }
+    });
+    media_reads_started(&api, 1).await;
+    // The write lands after the in-flight read took its answer.
+    api.inner.set_snapshot(fixture());
+    let newer = tokio::spawn({
+        let machine = machine.clone();
+        async move { machine.refresh(None).await }
+    });
+    settle_tasks().await;
+    assert_eq!(
+        media_reads(&api.inner),
+        1,
+        "no second read beside the one in flight"
+    );
+    assert!(
+        !newer.is_finished(),
+        "the newer ask waits for a read that starts after it"
+    );
+
+    release_old.send(()).unwrap();
+    older.await.unwrap();
+    newer.await.unwrap();
+    let snap = machine.snapshot();
+    assert!(snap.loaded);
+    assert_eq!(media_reads(&api.inner), 2, "exactly one trailing read");
+    assert_eq!(snap.items.len(), 3, "the trailing read shows the write");
+}
+
+#[tokio::test]
+async fn a_push_burst_runs_one_read_at_a_time_and_one_trailing_read() {
+    // The nest fires one `SyncChanged` per recorded file and every app
+    // re-reads the visible Media page on each: a folder sync used to start
+    // hundreds of overlapping full reads, and on a large account none landed
+    // before the next began (`ui/README.md` § List pages). The machine runs
+    // one read at a time, and every refresh asked while it ran shares ONE
+    // trailing read.
+    let observer = CountingObserver::new();
+    let api = Arc::new(DelegatingFake::default());
+    api.inner.set_snapshot(fixture());
+    api.inner
+        .set_folders(vec![folder("docs"), folder("photos")]);
+    let (release, gate) = tokio::sync::oneshot::channel();
+    api.held_reads.lock().unwrap().push_back((fixture(), gate));
+    let machine = MediaMachine::new(observer.clone(), api.clone(), None, None, None);
+
+    let first = tokio::spawn({
+        let machine = machine.clone();
+        async move { machine.refresh(None).await }
+    });
+    media_reads_started(&api, 1).await;
+    let burst: Vec<_> = (0..50)
+        .map(|_| {
+            let machine = machine.clone();
+            tokio::spawn(async move { machine.refresh(None).await })
+        })
+        .collect();
+    settle_tasks().await;
+    assert_eq!(
+        media_reads(&api.inner),
+        1,
+        "fifty pushes while a read runs start no read beside it"
+    );
+
+    release.send(()).unwrap();
+    first.await.unwrap();
+    for refresh in burst {
+        refresh.await.unwrap();
+    }
+    assert_eq!(
+        media_reads(&api.inner),
+        2,
+        "the whole burst shares one trailing read"
+    );
+    assert!(machine.snapshot().loaded);
+}
+
+#[tokio::test]
+async fn a_page_whose_rows_stay_held_loads_once_its_budget_is_spent_however_often_it_is_refreshed()
+{
+    // The first-load settle budget is the PAGE's: a page that never loaded,
+    // whose rows stay held for want of custody, and that keeps being asked to
+    // refresh (a push per recorded file) must still spend the budget and load
+    // with what it found — a budget restarted by every refresh is never spent
+    // and the page never loads (`ui/README.md` § List pages, rule 2).
+    let observer = CountingObserver::new();
+    let api = Arc::new(FakeMediaNestApi::new());
+    api.set_snapshot(fixture());
+    api.set_folders(vec![folder("docs"), folder("photos")]);
+    api.hold_media_reads(usize::MAX);
+    let machine = MediaMachine::new(observer, api.clone(), None, None, None);
+    machine.set_settle_policy(fast_settle(20));
+
+    let mut refreshes = Vec::new();
+    for _ in 0..2_000 {
+        if machine.snapshot().loaded {
+            break;
+        }
+        refreshes.push(tokio::spawn({
+            let machine = machine.clone();
+            async move { machine.refresh(None).await }
+        }));
+        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+    }
+    assert!(
+        machine.snapshot().loaded,
+        "the page loads once its budget is spent, while the refreshes keep coming"
+    );
+    assert!(
+        machine.snapshot().items.is_empty(),
+        "every row is still held"
+    );
+    for refresh in refreshes {
+        refresh.await.unwrap();
+    }
+}
+
+/// The lifecycle tests' delegating seam — the in-memory fake, with the two
+/// shapes its own fixtures cannot express: an option-list read that fails
+/// while the media read succeeds (the fake's shared error fixture fails
+/// both), and media reads HELD until the test releases them, each answering
+/// the snapshot it was queued with (so two overlapping reads can land in
+/// either order).
+#[derive(Debug, Default)]
+struct DelegatingFake {
     inner: FakeMediaNestApi,
+    option_list_fails: bool,
+    held_reads: std::sync::Mutex<
+        std::collections::VecDeque<(MediaSnapshot, tokio::sync::oneshot::Receiver<()>)>,
+    >,
 }
 
 #[async_trait::async_trait]
-impl fauna_media_machine::nest_api::MediaNestApi for FakeOptionListFailure {
+impl fauna_media_machine::nest_api::MediaNestApi for DelegatingFake {
     async fn media_snapshot(&self) -> Result<MediaSnapshot, MediaApiError> {
-        self.inner.media_snapshot().await
+        let held = self.held_reads.lock().unwrap().pop_front();
+        match held {
+            Some((snapshot, gate)) => {
+                self.inner.set_snapshot(snapshot);
+                // Logged at the call, before the hold, as the fake logs it.
+                let read = self.inner.media_snapshot().await;
+                let _ = gate.await;
+                read
+            }
+            None => self.inner.media_snapshot().await,
+        }
     }
     async fn list_folders(&self) -> Result<Vec<MediaFolder>, MediaApiError> {
-        Err(MediaApiError::Transient {
-            detail: "unknown kind".into(),
-        })
+        if self.option_list_fails {
+            return Err(MediaApiError::Transient {
+                detail: "unknown kind".into(),
+            });
+        }
+        self.inner.list_folders().await
     }
     async fn record_member(
         &self,
@@ -3243,6 +3747,7 @@ impl fauna_media_machine::nest_api::MediaNestApi for FakeOptionListFailure {
         manifest_hash: String,
         size_bytes: i64,
         content_key_version: Option<u64>,
+        thumbnail_hash: Option<String>,
         path_sealed: Option<Vec<u8>>,
     ) -> Result<(), MediaApiError> {
         self.inner
@@ -3254,6 +3759,7 @@ impl fauna_media_machine::nest_api::MediaNestApi for FakeOptionListFailure {
                 manifest_hash,
                 size_bytes,
                 content_key_version,
+                thumbnail_hash,
                 path_sealed,
             )
             .await
@@ -3345,7 +3851,7 @@ async fn followed_options_render_after_refresh_when_the_source_is_wired() {
     let observer = CountingObserver::new();
     let api = Arc::new(FakeMediaNestApi::new());
     api.set_snapshot(fixture());
-    let machine = MediaMachine::new(observer, api, None, None, None, None);
+    let machine = MediaMachine::new(observer, api, None, None, None);
 
     // Unwired: no options — the correct render for an app without the surface.
     machine.refresh(None).await;
@@ -3380,7 +3886,7 @@ async fn followed_options_render_after_refresh_when_the_source_is_wired() {
 async fn a_followed_option_names_its_owner_as_the_followed_row_does() {
     let api = Arc::new(FakeMediaNestApi::new());
     api.set_snapshot(fixture());
-    let machine = MediaMachine::new(CountingObserver::new(), api, None, None, None, None);
+    let machine = MediaMachine::new(CountingObserver::new(), api, None, None, None);
     machine.set_followed_media_source(FakeFollowedSource::new(
         vec![FollowedMediaScope {
             owner_display: "alice".into(),
@@ -3397,7 +3903,7 @@ async fn selecting_a_followed_scope_fetches_its_listing_on_demand() {
     let observer = CountingObserver::new();
     let api = Arc::new(FakeMediaNestApi::new());
     api.set_snapshot(fixture());
-    let machine = MediaMachine::new(observer, api, None, None, None, None);
+    let machine = MediaMachine::new(observer, api, None, None, None);
     machine.set_followed_media_source(FakeFollowedSource::new(
         vec![followed_scope("photos", 7)],
         Ok(vec![followed_entry("b.png", 2), followed_entry("a.jpg", 1)]),
@@ -3435,7 +3941,7 @@ async fn an_unavailable_scope_enters_empty_and_loudly() {
     let observer = CountingObserver::new();
     let api = Arc::new(FakeMediaNestApi::new());
     api.set_snapshot(fixture());
-    let machine = MediaMachine::new(observer, api, None, None, None, None);
+    let machine = MediaMachine::new(observer, api, None, None, None);
     machine.set_followed_media_source(FakeFollowedSource::new(
         vec![followed_scope("photos", 7)],
         Err(FollowedFetchError::Unavailable),
@@ -3463,7 +3969,7 @@ async fn a_transport_fault_keeps_the_prior_browse_and_is_not_a_revoke() {
     let observer = CountingObserver::new();
     let api = Arc::new(FakeMediaNestApi::new());
     api.set_snapshot(fixture());
-    let machine = MediaMachine::new(observer, api, None, None, None, None);
+    let machine = MediaMachine::new(observer, api, None, None, None);
     machine.set_followed_media_source(FakeFollowedSource::new(
         vec![followed_scope("photos", 7)],
         Err(FollowedFetchError::Transport("connection reset".into())),
@@ -3489,7 +3995,7 @@ async fn a_transport_fault_keeps_the_prior_browse_and_is_not_a_revoke() {
 async fn an_unknown_scope_value_reports_rather_than_silently_no_opping() {
     let observer = CountingObserver::new();
     let api = Arc::new(FakeMediaNestApi::new());
-    let machine = MediaMachine::new(observer, api, None, None, None, None);
+    let machine = MediaMachine::new(observer, api, None, None, None);
     machine.set_followed_media_source(FakeFollowedSource::new(vec![], Ok(vec![])));
     machine.refresh(None).await;
 
@@ -3505,7 +4011,7 @@ async fn an_unknown_scope_value_reports_rather_than_silently_no_opping() {
 async fn download_followed_requires_the_active_scope() {
     let observer = CountingObserver::new();
     let api = Arc::new(FakeMediaNestApi::new());
-    let machine = MediaMachine::new(observer, api, None, None, None, None);
+    let machine = MediaMachine::new(observer, api, None, None, None);
 
     // No scope active: the guard fails loudly before any fetcher is touched —
     // a wrong-scope download must never reach a nest at all.
@@ -3520,7 +4026,7 @@ async fn download_followed_requires_the_active_scope() {
 async fn download_followed_resolves_the_manifest_from_the_retained_listing() {
     let observer = CountingObserver::new();
     let api = Arc::new(FakeMediaNestApi::new());
-    let machine = MediaMachine::new(observer, api, None, None, None, None);
+    let machine = MediaMachine::new(observer, api, None, None, None);
     let entry = FollowedFileEntry {
         // A real 32-byte hex manifest, so a resolved path gets past the decode
         // guard to the fetcher pick.
@@ -3564,7 +4070,7 @@ async fn download_followed_resolves_the_manifest_from_the_retained_listing() {
 async fn download_followed_dials_the_home_nest_under_the_stamped_identity() {
     let observer = CountingObserver::new();
     let api = Arc::new(FakeMediaNestApi::new());
-    let machine = MediaMachine::new(observer, api, None, None, None, None);
+    let machine = MediaMachine::new(observer, api, None, None, None);
     let factory = Arc::new(RecordingForeignFactory {
         served: FakeDownloadFetcher::default(),
         asked: std::sync::Mutex::new(Vec::new()),
@@ -3629,7 +4135,6 @@ async fn upload_into_a_declassified_folder_rests_plaintext() {
         Some(uploader.clone() as Arc<dyn MediaBlobUploader>),
         None,
         None,
-        None,
     );
     machine.refresh(None).await;
 
@@ -3676,7 +4181,6 @@ async fn upload_into_a_declassified_folder_posts_a_plaintext_manifest_a_keyless_
         CountingObserver::new(),
         api.clone(),
         Some(uploader.clone() as Arc<dyn MediaBlobUploader>),
-        None,
         None,
         None,
     );
@@ -3745,7 +4249,6 @@ async fn upload_into_a_declassified_folder_records_no_sealed_path() {
         Some(uploader.clone() as Arc<dyn MediaBlobUploader>),
         None,
         None,
-        None,
     );
     machine.refresh(None).await;
 
@@ -3792,7 +4295,6 @@ async fn upload_into_an_ordinary_folder_still_seals() {
         Some(uploader.clone() as Arc<dyn MediaBlobUploader>),
         None,
         None,
-        None,
     );
     machine.refresh(None).await;
 
@@ -3834,7 +4336,6 @@ async fn upload_into_an_unlisted_folder_seals() {
         observer,
         api.clone(),
         Some(uploader.clone() as Arc<dyn MediaBlobUploader>),
-        None,
         None,
         None,
     );
@@ -3880,7 +4381,6 @@ async fn upload_after_the_owner_flips_a_folder_back_to_private_seals_despite_a_s
         CountingObserver::new(),
         api.clone(),
         Some(uploader.clone() as Arc<dyn MediaBlobUploader>),
-        None,
         None,
         None,
     );
@@ -3947,7 +4447,6 @@ async fn a_path_seal_required_refusal_refreshes_the_snapshot_and_keeps_the_error
         Some(uploader.clone() as Arc<dyn MediaBlobUploader>),
         None,
         None,
-        None,
     );
     machine.refresh(None).await;
     api.fail_writes(MediaApiError::SealRequired {
@@ -3993,7 +4492,6 @@ async fn upload_into_a_cached_public_folder_seals_when_the_fresh_read_fails() {
         CountingObserver::new(),
         api.clone(),
         Some(uploader.clone() as Arc<dyn MediaBlobUploader>),
-        None,
         None,
         None,
     );
@@ -4092,7 +4590,6 @@ async fn upload_into_a_served_set_seals_through_the_engines_pipeline_and_the_mda
         api.clone(),
         Some(uploader.clone() as Arc<dyn MediaBlobUploader>),
         None,
-        None,
         Some(resolver as Arc<dyn FolderKeyResolver>),
     );
 
@@ -4159,7 +4656,7 @@ async fn upload_into_a_served_set_seals_through_the_engines_pipeline_and_the_mda
     assert_eq!(rec_hash, hex::encode(manifest_hash));
     assert_eq!(size, raw.len() as i64);
     assert_eq!(version, Some(3), "stamped with the sealing generation");
-    assert_eq!(thumb, None, "no thumbnail for a content-keyed set");
+    assert_eq!(thumb, None, "a non-image renders no thumbnail");
     assert_eq!(
         path_sealed,
         Some(expected_content_path_seal(
@@ -4191,7 +4688,7 @@ async fn upload_into_a_served_set_seals_through_the_engines_pipeline_and_the_mda
         &fetcher,
         &mda_keys,
         fauna_core::data::ContentHash::from_digest_raw(*manifest_hash),
-        Some(3),
+        Some(fauna_core::blob_seal::SealStamp::Version(3)),
         "photos/from-phone.bin",
     )
     .await
@@ -4213,7 +4710,6 @@ async fn upload_into_a_served_set_with_custody_not_yet_synced_refuses_and_upload
         observer,
         api.clone(),
         Some(uploader.clone() as Arc<dyn MediaBlobUploader>),
-        None,
         None,
         Some(resolver as Arc<dyn FolderKeyResolver>),
     );
@@ -4258,7 +4754,6 @@ async fn upload_into_a_metadata_only_folder_refuses_and_sends_nothing() {
         observer,
         api.clone(),
         Some(uploader.clone() as Arc<dyn MediaBlobUploader>),
-        None,
         None,
         None,
     );
@@ -4316,7 +4811,6 @@ async fn upload_into_a_shared_set_seals_under_the_groups_content_key_never_a_blo
         observer,
         api.clone(),
         Some(uploader.clone() as Arc<dyn MediaBlobUploader>),
-        None,
         None,
         Some(resolver as Arc<dyn FolderKeyResolver>),
     );
@@ -4385,7 +4879,6 @@ async fn a_served_sets_mount_written_rows_render_under_the_serve_custody() {
     let machine = MediaMachine::new(
         observer,
         api,
-        None,
         None,
         None,
         Some(resolver as Arc<dyn FolderKeyResolver>),
@@ -4479,7 +4972,6 @@ async fn an_unflagged_sets_served_era_rows_still_render_via_the_retired_generati
         api,
         None,
         None,
-        None,
         Some(resolver as Arc<dyn FolderKeyResolver>),
     );
 
@@ -4510,6 +5002,8 @@ fn version(num: i64, manifest_hash: String) -> fauna_media_machine::snapshots::F
         pruned: false,
         purge_after: None,
         folder_id: None,
+        thumbnail_hash: None,
+        deposited_by: None,
     }
 }
 
@@ -4529,7 +5023,7 @@ async fn share_machine() -> (Arc<MediaMachine>, Arc<FakeMediaNestApi>) {
         version(1, "11".repeat(32)),
         version(2, "22".repeat(32)),
     ]);
-    let machine = MediaMachine::new(CountingObserver::new(), api.clone(), None, None, None, None);
+    let machine = MediaMachine::new(CountingObserver::new(), api.clone(), None, None, None);
     machine.set_share_author(SHARE_SECRET.to_vec(), "https://nest.example".into());
     machine.refresh(None).await;
     (machine, api)
@@ -4590,7 +5084,6 @@ async fn private_share_machine(
     let machine = MediaMachine::new(
         CountingObserver::new(),
         api.clone(),
-        None,
         None,
         Some(Arc::new(fetcher)),
         None,
@@ -4713,7 +5206,6 @@ async fn a_media_upload_into_an_owner_only_folder_takes_a_private_link_its_holde
         Some(uploader.clone() as Arc<dyn MediaBlobUploader>),
         None,
         None,
-        None,
     );
     upload_machine.refresh(None).await;
     let raw = served_body();
@@ -4750,7 +5242,6 @@ async fn a_media_upload_into_an_owner_only_folder_takes_a_private_link_its_holde
     let machine = MediaMachine::new(
         CountingObserver::new(),
         api.clone(),
-        None,
         None,
         Some(Arc::new(fetcher_over(&uploader))),
         None,
@@ -5004,7 +5495,6 @@ async fn a_predecessor_signed_item_never_opens_under_the_current_root() {
         CountingObserver::new(),
         api,
         None,
-        None,
         Some(Arc::new(fetcher) as Arc<dyn fauna_core::file_download::BlobFetcher>),
         None,
     );
@@ -5057,20 +5547,17 @@ async fn a_predecessor_signed_item_never_opens_under_the_current_root() {
     );
 }
 
-/// The bare-key twin: a thumbnail that only a predecessor's signature names is
-/// offered the retired keys alone.
+/// The thumbnail twin: a thumbnail that only a predecessor's signature names
+/// is offered the retired roots alone — it opens through the row's own
+/// `FileDownloadKeys`, the signer bound included, exactly as its file does.
 #[tokio::test]
 async fn a_predecessor_signed_thumbnail_is_offered_the_retired_keys_alone() {
     for (seal_key, opens) in [(KEY, false), (RETIRED_KEY, true)] {
-        let sealed_bytes = sealed(b"blob bytes", &seal_key);
-        let hash = content_hash_hex(&sealed_bytes);
+        let mut fetcher = FakeDownloadFetcher::default();
+        let hash = stock_manifest(&mut fetcher, owner_root(&seal_key), b"tile bytes");
         let api = Arc::new(FakeMediaNestApi::new());
         api.set_snapshot(MediaSnapshot {
-            items: vec![MediaItem {
-                thumbnail_hash: Some(hash.clone()),
-                manifest_hash: Some(hex::decode(&hash).unwrap().into()),
-                ..item("photos", "photos/a.jpg", 10, 100)
-            }],
+            items: vec![thumbnail_item("photos/a.jpg", &hash)],
             ..Default::default()
         });
         api.set_predecessor_signed(vec!["photos/a.jpg".into()]);
@@ -5078,8 +5565,7 @@ async fn a_predecessor_signed_thumbnail_is_offered_the_retired_keys_alone() {
             CountingObserver::new(),
             api,
             None,
-            Some(Arc::new(FakeMediaBlobFetcher::new(sealed_bytes)) as Arc<dyn MediaBlobFetcher>),
-            None,
+            Some(Arc::new(fetcher) as Arc<dyn fauna_core::file_download::BlobFetcher>),
             None,
         );
         machine.set_predecessor_chain(
@@ -5129,7 +5615,6 @@ async fn a_signer_opens_only_its_own_root_and_earlier_ones_on_the_media_page() {
     let machine = MediaMachine::new(
         CountingObserver::new(),
         api,
-        None,
         None,
         Some(Arc::new(fetcher) as Arc<dyn fauna_core::file_download::BlobFetcher>),
         None,
@@ -5184,7 +5669,6 @@ async fn an_unpaired_key_or_another_writer_opens_no_predecessor_signed_row() {
             CountingObserver::new(),
             api,
             None,
-            None,
             Some(Arc::new(fetcher) as Arc<dyn fauna_core::file_download::BlobFetcher>),
             None,
         );
@@ -5222,6 +5706,8 @@ fn version_naming(manifest_hex: &str) -> fauna_media_machine::snapshots::FileVer
         pruned: false,
         purge_after: None,
         folder_id: None,
+        thumbnail_hash: None,
+        deposited_by: None,
     }
 }
 
@@ -5236,7 +5722,6 @@ fn restore_machine(
         CountingObserver::new(),
         api.clone(),
         Some(uploader.clone() as Arc<dyn MediaBlobUploader>),
-        None,
         Some(Arc::new(fetcher) as Arc<dyn fauna_core::file_download::BlobFetcher>),
         None,
     );
@@ -5397,6 +5882,114 @@ async fn a_current_identity_version_restores_verbatim() {
     assert!(uploader.manifests().is_empty());
 }
 
+/// The thumbnail each recorded restore named.
+fn restored_thumbnails(api: &FakeMediaNestApi) -> Vec<Option<String>> {
+    api.calls()
+        .into_iter()
+        .filter_map(|c| match c {
+            MediaNestCall::RestoreMember { thumbnail_hash, .. } => Some(thumbnail_hash),
+            _ => None,
+        })
+        .collect()
+}
+
+/// A restore driven through the listing, as the page drives it.
+async fn restore_listed(machine: &MediaMachine) {
+    let versions = machine
+        .file_versions("photos".into(), "photos/a.bin".into(), false)
+        .await
+        .expect("listed");
+    machine
+        .restore_version(
+            "photos".into(),
+            "dev-1".into(),
+            "photos/a.bin".into(),
+            versions[0].clone(),
+        )
+        .await;
+}
+
+/// `media.md` § Encryption at rest → *A thumbnail rests as its file rests*,
+/// bound (2): a predecessor-signed version's thumbnail is re-sealed exactly
+/// as its bytes — the restore records a NEW thumbnail manifest that opens
+/// under the current root alone, with the original pixels.
+#[tokio::test]
+async fn a_predecessor_signed_versions_thumbnail_is_re_sealed_with_it() {
+    let current_only =
+        fauna_core::file_download::FileDownloadKeys::owner(BackupKey::from_bytes(KEY));
+    let pixels = b"the inherited thumbnail JPEG".to_vec();
+    let mut fetcher = FakeDownloadFetcher::default();
+    let inherited = stock_owner_manifest(&mut fetcher, &RETIRED_KEY, b"the inherited file");
+    let thumb = stock_owner_manifest(&mut fetcher, &RETIRED_KEY, &pixels);
+    let api = Arc::new(FakeMediaNestApi::new());
+    api.set_versions(vec![fauna_media_machine::snapshots::FileVersionSummary {
+        thumbnail_hash: Some(thumb.clone()),
+        ..version_naming(&inherited)
+    }]);
+    api.set_predecessor_signed(vec![inherited.clone()]);
+    let uploader = Arc::new(FakeMediaBlobUploader::new("unused"));
+    let machine = restore_machine(&api, &uploader, fetcher.clone());
+    restore_listed(&machine).await;
+    assert!(
+        machine.snapshot().error.is_none(),
+        "{:?}",
+        machine.snapshot().error
+    );
+    let recorded = restored_thumbnails(&api);
+    assert_eq!(recorded.len(), 1);
+    let new_thumb = recorded[0].clone().expect("the restore names a thumbnail");
+    assert_ne!(
+        new_thumb, thumb,
+        "re-sealed, never carried under a retired root"
+    );
+    let opened = fauna_core::file_download::download_file_bytes_by_manifest(
+        &uploaded(&uploader),
+        &current_only,
+        fauna_core::data::ContentHash::from_digest_raw(hex_decode32(&new_thumb)),
+        None,
+        "photos/a.bin",
+    )
+    .await
+    .expect("the restored thumbnail opens under the current root alone");
+    assert_eq!(opened, pixels);
+}
+
+/// …and a thumbnail that does not open under the signer's roots (one the
+/// successor sealed) is dropped: the file still restores, with no tile.
+#[tokio::test]
+async fn an_unopenable_thumbnail_never_fails_the_inherited_restore() {
+    let mut fetcher = FakeDownloadFetcher::default();
+    let inherited = stock_owner_manifest(&mut fetcher, &RETIRED_KEY, b"the inherited file");
+    let planted = stock_owner_manifest(&mut fetcher, &KEY, b"a tile under the current root");
+    let api = Arc::new(FakeMediaNestApi::new());
+    api.set_versions(vec![fauna_media_machine::snapshots::FileVersionSummary {
+        thumbnail_hash: Some(planted),
+        ..version_naming(&inherited)
+    }]);
+    api.set_predecessor_signed(vec![inherited.clone()]);
+    let uploader = Arc::new(FakeMediaBlobUploader::new("unused"));
+    let machine = restore_machine(&api, &uploader, fetcher);
+    restore_listed(&machine).await;
+    assert!(machine.snapshot().error.is_none());
+    assert_eq!(restores(&api).len(), 1, "the file restored");
+    assert_eq!(restored_thumbnails(&api), [None], "without a tile");
+}
+
+/// A Verbatim restore re-points the version's own thumbnail with its bytes.
+#[tokio::test]
+async fn a_verbatim_restore_re_records_the_versions_thumbnail() {
+    let api = Arc::new(FakeMediaNestApi::new());
+    api.set_versions(vec![fauna_media_machine::snapshots::FileVersionSummary {
+        thumbnail_hash: Some("feed01".into()),
+        ..version_naming("abc123")
+    }]);
+    let uploader = Arc::new(FakeMediaBlobUploader::new("unused"));
+    let machine = restore_machine(&api, &uploader, FakeDownloadFetcher::default());
+    restore_listed(&machine).await;
+    assert_eq!(restored_thumbnails(&api), [Some("feed01".to_string())]);
+    assert!(uploader.manifests().is_empty(), "nothing re-sealed");
+}
+
 // ── Ruling (10)(c): the stamp binds the root ────────────────────────────────
 //
 // `writer-signed-change-records.md` § Writer-signed change records. A record
@@ -5453,7 +6046,6 @@ async fn a_stamped_version_restored_verbatim_never_opens_under_the_owner_root() 
         CountingObserver::new(),
         reader_api,
         None,
-        None,
         Some(Arc::new(fetcher) as Arc<dyn fauna_core::file_download::BlobFetcher>),
         None,
     );
@@ -5484,22 +6076,23 @@ async fn a_stamped_version_restored_verbatim_never_opens_under_the_owner_root() 
     );
 }
 
-/// The bare-key arm: a thumbnail no unstamped row names is refused under the
-/// owner key when the row naming it is stamped (a content-keyed upload records
-/// no thumbnail) — while the same bytes named by an unstamped row of the
-/// current identity open.
+/// Ruling (10)(c), by construction: a thumbnail named by a STAMPED row opens
+/// under that row's generation and never an owner root, while the same
+/// owner-root tile named by an unstamped row of the current identity opens.
+/// The fixture's path is SEALED, so the row goes through the label render
+/// first — the shape every served or shared set has in production, under
+/// which the old reader-side narrowing was dead.
 #[tokio::test]
 async fn a_stamped_item_never_opens_a_thumbnail_under_the_owner_key() {
     for stamp in [Some(5u64), None] {
-        let sealed_bytes = sealed(b"blob bytes", &KEY);
-        let hash = content_hash_hex(&sealed_bytes);
+        let mut fetcher = FakeDownloadFetcher::default();
+        let hash = stock_manifest(&mut fetcher, owner_root(&KEY), b"tile bytes");
         let api = Arc::new(FakeMediaNestApi::new());
         api.set_snapshot(MediaSnapshot {
             items: vec![MediaItem {
                 thumbnail_hash: Some(hash.clone()),
-                manifest_hash: Some(hex::decode(&hash).unwrap().into()),
                 content_key_version: stamp,
-                ..item("photos", "photos/a.jpg", 10, 100)
+                ..item_naming("photos/a.jpg", &hash, &KEY)
             }],
             ..Default::default()
         });
@@ -5507,12 +6100,15 @@ async fn a_stamped_item_never_opens_a_thumbnail_under_the_owner_key() {
             CountingObserver::new(),
             api,
             None,
-            Some(Arc::new(FakeMediaBlobFetcher::new(sealed_bytes)) as Arc<dyn MediaBlobFetcher>),
-            Some(Arc::new(FakeDownloadFetcher::default())
-                as Arc<dyn fauna_core::file_download::BlobFetcher>),
+            Some(Arc::new(fetcher) as Arc<dyn fauna_core::file_download::BlobFetcher>),
             None,
         );
         machine.refresh(Some(KEY.to_vec())).await;
+        assert_eq!(
+            machine.snapshot().items.len(),
+            1,
+            "the sealed path renders, so the row is listed ({stamp:?})"
+        );
 
         let thumbnail = machine.fetch_thumbnail(hash, KEY.to_vec()).await;
         assert_eq!(thumbnail.is_ok(), stamp.is_none(), "thumbnail, {stamp:?}");
@@ -5524,7 +6120,7 @@ async fn a_stamped_item_never_opens_a_thumbnail_under_the_owner_key() {
 #[tokio::test]
 async fn the_attested_predecessor_ids_reach_the_seams_reader() {
     let api = Arc::new(FakeMediaNestApi::new());
-    let machine = MediaMachine::new(CountingObserver::new(), api.clone(), None, None, None, None);
+    let machine = MediaMachine::new(CountingObserver::new(), api.clone(), None, None, None);
     machine.set_predecessor_actor_ids(vec![vec![3u8; 32], vec![1, 2, 3]]);
     assert_eq!(api.reader_predecessors(), vec![[3u8; 32]]);
 }
@@ -5607,7 +6203,6 @@ async fn same_named_machine(
         api.clone(),
         uploader.map(|u| u as Arc<dyn MediaBlobUploader>),
         None,
-        None,
         resolver,
     );
     if let Some(groups) = joined {
@@ -5659,7 +6254,7 @@ async fn an_unjoined_member_row_is_never_offered() {
             items: vec![item_in("trip", Some(SHARED_PHOTOS), "beach.jpg")],
             ..Default::default()
         });
-        let machine = MediaMachine::new(CountingObserver::new(), api, None, None, None, None);
+        let machine = MediaMachine::new(CountingObserver::new(), api, None, None, None);
         if let Some(groups) = joined.clone() {
             machine.set_mls_query(Arc::new(Joined(groups)));
         }
@@ -5707,7 +6302,7 @@ async fn an_item_without_folder_id_follows_the_name() {
         ],
         ..Default::default()
     });
-    let machine = MediaMachine::new(CountingObserver::new(), api, None, None, None, None);
+    let machine = MediaMachine::new(CountingObserver::new(), api, None, None, None);
     machine.refresh(None).await;
     machine.set_filter(Some("photos".into()));
     assert_eq!(paths(&machine), vec!["old.jpg".to_string()]);
@@ -5821,7 +6416,6 @@ async fn the_all_media_default_target_is_the_first_own_set() {
         Some(uploader as Arc<dyn MediaBlobUploader>),
         None,
         None,
-        None,
     );
     machine.set_mls_query(Arc::new(Joined(vec!["g9"])));
     machine.refresh(None).await;
@@ -5898,7 +6492,6 @@ async fn a_shared_sets_version_restores_into_its_own_row() {
     let machine = MediaMachine::new(
         CountingObserver::new(),
         api.clone(),
-        None,
         None,
         None,
         Some(shared_row_resolver(content_key)),

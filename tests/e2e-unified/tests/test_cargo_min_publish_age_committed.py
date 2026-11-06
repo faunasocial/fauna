@@ -2,18 +2,22 @@
 
 `release-integrity.md` § Dependency verification → *Minimum release age for new
 dependency versions* (owner-ruled 2026-10-03) says Cargo's resolver refuses any
-registry version published less than 7 days ago. The whole control is three
-lines of `.cargo/config.toml`, and it fails silently in both directions:
+registry version published less than 7 days ago. The whole control is one
+line of `.cargo/config.toml`, and it fails silently in two ways:
 
   * drop the `[registry]` value and every resolution goes back to "newest",
     with no error anywhere;
-  * drop the `[unstable]` gate and the pinned Cargo (1.99 nightly) prints one
-    warning line and ignores the value — measured 2026-10-03;
   * commit the resolver's own override (`incompatible-publish-age`, or its
     environment form in a recipe or workflow) and the value is still there to
     read while nothing enforces it.
 
-So the gate is that all three hold. The age is the owner's: changing the number
+The key is stable since Cargo 1.100. Measured on the pinned Cargo 1.101
+nightly on 2026-10-27, it is honoured with no `[unstable] min-publish-age` gate
+line, and that line only draws an "unused config key" warning. So the gate
+line is gone, and this test keeps it gone. (On the Cargo 1.99 nightly before
+that, the key was ignored without the gate, measured 2026-10-03.)
+
+So the gate is that all three hold: the value, no override, no dead gate line. The age is the owner's: changing the number
 here without a new ruling in the goal doc is the drift this test exists to stop.
 
 The same age is committed for Deno's npm and JSR resolution, as the
@@ -71,17 +75,18 @@ def test_the_seven_day_age_is_committed():
     )
 
 
-def test_the_unstable_gate_is_on():
-    """Without the gate the pinned Cargo warns and ignores the age.
+def test_the_retired_unstable_gate_is_not_committed():
+    """The pinned Cargo (1.101) reads the age as a stable key.
 
-    At the pin bump to a Cargo that has stabilised the setting (1.100), this
-    assertion and the `[unstable]` line go together — but only after checking
-    that Cargo still honours the `[registry]` value without it.
+    The `[unstable] min-publish-age` line it needed before Cargo 1.100 now only
+    draws an "unused config key" warning on every cargo invocation (measured
+    2026-10-27), so it stays out.
     """
     gate = _config().get("unstable", {}).get("min-publish-age")
-    assert gate is True, (
+    assert gate is None, (
         f"{_CONFIG.relative_to(_REPO)}: [unstable] min-publish-age is {gate!r}; "
-        "the pinned Cargo ignores [registry] global-min-publish-age without it."
+        "the pinned Cargo reads [registry] global-min-publish-age as a stable "
+        "key and warns that the gate line is unused."
     )
 
 

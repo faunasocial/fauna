@@ -413,6 +413,24 @@ class _WsRpcClientBase:
             return {"cert_reqs": ssl.CERT_NONE}
         return None
 
+    def _create_ws(self, url: str, **kwargs) -> websocket.WebSocket:
+        """``websocket.create_connection`` under this client's TLS posture —
+        the one dial every subclass's handshake goes through.
+
+        An authority a caller pinned (`common/auth.py` § SPKI pins per
+        authority) is dialled on a socket whose leaf SPKI was compared to the
+        pin before this hands it over, so the upgrade — and the bearer in its
+        subprotocol header — goes only to the key the pin names; the socket is
+        passed to ``websocket-client`` as-is (pinned by
+        ``tests/test_ws_rpc_spki_pin.py``). Any other URL keeps
+        :meth:`_ssl_opt`'s posture, unchanged."""
+        from common.auth import open_pinned_tls
+
+        pinned = open_pinned_tls(url, timeout=self._http_timeout)
+        if pinned is not None:
+            return websocket.create_connection(url, socket=pinned, **kwargs)
+        return websocket.create_connection(url, sslopt=self._ssl_opt(), **kwargs)
+
     def _https_context(self) -> Optional[ssl.SSLContext]:
         """Unverified `SSLContext` for urllib over an `https://` base (the
         self-signed deploy cert); `None` for `http://` (verification path

@@ -112,7 +112,7 @@ impl RoleAddressKind {
 /// the four-arm map itself — web, apple, android and windows all did, each under
 /// a comment naming the shared function it was mirroring. Handing the whole
 /// table across the boundary is the shape `fauna_core::format::
-/// content_floor_options` / `unknown_sender_options` already use for exactly
+/// unknown_sender_options` already uses for exactly
 /// this problem (priority #2/#4).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
@@ -362,9 +362,14 @@ impl From<MailDomainRow> for LocalDomainView {
             catch_all_actor_id: r.catch_all_actor_id.map(|b| b.into_vec()),
             catch_all_cleared_by_succession_at: r.catch_all_cleared_by_succession_at,
             role_address_overrides,
+            // The policy the domain PUBLISHES (its partial over the
+            // deployment-wide catalog, resolved nest-side), never the bare
+            // partial: a domain with no override publishes the deployment's
+            // policy, which an admin may have softened below `reject`
+            // (`dmarc-reporting.md` § Multi-domain deployments).
             dmarc_policy: r
-                .dmarc_overrides
-                .policy_mode
+                .effective_dmarc_policy_mode
+                .or(r.dmarc_overrides.policy_mode)
                 .map(DomainDmarcPolicy::from)
                 .unwrap_or_default(),
             added_at: r.added_at,
@@ -497,22 +502,20 @@ pub enum LocalDomainAction {
         domain: String,
         mta_sts_cert_mode: String,
     },
-    /// Soft-delete a domain (30-day recovery) with no confirm. The nest refuses
-    /// the primary (`cannot_remove_primary_domain`); the resulting error
-    /// surfaces. The admin's remove goes through the confirm instead
-    /// ([`LocalDomainMachine::arm_remove_domain`] →
-    /// [`Self::ConfirmRemoveDomain`]); this direct form stays for the apps not
-    /// yet lifted onto the confirm.
-    RemoveDomain { domain: String },
-    /// The remove-confirm dialog's confirm: soft-delete the domain
-    /// [`LocalDomainsSnapshot::remove_confirm_domain`] names and close the
-    /// dialog. Nothing armed → a no-op, never a removal of a stale pick.
+    /// The remove-confirm dialog's confirm — the one way a domain is removed:
+    /// soft-delete (30-day recovery) the domain
+    /// [`LocalDomainsSnapshot::remove_confirm_domain`] names
+    /// ([`LocalDomainMachine::arm_remove_domain`]) and close the dialog.
+    /// Nothing armed → a no-op, never a removal of a stale pick. The nest
+    /// refuses the primary (`cannot_remove_primary_domain`); the resulting
+    /// error surfaces.
     ConfirmRemoveDomain,
     /// Un-soft-delete a domain within the 30-day window.
     RestoreDomain { domain: String },
     /// Partial edit of the per-domain knobs (each `None` leaves it untouched;
     /// `update_local_domain_config`). `dmarc_policy` is the domain's published
-    /// DMARC policy: `Some(Reject)`, the default, clears the override. The knobs
+    /// DMARC policy: the nest stores it, or clears the override when the
+    /// deployment-wide policy already publishes it. The knobs
     /// that need a genuine clear are their own actions below.
     UpdateConfig {
         domain: String,
@@ -574,6 +577,41 @@ pub enum LocalDomainAction {
         rename_id: Vec<u8>,
         reason: Option<String>,
     },
+}
+
+impl LocalDomainAction {
+    /// Whether the action, once it succeeds, changes what the nest's
+    /// `fauna.dns.list_records` assembles: the active domain set, a domain's
+    /// SPF / DMARC / MTA-STS bodies, or the extra `mail.<x>` row a primary
+    /// rename keeps published. After one, the app runs
+    /// `DnsManagementMachine::recheck_matrix` before its next render, so an
+    /// added domain appears with its records and their status
+    /// (`mail-multidomain.md` § Wizard steps, step 8). Exhaustive on purpose: a
+    /// new action decides here.
+    pub fn moves_record_matrix(&self) -> bool {
+        match self {
+            Self::AddDomain { .. }
+            | Self::ConfirmRemoveDomain
+            | Self::RestoreDomain { .. }
+            | Self::UpdateConfig { .. }
+            | Self::StartPrimaryRename { .. }
+            | Self::CompletePrimaryRename { .. }
+            | Self::AbortPrimaryRename { .. } => true,
+            // The page's own re-read refreshes the matrix beside it; routing
+            // picks and the grace window publish nothing.
+            Self::Refresh
+            | Self::SetCatchAllActor { .. }
+            | Self::SetRoleAddress { .. }
+            | Self::ExtendPrimaryRenameGrace { .. } => false,
+        }
+    }
+}
+
+/// [`LocalDomainAction::moves_record_matrix`] over UniFFI and wasm, where an
+/// enum carries no methods.
+#[cfg_attr(feature = "uniffi", uniffi::export)]
+pub fn local_domain_action_moves_record_matrix(action: LocalDomainAction) -> bool {
+    action.moves_record_matrix()
 }
 
 /// WS-RPC seam to nest. Per-app glue implements this over `MailAdminClient`
@@ -928,7 +966,6 @@ impl LocalDomainMachine {
                 domain,
                 mta_sts_cert_mode,
             } => self.add_domain(domain, mta_sts_cert_mode).await,
-            LocalDomainAction::RemoveDomain { domain } => self.remove_domain(domain).await,
             LocalDomainAction::ConfirmRemoveDomain => self.confirm_remove_domain().await,
             LocalDomainAction::RestoreDomain { domain } => self.restore_domain(domain).await,
             LocalDomainAction::UpdateConfig {
@@ -989,6 +1026,65 @@ impl LocalDomainMachine {
 mod tests {
     use super::*;
     use std::sync::Mutex as StdMutex;
+
+    /// The actions that change what the nest's `fauna.dns.list_records`
+    /// assembles — the domain set, a record body, the rename's extra MX-host
+    /// row — move the matrix; a routing pick, a grace extension and a re-read
+    /// do not (`mail-multidomain.md` § Wizard steps, step 8).
+    #[test]
+    fn domain_actions_that_move_the_record_matrix() {
+        let d = || "example.org".to_string();
+        let id = || vec![7u8; 16];
+        let moves = [
+            LocalDomainAction::AddDomain {
+                domain: d(),
+                mta_sts_cert_mode: DEFAULT_CERT_MODE.into(),
+            },
+            LocalDomainAction::ConfirmRemoveDomain,
+            LocalDomainAction::RestoreDomain { domain: d() },
+            LocalDomainAction::UpdateConfig {
+                domain: d(),
+                mta_sts_max_age_seconds: None,
+                mta_sts_cert_mode: None,
+                spf_record: None,
+                dmarc_policy: Some(DomainDmarcPolicy::Quarantine),
+            },
+            LocalDomainAction::StartPrimaryRename {
+                new_primary_domain_id: id(),
+                grace_days: None,
+            },
+            LocalDomainAction::CompletePrimaryRename {
+                rename_id: id(),
+                force: false,
+            },
+            LocalDomainAction::AbortPrimaryRename {
+                rename_id: id(),
+                reason: None,
+            },
+        ];
+        for a in moves {
+            assert!(local_domain_action_moves_record_matrix(a.clone()), "{a:?}");
+        }
+        let still = [
+            LocalDomainAction::Refresh,
+            LocalDomainAction::SetCatchAllActor {
+                domain: d(),
+                actor_id: None,
+            },
+            LocalDomainAction::SetRoleAddress {
+                domain: d(),
+                role: RoleAddressKind::Postmaster,
+                actor_id: None,
+            },
+            LocalDomainAction::ExtendPrimaryRenameGrace {
+                rename_id: id(),
+                additional_days: 1,
+            },
+        ];
+        for a in still {
+            assert!(!local_domain_action_moves_record_matrix(a.clone()), "{a:?}");
+        }
+    }
 
     /// The four storage keys are the nest's, not this crate's — they name
     /// `role_address_overrides` entries the nest reads back. Pinned literally
@@ -1187,8 +1283,11 @@ mod tests {
             if let Some(v) = spf_record {
                 r.spf_record = v;
             }
-            // The nest's rule: the default clears both keys, a softer policy
-            // sets both (`fauna_mail::dmarc_publish::set_policy_mode_json`).
+            // The nest's rule over this mock's deployment policy (the shipped
+            // `reject`): the policy the deployment already publishes clears
+            // both keys, any other sets both
+            // (`fauna_mail::dmarc_publish::set_policy_mode_json`); the reply
+            // carries the published policy.
             if let Some(p) = dmarc_policy {
                 let mode = match p {
                     DomainDmarcPolicy::Reject => None,
@@ -1196,6 +1295,7 @@ mod tests {
                 };
                 r.dmarc_overrides.policy_mode = mode;
                 r.dmarc_overrides.subdomain_policy_mode = mode;
+                r.effective_dmarc_policy_mode = Some(DmarcMode::from(p));
             }
             Ok(r.clone())
         }
@@ -1550,11 +1650,12 @@ mod tests {
             vec![row("primary.example", true), row("two.example", false)],
             vec![],
         );
-        m.dispatch(LocalDomainAction::RemoveDomain {
-            domain: "two.example".to_string(),
-        })
-        .await
-        .unwrap();
+        // Only a listed domain arms: the page has read its list first.
+        m.hydrate().await.unwrap();
+        m.arm_remove_domain("two.example".to_string());
+        m.dispatch(LocalDomainAction::ConfirmRemoveDomain)
+            .await
+            .unwrap();
         let snap = m.snapshot();
         assert_eq!(snap.active.len(), 1);
         assert!(!snap.active.iter().any(|d| d.domain == "two.example"));
@@ -1627,10 +1728,14 @@ mod tests {
 
     #[tokio::test]
     async fn a_reread_keeps_the_confirm_while_its_domain_is_listed() {
-        let m = machine_with(
-            vec![row("primary.example", true), row("two.example", false)],
-            vec![],
-        );
+        let nest = Arc::new(FakeNest {
+            active: StdMutex::new(vec![
+                row("primary.example", true),
+                row("two.example", false),
+            ]),
+            ..Default::default()
+        });
+        let m = LocalDomainMachine::new(nest.clone());
         m.hydrate().await.unwrap();
         m.arm_remove_domain("two.example".to_string());
         m.dispatch(LocalDomainAction::Refresh).await.unwrap();
@@ -1639,13 +1744,13 @@ mod tests {
             Some("two.example"),
             "a background re-read must not close the dialog under the admin"
         );
-        // The armed domain removed by any other path: the re-read no longer
-        // lists it, so there is nothing left to confirm.
-        m.dispatch(LocalDomainAction::RemoveDomain {
-            domain: "two.example".to_string(),
-        })
-        .await
-        .unwrap();
+        // The armed domain removed elsewhere (another admin device): the
+        // re-read no longer lists it, so there is nothing left to confirm.
+        nest.active
+            .lock()
+            .unwrap()
+            .retain(|d| d.domain_name != "two.example");
+        m.dispatch(LocalDomainAction::Refresh).await.unwrap();
         assert_eq!(
             m.snapshot().remove_confirm_domain,
             None,
@@ -1676,10 +1781,9 @@ mod tests {
     async fn remove_primary_is_refused_and_surfaces_error() {
         let m = machine_with(vec![row("primary.example", true)], vec![]);
         m.hydrate().await.unwrap();
+        m.arm_remove_domain("primary.example".to_string());
         let err = m
-            .dispatch(LocalDomainAction::RemoveDomain {
-                domain: "primary.example".to_string(),
-            })
+            .dispatch(LocalDomainAction::ConfirmRemoveDomain)
             .await
             .unwrap_err();
         assert!(matches!(err, DispatchError::Nest(_)));
@@ -1781,6 +1885,36 @@ mod tests {
             .find(|v| v.domain == "other.example")
             .unwrap();
         assert_eq!(other.dmarc_policy, DomainDmarcPolicy::Reject);
+    }
+
+    /// (2026-11-05 fix) The select shows the policy the domain PUBLISHES.
+    /// A domain with no override under a deployment softened to `p=none` reads
+    /// `Monitor`, never the shipped default `Reject`; a stricter per-domain
+    /// choice reads as itself.
+    #[test]
+    fn view_dmarc_policy_is_the_published_policy_not_the_partial() {
+        let inherits_soft = MailDomainRow {
+            effective_dmarc_policy_mode: Some(DmarcMode::None),
+            ..row("soft.example", false)
+        };
+        assert_eq!(
+            LocalDomainView::from(inherits_soft).dmarc_policy,
+            DomainDmarcPolicy::Monitor
+        );
+        let mut stricter = row("strict.example", false);
+        stricter.dmarc_overrides.policy_mode = Some(DmarcMode::Reject);
+        stricter.effective_dmarc_policy_mode = Some(DmarcMode::Reject);
+        assert_eq!(
+            LocalDomainView::from(stricter).dmarc_policy,
+            DomainDmarcPolicy::Reject
+        );
+        // A nest that predates the field: the partial, then the default.
+        let mut older = row("older.example", false);
+        older.dmarc_overrides.policy_mode = Some(DmarcMode::Quarantine);
+        assert_eq!(
+            LocalDomainView::from(older).dmarc_policy,
+            DomainDmarcPolicy::Quarantine
+        );
     }
 
     #[test]

@@ -66,6 +66,10 @@ fn auth_error_to_rpc(e: AuthError) -> RpcError {
         AuthError::InvalidNonce => {
             RpcError::new("fauna.auth.invalid_nonce", "error.auth.invalid_nonce")
         }
+        AuthError::AlreadyBound => RpcError::new(
+            RpcError::CODE_AUTH_DEVICE_BIND_ALREADY_BOUND,
+            "error.auth.device_bind_already_bound",
+        ),
         // The one auth refusal that is deliberately *informative*: it names the
         // successor and the kind that serves the proof, because the client
         // hitting it is normally the succeeded user's own device and its next
@@ -336,6 +340,50 @@ fn device_handshake_handler() -> RpcHandler {
                 cert_binding,
                 extra: Default::default(),
             })
+        })
+    })
+}
+
+// ── fauna.auth.device_bind (in-band device binding) ──────────────────────────
+
+/// Bind the calling connection to a device of its own actor — the one kind in
+/// this file that is **post-auth**: it is absent from `pre_identity_allowlist`,
+/// so it dispatches only on an authenticated connection, and unlike its
+/// neighbours it reads the dispatcher's `actor_id`, the connection's own. The
+/// verification body is `auth_core::device_bind_core`.
+///
+/// The failed-credential throttle stays with the anonymous mint: it keys a
+/// claimed identity from an unproven source, and this caller holds a session.
+fn device_bind_handler() -> RpcHandler {
+    Box::new(|state, actor_id, payload| {
+        Box::pin(async move {
+            crate::bridge_method_allowlist::require_permission(
+                &state.db,
+                &actor_id,
+                fauna_protocol::auth::DEVICE_BIND_KIND,
+                internal,
+            )
+            .await?;
+            let req: fauna_protocol::auth::DeviceBindRequest =
+                decode(&payload).map_err(malformed)?;
+            // The binding lands on the connection the request rode in on,
+            // which only the dispatch core knows.
+            let conn_id = crate::dispatch_core::current_caller()
+                .map(|c| c.conn_id)
+                .ok_or_else(|| internal("device bind called outside a client connection"))?;
+            auth_core::device_bind_core(
+                &state,
+                &actor_id,
+                conn_id,
+                &req.actor_id,
+                &req.device_key,
+                req.timestamp,
+                &req.signature,
+                req.nonce.as_slice(),
+            )
+            .await
+            .map_err(auth_error_to_rpc)?;
+            encode_reply(&fauna_protocol::auth::DeviceBindReply::default())
         })
     })
 }
@@ -631,6 +679,14 @@ pub fn register_auth_handlers(b: &mut RpcRouterBuilder) {
             forbid_replay: false,
             default_deadline: deadline,
             handler: device_handshake_handler(),
+        },
+    );
+    b.add(
+        fauna_protocol::auth::DEVICE_BIND_KIND,
+        RpcKindMeta {
+            forbid_replay: false,
+            default_deadline: deadline,
+            handler: device_bind_handler(),
         },
     );
     b.add(

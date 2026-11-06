@@ -37,7 +37,7 @@ func propPatchFixture(t *testing.T, displayname, description string) (*mockCalle
 	sealed, err := SealCollectionMetadata(EncryptedCollectionMetadata{
 		Displayname: displayname,
 		Description: description,
-	}, fx.leaf.Pubkey, nil) // nil ek = classical seal
+	}, fixtureCardPubkey(), nil) // nil ek = classical seal
 	if err != nil {
 		t.Fatalf("SealCollectionMetadata: %v", err)
 	}

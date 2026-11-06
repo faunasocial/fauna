@@ -105,11 +105,12 @@ def hold_rpc_until_shutdown(port: int, kind: str) -> None:
 
 def rpc_hold_status(port: int, kind: str) -> dict:
     """``{"armed", "until_shutdown", "refusing", "dropping", "holding",
-    "passing", "released", "refused", "dropped"}`` for ``kind``.
+    "passing", "released", "refused", "dropped", "abandoned"}`` for ``kind``.
 
     ``holding`` counts the requests parked *right now* — the arrival observable.
-    ``released``, ``refused`` and ``dropped`` are cumulative over the nest
-    process's life.
+    ``released``, ``refused``, ``dropped`` and ``abandoned`` (parks the app
+    gave up on — its own deadline's Cancel, or a closed connection) are
+    cumulative over the nest process's life.
     """
     with urllib.request.urlopen(
         f"http://127.0.0.1:{port}/api/v1/test/rpc-hold/{kind}"
@@ -146,6 +147,16 @@ def wait_for_held_rpc(port: int, kind: str, *, count: int = 1,
             extra = f" {diagnose()}"
         except Exception as e:  # a diagnostic must never mask the real failure
             extra = f" (diagnose raised {e!r})"
+    if status.get("abandoned", 0):
+        # The nest DID park it, and the app gave up on it — its own deadline's
+        # Cancel, or a closed connection — before this poll saw it held.
+        raise AssertionError(
+            f"{status['abandoned']} request(s) of kind {kind!r} were parked and "
+            f"then abandoned by the app (its own deadline cancelled them, or the "
+            f"connection closed), and none was held when polled within "
+            f"{timeout:.0f}s (last status {status!r}). The app issued the read and "
+            f"did not re-issue it while the hold lasted.{extra}"
+        )
     raise AssertionError(
         f"no request of kind {kind!r} reached the nest within {timeout:.0f}s "
         f"(last status {status!r}). Either the app never reached the page that "

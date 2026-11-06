@@ -353,7 +353,9 @@ async fn a_spouse_pulls_the_holiday_clip_byte_for_byte_over_the_peer_channel() {
         &fetcher,
         &member_keys(),
         ContentHash::from_digest_raw(hash_bytes),
-        Some(CONTENT_KEY_VERSION),
+        Some(fauna_core::blob_seal::SealStamp::Version(
+            CONTENT_KEY_VERSION,
+        )),
         FILE_PATH,
     )
     .await
@@ -431,7 +433,9 @@ async fn an_ordinary_multi_megabyte_file_transfers() {
         &fetcher,
         &member_keys(),
         manifest_hash,
-        Some(CONTENT_KEY_VERSION),
+        Some(fauna_core::blob_seal::SealStamp::Version(
+            CONTENT_KEY_VERSION,
+        )),
         FILE_PATH,
     )
     .await
@@ -891,7 +895,9 @@ async fn with_no_cached_writer_role_rows_are_refused_but_bytes_still_flow() {
         &fetcher,
         &member_keys(),
         manifest_hash,
-        Some(CONTENT_KEY_VERSION),
+        Some(fauna_core::blob_seal::SealStamp::Version(
+            CONTENT_KEY_VERSION,
+        )),
         FILE_PATH,
     )
     .await

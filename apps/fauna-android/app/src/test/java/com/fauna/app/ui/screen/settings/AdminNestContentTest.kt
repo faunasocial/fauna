@@ -1195,7 +1195,7 @@ class AdminNestContentTest {
             "r1", com.fauna.ffi.FfiReportSubject.Post("cid1"), canOpenTakedown = true,
             note = "rude", excerpt = "the words",
         )
-        val line = AdminNestVM.reportLine(post) { it.key }
+        val line = AdminNestVM.reportLine(post, relativeTime = { "just now" }) { it.key }
         render(reports = AdminNestVM.ReportsState(rows = listOf(post), loaded = true))
 
         composeTestRule.onNodeWithTag("admin-nest-reports-section").performScrollTo()

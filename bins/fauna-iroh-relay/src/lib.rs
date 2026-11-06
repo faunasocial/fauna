@@ -1490,6 +1490,22 @@ mod tests {
         assert_eq!(inner.asked(), asked + 2);
         assert!(guard.admits_at(member, now).await);
         assert_eq!(inner.asked(), asked + 2, "the fresh admit is cached again");
+
+        // The refusal forgot the revoked key: once its refusal lapses, with the
+        // flood holding the strangers' budget empty again, its reconnect is
+        // refused unasked instead of drawing the reserved budget.
+        let later = now + DENY_TTL + Duration::from_millis(1);
+        for _ in 0..(QUESTION_BURST as u32 + 10) {
+            assert!(!guard.admits_at(stranger(n), later).await);
+            n += 1;
+        }
+        let asked = inner.asked();
+        assert!(!guard.admits_at(revoked, later).await);
+        assert_eq!(
+            inner.asked(),
+            asked,
+            "a refused key was still remembered and re-asked from the reserved budget"
+        );
     }
 
     /// [`NestLink`] fails closed: with no channel to nest it admits nobody.

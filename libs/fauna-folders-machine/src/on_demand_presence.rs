@@ -51,7 +51,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use fauna_core::folder_keys::{ActorScopedFolderRef, FolderRef};
 use serde::{Deserialize, Serialize};
 
-/// How the account holds a set. Both roles join the plan
+/// How the account holds a set. Every role joins the plan
 /// (`on-demand-files-shared-sets.md` § Shared sets on a capability host, decision 3);
 /// [`PresenceRole::joins_plan`] stays the one seam a role is admitted or
 /// withheld at, so the plan's signature never changes with it.
@@ -65,6 +65,11 @@ pub enum PresenceRole {
     /// in the plan since the user's answer of 2026-09-30 (default ON, hidden
     /// per set per device by the same toggle).
     SharedWithMe,
+    /// A group set — a folder bound under an in-person share's group scope —
+    /// this device holds the machinery for (`group-set.md` § Build design —
+    /// the group set, decision 11 (a)): a set like any other on a platform
+    /// with no location form, default ON, hidden by the same toggle.
+    Group,
 }
 
 impl PresenceRole {
@@ -74,7 +79,7 @@ impl PresenceRole {
     #[must_use]
     pub fn joins_plan(self) -> bool {
         match self {
-            PresenceRole::Own | PresenceRole::SharedWithMe => true,
+            PresenceRole::Own | PresenceRole::SharedWithMe | PresenceRole::Group => true,
         }
     }
 }
@@ -125,6 +130,44 @@ pub fn shared_display_name(name: &str, owner: &str) -> String {
     }
 }
 
+/// One group set this device holds the machinery for, as the presence plan
+/// takes it — the folders page's own listing of it (the scope, its folded
+/// `fauna.group.name`, its short id), so a group set has a presence exactly
+/// where the page shows it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HeldGroupScope {
+    pub scope_id: [u8; 32],
+    /// The set's recorded name under the name's writer check; `None` for a
+    /// nameless set.
+    pub name: Option<String>,
+    /// The short scope id — the label of a nameless set.
+    pub short_id: String,
+}
+
+/// The group sets as presence sets (`group-set.md` § Build design — the group
+/// set, decision 11 (a)): keyed by the scope's `FolderRef::Group` wire form,
+/// so the toggle's store hides one under that id as it hides any set; named by
+/// the folded name, else the short id; seated by the membership (the scope's
+/// machinery is the seat) and writable (v1 group sets are all-writer,
+/// decision 5).
+#[must_use]
+pub fn group_presence_sets(groups: &[HeldGroupScope]) -> Vec<PresenceSet> {
+    groups
+        .iter()
+        .map(|g| {
+            let label = g.name.clone().unwrap_or_else(|| g.short_id.clone());
+            PresenceSet {
+                name: label.clone(),
+                set_name: label,
+                folder_id: FolderRef::Group(g.scope_id).to_wire(),
+                this_device_accepts: true,
+                role: PresenceRole::Group,
+                read_only: false,
+            }
+        })
+        .collect()
+}
+
 /// Every set the account holds, as the plan takes it — the one mapping from
 /// the member-visible folder list and the account's folder-key custody to
 /// [`PresenceSet`]s, shared by every set-level platform so none grows its own
@@ -137,6 +180,8 @@ pub fn shared_display_name(name: &str, owner: &str) -> String {
 ///   delivery seat. Never consulted for a member row: the device roster reads
 ///   are owner-scoped and resolve a set by NAME among the caller's own, so
 ///   asking for a member row would answer for an own set of the same name.
+/// - `groups` — the group sets this device holds the machinery for
+///   ([`HeldGroupScope`]), each a set as [`group_presence_sets`] maps it.
 ///
 /// The rules:
 ///
@@ -158,6 +203,7 @@ pub fn held_sets(
     rows: &[fauna_protocol::folders::FolderSummary],
     custody: &fauna_core::data::FoldersConfig,
     own_place_accepts: &BTreeMap<i64, bool>,
+    groups: &[HeldGroupScope],
 ) -> Vec<PresenceSet> {
     use fauna_client_folders::custody::{content_keys, live_foreign_sets};
     use fauna_client_folders::engine_binding::custody_channel_for;
@@ -219,7 +265,10 @@ pub fn held_sets(
             read_only: record.access.as_deref() != Some("writer"),
         })
     });
-    local.chain(foreign).collect()
+    local
+        .chain(foreign)
+        .chain(group_presence_sets(groups))
+        .collect()
 }
 
 /// The host of a nest base URL (`https://nest.example:8443/` →
@@ -369,6 +418,43 @@ pub fn plan(
     plan
 }
 
+/// A registered presence with the enablement the OS reports for it. Where the
+/// OS holds a presence disabled until the person enables it once (apple's
+/// `NSFileProviderDomain.userEnabled`), the platform's listing answers this.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct RegisteredPresence {
+    pub identifier: String,
+    pub user_enabled: bool,
+}
+
+/// The scoped identifiers whose row tells the person to enable the provider in
+/// the OS (`on-demand-files-apple.md` § Apple File Provider binding, *The
+/// one-time OS enable*): a presence the plan keeps — desired, registered, not
+/// foreign-held — that the OS reports not enabled. A set with no registered
+/// presence has nothing to enable. Derived per read and never stored. Order
+/// follows `desired`.
+#[must_use]
+pub fn os_enable_notices(
+    actor_id: [u8; 32],
+    desired: &[DesiredPresence],
+    registered: &[RegisteredPresence],
+    owners: Option<&BTreeMap<String, String>>,
+) -> Vec<String> {
+    let identifiers: Vec<String> = registered.iter().map(|r| r.identifier.clone()).collect();
+    let disabled: BTreeSet<&str> = registered
+        .iter()
+        .filter(|r| !r.user_enabled)
+        .map(|r| r.identifier.as_str())
+        .collect();
+    plan(actor_id, desired, &identifiers, owners)
+        .keep
+        .into_iter()
+        .map(|presence| presence.scoped_id)
+        .filter(|id| disabled.contains(id.as_str()))
+        .collect()
+}
+
 /// The per-set, per-account, per-device "show on demand" preference backing
 /// `folder-on-demand-toggle`: device-local by design (the same sanctioned
 /// class as the folder map), default ON, keyed by the scoped identifier so
@@ -403,6 +489,38 @@ impl OnDemandPrefs {
         } else {
             self.disabled.insert(key);
         }
+    }
+
+    /// Carry the toggle across an identity succession (`sync-agent.md` § The
+    /// per-actor scope follows the account across a succession): every entry
+    /// keyed by an actor in `predecessors` (the registry's chain,
+    /// `AccountRegistry::predecessors_of`) is re-keyed to `successor` and the
+    /// predecessor's key dropped. The store holds only the off toggles, so a
+    /// successor entry already present simply stays, and a successor with
+    /// none takes the predecessor's; entries of any other actor — and inert
+    /// orphans — are never touched. Idempotent: a second pass finds no
+    /// predecessor key. Returns whether anything changed (the caller persists
+    /// only then).
+    pub fn carry_from_predecessors(
+        &mut self,
+        successor: [u8; 32],
+        predecessors: &[[u8; 32]],
+    ) -> bool {
+        let moved: Vec<(String, ActorScopedFolderRef)> = self
+            .disabled
+            .iter()
+            .filter_map(|key| {
+                let scoped = ActorScopedFolderRef::parse(key)?;
+                (scoped.actor_id != successor && predecessors.contains(&scoped.actor_id))
+                    .then(|| (key.clone(), scoped))
+            })
+            .collect();
+        for (key, scoped) in &moved {
+            self.disabled.remove(key);
+            self.disabled
+                .insert(scoped.folder.scoped_to(successor).to_wire());
+        }
+        !moved.is_empty()
     }
 
     /// Decode the persisted form.
@@ -822,6 +940,7 @@ mod tests {
                 &rows,
                 &FoldersConfig::default(),
                 &accepts(&[(1, true), (2, false)]),
+                &[],
             );
             let seats: Vec<(&str, &str, bool, PresenceRole, bool)> = sets
                 .iter()
@@ -854,7 +973,12 @@ mod tests {
                 member_row(5, "docs", GID, None),
                 member_row(6, "plans", GID2, Some("writer")),
             ];
-            let sets = held_sets(&rows, &custody_with(&[GID, GID2]), &accepts(&[(5, false)]));
+            let sets = held_sets(
+                &rows,
+                &custody_with(&[GID, GID2]),
+                &accepts(&[(5, false)]),
+                &[],
+            );
             assert_eq!(
                 sets,
                 vec![
@@ -883,13 +1007,13 @@ mod tests {
         #[test]
         fn an_unaccepted_share_has_no_presence() {
             let rows = [member_row(5, "docs", GID, None), owner_row(1, "docs")];
-            let sets = held_sets(&rows, &custody_with(&[GID2]), &accepts(&[(1, true)]));
+            let sets = held_sets(&rows, &custody_with(&[GID2]), &accepts(&[(1, true)]), &[]);
             assert_eq!(sets.len(), 1);
             assert_eq!(sets[0].role, PresenceRole::Own);
 
             let mut corrupt = member_row(5, "docs", GID, None);
             corrupt.mls_group_id = Some("not hex".into());
-            assert!(held_sets(&[corrupt], &custody_with(&[GID]), &BTreeMap::new()).is_empty());
+            assert!(held_sets(&[corrupt], &custody_with(&[GID]), &BTreeMap::new(), &[]).is_empty());
         }
 
         /// An own set and a set shared with the account can wear one name: two
@@ -897,7 +1021,7 @@ mod tests {
         #[test]
         fn a_shared_set_named_like_an_own_one_stays_apart() {
             let rows = [owner_row(1, "docs"), member_row(5, "docs", GID, None)];
-            let sets = held_sets(&rows, &custody_with(&[GID]), &accepts(&[(1, true)]));
+            let sets = held_sets(&rows, &custody_with(&[GID]), &accepts(&[(1, true)]), &[]);
             let names: Vec<(&str, &str)> = sets
                 .iter()
                 .map(|s| (s.name.as_str(), s.folder_id.as_str()))
@@ -909,8 +1033,37 @@ mod tests {
             // An owner with no handle falls back to the short id, never blank.
             let mut anon = member_row(5, "docs", GID, None);
             anon.owner_handle = None;
-            let sets = held_sets(&[anon], &custody_with(&[GID]), &BTreeMap::new());
+            let sets = held_sets(&[anon], &custody_with(&[GID]), &BTreeMap::new(), &[]);
             assert!(sets[0].name.starts_with("docs (") && sets[0].name.len() > "docs ()".len());
+        }
+
+        /// The third source: every held group set follows the own rows and
+        /// the shares, needing no folder row and no custody.
+        #[test]
+        fn a_held_group_set_is_the_third_source() {
+            let group = HeldGroupScope {
+                scope_id: [0x5c; 32],
+                name: None,
+                short_id: "5c5c5c5c".into(),
+            };
+            let sets = held_sets(
+                &[owner_row(1, "docs")],
+                &FoldersConfig::default(),
+                &accepts(&[(1, true)]),
+                std::slice::from_ref(&group),
+            );
+            let roles: Vec<_> = sets
+                .iter()
+                .map(|s| (s.role, s.folder_id.as_str()))
+                .collect();
+            let group_ref = format!("group:{}", "5c".repeat(32));
+            assert_eq!(
+                roles,
+                vec![
+                    (PresenceRole::Own, "local:1"),
+                    (PresenceRole::Group, group_ref.as_str()),
+                ]
+            );
         }
 
         /// A cross-nest set is its custody record: a live, named record is a
@@ -938,7 +1091,7 @@ mod tests {
                 ],
                 ..Default::default()
             };
-            let sets = held_sets(&[], &cfg, &BTreeMap::new());
+            let sets = held_sets(&[], &cfg, &BTreeMap::new(), &[]);
             assert_eq!(
                 sets,
                 vec![
@@ -991,7 +1144,7 @@ mod tests {
                 ],
                 ..Default::default()
             };
-            let names: Vec<String> = held_sets(&[], &cfg, &BTreeMap::new())
+            let names: Vec<String> = held_sets(&[], &cfg, &BTreeMap::new(), &[])
                 .into_iter()
                 .map(|s| s.name)
                 .collect();
@@ -1004,6 +1157,146 @@ mod tests {
                 ]
             );
         }
+    }
+
+    /// A group set is a set like any other on a platform with no location
+    /// form (`group-set.md` § Build design — the group set, decision 11 (a)):
+    /// keyed by its scope's group ref, labelled by its folded name else its
+    /// short id, seated by the membership, writable.
+    #[test]
+    fn a_group_set_joins_the_plan_under_its_scope_ref() {
+        let named = HeldGroupScope {
+            scope_id: [0x5c; 32],
+            name: Some("cabin".into()),
+            short_id: "5c5c5c5c".into(),
+        };
+        let nameless = HeldGroupScope {
+            scope_id: [0x6d; 32],
+            name: None,
+            short_id: "6d6d6d6d".into(),
+        };
+        let sets = group_presence_sets(&[named, nameless]);
+        assert_eq!(
+            sets[0],
+            PresenceSet {
+                name: "cabin".into(),
+                set_name: "cabin".into(),
+                folder_id: format!("group:{}", "5c".repeat(32)),
+                this_device_accepts: true,
+                role: PresenceRole::Group,
+                read_only: false,
+            }
+        );
+        assert_eq!(
+            sets[1].name, "6d6d6d6d",
+            "a nameless set wears its short id"
+        );
+        assert!(PresenceRole::Group.joins_plan());
+
+        // Desired by default; the toggle hides it under its scoped group id,
+        // and only it.
+        let mut prefs = OnDemandPrefs::default();
+        let all: Vec<_> = desired_presences(B, &sets, &BTreeSet::new(), &prefs)
+            .into_iter()
+            .map(|d| d.scoped_id)
+            .collect();
+        assert_eq!(
+            all,
+            vec![
+                FolderRef::Group([0x5c; 32]).scoped_to(B).to_wire(),
+                FolderRef::Group([0x6d; 32]).scoped_to(B).to_wire(),
+            ]
+        );
+        prefs.set_enabled(&FolderRef::Group([0x5c; 32]).scoped_to(B), false);
+        let left: Vec<_> = desired_presences(B, &sets, &BTreeSet::new(), &prefs)
+            .into_iter()
+            .map(|d| d.set.folder_id)
+            .collect();
+        assert_eq!(left, vec![format!("group:{}", "6d".repeat(32))]);
+    }
+
+    fn registered(id: &str, user_enabled: bool) -> RegisteredPresence {
+        RegisteredPresence {
+            identifier: id.to_string(),
+            user_enabled,
+        }
+    }
+
+    #[test]
+    fn a_registered_disabled_presence_carries_the_notice() {
+        let docs = scoped(docs(), A);
+        let notices = os_enable_notices(
+            A,
+            std::slice::from_ref(&docs),
+            &[registered(&docs.scoped_id, false)],
+            None,
+        );
+        assert_eq!(notices, vec![docs.scoped_id]);
+    }
+
+    #[test]
+    fn a_presence_the_os_has_enabled_carries_none() {
+        let docs = scoped(docs(), A);
+        let notices = os_enable_notices(
+            A,
+            std::slice::from_ref(&docs),
+            &[registered(&docs.scoped_id, true)],
+            None,
+        );
+        assert!(notices.is_empty());
+    }
+
+    #[test]
+    fn a_desired_set_with_no_registered_presence_carries_none() {
+        let notices = os_enable_notices(A, &[scoped(docs(), A)], &[], None);
+        assert!(notices.is_empty(), "nothing registered, nothing to enable");
+    }
+
+    #[test]
+    fn a_registered_identifier_no_set_desires_carries_none() {
+        // Toggled off, bound, or left: the reconcile removes it, and turning
+        // the switch off is what clears the notice.
+        let other = scoped(pics(), A);
+        let notices = os_enable_notices(A, &[], &[registered(&other.scoped_id, false)], None);
+        assert!(notices.is_empty());
+    }
+
+    #[test]
+    fn a_foreign_held_presence_carries_none() {
+        let docs = scoped(docs(), A);
+        let on_record = owners(&[(&docs.scoped_id, B)]);
+        let notices = os_enable_notices(
+            A,
+            std::slice::from_ref(&docs),
+            &[registered(&docs.scoped_id, false)],
+            Some(&on_record),
+        );
+        assert!(notices.is_empty(), "this account's row does not hold it");
+    }
+
+    #[test]
+    fn each_presence_answers_for_itself_in_desired_order() {
+        let (docs, pics) = (scoped(docs(), A), scoped(pics(), A));
+        let notices = os_enable_notices(
+            A,
+            &[docs.clone(), pics.clone()],
+            &[
+                registered(&pics.scoped_id, false),
+                registered(&docs.scoped_id, true),
+            ],
+            None,
+        );
+        assert_eq!(notices, vec![pics.scoped_id.clone()]);
+        let notices = os_enable_notices(
+            A,
+            &[docs.clone(), pics.clone()],
+            &[
+                registered(&pics.scoped_id, false),
+                registered(&docs.scoped_id, false),
+            ],
+            None,
+        );
+        assert_eq!(notices, vec![docs.scoped_id, pics.scoped_id]);
     }
 
     #[test]
@@ -1070,5 +1363,54 @@ mod tests {
         std::fs::write(&path, b"not json").unwrap();
         assert!(OnDemandPrefs::load(&path).is_err());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The succession carry (`sync-agent.md` § The per-actor scope follows
+    /// the account across a succession): a predecessor's off toggle moves to
+    /// the successor's key and the predecessor's key is dropped; a successor
+    /// already off stays off; an unrelated account and an inert orphan are
+    /// never touched; an empty chain and a second pass change nothing.
+    #[test]
+    fn prefs_carry_a_predecessors_off_toggle_to_the_successor() {
+        const C: [u8; 32] = [0xcc; 32];
+        const OLDER: [u8; 32] = [0x11; 32];
+        let orphan = format!("local:3@{}", hex::encode(A));
+        let json = format!(r#"{{"disabled":["{orphan}"]}}"#);
+        let mut prefs = OnDemandPrefs::from_json(json.as_bytes()).unwrap();
+        // A is the nearest predecessor of the successor B, OLDER the hop
+        // before it; C is an unrelated account.
+        prefs.set_enabled(&FolderRef::Local(1).scoped_to(A), false);
+        prefs.set_enabled(&FolderRef::Local(2).scoped_to(A), false);
+        prefs.set_enabled(&FolderRef::Local(2).scoped_to(B), false);
+        prefs.set_enabled(&FolderRef::Local(4).scoped_to(OLDER), false);
+        prefs.set_enabled(&FolderRef::Local(1).scoped_to(C), false);
+
+        let before = prefs.clone();
+        assert!(!prefs.carry_from_predecessors(B, &[]), "empty chain");
+        assert!(!prefs.carry_from_predecessors(B, &[B]), "never itself");
+        assert_eq!(prefs, before);
+
+        assert!(prefs.carry_from_predecessors(B, &[A, OLDER]));
+        for n in [1, 2, 4] {
+            assert!(
+                !prefs.is_enabled(&FolderRef::Local(n).scoped_to(B)),
+                "local:{n} stays off for the successor"
+            );
+        }
+        assert!(prefs.is_enabled(&FolderRef::Local(3).scoped_to(B)));
+        let rewritten = String::from_utf8(prefs.to_json()).unwrap();
+        for (n, actor) in [(1, A), (2, A), (4, OLDER)] {
+            let key = FolderRef::Local(n).scoped_to(actor).to_wire();
+            assert!(!rewritten.contains(&key), "{key} dropped: {rewritten}");
+        }
+        assert!(
+            !prefs.is_enabled(&FolderRef::Local(1).scoped_to(C)),
+            "an unrelated account is untouched"
+        );
+        assert!(rewritten.contains(&orphan), "orphan kept: {rewritten}");
+
+        let after = prefs.clone();
+        assert!(!prefs.carry_from_predecessors(B, &[A, OLDER]), "idempotent");
+        assert_eq!(prefs, after);
     }
 }

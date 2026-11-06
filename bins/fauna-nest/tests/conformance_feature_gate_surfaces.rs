@@ -196,6 +196,7 @@ async fn provider_configure_is_gated() {
             kind: "fake".into(),
             webhook_secret: "s3cret".into(),
             tier: "gold".into(),
+            product_ref: None,
             extra: Default::default(),
         },
     )
@@ -485,7 +486,7 @@ async fn unlock_purchase_is_gated_at_the_webhook_ingress() {
     create_free_tier(&router, &state, author, "gold").await;
     state
         .db
-        .upsert_payment_provider(&author, "fake", "s3cret", "gold")
+        .upsert_payment_provider(&author, "fake", "s3cret", "gold", None)
         .await
         .unwrap();
     deny(&state, &author, GatedFeature::Payments).await;

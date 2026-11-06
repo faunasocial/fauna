@@ -64,6 +64,15 @@ pub(crate) struct MutedWordsState {
     /// read-modify-write cycles against the same config (linux's
     /// `add_button.set_sensitive(false)`).
     pub(crate) busy: bool,
+    /// Monotonic read counter, bumped at every load dispatch and carried by the
+    /// load's `Op`/`Outcome` as `seq` (the `TrainedTopicsState::dispatch_seq`
+    /// shape). A store-change notice re-reads the open page outside `busy`, so
+    /// a read can leave before a save commits and land after its answer.
+    pub(crate) dispatch_seq: u64,
+    /// The newest read the fold has settled: the last one it applied, or every
+    /// read dispatched so far once a save's answer lands. Its order against the
+    /// commit is unknown, and the save's list is the fresher one.
+    pub(crate) applied_seq: u64,
 }
 
 impl MutedWordsState {
@@ -468,6 +477,7 @@ mod tests {
             },
             input: "half-typed".into(),
             busy: true,
+            ..Default::default()
         };
         mw.reset_form();
         assert_eq!(mw.snapshot.terms(), vec!["spam".to_string()]);

@@ -14,7 +14,7 @@ nest as their signer, and name the signers whose zap receipts you believe.
 
 ## Coverage contract
 
-Stamped 2026-10-01 at f5dec3d933.
+Stamped 2026-11-01 at a6047fbd8b.
 
 1. [app] Link with a generated key, see your public key and content switches, and unlink — `docs/goal/ui/nostr.md` § Layout & flow
    - `tests/e2e-unified/tests/test_nostr.py::test_nostr_page_renders`
@@ -73,53 +73,62 @@ Stamped 2026-10-01 at f5dec3d933.
    - `tests/e2e-unified/tests/test_nostr_zap_signer_gate.py::test_a_named_zap_signer_stays_removable_when_zaps_are_turned_off`
 24. [app] A private message someone sends you over Nostr shows on your Conversations page as a Nostr conversation you can open and read — `docs/goal/ui/nostr.md` § Implementation status today
    - `tests/e2e-unified/tests/test_bridged_conversation.py::test_a_nostr_gift_wrap_arrives_as_a_nostr_bridged_room`
+25. [nest] A Nostr post by someone no account on your nest follows is never taken into a feed, even when a relay sends it — `docs/goal/ui/nostr.md` § Implementation status today
+   - `tests/e2e-unified/tests/api/test_nostr_nest.py::test_a_post_by_someone_nobody_follows_never_reaches_a_feed`
+26. [nest] A Nostr deletion removes only events by its own author from your nest's relay; one naming someone else's events removes nothing of theirs — `docs/goal/ui/nostr.md` § The relay event store
+   - `tests/e2e-unified/tests/api/test_nostr_nest.py::test_a_deletion_removes_only_its_own_authors_events_from_your_nests_relay`
+27. [nest] Other Nostr apps can search the posts you share by their words on your nest's relay — `docs/goal/ui/nostr.md` § The relay event store
+   - `tests/e2e-unified/tests/api/test_nostr_nest.py::test_other_nostr_apps_search_your_shared_posts_by_their_words`
 
 ## Status
 
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ⚠ partial | 0.1.2-dev+d6ff0673 standalone |
-| linux | ⚠ partial | 0.1.4-dev+ea391d07 standalone |
+| web | ✅ full | 0.1.5-dev+962dc452 standalone |
+| linux | ✅ full | 0.1.5-dev+962dc452 standalone |
 | windows | ⚠ partial | 0.1.2-dev+d6ff0673 standalone |
-| macos | ⚠ partial | 0.1.5-dev+61b844ca standalone |
-| ios | ⚠ partial | 0.1.5-dev+61b844ca standalone |
+| macos | ✅ full | 0.1.5-dev+3f9f2b95 standalone |
+| ios | ✅ full | 0.1.5-dev+962dc452 standalone |
 | android |  no run recorded | |
-| tui | ✅ full | 0.1.2-dev+d6ff0673 standalone |
+| tui | ✅ full | 0.1.5-dev+962dc452 standalone |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
-| 1 | app | `tests/e2e-unified/tests/test_nostr.py::test_nostr_page_renders` | web (linux): passed, web (windows): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (windows): passed |
-| 1 | app | `tests/e2e-unified/tests/test_nostr.py::test_link_generate_and_unlink_round_trip` | web (linux): passed, web (windows): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (windows): passed |
-| 1 | app | `tests/e2e-unified/tests/test_nostr.py::test_content_toggles_round_trip` | web (linux): passed, web (windows): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (windows): passed |
-| 2 | app | `tests/e2e-unified/tests/test_nostr.py::test_relay_add_remove_round_trip` | web (linux): passed, web (windows): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (windows): passed |
-| 2 | app | `tests/e2e-unified/tests/test_nostr.py::test_relay_invalid_url_rejected` | web (linux): passed, web (windows): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (windows): passed |
-| 2 | app | `tests/e2e-unified/tests/test_nostr.py::test_relay_private_address_rejected` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
-| 2 | app | `tests/e2e-unified/tests/test_nostr.py::test_follow_add_remove_round_trip` | web (linux): passed, web (windows): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (windows): passed |
-| 3 | app | `tests/e2e-unified/tests/test_nostr_bunker.py::test_bunker_section_renders_for_custodial_account` | web (linux): passed, web (windows): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (windows): passed |
-| 3 | app | `tests/e2e-unified/tests/test_nostr_bunker.py::test_bunker_connect_and_disconnect_round_trip` | web (linux): passed, web (windows): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (windows): passed |
+| 1 | app | `tests/e2e-unified/tests/test_nostr.py::test_nostr_page_renders` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 1 | app | `tests/e2e-unified/tests/test_nostr.py::test_link_generate_and_unlink_round_trip` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 1 | app | `tests/e2e-unified/tests/test_nostr.py::test_content_toggles_round_trip` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 2 | app | `tests/e2e-unified/tests/test_nostr.py::test_relay_add_remove_round_trip` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 2 | app | `tests/e2e-unified/tests/test_nostr.py::test_relay_invalid_url_rejected` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 2 | app | `tests/e2e-unified/tests/test_nostr.py::test_relay_private_address_rejected` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 2 | app | `tests/e2e-unified/tests/test_nostr.py::test_follow_add_remove_round_trip` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 3 | app | `tests/e2e-unified/tests/test_nostr_bunker.py::test_bunker_section_renders_for_custodial_account` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (windows): passed |
+| 3 | app | `tests/e2e-unified/tests/test_nostr_bunker.py::test_bunker_connect_and_disconnect_round_trip` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (windows): passed |
 | 4 | app | `tests/e2e-unified/tests/test_nostr_zap_signers.py::test_zap_signer_section_renders_with_a_stated_empty_state` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (windows): passed |
 | 4 | app | `tests/e2e-unified/tests/test_nostr_zap_signers.py::test_designate_and_undesignate_round_trip` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (windows): passed |
 | 5 | nest | `tests/e2e-unified/tests/api/test_nostr_nest.py::test_another_nostr_client_reads_your_shared_posts_from_your_nest` | nest (linux): passed |
 | 6 | nest | `tests/e2e-unified/tests/api/test_nostr_nest.py::test_turning_sharing_off_takes_posts_off_your_relay_and_on_brings_them_back` | nest (linux): passed |
 | 7 | nest | `tests/e2e-unified/tests/api/test_nostr_nest.py::test_your_nostr_address_resolves_to_your_key` | nest (linux): passed |
 | 8 | nest | `tests/e2e-unified/tests/api/test_nostr_nest.py::test_a_direct_message_is_accepted_by_your_own_nest` | nest (linux): passed |
-| 9 | app | `tests/e2e-unified/tests/test_nostr_inbound_feed.py::test_posts_from_someone_you_follow_on_nostr_arrive_in_your_feed` | tui (linux): passed |
+| 9 | app | `tests/e2e-unified/tests/test_nostr_inbound_feed.py::test_posts_from_someone_you_follow_on_nostr_arrive_in_your_feed` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (windows): passed |
 | 10 | nest | `tests/e2e-unified/tests/api/test_nostr_nest.py::test_a_followed_authors_delete_removes_the_post_from_your_feed` | nest (linux): passed |
-| 11 | app | `tests/e2e-unified/tests/test_feed_nostr_reply.py::test_a_reply_to_a_nostr_post_reaches_nostr_threaded_under_it` | web (linux): passed, linux (linux): passed, tui (linux): passed |
-| 11 | app | `tests/e2e-unified/tests/test_feed_nostr_reply.py::test_a_quote_of_a_nostr_post_reaches_nostr_linking_it` | web (linux): passed, linux (linux): passed, tui (linux): passed |
+| 11 | app | `tests/e2e-unified/tests/test_feed_nostr_reply.py::test_a_reply_to_a_nostr_post_reaches_nostr_threaded_under_it` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (windows): passed |
+| 11 | app | `tests/e2e-unified/tests/test_feed_nostr_reply.py::test_a_quote_of_a_nostr_post_reaches_nostr_linking_it` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (windows): passed |
 | 12 | nest | `tests/e2e-unified/tests/api/test_nostr_nest.py::test_your_reply_threads_under_a_nostr_post_and_your_quote_links_it` | nest (linux): passed |
-| 13 | app | `tests/e2e-unified/tests/test_feed_nostr_reply.py::test_replying_or_quoting_with_no_relays_is_refused_naming_the_nostr_page` | web (linux): passed, linux (linux): passed, tui (linux): passed |
+| 13 | app | `tests/e2e-unified/tests/test_feed_nostr_reply.py::test_replying_or_quoting_with_no_relays_is_refused_naming_the_nostr_page` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (windows): passed |
 | 14 | nest | `tests/e2e-unified/tests/api/test_nostr_nest.py::test_automatic_publishing_sends_your_new_posts_to_your_relays` | nest (linux): passed |
 | 15 | nest | `tests/e2e-unified/tests/api/test_nostr_nest.py::test_with_publishing_replies_off_your_replies_stay_off_your_relays` | nest (linux): passed |
 | 16 | nest | `tests/e2e-unified/tests/api/test_nostr_nest.py::test_deleting_a_published_post_takes_it_back_on_nostr` | nest (linux): passed |
-| 17 | app | `tests/e2e-unified/tests/test_nostr_link_import.py::test_a_pasted_nsec_links_exactly_that_key` | web (linux): passed, linux (linux): passed, tui (linux): passed |
+| 17 | app | `tests/e2e-unified/tests/test_nostr_link_import.py::test_a_pasted_nsec_links_exactly_that_key` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (windows): passed |
 | 18 | nest | `tests/e2e-unified/tests/api/test_nostr_nest.py::test_a_browser_extension_key_links_only_once_proven` | nest (linux): passed |
 | 18 | nest | `tests/e2e-unified/tests/api/test_nostr_nest.py::test_a_remote_signer_key_links_only_once_its_bunker_proves_it` | nest (linux): passed |
 | 19 | nest | `tests/e2e-unified/tests/api/test_nostr_nest.py::test_a_key_another_account_holds_cannot_be_linked_to_yours` | nest (linux): passed |
-| 20 | app | `tests/e2e-unified/tests/test_nostr_signing_mode.py::test_the_signing_mode_reads_as_its_label` | web (linux): passed, linux (linux): passed, tui (linux): passed |
+| 20 | app | `tests/e2e-unified/tests/test_nostr_signing_mode.py::test_the_signing_mode_reads_as_its_label` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (windows): passed |
 | 21 | nest | `tests/e2e-unified/tests/api/test_nostr_nest.py::test_an_empty_relay_list_publishes_nowhere` | nest (linux): passed |
 | 22 | nest | `tests/e2e-unified/tests/api/test_nostr_nest.py::test_unlinking_disconnects_every_signer_app` | nest (linux): passed |
-| 23 | app | `tests/e2e-unified/tests/test_nostr_zap_signer_gate.py::test_a_named_zap_signer_stays_removable_when_zaps_are_turned_off` | web (linux): passed, linux (linux): passed, tui (linux): passed |
-| 24 | app | `tests/e2e-unified/tests/test_bridged_conversation.py::test_a_nostr_gift_wrap_arrives_as_a_nostr_bridged_room` | web (linux): passed, linux (linux): passed, ios (macos): passed, tui (linux): passed |
+| 23 | app | `tests/e2e-unified/tests/test_nostr_zap_signer_gate.py::test_a_named_zap_signer_stays_removable_when_zaps_are_turned_off` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (windows): passed |
+| 24 | app | `tests/e2e-unified/tests/test_bridged_conversation.py::test_a_nostr_gift_wrap_arrives_as_a_nostr_bridged_room` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (windows): passed |
+| 25 | nest | `tests/e2e-unified/tests/api/test_nostr_nest.py::test_a_post_by_someone_nobody_follows_never_reaches_a_feed` | nest (linux): passed |
+| 26 | nest | `tests/e2e-unified/tests/api/test_nostr_nest.py::test_a_deletion_removes_only_its_own_authors_events_from_your_nests_relay` | nest (linux): passed |
+| 27 | nest | `tests/e2e-unified/tests/api/test_nostr_nest.py::test_other_nostr_apps_search_your_shared_posts_by_their_words` | nest (linux): passed |
 <!-- features-render:end -->

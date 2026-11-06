@@ -30,7 +30,7 @@ use fauna_core::identity::{ActorId, ActorKeypair};
 use fauna_core::subscription::crypto::subscriber_mlkem_encaps_key;
 use fauna_core::subscription::types::{FollowIntent, FollowIntentKind};
 use fauna_protocol::RpcRequester;
-use fauna_protocol::discovery::{NestInfoReply, NestInfoRequest, capability};
+use fauna_protocol::discovery::capability;
 use fauna_protocol::subscriptions::{
     ApproveRequestReply, ApproveRequestRequest, DelegateUploadReply, DelegateUploadRequest,
     EncapsKeyPublishReply, EncapsKeyPublishRequest, EncryptedKeyBlobUpload, KeyBlobGetReply,
@@ -117,6 +117,7 @@ impl<E: std::fmt::Debug + std::fmt::Display> std::error::Error for FollowError<E
 pub mod custody;
 pub mod orchestration;
 pub mod period_keys;
+pub mod port;
 
 /// The period-key store seam every custody consumer holds
 /// (`fauna.state.subscriptions`, implemented on the account runtime's handle).
@@ -435,7 +436,9 @@ impl<R: RpcRequester> SubscriptionsClient<R> {
 
     /// Mint the subscriber's intent naming the nest this client is connected
     /// to — its id as `fauna.nest.info` states it, the id the nest compares
-    /// against its own key before relaying.
+    /// against its own key before relaying. The id is fixed for the life of a
+    /// connection, so it comes off the transport's per-connection memo
+    /// ([`fauna_protocol::read_nest_info`]).
     async fn follow_intent(
         &self,
         subscriber: &ActorKeypair,
@@ -443,9 +446,7 @@ impl<R: RpcRequester> SubscriptionsClient<R> {
         tier: &str,
         kind: FollowIntentKind,
     ) -> Result<EmbedAsBytes, FollowError<R::Error>> {
-        let info: NestInfoReply = self
-            .nest
-            .request("fauna.nest.info", NestInfoRequest::default())
+        let info = fauna_protocol::read_nest_info(&self.nest)
             .await
             .map_err(FollowError::Nest)?;
         let home_nest_id = fauna_core::hex32::decode(&info.nest_id).map_err(|e| {
@@ -487,12 +488,11 @@ impl<R: RpcRequester> SubscriptionsClient<R> {
     /// `fauna.nest.info` reply (`fauna_protocol::discovery::capability`). An old
     /// nest that omits the token — or omits the whole `capabilities` field —
     /// reads as `false` (the standard non-erroring degrade). Mirrors the
-    /// mail-settings `nest_supports` seam.
+    /// mail-settings `nest_supports` seam. Every caller passes a static token,
+    /// whose answer is fixed for the connection, so the read comes off the
+    /// transport's per-connection memo ([`fauna_protocol::read_nest_info`]).
     pub async fn nest_supports(&self, token: &str) -> Result<bool, R::Error> {
-        let info: NestInfoReply = self
-            .nest
-            .request("fauna.nest.info", NestInfoRequest::default())
-            .await?;
+        let info = fauna_protocol::read_nest_info(&self.nest).await?;
         Ok(capability::supports(&info.capabilities, token))
     }
 
@@ -777,6 +777,7 @@ impl<R: RpcRequester> SubscriptionsClient<R> {
 mod tests {
     use super::*;
     use fauna_client_testkit::{MockRequester, RecordingRequester, block_on};
+    use fauna_protocol::discovery::NestInfoReply;
 
     #[test]
     fn constructor_builds_over_generic_requester() {
@@ -1309,6 +1310,36 @@ mod tests {
         let req: UnsubscribeRequest =
             fauna_protocol::decode_strict(&rec.recorded().1).expect("decodes");
         assert!(req.intent.is_none() && req.home_nest_url.is_none());
+    }
+
+    /// The capability checks and the follow intent read `fauna.nest.info`
+    /// through the transport's per-connection memo (`security.md` § Transport
+    /// trust → *The nest's self-description is read once per connection*):
+    /// every one reads a fact fixed for the connection — a static capability
+    /// token, the nest's own id — so on one connection they share ONE read
+    /// of the actor's discovery budget instead of one each.
+    #[test]
+    fn capability_checks_and_the_follow_intent_share_one_nest_info_read() {
+        let me = ActorKeypair::generate();
+        let rec = std::sync::Arc::new(RecordingRequester::on_connection(reply, 7));
+        let client = SubscriptionsClient::new(rec.clone());
+        block_on(client.nest_supports(capability::SUBSCRIPTION_PERIOD_ROTATE))
+            .expect("infallible mock");
+        block_on(client.nest_supports(capability::SUBSCRIPTION_PERIOD_ROTATE))
+            .expect("infallible mock");
+        block_on(client.subscribe_across_nests(
+            actor(),
+            "followers",
+            &me,
+            Some("https://home.test".into()),
+        ))
+        .expect("infallible mock");
+        assert_eq!(
+            rec.kinds(),
+            vec!["fauna.nest.info", "fauna.subscriptions.subscribe"],
+            "two capability checks and a follow intent on one connection must \
+             draw one fauna.nest.info, not one each"
+        );
     }
 
     /// A nest whose `nest.info` names no well-formed id gets no intent: an

@@ -353,9 +353,16 @@ pub struct WebdavAdmitPrincipalRequest {
     /// The request's method — the proof's `htm`.
     pub htm: String,
     /// The request's absolute `https` URL — the proof's `htu`. Must name a
-    /// path under `/webdav/`; anything else is refused before the admission
-    /// runs, so the relay cannot vouch a proof minted for another door.
+    /// path under `/webdav/` on the nest's own DAV host; anything else is
+    /// refused before the admission runs, so the relay cannot vouch a proof
+    /// minted for another door or another server.
     pub htu: String,
+    /// The DAV client's address as the MDA's listener saw it (the PROXY-v2
+    /// source behind the SNI router) — the source half of the
+    /// failed-credential throttle's key. Additive: absent from an older MDA,
+    /// whose refusals then key on the claimed client alone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_ip: Option<String>,
     #[serde(flatten, default)]
     pub extra: BTreeMap<String, Value>,
 }
@@ -394,7 +401,8 @@ pub struct WebdavAdmittedPrincipal {
     /// The principal's granted scopes ∩ the token's — every string, so the
     /// MDA reads its `folder:read` arms through the one grammar.
     pub scopes: Vec<String>,
-    /// The access token's `exp`, epoch seconds — the admission's cache ceiling.
+    /// The access token's `exp`, epoch seconds. Informational: the MDA caches
+    /// no admission and admits every request through the nest.
     pub exp: i64,
     /// One entry per `fauna:folder:read:<id>` scope in [`Self::scopes`].
     pub folders: Vec<WebdavAdmittedFolder>,
@@ -1791,6 +1799,57 @@ pub struct GetMailServingEnabledRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct GetMailServingEnabledReply {
+    pub enabled: bool,
+    /// Forward-compat catch-all: unknown keys from a newer peer are
+    /// preserved here and re-emitted on encode (transport.md § Schema
+    /// and forward-compat discipline, rule 4).
+    #[serde(flatten, default)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+// ---- Per-actor mail-off flag (user) ----
+//
+// `set_actor_mail_enabled` / `get_actor_mail_enabled` (`mail-credentials.md`
+// § Trigger taxonomy, the Disable-mail row): the nest-side half of the user's
+// "Disable mail". The exact sibling of the serving opt-out above — User-class,
+// **caller-scoped** (the request carries only `enabled`; the handler keys on
+// the authenticated actor), default ON / absent ⇒ ON — but a different
+// question: not "does THIS nest serve my mail" but "is my mail on at all".
+// Only the IMAP serving gate reads it, so turning mail off refuses the actor's
+// IMAP operations while CalDAV, CardDAV and WebDAV keep serving the same
+// credential. Replies carry only `{ ok }` / `{ enabled }`.
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SetActorMailEnabledRequest {
+    pub enabled: bool,
+    /// Forward-compat catch-all: unknown keys from a newer peer are
+    /// preserved here and re-emitted on encode (transport.md § Schema
+    /// and forward-compat discipline, rule 4).
+    #[serde(flatten, default)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SetActorMailEnabledReply {
+    pub ok: bool,
+    /// Forward-compat catch-all: unknown keys from a newer peer are
+    /// preserved here and re-emitted on encode (transport.md § Schema
+    /// and forward-compat discipline, rule 4).
+    #[serde(flatten, default)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct GetActorMailEnabledRequest {
+    /// Forward-compat catch-all: unknown keys from a newer peer are
+    /// preserved here and re-emitted on encode (transport.md § Schema
+    /// and forward-compat discipline, rule 4).
+    #[serde(flatten, default)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct GetActorMailEnabledReply {
     pub enabled: bool,
     /// Forward-compat catch-all: unknown keys from a newer peer are
     /// preserved here and re-emitted on encode (transport.md § Schema

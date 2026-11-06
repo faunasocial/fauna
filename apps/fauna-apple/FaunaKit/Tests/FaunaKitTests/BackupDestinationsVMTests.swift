@@ -295,6 +295,13 @@ private func auditStatus(_ id: String, auditState: String?, lastAuditPassedAt: U
     /// stood mid-run — the disarm witness.
     weak var vm: BackupDestinationsVM?
     var recoverRunningDuringCall: [Bool] = []
+    /// What the nest-held pull-back answers with.
+    var pullBackResult = FfiReseedResult(stopped: nil, resultLines: [], isWhole: true, reenrollError: nil)
+    var preflight = FfiPullBackPreflight(
+        stopped: nil,
+        lines: [LocalizedText(key: "backups.reseed_preflight_unvouched",
+                              args: ["set": "backups.reseed_set_mail", "generation": "3"])],
+        acceptance: "{\"accepted\":true}")
 }
 
 @MainActor private final class RecordingCustodian: CustodianStoreAccess {
@@ -368,6 +375,27 @@ private final class RecordingAPI: APIClient {
         }
         if fails { throw APIError.ffiError("transport fault") }
         return result
+    }
+
+    /// The pull-back's preflight — recorded with the source it ran for, and
+    /// answering what the test staged.
+    override func backupPullBackPreflight(
+        destinationId: String, statePath: String
+    ) async throws -> FfiPullBackPreflight {
+        await MainActor.run {
+            log.calls.append("preflight:\(destinationId)")
+            return log.preflight
+        }
+    }
+
+    /// The confirmed pull-back — recorded with the acceptance it carried.
+    override func backupPullBackAccepted(
+        destinationId: String, deviceIdHex: String, statePath: String, acceptance: String
+    ) async throws -> FfiReseedResult {
+        await MainActor.run {
+            log.calls.append("pull-back:\(destinationId):\(deviceIdHex):\(acceptance)")
+            return log.pullBackResult
+        }
     }
 
     /// The page's re-list after a landed restore — recorded, and empty, so a
@@ -604,8 +632,9 @@ private final class RecordingAPI: APIClient {
 
 @Test @MainActor func reseedPaintsOnTheOrphanedStoreAndOnThisDevicesOwnRowOnly() async {
     // The shared `backupReseedRows` over the VM's cached state: an orphaned store
-    // carries the button; so does this device's own custodian row; another
-    // device's row and a nest row never do (the nest-held leg is not built).
+    // carries the button; so does this device's own custodian row and a
+    // surviving nest's row (apple hosts the pull-back); another device's row
+    // never does.
     let log = CallLog()
     let custodian = RecordingCustodian(log: log)
     custodian.bytes = 4096
@@ -622,17 +651,82 @@ private final class RecordingAPI: APIClient {
     #expect(!vm.reseedOnOrphanedStore)
     #expect(vm.reseedOnRow(mine))
     #expect(!vm.reseedOnRow(theirs))
-    #expect(!vm.reseedOnRow(offSite))
+    #expect(vm.reseedOnRow(offSite))
 
-    // A shell with no store seam offers the gesture nowhere.
+    // A shell with no store seam offers no custodian leg — but the pull-back
+    // needs no store, so a nest row still carries it.
     let noSeam = wired(log, custodian: nil)
-    noSeam.seedDestinationsForTest([mine])
-    #expect(noSeam.reseedRows.isEmpty)
+    noSeam.seedDestinationsForTest([mine, offSite])
+    #expect(noSeam.reseedRows == ["off-site"])
 }
 
-@Test @MainActor func armReseedRefusesWithoutAPaintedRow() {
+@Test @MainActor func aNestRowsConfirmPullsBackFromThatNestThenReLists() async {
+    // No custodian seam at all: the pull-back runs through the API alone, for
+    // the pressed row, under this device's id — and the confirm names it.
+    let log = CallLog()
+    let lines = [LocalizedText(key: "backups.reseed_result_whole", args: [:])]
+    log.pullBackResult = FfiReseedResult(
+        stopped: nil, resultLines: lines, isWhole: true, reenrollError: nil)
+    let vm = wired(log, custodian: nil)
+    let mine = clientDest("mine", deviceId: "dev-1")
+    let offSite = dest("off-site", "https://b.example.com/", "Off-site box")
+    vm.seedDestinationsForTest([mine, offSite])
+
+    await vm.armReseed(source: "mine")
+    #expect(!vm.reseedConfirming)  // no store seam: the custodian row offers nothing
+    await vm.armReseed(source: "off-site")
+    #expect(vm.reseedConfirming)
+    #expect(vm.reseedPulledFromName == "Off-site box")
+    // The confirm carries the preflight's lines, resolved nested.
+    #expect(vm.reseedPreflightLines == log.preflight.lines.map(renderLocalizedTextNested))
+    #expect(vm.reseedPreflightLines.first?.contains("backups.") == false)
+
+    await vm.confirmReseed()
+
+    #expect(log.calls.first == "preflight:off-site")
+    // The run carries the acceptance the preflight returned, verbatim.
+    #expect(log.calls.contains("pull-back:off-site:dev-1:{\"accepted\":true}"))
+    #expect(!log.calls.contains("reseed"))
+    #expect(vm.reseedResultText == L.backups.reseedResultWhole)
+    #expect(vm.errorMessage == nil)
+    #expect(log.calls.contains("list"))
+}
+
+@Test @MainActor func aStoppedPreflightOpensNoConfirmAndPaintsTheError() async {
+    let log = CallLog()
+    log.preflight = FfiPullBackPreflight(stopped: "holder unreachable", lines: [], acceptance: "")
+    let vm = wired(log, custodian: nil)
+    vm.seedDestinationsForTest([dest("off-site", "https://b.example.com/", "Off-site box")])
+
+    await vm.armReseed(source: "off-site")
+
+    #expect(!vm.reseedConfirming)
+    #expect(vm.reseedPreflightLines.isEmpty)
+    #expect(vm.errorMessage == L.backups.backupReseedFailed(reason: "holder unreachable"))
+    #expect(!log.calls.contains { $0.hasPrefix("pull-back") })
+}
+
+@Test @MainActor func aPullBacksFailedReenrollmentNamesTheNest() async {
+    let log = CallLog()
+    log.pullBackResult = FfiReseedResult(
+        stopped: nil,
+        resultLines: [LocalizedText(key: "backups.reseed_result_whole", args: [:])],
+        isWhole: true, reenrollError: "offline")
+    let vm = wired(log, custodian: RecordingCustodian(log: log))
+    vm.seedDestinationsForTest([dest("off-site", "https://b.example.com/", "Off-site box")])
+    await vm.armReseed(source: "off-site")
+
+    await vm.confirmReseed()
+
+    #expect(vm.reseedResultText == L.backups.reseedResultWhole)
+    #expect(vm.errorMessage
+        == L.backups.backupReseedPullBackReenrollFailed(name: "Off-site box", reason: "offline"))
+    #expect(!log.calls.contains("list"))
+}
+
+@Test @MainActor func armReseedRefusesWithoutAPaintedRow() async {
     let vm = wired(CallLog(), custodian: RecordingCustodian(log: CallLog()))
-    vm.armReseed()
+    await vm.armReseed()
     #expect(!vm.reseedConfirming)
 }
 
@@ -649,7 +743,7 @@ private final class RecordingAPI: APIClient {
         stopped: nil, resultLines: lines, isWhole: true, reenrollError: nil)
     let vm = wired(log, custodian: custodian)
     await vm.refreshOrphanedStore()
-    vm.armReseed()
+    await vm.armReseed()
     #expect(vm.reseedConfirming)
 
     await vm.confirmReseed()
@@ -674,7 +768,7 @@ private final class RecordingAPI: APIClient {
         stopped: "the agent restarted", resultLines: [], isWhole: false, reenrollError: nil)
     let vm = wired(log, custodian: custodian)
     await vm.refreshOrphanedStore()
-    vm.armReseed()
+    await vm.armReseed()
 
     await vm.confirmReseed()
 

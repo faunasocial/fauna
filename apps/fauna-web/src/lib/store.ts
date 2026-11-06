@@ -1,9 +1,10 @@
-import { get, writable } from 'svelte/store';
+import { derived, get, writable } from 'svelte/store';
 import type { Identity, DecodedEmail, Knock, Contact } from './types';
 import {
   actorIdFromSecret,
   ensureWasm,
   logMessage,
+  recoveryBoxesLocal,
   signOutRecordBegin,
   signOutWipeOwed,
 } from './wasm';
@@ -17,9 +18,9 @@ import {
   type SessionMaterial,
 } from './accounts';
 import { tabPin, clearTabPin } from './tabPin';
-import { clearTokenCache, silentSignIn, storedNestUrlOrNull } from './api';
-import { escalateIfTerminalAuthVerdict, escalateSignInRefused } from './post-auth-escalation';
-import { silentSignInRetryDelay } from './silent-sign-in-retry';
+import { clearTokenCache, homeNestUrlOrNull, silentSignIn } from './api';
+import { escalateIfTerminalAuthVerdict, escalateLostNest, escalateSignInRefused } from './post-auth-escalation';
+import { lostNestOfferDue, silentSignInRetryDelay } from './silent-sign-in-retry';
 import { keepVerifiedSession } from './identity-reread';
 import { resetActorScopedState } from './actorScope';
 
@@ -109,6 +110,10 @@ function createIdentityStore() {
   // another identity, a switch back, or the forced re-check below — ends the
   // older one's loop rather than leaving two loops dialing for one tab.
   let refreshGeneration = 0;
+  // Whether the refresh behind `refreshInFlight` has settled. A settled refresh
+  // that did not verify (a terminal verdict, an opaque failure) stays sticky for
+  // a plain mount, but not for `reverifyAfterLaunch` below.
+  let refreshSettled = false;
   function refreshFromServer(secretHex: string, force = false): Promise<void> {
     // The guard is deliberately *sticky* (see above): once a refresh for this
     // identity has settled, later mounts reuse it rather than re-running the
@@ -119,6 +124,7 @@ function createIdentityStore() {
     // launch, plus a trigger that re-runs that same production body.
     if (!force && refreshInFlight && refreshingSecret === secretHex) return refreshInFlight;
     refreshingSecret = secretHex;
+    refreshSettled = false;
     const generation = ++refreshGeneration;
     // Whether this refresh may still act for its identity: no later refresh has
     // superseded it (the key the sticky guard above is keyed on), and the store
@@ -212,7 +218,8 @@ function createIdentityStore() {
           // never shows a launch surface at all, so a refresh that gave up here
           // left the tab with no working session, no kit and no error until the
           // user happened to reload. Silent, not abandoned (`security.md`
-          // § Transport trust → § Post-auth surfacing).
+          // § Transport trust → § Post-auth surfacing), but for the lost-nest
+          // offer below.
           const delay = silentSignInRetryDelay(e, attempt);
           if (delay !== null) {
             console.warn(
@@ -224,6 +231,18 @@ function createIdentityStore() {
               'fauna_web::store',
               `silentSignIn refresh failed (transient; retry ${attempt + 1} in ${delay} ms): ${e}`,
             );
+            // The one transient failure that is not silent: a tab that never
+            // reached its nest, on a device that can recover it. The nest may be
+            // gone, and only the launch surface offers recovery
+            // (`box-recovery.md` § The plane-era recovery floor, (b)). Ending the
+            // refresh is safe: `Online` runs `reverifyAfterLaunch`.
+            if (lostNestOfferDue(attempt) && get({ subscribe })?.registered !== true) {
+              const boxes = await recoveryBoxesLocal(secretHex).catch(() => []);
+              if (boxes.length > 0 && stillCurrent()) {
+                escalateLostNest();
+                return;
+              }
+            }
             await new Promise((resolve) => setTimeout(resolve, delay));
             if (!stillCurrent()) return;
             continue;
@@ -239,7 +258,9 @@ function createIdentityStore() {
           return;
         }
       }
-    })();
+    })().finally(() => {
+      if (generation === refreshGeneration) refreshSettled = true;
+    });
     return refreshInFlight;
   }
   return {
@@ -256,6 +277,28 @@ function createIdentityStore() {
      * that fakes the verdict).
      */
     refreshFromNest(secretHex: string): Promise<void> {
+      return refreshFromServer(secretHex, true);
+    },
+    /**
+     * Re-run the verified refresh for `secretHex` when the launch machine has
+     * just reached `Online` and this document's refresh for that secret settled
+     * WITHOUT verifying it — the post-auth re-trust (`security.md` § Transport
+     * trust → § Post-auth surfacing). The escalation lands the tab on the launch
+     * route, whose mount runs the refresh against the poisoned pin; it ends on
+     * the identity-changed verdict, and the sticky guard would hand every later
+     * mount that settled promise, so `registered` never came back after the
+     * user trusted the nest (`identity-reread.ts`).
+     *
+     * A refresh still in flight, or one that verified, is left alone: the plain
+     * launch path is unchanged, and one verified refresh per secret stays the
+     * rule. The forced body is `refreshFromServer`'s, so `registered` is still
+     * set by that one production path and nowhere else.
+     */
+    reverifyAfterLaunch(secretHex: string): Promise<void> {
+      const current = get({ subscribe });
+      const verified = current?.secretHex === secretHex && current.registered === true;
+      const pending = refreshInFlight !== null && refreshingSecret === secretHex && !refreshSettled;
+      if (verified || pending) return refreshInFlight ?? Promise.resolve();
       return refreshFromServer(secretHex, true);
     },
     /** Direct store set — for test agent use (bypasses WASM). */
@@ -319,8 +362,10 @@ function createIdentityStore() {
           // Background refresh: pull current handle/domain/tier from the nest so
           // out-of-band changes (server-side handle rename, tier upgrade) replace
           // the cache. Non-blocking — the store already holds the registry's
-          // cached identity.
-          refreshFromServer(healed.secretHex);
+          // cached identity. Not for a wizard resumed before its account has a
+          // home nest: that refresh would mint the session the handle check is
+          // about to read (`signedInIdentity`).
+          if (homeNestUrlOrNull(healed.actorId) !== null) refreshFromServer(healed.secretHex);
         })
         .catch((e) => {
           logMessage('warn', 'fauna_web::store', `account boot failed: ${e}`);
@@ -368,7 +413,7 @@ function createIdentityStore() {
      *  namespace, erase every reached account's store — in the native order,
      *  behind one durable decision (`account-scoping.md` § The scoping
      *  taxonomy → *Erasure follows scope*, the paragraph "Web's account store
-     *  is in the erase too"): **record, stop, wipe, erase.** The other-tab
+     *  is in the erase too"): **record, flush, stop, wipe, erase.** The other-tab
      *  refusal is the caller's, asked before this is entered.
      *
      *  1. **Record.** The sign-out record names every account this reaches,
@@ -376,12 +421,15 @@ function createIdentityStore() {
      *     finished by the next load (`accountsBoot()`'s reconcile) and a
      *     caller that cannot await (the e2e agent's `reset`, which navigates
      *     on the next line) still lands signed out.
-     *  2. **Stop.** The runtime's sign-out stop, awaited under the hosts' one
+     *  2. **Flush.** Every drafts rail saved now, each rail bounded
+     *     (`#lib/drafts-leave-flush`) — the sign-out door of the leave-flush
+     *     promise, while the session the save rides is still alive.
+     *  3. **Stop.** The runtime's sign-out stop, awaited under the hosts' one
      *     stop budget: it retires the enrollment over the session this tab
      *     still holds and closes the store. Until it returns the runtime can
      *     still write a credential slot the wipe is about to delete, and holds
      *     the database a delete would wait on.
-     *  3. **Wipe.** `clearTokenCache()` drops the in-memory bearers so none
+     *  4. **Wipe.** `clearTokenCache()` drops the in-memory bearers so none
      *     outlives the identity that minted it — sign-out `goto`s rather than
      *     reloading, so module state would otherwise survive into the next
      *     identity — and `set(null)` runs the actor-scope pass for the same
@@ -392,7 +440,7 @@ function createIdentityStore() {
      *     shared-Rust credential erase: leaving `fauna/index` pointing at this
      *     account and its `fauna/{actor}/secret` on disk would make the next
      *     load read it back.
-     *  4. **Erase.** `signOutFinish()` erases each recorded account's store,
+     *  5. **Erase.** `signOutFinish()` erases each recorded account's store,
      *     bounded, and each leaves the record as its store goes. A store that
      *     would not go stays recorded, and the onboarding page this lands on
      *     tells the user (`#lib/accounts`'s `signOutResidue`). */
@@ -421,6 +469,19 @@ function createIdentityStore() {
         } catch (e) {
           logMessage('warn', 'fauna_web::store', `sign-out not recorded: ${e}`);
         }
+      }
+      // The leave-flush (`reserved-folders.md` § The leave-flush promise, the
+      // sign-out door): every drafts rail saved NOW, ahead of the stop below —
+      // that stop retires the session the save rides, and the actor-scope pass
+      // after it drops the managers holding the snapshot, so a later flush
+      // could only lose the edit still inside the debounce. After the record,
+      // so a tab closed while it runs is still signed out on the next load;
+      // each rail bounded, so an offline sign-out still completes. Dynamic
+      // import: the rails' modules import this one.
+      try {
+        await (await import('./drafts-leave-flush')).flushDraftRailsNow();
+      } catch (e) {
+        logMessage('warn', 'fauna_web::store', `sign-out: drafts not flushed: ${e}`);
       }
       // Dynamic import for the reason `push.ts` is one above:
       // `account-runtime.ts` → `rpc.ts` → this module is a static cycle.
@@ -528,8 +589,12 @@ const withheldUntilHomed = new Set<ActorChangeHandler>();
  * its own SPA, the very box about to be claimed — which answers
  * `fauna.auth.not_registered` and stops the client's reconnect loop for good
  * (`security.md` § Post-auth surfacing: that refusal ends a *signed-in*
- * session, and there is none yet). The gate is the one `resolveRecoveryBoxes`
- * applies: `storedNestUrlOrNull()`, never the origin fallback.
+ * session, and there is none yet). The gate is the identity's OWN home nest,
+ * `homeNestUrlOrNull(actorId)` — never the origin fallback, and never the
+ * tab's nest when the tab belongs to another account: the append-mode "Add
+ * account" wizard holds a new identity in a tab still pinned to the live
+ * account, and a dial with the new secret against the live account's nest
+ * would spend an admin-admitted identity's `first_sign_in`.
  *
  * A withheld handler is not dropped: the `LoggedIn` terminal records the home
  * nest and calls `deliverWithheldActorChange()`, which runs it then. A route
@@ -538,7 +603,7 @@ const withheldUntilHomed = new Set<ActorChangeHandler>();
  */
 export function onSignedInActorChange(fn: ActorChangeHandler): () => void {
   const off = onActorChange((id) => {
-    if (storedNestUrlOrNull() === null) {
+    if (homeNestUrlOrNull(id.actorId) === null) {
       withheldUntilHomed.add(fn);
       return;
     }
@@ -551,12 +616,29 @@ export function onSignedInActorChange(fn: ActorChangeHandler): () => void {
   };
 }
 
+/** Bumped when the `LoggedIn` terminal records the home nest: the nest is not a
+ *  store, so {@link signedInIdentity} has nothing else to re-derive on. */
+const homeNestRecorded = writable(0);
+
+/**
+ * The {@link onSignedInActorChange} gate for reactive code: the identity once it
+ * has a home nest, else `null`. An `$effect` that dials reads this, never
+ * `$identity` — a dial mints a session, and for an account an admin admitted
+ * directly that first mint is what the nest answers `first_sign_in` for
+ * (`login.md` § Direct Auth → the verify reply), so a mint ahead of the wizard's
+ * handle check takes the one-tap trust offer away from them.
+ */
+export const signedInIdentity = derived([identity, homeNestRecorded], ([$identity]) =>
+  $identity && homeNestUrlOrNull($identity.actorId) !== null ? $identity : null,
+);
+
 /** Run every signed-in handler withheld from the current actor, now that its
  *  home nest is stored — the `LoggedIn` terminal's call, after its registry
  *  write. A no-op when nothing was withheld, or the nest is still unknown. */
 export function deliverWithheldActorChange(): void {
   const id = get(identity);
-  if (!id || storedNestUrlOrNull() === null) return;
+  if (!id || homeNestUrlOrNull(id.actorId) === null) return;
+  homeNestRecorded.update((n) => n + 1);
   const due = [...withheldUntilHomed];
   withheldUntilHomed.clear();
   for (const fn of due) void fn(id);

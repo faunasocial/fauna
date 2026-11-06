@@ -62,7 +62,7 @@ import time
 
 import pytest
 
-from helpers.app_surface import declared_absence, skip_unbuilt
+from helpers.app_surface import declared_absence, require_surface
 from helpers.mail_dedicated_nest import (
     alias_admin_to_address,
     dedicated_node_url,
@@ -129,21 +129,7 @@ def test_first_party_sent_copy_survives_client_restart(app, dedicated_mail_nest,
             "recover() does not relaunch the browser; its own reload-based "
             "twin is test_mail_sent_copy_restart_web.py)",
         )
-    elif not (
-        app.driver.is_linux()
-        or app.driver.is_windows()
-        or app.driver.is_macos()
-        or app.driver.is_tui()
-    ):
-        skip_unbuilt(
-            app.driver,
-            surface="a native-process-relaunch Sent-copy restart proof",
-            detail="linux + windows + macOS + tui have it (PlatformDriver."
-            "recover() does a real teardown+relaunch); iOS + android are "
-            "the cross-app follow-on",
-            tracked="docs/goal/behavior/smtp-server.md § Implementation "
-            "status today",
-        )
+    require_surface(app.driver, "native-relaunch-sent-copy-proof")
 
     handle = dedicated_mail_nest
     handle.assert_mta_running()

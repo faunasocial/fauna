@@ -108,6 +108,7 @@ REPAINT_BUDGET_S = 30.0
 @pytest.mark.linux
 @pytest.mark.tui
 @pytest.mark.windows
+@pytest.mark.android
 @pytest.mark.feature("feed-delete-own-post")
 def test_deleting_your_post_leaves_replies_and_quotes_standing_and_says_it_is_gone(
     logged_in_app, nest_instance

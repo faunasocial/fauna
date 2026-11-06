@@ -145,10 +145,11 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
     /// watcher/loop (control inversion), so on the shared reconcile cadence
     /// (`defaultRescanIntervalSecs()` — the one constant every seat ticks at
     /// since folders re-model phase 5, crossed from Rust rather than copied
-    /// here) we `host.refresh()` and, iff it folded something new, tell the OS to
-    /// re-enumerate via `signalEnumerator(for: .rootContainer)` (`on-demand-files.md`
-    /// § Apple File Provider binding — *a pulled remote change signals the
-    /// enumerator*). A `nil` host or an indeterminate binding starts no tick.
+    /// here) we `host.refresh()` and, iff it folded something new or flipped an
+    /// item's keep, tell the OS to re-enumerate — the root, and the working set
+    /// whose change feed reports the kept flips (`FileProviderWorkingSetFeed`;
+    /// `on-demand-files.md` § Apple File Provider binding — *a pulled remote
+    /// change signals the enumerator*). A `nil` host or an indeterminate binding starts no tick.
     ///
     /// The same tick runs **eviction observation**: the OS evicts materialized
     /// items behind the provider's back ("Remove Download", storage pressure)
@@ -167,9 +168,10 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: interval)
                 if Task.isCancelled { break }
-                if (try? await host.refresh()) == true {
+                let changed = (try? await host.refresh()) == true
+                for signalled in FileProviderWorkingSetFeed.containersToSignal(changed: changed) {
                     try? await NSFileProviderManager(for: self.domain)?
-                        .signalEnumerator(for: .rootContainer)
+                        .signalEnumerator(for: signalled)
                 }
                 await self.observeEvictions(host: host)
             }
@@ -237,11 +239,14 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
         }
         let rel = Self.rel(for: identifier)
         let displayName = domain.displayName
+        let domainIdentifier = domain.identifier.rawValue
         Task {
             let readOnly = await FileProviderItemCapabilities.isReadOnly(host)
             if identifier == .rootContainer {
                 completionHandler(
-                    FileProviderItem.rootContainer(named: displayName, readOnly: readOnly), nil)
+                    FileProviderItem.rootContainer(
+                        named: displayName, readOnly: readOnly, shareable: domainIdentifier),
+                    nil)
                 progress.completedUnitCount = 1
                 return
             }
@@ -383,7 +388,7 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
         basedOn itemTemplate: NSFileProviderItem,
         fields _: NSFileProviderItemFields,
         contents: URL?,
-        options _: NSFileProviderCreateItemOptions = [],
+        options: NSFileProviderCreateItemOptions = [],
         request _: NSFileProviderRequest,
         completionHandler: @escaping (NSFileProviderItem?, NSFileProviderItemFields, Bool, Error?) -> Void
     ) -> Progress {
@@ -399,6 +404,11 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
         let parentIdentifier = itemTemplate.parentItemIdentifier
         let filename = itemTemplate.filename
         let isFolder = itemTemplate.contentType == .folder
+        // The OS re-creating an item it held edited when a remote delete removed
+        // it: the survivor of a declined delete, whose conflict the host reports
+        // (`on-demand-files-apple.md` § Apple File Provider binding, *A remote
+        // delete of a hydrated item*, case (3)).
+        let deletionConflicted = options.contains(.deletionConflicted)
 
         Task {
             do {
@@ -437,7 +447,10 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
                         at: dst.deletingLastPathComponent(), withIntermediateDirectories: true)
                     FileManager.default.createFile(atPath: dst.path, contents: Data())
                 }
-                try requireAcked(try await host.ingest(rel: rel))
+                try requireAcked(
+                    deletionConflicted
+                        ? try await host.ingestDeletionConflicted(rel: rel)
+                        : try await host.ingest(rel: rel))
                 completionHandler(try await refreshedItem(rel: rel, host: host), [], false, nil)
             } catch {
                 completionHandler(nil, [], false, error)

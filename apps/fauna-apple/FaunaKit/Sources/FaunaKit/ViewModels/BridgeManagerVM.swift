@@ -7,6 +7,9 @@ import SwiftUI
 public class BridgeManagerVM {
     public var bridges: [BridgeInfo] = []
     public var follows: [String: [BridgeFollow]] = [:]
+    /// Pending follow requests per bridge, read only for a linked bridge that
+    /// `supportsFollowRequests` (bridges.md § Follow requests).
+    public var followRequests: [String: [BridgeFollowRequest]] = [:]
     public var isLoading = false
     public var errorMessage: String?
 
@@ -200,10 +203,15 @@ public class BridgeManagerVM {
             for bridge in bridges where bridge.linked && bridge.supportsFollows {
                 newFollows[bridge.id] = try await api.listBridgeFollows(bridgeId: bridge.id)
             }
+            var newRequests: [String: [BridgeFollowRequest]] = [:]
+            for bridge in bridges where bridge.linked && bridge.supportsFollowRequests {
+                newRequests[bridge.id] = try await api.listBridgeFollowRequests(bridgeId: bridge.id)
+            }
             // The in-flight clause, re-checked after the LOOP of per-bridge follow
             // reads — the widest window on this page for a switch to land mid-read.
             guard self.api === api else { return }
             follows = newFollows
+            followRequests = newRequests
         } catch {
             guard self.api === api else { return }
             errorMessage = DisplayError.http(error)
@@ -277,6 +285,23 @@ public class BridgeManagerVM {
         } catch {
             guard self.api === api else { return }
             noteFailure(error, source: source)
+        }
+    }
+
+    /// Approve or refuse one request, then re-read (non-optimistic, no confirm).
+    public func answerFollowRequest(bridgeId: String, id: String, approve: Bool) async {
+        guard let api else { return }
+        do {
+            if approve {
+                try await api.approveBridgeFollowRequest(bridgeId: bridgeId, id: id)
+            } else {
+                try await api.refuseBridgeFollowRequest(bridgeId: bridgeId, id: id)
+            }
+            guard self.api === api else { return }   // the in-flight clause
+            await refresh()
+        } catch {
+            guard self.api === api else { return }
+            errorMessage = DisplayError.http(error)
         }
     }
 

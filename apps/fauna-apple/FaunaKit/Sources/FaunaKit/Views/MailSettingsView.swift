@@ -105,10 +105,18 @@ public struct MailSettingsView: View {
                 // hiding this section from a CardDAV-only or WebDAV-only actor who still
                 // needs the one shared bridge credential). mail-settings.md
                 // § Credential-management reachability.
+                // The pending-rotation banner is gated on the sentinel ALONE, never
+                // on the credential-management gate below (`mail-settings.md`
+                // § Pending-rotation banner): a first enable torn before its
+                // submission token runs as a degenerate rotation, so the sentinel is
+                // set while `enabled` is still false and the gate reads closed —
+                // nesting the banner inside it left the relaunched page reading
+                // "Mail is disabled" with no way to Resume. Mirrors tui
+                // (`settings/mail.rs`, the banner pushed outside the mailbox gate).
+                if let pending = vm.snapshot?.pendingRotation {
+                    pendingRotationBanner(pending)
+                }
                 if vm.credentialManagementReachable {
-                    if let pending = vm.snapshot?.pendingRotation {
-                        pendingRotationBanner(pending)
-                    }
                     manageSection
                     // Rotate-keys is likewise an inline reveal (same `.sheet`
                     // in-process-registration gap). Reachable only with ≥1 credential, so
@@ -118,7 +126,10 @@ public struct MailSettingsView: View {
                         MailRotateKeysSheet(vm: vm) { showingRotate = false }
                     }
                     serveSection
-                    if vm.enabled { forwardingSection }
+                    if vm.enabled {
+                        accountSection
+                        forwardingSection
+                    }
                     muaSection
                 }
                 statusSection
@@ -145,17 +156,34 @@ public struct MailSettingsView: View {
     // MARK: - Enable toggle
 
     private var enabledSection: some View {
-        groupedSection {
+        // A box that cannot enable mail (no content scanners): the toggle is
+        // disabled with state `unavailable` and the notice replaces the enable
+        // explanation. Read from the shared snapshot, never re-derived; where mail
+        // is already on, the toggle stays live so it can still be turned off.
+        let unavailable = !vm.enabled && (vm.snapshot?.mailUnavailableHere ?? false)
+        return groupedSection {
             Toggle(L.settings.mail.enableTitle, isOn: Binding(
                 get: { vm.enabled },
                 set: { wantOn in setEnabled(wantOn) }
             ))
+            .disabled(unavailable)
             .accessibilityIdentifier(Ids.mailSettingsEnabledToggle)
             .automationActivate(
                 Ids.mailSettingsEnabledToggle,
-                value: { vm.enabled ? "on" : "off" }
+                isEnabled: { !(!vm.enabled && (vm.snapshot?.mailUnavailableHere ?? false)) },
+                value: {
+                    if vm.enabled { return "on" }
+                    return (vm.snapshot?.mailUnavailableHere ?? false) ? "unavailable" : "off"
+                }
             ) { setEnabled(!vm.enabled) }
-            if !vm.enabled {
+            if unavailable {
+                Text(L.mailSettings.unavailableNotice)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .accessibilityIdentifier(Ids.mailSettingsUnavailableNotice)
+                    .automationValue(Ids.mailSettingsUnavailableNotice,
+                                     text: { L.mailSettings.unavailableNotice })
+            } else if !vm.enabled {
                 Text(L.settings.mail.sectionDescription)
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -302,6 +330,108 @@ public struct MailSettingsView: View {
             // could never move.
             .faunaGate("fauna.bridges.set_mail_serving_enabled")
         }
+    }
+
+    // MARK: - Receive / send, automatic reply, quota (mail-policy-config.md § Tier 3)
+
+    /// The tui lead's `account_switch_elements` / `autorespond_elements` /
+    /// `quota_elements`, shown while mail is enabled. Each switch is
+    /// non-optimistic — the serve-here toggle's shape: its `state` flips only
+    /// once the nest's re-read lands — and absent until the first read; the
+    /// reply's toggle likewise. The quota readout and notice are worded by the
+    /// shared `quota` helpers and never show the sending allowance.
+    private var accountSection: some View {
+        groupedSection {
+            if vm.switches != nil {
+                switchToggle(
+                    Ids.mailSettingsReceiveToggle,
+                    L.mailSettings.receiveLabel, L.mailSettings.receiveSubtitle,
+                    isOn: { vm.switches?.receiveEnabled ?? false }
+                ) { Task { await vm.toggleReceive() } }
+                switchToggle(
+                    Ids.mailSettingsSendToggle,
+                    L.mailSettings.sendLabel, L.mailSettings.sendSubtitle,
+                    isOn: { vm.switches?.sendEnabled ?? false }
+                ) { Task { await vm.toggleSend() } }
+                switchToggle(
+                    Ids.mailSettingsScanResultVisibleToggle,
+                    L.mailSettings.scanResultVisibleLabel, L.mailSettings.scanResultVisibleSubtitle,
+                    isOn: { vm.switches?.scanResultVisible ?? true }
+                ) { Task { await vm.toggleScanResultVisible() } }
+            }
+            if vm.autorespond != nil {
+                Toggle(isOn: Binding(
+                    get: { vm.autorespond?.enabled ?? false },
+                    set: { _ in toggleAutorespond() }
+                )) {
+                    VStack(alignment: .leading) {
+                        Text(L.mailSettings.autorespondLabel)
+                        Text(L.mailSettings.autorespondSubtitle)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .accessibilityIdentifier(Ids.mailSettingsAutorespondToggle)
+                .automationActivate(
+                    Ids.mailSettingsAutorespondToggle,
+                    value: { (vm.autorespond?.enabled ?? false) ? "on" : "off" }
+                ) { toggleAutorespond() }
+                // No gate: the reply is a filter rule, and its create
+                // (`fauna.email.filters.create`) is OfflineQueued — it never
+                // desensitizes, so neither the toggle nor the message declares.
+            }
+            VStack(alignment: .leading, spacing: 4) {
+                Text(L.mailSettings.autorespondMessageLabel)
+                TextField(L.mailSettings.autorespondMessageLabel, text: $vm.autorespondMessageDraft)
+                    .accessibilityIdentifier(Ids.mailSettingsAutorespondMessageInput)
+                    .automationField(
+                        Ids.mailSettingsAutorespondMessageInput,
+                        text: $vm.autorespondMessageDraft,
+                        commit: { Task { await vm.commitAutorespondMessage() } }
+                    )
+                    .onSubmit { Task { await vm.commitAutorespondMessage() } }
+            }
+            if let quota = vm.mailboxQuotaText {
+                automationText(Ids.mailSettingsMailboxQuota, quota)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            if let sending = vm.submissionQuotaText {
+                automationText(Ids.mailSettingsSubmissionQuota, sending)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            if let notice = vm.overQuotaNoticeText {
+                automationText(Ids.mailSettingsOverQuotaNotice, notice)
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+            }
+        }
+    }
+
+    /// One receive / send switch: a labelled toggle whose rendered value is the
+    /// nest's (`isOn` reads the VM live, so the automation value never serves a
+    /// stale capture), flipped through `toggle` (shared by the `Toggle`'s setter
+    /// and its `.automationActivate`).
+    private func switchToggle(
+        _ id: String, _ label: String, _ subtitle: String, isOn: @escaping () -> Bool,
+        toggle: @escaping () -> Void
+    ) -> some View {
+        Toggle(isOn: Binding(get: isOn, set: { _ in toggle() })) {
+            VStack(alignment: .leading) {
+                Text(label)
+                Text(subtitle)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .accessibilityIdentifier(id)
+        .automationActivate(id, value: { isOn() ? "on" : "off" }) { toggle() }
+        .faunaGate("fauna.bridges.set_mail_switches")
+    }
+
+    private func toggleAutorespond() {
+        Task { await vm.toggleAutorespond() }
     }
 
     // MARK: - Forwarding (mail-forwarding.md)

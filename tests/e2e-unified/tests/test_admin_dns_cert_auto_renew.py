@@ -71,8 +71,7 @@ def test_admin_dns_auto_renew_default_on_and_toggles(admin_app, nest_instance):
     )
 
     try:
-        while admin_app.admin.dns_credential_count() > 0:
-            admin_app.admin.clear_dns_credential(0)
+        admin_app.admin.clear_all_dns_credentials()
 
         admin_app.admin.add_dns_credential("cloudflare", {"api-token": _SENTINEL_TOKEN})
         wait_until(
@@ -151,7 +150,6 @@ def test_admin_dns_auto_renew_default_on_and_toggles(admin_app, nest_instance):
                     admin_app.admin.toggle_auto_renew(i)
                 if admin_app.admin.cert_delegation_present(i):
                     admin_app.admin.remove_cert_delegation(i)
-            while admin_app.admin.dns_credential_count() > 0:
-                admin_app.admin.clear_dns_credential(0)
+            admin_app.admin.clear_all_dns_credentials()
         except Exception:
             pass

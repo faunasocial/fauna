@@ -13,7 +13,7 @@ namespace FaunaApp.Helpers;
 ///
 /// Usage:
 ///   &lt;Image helpers:ImageHashBind.Hash="{x:Bind MediaHashHex, Mode=OneWay}"
-///          helpers:ImageHashBind.Loader="{x:Bind local:FeedPage.GetImageLoader(), Mode=OneTime}" /&gt;
+///          helpers:ImageHashBind.Loader="{x:Bind feed:PostCardBind.GetImageLoader(), Mode=OneTime}" /&gt;
 ///
 /// <para>A bridged post's picture has no hash: it is a nest-relative path
 /// (<see cref="ProxiedPathProperty"/>, render-model.md § D6c), loaded through the same
@@ -38,6 +38,18 @@ public static class ImageHashBind
 
     public static void SetLoader(DependencyObject d, IHashImageLoader? value) => d.SetValue(LoaderProperty, value);
     public static IHashImageLoader? GetLoader(DependencyObject d) => (IHashImageLoader?)d.GetValue(LoaderProperty);
+
+    // The home the post's own bytes rest on (`FeedPostItem.BlobHome`, the shared
+    // `post_blob_home` read off the post), handed to the loader unchanged with the hash.
+    // Typed object: the generated record is internal to FaunaApp.Core and a public
+    // attached-property signature cannot name it. Null = this nest.
+    public static readonly DependencyProperty HomeProperty =
+        DependencyProperty.RegisterAttached(
+            "Home", typeof(object), typeof(ImageHashBind),
+            new PropertyMetadata(null, OnHashChanged));
+
+    public static void SetHome(DependencyObject d, object? value) => d.SetValue(HomeProperty, value);
+    public static object? GetHome(DependencyObject d) => d.GetValue(HomeProperty);
 
     // A bridged post's picture: the nest-relative path of its `ProxiedImage` block
     // (render-model.md § D6c). Used only while Hash is empty — a blob image wins the
@@ -107,12 +119,12 @@ public static class ImageHashBind
     /// <summary>One picture to load: a blob by content hash, or a bridged post's picture
     /// by nest-relative path. A record, so two binds that resolve to the same picture
     /// through the same loader compare equal.</summary>
-    private sealed record ImageSourceKey(bool Proxied, string Key, IHashImageLoader Loader);
+    private sealed record ImageSourceKey(bool Proxied, string Key, IHashImageLoader Loader, object? Home = null);
 
     private static ImageSourceKey? Resolve(Image img)
     {
         if (GetLoader(img) is not { } loader) return null;
-        if (GetHash(img) is { Length: > 0 } hash) return new ImageSourceKey(false, hash, loader);
+        if (GetHash(img) is { Length: > 0 } hash) return new ImageSourceKey(false, hash, loader, GetHome(img));
         if (GetProxiedPath(img) is { Length: > 0 } path && loader is IProxiedImageLoader)
             return new ImageSourceKey(true, path, loader);
         return null;
@@ -154,7 +166,7 @@ public static class ImageHashBind
 
         var bmp = source.Proxied
             ? await ((IProxiedImageLoader)source.Loader).LoadProxiedAsync(source.Key)
-            : await source.Loader.LoadAsync(source.Key);
+            : await source.Loader.LoadAsync(source.Key, source.Home);
 
         // If the Image recycled to a new picture while we were loading, drop this result.
         if ((int)img.GetValue(RequestVersionProperty) != version) return;

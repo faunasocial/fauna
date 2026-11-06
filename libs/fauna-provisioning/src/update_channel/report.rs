@@ -34,6 +34,16 @@ pub const REPORT_SCHEMA: u32 = 1;
 /// [`Report::dropped`].
 pub const REPORT_RETAINED_EVENTS: usize = 32;
 
+/// The most bytes of the report archive the updater reads back out of the
+/// nest container: 32 events of bounded fields are a few KiB, so anything past
+/// this is not a ledger the updater wrote, and the read starts a fresh one.
+pub const REPORT_MAX_ARCHIVE_BYTES: usize = 64 * 1024;
+
+/// The largest `seq` or `dropped` a read-back ledger may carry: 2^53, some
+/// 285,000 years of milliseconds. A file past it was not written by the
+/// updater, and [`Report::parse`] refuses it so a fresh ledger starts.
+pub const REPORT_MAX_PLAUSIBLE: u64 = 1 << 53;
+
 /// The word a version label or an image tag is replaced by when it does not
 /// match [`is_reportable_label`] — registry-sourced text is data, never
 /// interpolated as it is.
@@ -80,7 +90,11 @@ impl Report {
     /// found it mid-write — or that carries another [`REPORT_SCHEMA`].
     pub fn parse(bytes: &[u8]) -> Option<Self> {
         let report: Report = serde_json::from_slice(bytes).ok()?;
-        (report.schema == REPORT_SCHEMA).then_some(report)
+        let plausible = report.schema == REPORT_SCHEMA
+            && report.dropped <= REPORT_MAX_PLAUSIBLE
+            && report.events.len() <= REPORT_RETAINED_EVENTS
+            && report.events.iter().all(|e| e.seq <= REPORT_MAX_PLAUSIBLE);
+        plausible.then_some(report)
     }
 
     /// The bytes the updater writes.
@@ -100,7 +114,7 @@ impl Report {
     /// across an updater restart or a hand-off that could not read the ledger
     /// back, as far as the host clock moves forward.
     pub fn push(&mut self, now_ms: u64, level: &str, event: &str, message: String) {
-        let seq = (self.last_seq() + 1).max(now_ms);
+        let seq = self.last_seq().saturating_add(1).max(now_ms);
         self.events.push(ReportEvent {
             seq,
             timestamp_ms: now_ms,
@@ -111,7 +125,7 @@ impl Report {
         let excess = self.events.len().saturating_sub(REPORT_RETAINED_EVENTS);
         if excess > 0 {
             self.events.drain(..excess);
-            self.dropped += excess as u64;
+            self.dropped = self.dropped.saturating_add(excess as u64);
         }
     }
 }
@@ -192,6 +206,33 @@ mod tests {
         assert_eq!(Report::parse(&bytes[..bytes.len() / 2]), None);
         let other = serde_json::json!({"schema": 2, "dropped": 0, "events": []});
         assert_eq!(Report::parse(other.to_string().as_bytes()), None);
+    }
+
+    #[test]
+    fn a_maxed_ledger_takes_a_push_without_panicking_and_does_not_parse() {
+        let mut report = Report {
+            dropped: u64::MAX,
+            events: (0..REPORT_RETAINED_EVENTS)
+                .map(|_| ReportEvent {
+                    seq: u64::MAX,
+                    timestamp_ms: 0,
+                    level: "info".into(),
+                    event: "a".into(),
+                    message: String::new(),
+                })
+                .collect(),
+            ..Default::default()
+        };
+        report.push(1, "info", "b", String::new());
+        assert_eq!(report.dropped, u64::MAX);
+        assert_eq!(report.last_seq(), u64::MAX);
+        // And such a file is refused on the read-back: a fresh ledger starts.
+        assert_eq!(Report::parse(&report.to_bytes()), None);
+        let huge_dropped = Report {
+            dropped: REPORT_MAX_PLAUSIBLE + 1,
+            ..Default::default()
+        };
+        assert_eq!(Report::parse(&huge_dropped.to_bytes()), None);
     }
 
     #[test]

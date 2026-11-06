@@ -33,18 +33,33 @@ public final class LabelerCatalogVM {
 
     /// Vend the machine from `APIClient` and load the first snapshot. Idempotent
     /// — the machine is built once per VM instance; later calls only re-`refresh()`.
+    ///
+    /// Safe to call from several `.task` runs at once (a page whose `.task` fires
+    /// again while the first build is in flight — iOS's re-pushed Settings
+    /// sub-page): the build that finishes first wins, and a later one refreshes
+    /// that machine instead of replacing it. A replaced machine left a gesture
+    /// already sent to the first one writing a state the page no longer read,
+    /// so the row never flipped.
     public func configure(api: APIClient) async {
         guard machine == nil else {
             await refresh()
             return
         }
         observerBox.target = self
+        let built: LabelerCatalogMachine
         do {
-            machine = try await api.labelerCatalogMachine(observer: observerBox)
+            built = try await api.labelerCatalogMachine(observer: observerBox)
         } catch {
-            connectError = DisplayError.message(error)
+            // A concurrent build that succeeded owns the page; this one's
+            // failure is not the page's.
+            if machine == nil { connectError = DisplayError.message(error) }
             return
         }
+        guard machine == nil else {
+            await refresh()
+            return
+        }
+        machine = built
         await refresh()
     }
 

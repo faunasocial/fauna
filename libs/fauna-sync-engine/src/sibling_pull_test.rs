@@ -559,6 +559,206 @@ async fn a_write_with_no_nest_lands_on_the_sibling_provisionally_and_the_nest_re
     );
 }
 
+/// **An on-demand receiver** — the agent's on-demand root, which hosts every
+/// bound folder on windows — takes a sibling's row as the share leg's rows land
+/// on that root: provisional, its body written whole, nothing recorded as its
+/// own (`p2p.md` § Same-account nest-down folder transfer). Its nest return is
+/// not the resident apply but the placeholder fold (the one
+/// `populate_placeholders_from_nest` runs on every re-pull): the fold's
+/// reconcile CONFIRMS the landed body — the overlay retires, the row stands at
+/// the writer's head with the fetched proof stamped, no placeholder is minted
+/// over it — and with the overlay's guard gone the receiver's sweep still
+/// records nothing, so the nest sequences the write once, as A's.
+///
+/// The pending row is pulled TWICE before the nest returns, as every pass
+/// re-serves it (a pending row advances no cursor): measured on two
+/// tui-on-windows seats 2026-11-05, the second pass forgot the landed body's
+/// hash, which disarmed the upload door's guard, and B recorded A's file as
+/// its own before A's catch-up — the nest's one row attributed to B.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_on_demand_receivers_placeholder_fold_confirms_a_sibling_landed_body() {
+    let net = listeners();
+    let a = a_writes_with_the_nest_down().await;
+    let manifest = a.manifest;
+    let _a_node = serve(0xa1, &net, a.doors).await;
+    let _a_engine = a.engine;
+    let b = reader_b().await;
+    b.siblings
+        .admitted(node_id(0xa1), admitted_channel(0xb2, 0xa1, &net).await);
+    let report = b.engine.pull_sibling_changes().await.unwrap();
+    assert_eq!(report.materialized, 1, "{report:?}");
+    assert_eq!(std::fs::read(b.watch.path().join(REL)).unwrap(), BODY);
+
+    // The next pass serves the same pending row again: nothing new lands, and
+    // the body stays the sibling's — the upload door still declines it.
+    let report = b.engine.pull_sibling_changes().await.unwrap();
+    assert_eq!(
+        (report.rows, report.materialized),
+        (1, 0),
+        "the pending row is re-served and lands nothing new: {report:?}"
+    );
+    assert!(
+        b.engine.holds_provisional_peer_body(REL).unwrap(),
+        "a re-served pending row forgot the body it landed"
+    );
+    let _ = b.engine.upload_file(REL).await;
+    assert!(
+        b.engine.db().own_pending_changes(4).unwrap().is_empty(),
+        "B's upload door mints no row of its own for a re-served sibling body"
+    );
+    assert!(
+        b.nest.received_requests().await.unwrap().is_empty(),
+        "B's upload door uploads nothing of a re-served sibling body"
+    );
+
+    // The nest is back: A's record, sequenced, as the placeholder fold reads it.
+    let channel = admitted_channel(0xb2, 0xa1, &net).await;
+    let page = fauna_peer_sync::pull_folder_changes(&channel, &folder_ref().to_wire(), 0)
+        .await
+        .unwrap();
+    let mut sequenced = page
+        .changes
+        .into_iter()
+        .next()
+        .expect("A serves its row")
+        .change;
+    sequenced.seq = 5;
+    sequenced.path = Some(REL.to_string());
+    let fold = b
+        .engine
+        .record_placeholders_from_changes(&[sequenced])
+        .expect("the placeholder fold");
+    assert_eq!(fold.overlay.confirmed, vec![REL.to_string()], "{fold:?}");
+    assert!(fold.overlay.superseded.is_empty(), "{fold:?}");
+    assert!(
+        fold.created.is_empty() && fold.repointed.is_empty() && fold.stale_hydrated.is_empty(),
+        "the fold leaves the landed body be — no placeholder over it: {fold:?}"
+    );
+    assert!(
+        b.engine.db().get_share_overlay(REL).unwrap().is_none(),
+        "the provisional annotation retired on arrival"
+    );
+    let entry = b.engine.db().get_entry(REL).unwrap().expect("entry stands");
+    assert_eq!(
+        (entry.state, entry.manifest_hash),
+        (crate::db::SyncState::Synced, Some(manifest)),
+        "same head — no fork"
+    );
+    assert!(
+        b.engine.is_recorded_content(REL),
+        "the confirm stamps the proof, so the body may be freed like any recorded one"
+    );
+    assert_eq!(b.engine.db().get_anchor().unwrap(), 5);
+
+    // The overlay's guard is gone with it; the sweep still records nothing.
+    let _ = crate::always_resident::LocalWriteHost::converge(&b.engine, "__test").await;
+    assert!(
+        b.engine.db().own_pending_changes(4).unwrap().is_empty(),
+        "sequenced once — A's record, never B's"
+    );
+    assert!(
+        b.nest.received_requests().await.unwrap().is_empty(),
+        "B's sweep uploads nothing"
+    );
+    assert_eq!(std::fs::read(b.watch.path().join(REL)).unwrap(), BODY);
+}
+
+/// **A pending row ends when the nest speaks.** A relayer's copy of a sibling's
+/// pending row retires on the nest's sequenced row, which on this leg is signed
+/// as the relayer's own account and is retained by nobody. And a row that does
+/// still arrive, from a sibling yet to hear the nest, is history once this
+/// replica's ledger holds its bytes: left to materialize, it wrote the file's
+/// first bytes over a converged fold, and the watcher then published them as a
+/// fresh edit on every seat; over a settled delete it brought the file back.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_pending_row_the_nest_has_answered_neither_relays_nor_lands() {
+    let net = listeners();
+    let a = a_writes_with_the_nest_down().await;
+    let manifest = a.manifest;
+    let _a_node = serve(0xa1, &net, a.doors).await;
+    let a = AtNest {
+        _engine: a.engine,
+        manifest_bytes: a.manifest_bytes,
+        nest_chunks: a.nest_chunks,
+    };
+    let b = reader_b().await;
+    b.siblings
+        .admitted(node_id(0xa1), admitted_channel(0xb2, 0xa1, &net).await);
+    let report = b.engine.pull_sibling_changes().await.unwrap();
+    assert_eq!(report.materialized, 1, "{report:?}");
+    assert_eq!(
+        b.engine.db().relayed_pending_changes(4).unwrap().len(),
+        1,
+        "B relays its sibling's pending row"
+    );
+
+    // The nest's sequenced row for A's write reaches B through the pull's own
+    // verification: B's relay of the pending row retires.
+    let channel = admitted_channel(0xb2, 0xa1, &net).await;
+    let page = fauna_peer_sync::pull_folder_changes(&channel, &folder_ref().to_wire(), 0)
+        .await
+        .unwrap();
+    let served = page.changes.into_iter().next().expect("A serves its row");
+    let mut sequenced = served.change.clone();
+    sequenced.seq = 5;
+    ChangeSigner::direct(&owner())
+        .sign_row(&mut sequenced, SET_NONCE)
+        .unwrap();
+    let (kept, held) = b
+        .engine
+        .verify_served_rows(vec![sequenced.clone()], &[])
+        .await;
+    assert_eq!(
+        (kept.len(), held),
+        (1, None),
+        "the row verifies as the account's"
+    );
+    assert!(
+        b.engine.db().relayed_pending_changes(4).unwrap().is_empty(),
+        "the nest's row retires the relayed pending row"
+    );
+
+    // The row applies, and a delete settles over it.
+    sequenced.path = Some(REL.to_string());
+    b.engine.note_owner_signed(manifest);
+    b.engine
+        .note_manifest_signer(manifest, fauna_core::file_download::RecordSigner::Current);
+    let nest = crate::test_support::MockNest::new();
+    nest.store()
+        .seed_manifest(manifest, a.manifest_bytes.clone());
+    for (key, body) in &a.nest_chunks {
+        nest.store().seed_chunk(*key, body.clone());
+    }
+    nest.mount(&b.nest).await;
+    let mut delete = sequenced.clone();
+    delete.seq = 6;
+    delete.change_type = "delete".to_string();
+    delete.manifest_hash = None;
+    delete.size_bytes = 0;
+    let batch = b
+        .engine
+        .apply_remote_changes(&[sequenced, delete], 0)
+        .await
+        .expect("apply the nest's rows");
+    assert!(!batch.deferred, "{batch:?}");
+    assert!(
+        !b.watch.path().join(REL).exists(),
+        "the delete applied here"
+    );
+
+    // A has not heard the nest and still serves its pending row. It stays
+    // history: no file comes back, no overlay row names it, and B does not
+    // start relaying it again.
+    let report = b.engine.pull_sibling_changes().await.unwrap();
+    assert_eq!((report.rows, report.materialized), (1, 0), "{report:?}");
+    assert!(
+        !b.watch.path().join(REL).exists(),
+        "a pending row the ledger holds brings nothing back"
+    );
+    assert!(b.engine.db().get_share_overlay(REL).unwrap().is_none());
+    assert!(b.engine.db().relayed_pending_changes(4).unwrap().is_empty());
+}
+
 /// The accepts gate covers the sibling rail (`local-folder-sync` outcome 15):
 /// a seat told not to take changes pulls nothing from a sibling either, and a
 /// flip back to accepting catches it up from exactly where it held.

@@ -30,7 +30,7 @@ public enum FeedInjectErrorTestCommand {
             return
         }
         Task { @MainActor in
-            await feedVM.configure(api: api, secretHex: secret)
+            await feedVM.configure(api: api, secretHex: secret, deviceIdHex: client?.deviceId ?? "")
             guard let mgr = feedVM.manager else {
                 logMessage(level: .debug, target: "fauna.testagent", message: "[TestAgent] feed_inject_error: feedVM manager unavailable")
                 return

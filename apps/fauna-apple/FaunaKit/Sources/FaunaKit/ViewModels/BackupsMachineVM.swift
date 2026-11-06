@@ -56,6 +56,12 @@ public final class BackupsMachineVM {
     /// moves only after ``reset()`` has dropped the machine.
     private var api: APIClient?
 
+    /// This seat's stable sync device id, as `configure` received it — the
+    /// device the per-file download's throwaway restore engine runs as, the
+    /// same choice tui, android and windows make (never the open snapshot's
+    /// owning device, which an unattributed snapshot does not name).
+    private var deviceIdHex: String?
+
     public init() {}
 
     /// Drop everything this VM holds for the account it was scoped to — the ONE
@@ -89,6 +95,7 @@ public final class BackupsMachineVM {
         immediateDeleteAcknowledge = ""
         immediateDeleteAck = ""
         api = nil
+        deviceIdHex = nil
         observerBox.target = nil
         observerBox = BackupsObserverBox()
         _observerTick &+= 1
@@ -123,6 +130,7 @@ public final class BackupsMachineVM {
     public func configure(api: APIClient, deviceIdHex: String?) async {
         if let current = self.api, current !== api { reset() }
         self.api = api
+        self.deviceIdHex = (deviceIdHex?.isEmpty ?? true) ? nil : deviceIdHex
         guard machine == nil else {
             logMessage(level: .info, target: "fauna.backups.vm",
                        message: "configure: machine already built — re-refreshing")
@@ -224,6 +232,55 @@ public final class BackupsMachineVM {
 
     public var detailFiles: [SnapshotFileRow] { snapshot?.detail?.files ?? [] }
 
+    /// The open detail belongs to a kind entry (§ Snapshot-list shape → *Kind
+    /// entries*): it lists no files, and the whole-snapshot restore into a folder
+    /// does not apply to it.
+    public var detailIsKind: Bool { snapshot?.detail?.messageKind != nil }
+
+    /// The one line `snapshot-detail-files` paints in place of a file list: on a
+    /// kind row, where its snapshot restores from; on a folder snapshot with no
+    /// files, that it has none — never an empty list without a reason. `nil`
+    /// while the detail lists files (or none is open).
+    public var detailNoticeText: String? {
+        guard let detail = snapshot?.detail else { return nil }
+        if detail.messageKind != nil { return L.backups.kindSnapshotRestoresBelow }
+        return detail.files.isEmpty ? L.backups.noFilesInSnapshot : nil
+    }
+
+    // ── `backup-folder-selector` options ─────────────────────────────────────
+
+    /// One selector row's painted label: a kind entry's `name` is its i18n label
+    /// key, resolved here; a folder paints its own name (§ Snapshot-list shape →
+    /// *Kind entries*; tui `folder_row_label`).
+    public static func folderLabel(_ row: BackupFolderRow) -> String {
+        row.messageKind != nil ? L.lookup(row.name) : row.name
+    }
+
+    /// What `backup-folder-selector` paints, in the machine's order.
+    public var folderOptionLabels: [String] {
+        (snapshot?.folders ?? []).map(Self.folderLabel)
+    }
+
+    /// The locale-stable selection keys behind ``folderOptionLabels`` — each
+    /// row's `name`, which is what `selectFolder` hands the machine.
+    public var folderOptionKeys: [String] { (snapshot?.folders ?? []).map(\.name) }
+
+    /// Map a picker value — a row's key or its painted label — to the key the
+    /// machine selects by. A folder's name wins over a kind entry's label it
+    /// happens to equal; an unknown value passes through for the machine to reject.
+    public func folderKey(forOption option: String) -> String {
+        let folders = snapshot?.folders ?? []
+        if folders.contains(where: { $0.name == option }) { return option }
+        return folders.first { Self.folderLabel($0) == option }?.name ?? option
+    }
+
+    /// Bumped each time a gesture that changes which snapshots exist completes —
+    /// create, delete, undelete, immediate delete, prune execute. The Restore
+    /// section's local picker re-reads on it, so a snapshot just taken is offered
+    /// without a page re-entry (§ Snapshot-list shape → *Kind entries*; linux
+    /// `MutatingGesture`, android `BackupsVM.snapshotsChanged`).
+    public private(set) var snapshotsChanged: UInt64 = 0
+
     /// The page-level `error-message`: the connect failure first, else the
     /// machine snapshot's localized `error`. A completed check with problems is
     /// NOT routed here — it is a result (§ Architectural rules, rule 6).
@@ -255,7 +312,8 @@ public final class BackupsMachineVM {
     /// check that setter dispatches a `select_folder` for the selection the
     /// machine just handed back — an endless refresh loop that also clears the
     /// check result and prune preview each time round.
-    public func selectFolder(_ name: String) async {
+    public func selectFolder(_ option: String) async {
+        let name = folderKey(forOption: option)
         guard !name.isEmpty, name != snapshot?.selectedFolder else { return }
         let scope = api
         await machine?.selectFolder(name: name)
@@ -266,10 +324,14 @@ public final class BackupsMachineVM {
         await loadDevices(folder: name)
     }
 
-    public func createSnapshot() async { await machine?.createSnapshot() }
+    public func createSnapshot() async {
+        await machine?.createSnapshot()
+        snapshotsChanged &+= 1
+    }
 
     public func deleteSnapshot(id: Int64) async {
         await machine?.deleteSnapshot(snapshotId: id)
+        snapshotsChanged &+= 1
     }
 
     /// `snapshot-undelete-button[i]` — recover a soft-deleted row before its
@@ -278,6 +340,7 @@ public final class BackupsMachineVM {
     /// gesture here.
     public func undeleteSnapshot(id: Int64) async {
         await machine?.undeleteSnapshot(snapshotId: id)
+        snapshotsChanged &+= 1
     }
 
     /// `snapshot-prune-button` — the preview half. Prune applies THIS SET'S OWN
@@ -285,7 +348,10 @@ public final class BackupsMachineVM {
     /// (§ Architectural rules, rule 5), which is what retired the page's
     /// hand-encoded `keep_*` writer along with `RetentionEditorSheet`.
     public func prunePreview() async { await machine?.prunePreview() }
-    public func pruneExecute() async { await machine?.pruneExecute() }
+    public func pruneExecute() async {
+        await machine?.pruneExecute()
+        snapshotsChanged &+= 1
+    }
     public func cancelPrunePreview() { machine?.cancelPrunePreview() }
 
     /// `snapshot-check-button` — the tagged button fires the check DIRECTLY
@@ -351,6 +417,7 @@ public final class BackupsMachineVM {
             snapshotId: id,
             confirmId: immediateDeleteConfirmId,
             acknowledge: immediateDeleteAcknowledge)
+        snapshotsChanged &+= 1
         if !machine.snapshot().snapshots.contains(where: { $0.id == id }) {
             immediateDeleteSnapshotId = nil
         }
@@ -415,19 +482,19 @@ public final class BackupsMachineVM {
     /// under e2e via `SnapshotFileSaver`, otherwise via the platform-native save
     /// mechanism.
     ///
-    /// `deviceId` is optional because it comes from the open snapshot's own row,
-    /// which the wire may leave unattributed. Refusing HERE — loudly, onto
-    /// `error-message` — rather than in each view is e2e convention 11 (an
-    /// automation command is honoured or it fails visibly, never a bare
-    /// `return`) plus priority #2: one refusal in shared FaunaKit plays on both
-    /// targets, where two view-level guards were two silent drops.
-    public func downloadSnapshotFile(deviceId: String?, snapshotId: Int64,
-                                     path: String) async -> Data? {
+    /// The walk runs as THIS seat's device (``deviceIdHex``), as on tui, android
+    /// and windows. It used to run as the open snapshot's owning device, which
+    /// left every unattributed snapshot (the wire's `device_id: None`)
+    /// undownloadable on apple alone. A seat with no device id is refused HERE —
+    /// loudly, onto `error-message` — rather than in each view: e2e convention 11
+    /// (an automation command is honoured or it fails visibly, never a bare
+    /// `return`) plus priority #2, one refusal in shared FaunaKit for both targets.
+    public func downloadSnapshotFile(snapshotId: Int64, path: String) async -> Data? {
         // Input check BEFORE the `api` guard: the device id is wrong
         // independently of whether a nest is connected, and checking it first
         // leaves both refusals assertable without a live API.
-        guard let deviceId else {
-            sharingError = L.errors.snapshotDeviceUnknown
+        guard let deviceId = deviceIdHex else {
+            sharingError = L.errors.snapshotDownloadNoDeviceId
             return nil
         }
         guard let api else {
@@ -444,13 +511,10 @@ public final class BackupsMachineVM {
         }
     }
 
-    /// The device id of the row a detail is open on — what the download walk
-    /// resolves against. Read from the machine's own row rather than threaded
-    /// through each shell (macOS used to pass it past a SwiftData bridge model
-    /// that does not carry it).
-    public var openSnapshotDeviceId: String? {
-        guard let id = openSnapshotId else { return nil }
-        return snapshot?.snapshots.first { $0.id == id }?.deviceId
+    /// Test seam: stamp the seat's device id without a live `APIClient`, so the
+    /// download's `api` refusal is assertable on its own.
+    func seedDeviceIdForTest(_ deviceIdHex: String?) {
+        self.deviceIdHex = deviceIdHex
     }
 }
 

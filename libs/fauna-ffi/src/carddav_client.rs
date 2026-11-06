@@ -32,7 +32,7 @@ use std::sync::Arc;
 
 use fauna_client::NestClient;
 use fauna_client_carddav::{
-    CardDavClient, DavRecipientKeys, DecodedAddressbook, DecodedCard, DecodedCardsPage,
+    CardDavClient, DavKind, DavRecipientKeys, DecodedAddressbook, DecodedCard, DecodedCardsPage,
     bridge_routing::{ListAddressbooksRequest, QueryCardsRequest},
     vcard,
 };
@@ -186,7 +186,7 @@ impl FfiCarddavClient {
                 ListAddressbooksRequest {
                     actor_id: actor_id.to_vec(),
                 },
-                &DavRecipientKeys::from_mseks(&msek, &prior_mseks),
+                &DavRecipientKeys::from_mseks(DavKind::Card, &msek, &prior_mseks),
             )
             .await
             .map_err(|e| e.to_string())?;
@@ -223,7 +223,7 @@ impl FfiCarddavClient {
                     after_card_id: None,
                     limit: 0,
                 },
-                &DavRecipientKeys::from_mseks(&msek, &prior_mseks),
+                &DavRecipientKeys::from_mseks(DavKind::Card, &msek, &prior_mseks),
             )
             .await
             .map_err(|e| e.to_string())?;

@@ -66,54 +66,56 @@ Stamped 2026-09-19 at acb58fddf3.
    - `tests/e2e-unified/tests/test_sign_out_web.py::test_web_sign_out_residue_retry_refuses_beside_another_tab_and_finishes_the_erase`
 15. [app] The notice about data a sign-out left behind is still shown after the app is closed and reopened, and reopening quietly tries again first — `docs/goal/architecture/apps/account-scoping.md` § The scoping taxonomy (iron-clad for new app state)
    - `tests/e2e-unified/tests/test_sign_out.py::test_the_sign_out_residue_outlives_the_app`
+   - `tests/e2e-unified/tests/test_sign_out_web.py::test_web_sign_out_residue_outlives_a_reload_and_a_clean_reload_says_nothing`
 
 ## Status
 
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ⚠ partial | 0.1.5-dev+110d1248 standalone |
-| linux | ⚠ partial | 0.1.4-dev+ea391d07 standalone |
-| windows | ⚠ partial | 0.1.5-dev+61b844ca standalone |
-| macos | ⚠ partial | 0.1.5-dev+61b844ca standalone |
-| ios | ⚠ partial | 0.1.5-dev+61b844ca standalone |
+| web | ✅ full | 0.1.5-dev+acde58f9 standalone |
+| linux | ✅ full | 0.1.5-dev+74897c5d standalone |
+| windows | ⚠ partial | 0.1.5-dev+acde58f9 standalone |
+| macos | ✅ full | 0.1.5-dev+3f9f2b95 standalone |
+| ios | ⚠ partial | 0.1.5-dev+acde58f9 standalone |
 | android |  no run recorded | |
-| tui | ⚠ partial | 0.1.2-dev+7663afa6 standalone |
+| tui | ✅ full | 0.1.5-dev+74897c5d standalone |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
-| 1 | app | `tests/e2e-unified/tests/test_settings.py::test_handle_change_validation` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 2 | app | `tests/e2e-unified/tests/test_settings.py::test_actor_id_visible` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 2 | app | `tests/e2e-unified/tests/test_settings.py::test_copy_buttons_visible` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 3 | app | `tests/e2e-unified/tests/test_sign_out.py::test_sign_out_returns_to_onboarding` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (windows): passed |
-| 3 | app | `tests/e2e-unified/tests/test_sign_out.py::test_sign_out_erases_the_credential_namespace` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (windows): passed |
-| 3 | app | `tests/e2e-unified/tests/test_sign_out.py::test_sign_out_erases_the_account_scoped_state_directory` | web (linux): skipped, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (windows): passed |
+| 1 | app | `tests/e2e-unified/tests/test_settings.py::test_handle_change_validation` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 2 | app | `tests/e2e-unified/tests/test_settings.py::test_actor_id_visible` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 2 | app | `tests/e2e-unified/tests/test_settings.py::test_copy_buttons_visible` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 3 | app | `tests/e2e-unified/tests/test_sign_out.py::test_sign_out_returns_to_onboarding` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 3 | app | `tests/e2e-unified/tests/test_sign_out.py::test_sign_out_erases_the_credential_namespace` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 3 | app | `tests/e2e-unified/tests/test_sign_out.py::test_sign_out_erases_the_account_scoped_state_directory` | web (linux): skipped, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
 | 3 | app | `tests/e2e-unified/tests/test_sign_out_web.py::test_web_sign_out_erases_the_account_registry` | web (linux): passed |
 | 3 | app | `tests/e2e-unified/tests/test_sign_out_web.py::test_web_sign_out_retires_the_enrollment_and_erases_the_account_store` | web (linux): passed |
 | 3 | app | `tests/e2e-unified/tests/test_sign_out_web.py::test_web_load_after_a_tab_closed_mid_sign_out_finishes_the_sign_out` | web (linux): passed |
-| 3 | app | `tests/e2e-unified/tests/test_bearer_cache_web.py::test_web_sign_out_then_new_identity_posts_as_itself` | web (linux): failed |
-| 4 | app | `tests/e2e-unified/tests/test_delete_account.py::test_delete_account_via_confirm_field` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, tui (linux): passed |
-| 5 | app | `tests/e2e-unified/tests/test_pending_actions.py::test_a_scheduled_handle_change_is_visible_and_cancellable` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 5 | app | `tests/e2e-unified/tests/test_pending_actions.py::test_a_queued_account_delete_is_visible_and_cancellable` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 5 | app | `tests/e2e-unified/tests/test_pending_actions.py::test_an_admins_deletion_of_this_account_is_listed_and_cancellable` | web (linux): passed, linux (linux): passed, tui (linux): passed |
-| 6 | nest | `tests/e2e-unified/tests/api/test_onboarding.py::test_alice_self_service_onboarding` | nest (linux): passed |
-| 7 | app | `tests/e2e-unified/tests/test_sign_out.py::test_a_sign_out_that_cannot_erase_everything_says_so` | web (linux): skipped, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 7 | app | `tests/e2e-unified/tests/test_sign_out.py::test_a_sign_out_whose_credentials_cannot_be_erased_says_so` | web (linux): skipped, linux (linux): passed, windows (windows): passed, macos (macos): passed, tui (linux): passed |
+| 3 | app | `tests/e2e-unified/tests/test_bearer_cache_web.py::test_web_sign_out_then_new_identity_posts_as_itself` | web (linux): passed |
+| 4 | app | `tests/e2e-unified/tests/test_delete_account.py::test_delete_account_via_confirm_field` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 5 | app | `tests/e2e-unified/tests/test_pending_actions.py::test_a_scheduled_handle_change_is_visible_and_cancellable` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 5 | app | `tests/e2e-unified/tests/test_pending_actions.py::test_a_queued_account_delete_is_visible_and_cancellable` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 5 | app | `tests/e2e-unified/tests/test_pending_actions.py::test_an_admins_deletion_of_this_account_is_listed_and_cancellable` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 6 | nest | `tests/e2e-unified/tests/api/test_onboarding.py::test_alice_self_service_onboarding` | nest (linux): passed, nest (macos): passed |
+| 7 | app | `tests/e2e-unified/tests/test_sign_out.py::test_a_sign_out_that_cannot_erase_everything_says_so` | web (linux): skipped, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 7 | app | `tests/e2e-unified/tests/test_sign_out.py::test_a_sign_out_whose_credentials_cannot_be_erased_says_so` — requires `host-credential-fault-injection` (test harness) (not built: android) | web (linux): skipped, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
 | 7 | app | `tests/e2e-unified/tests/test_sign_out_web.py::test_web_sign_out_that_cannot_erase_a_store_says_so_and_a_later_load_finishes` | web (linux): passed |
-| 8 | app | `tests/e2e-unified/tests/test_settings.py::test_handle_someone_else_holds_is_refused_and_not_applied` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 9 | app | `tests/e2e-unified/tests/test_sign_out.py::test_sign_out_returns_to_onboarding` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (windows): passed |
-| 10 | app | `tests/e2e-unified/tests/test_delete_account.py::test_delete_account_via_confirm_field` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, tui (linux): passed |
-| 11 | app | `tests/e2e-unified/tests/test_pending_actions.py::test_a_scheduled_handle_change_is_not_shown_as_your_handle` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 12 | app | `tests/e2e-unified/tests/test_delete_account.py::test_tui_an_account_the_nest_stops_accepting_erases_nothing_on_the_device` | tui (linux): passed |
+| 8 | app | `tests/e2e-unified/tests/test_settings.py::test_handle_someone_else_holds_is_refused_and_not_applied` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 9 | app | `tests/e2e-unified/tests/test_sign_out.py::test_sign_out_returns_to_onboarding` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 10 | app | `tests/e2e-unified/tests/test_delete_account.py::test_delete_account_via_confirm_field` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 11 | app | `tests/e2e-unified/tests/test_pending_actions.py::test_a_scheduled_handle_change_is_not_shown_as_your_handle` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 12 | app | `tests/e2e-unified/tests/test_delete_account.py::test_tui_an_account_the_nest_stops_accepting_erases_nothing_on_the_device` | tui (linux): passed, tui (macos): passed, tui (windows): passed |
 | 12 | app | `tests/e2e-unified/tests/test_delete_account.py::test_linux_an_account_the_nest_stops_accepting_erases_nothing_on_the_device` | linux (linux): passed |
 | 12 | app | `tests/e2e-unified/tests/test_delete_account.py::test_windows_an_account_the_nest_stops_accepting_erases_nothing_on_the_device` | windows (windows): passed |
 | 12 | app | `tests/e2e-unified/tests/test_delete_account.py::test_apple_an_account_the_nest_stops_accepting_erases_nothing_on_the_device` | macos (macos): passed, ios (macos): passed |
 | 12 | app | `tests/e2e-unified/tests/test_delete_account.py::test_web_an_account_the_nest_stops_accepting_erases_nothing_on_the_device` | web (linux): passed |
 | 12 | app | `tests/e2e-unified/tests/test_delete_account.py::test_android_an_account_the_nest_stops_accepting_erases_nothing_on_the_device` | — |
 | 13 | app | `tests/e2e-unified/tests/test_sign_out_refused_other_tab_web.py::test_web_sign_out_refuses_while_another_tab_holds_the_engine` | web (linux): passed |
-| 13 | app | `tests/e2e-unified/tests/test_erase_refused_other_instance.py::test_sign_out_refuses_while_another_instance_serves_the_account` | linux (linux): passed |
-| 13 | app | `tests/e2e-unified/tests/test_erase_refused_other_instance.py::test_sign_out_refuses_while_a_sibling_app_serves_the_account` | — |
-| 14 | app | `tests/e2e-unified/tests/test_sign_out.py::test_the_sign_out_residue_retry_finishes_the_erase` | web (linux): skipped, linux (linux): passed, windows (windows): passed, macos (macos): passed, tui (linux): passed |
+| 13 | app | `tests/e2e-unified/tests/test_erase_refused_other_instance.py::test_sign_out_refuses_while_another_instance_serves_the_account` | linux (linux): passed, macos (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 13 | app | `tests/e2e-unified/tests/test_erase_refused_other_instance.py::test_sign_out_refuses_while_a_sibling_app_serves_the_account` | linux (linux): passed, tui (linux): passed |
+| 14 | app | `tests/e2e-unified/tests/test_sign_out.py::test_the_sign_out_residue_retry_finishes_the_erase` | web (linux): skipped, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
 | 14 | app | `tests/e2e-unified/tests/test_sign_out_web.py::test_web_sign_out_residue_retry_refuses_beside_another_tab_and_finishes_the_erase` | web (linux): passed |
-| 15 | app | `tests/e2e-unified/tests/test_sign_out.py::test_the_sign_out_residue_outlives_the_app` | web (linux): skipped, linux (linux): passed, windows (windows): passed, macos (macos): passed, tui (linux): passed |
+| 15 | app | `tests/e2e-unified/tests/test_sign_out.py::test_the_sign_out_residue_outlives_the_app` | web (linux): skipped, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 15 | app | `tests/e2e-unified/tests/test_sign_out_web.py::test_web_sign_out_residue_outlives_a_reload_and_a_clean_reload_says_nothing` | web (linux): passed |
 <!-- features-render:end -->

@@ -56,6 +56,7 @@ from helpers.launcher_entry import LauncherEntryListener
 from helpers.tray_bus import TrayBus
 from helpers.waiting import (
     await_account_runtime_assembled,
+    await_channel_bound,
     wait_rail_blob_settled,
     wait_until,
 )
@@ -336,12 +337,10 @@ def test_a_conversation_read_on_another_device_stops_counting_on_the_badge(
         bytes(sender["signing_key"]), my_kp, [body]
     )
     conv_api.accept_contact(port, test_user, sender["actor_id_hex"])
-    conv_api.welcome_deliver(port, sender, me, channel_hex, welcome)
-    wait_until(
-        lambda: _channel_thread(conv, channel_hex) is not None,
-        MLS_HANDSHAKE_S,
-        diagnose=lambda: "waiting for device A to join the sender's Welcome",
-    )
+    inbox_id = conv_api.welcome_deliver(port, sender, me, channel_hex, welcome)
+    # The acked Welcome is the join witness: a Welcome-only 1:1 is listed on
+    # no rail until its first message.
+    conv_api.await_welcome_applied(port, test_user, inbox_id, MLS_HANDSHAKE_S, who="device A")
 
     # ── Device A's replica now carries the group, so device B can restore it. ──
     wait_rail_blob_settled(
@@ -352,12 +351,13 @@ def test_a_conversation_read_on_another_device_stops_counting_on_the_badge(
         "linux", request, test_user, nest_instance,
         screenshot_tag="badge-second-device",
     )
-    with seat as (device_b, _driver_b):
-        wait_until(
-            lambda: _channel_thread(device_b.conversations, channel_hex) is not None,
-            MLS_HANDSHAKE_S,
-            diagnose=lambda: "device B never restored the sender's 1:1 from the "
-            f"replica: {[(t.rail, t.channel_id_hex) for t in device_b.conversations.list_threads()]!r}",
+    with seat as (device_b, driver_b):
+        # Device B restores — and binds — the channel at launch. The bound set,
+        # not the thread list, is the witness: the 1:1 holds only its Welcome
+        # yet, so it is listed on no rail until the message lands.
+        await_channel_bound(
+            driver_b, channel_hex, budget_s=MLS_HANDSHAKE_S,
+            who="device B (restoring the sender's 1:1 from the replica)",
         )
 
         # ── The message lands: unread on both devices, counted on A's badge. ──

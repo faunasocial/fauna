@@ -8,7 +8,8 @@ public class EncryptionSettingsVM {
 
     public var isKeyPackageLow: Bool {
         guard let count = keyPackageCount else { return false }
-        return count < 5
+        // The one shared threshold (`KEYPACKAGE_LOW_THRESHOLD`), never a per-app literal.
+        return keypackagesLow(count: UInt64(max(count, 0)))
     }
 
     private var api: APIClient?

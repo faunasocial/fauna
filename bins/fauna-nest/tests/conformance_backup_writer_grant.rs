@@ -1339,3 +1339,148 @@ async fn a_destination_url_answering_as_another_nest_is_refused_before_any_write
         "a refused dial must leave no custody at the impostor"
     );
 }
+
+// ═════════════════════════════════════════════════════════════════════════════
+// The device's seat carry against this destination — the revoke race
+// ═════════════════════════════════════════════════════════════════════════════
+
+/// The owner's own connection to the destination, as an `RpcRequester`, so the
+/// shared carry (`fauna_client_backup::seat_carry`) is the driver.
+struct OwnerLink {
+    router: Arc<RpcRouter>,
+    state: Arc<AppState>,
+}
+
+impl fauna_protocol::RpcRequester for OwnerLink {
+    type Error = String;
+
+    async fn request<Req, Reply>(
+        &self,
+        kind: &'static str,
+        payload: Req,
+    ) -> Result<Reply, Self::Error>
+    where
+        Req: Serialize,
+        Reply: DeserializeOwned,
+    {
+        let meta = self
+            .router
+            .kind_meta(kind)
+            .ok_or_else(|| format!("kind not registered: {kind}"))?;
+        let out = (meta.handler)(self.state.clone(), OWNER, encode(&payload))
+            .await
+            .map_err(|e| format!("{}: {:?}", e.code, e.message))?;
+        decode(&out).map_err(|e| e.to_string())
+    }
+}
+
+// The production macro — the same expansion every app's glue carries.
+fauna_client_backup::impl_backup_nest_seam!(struct CarrySeam<OwnerLink>);
+
+/// The bound box's rotation chain, served as the source nest would.
+struct ServedChain(Vec<fauna_protocol::nest_rotation::SignedNestRotation>);
+
+#[async_trait::async_trait]
+impl fauna_client_backup::seat_carry::RotationChainSource for ServedChain {
+    async fn rotation_chain(
+        &self,
+    ) -> Result<Vec<fauna_protocol::nest_rotation::SignedNestRotation>, String> {
+        Ok(self.0.clone())
+    }
+}
+
+/// **An owner's revoke landing between the carry's seat read and its handover
+/// is not undone** (`segment-backup-protocol.md` § Cross-location backup
+/// protocol → *The writer seat*, *How the seat moves*: "A revoked seat is not
+/// carried"). The carry reads the seat in force, the owner revokes it from
+/// another device, and the carry's handover — which asks for a seat in force
+/// only — is answered `seat_revoked` inside the registration's own
+/// transaction: the seat stays revoked, naming the predecessor, and the carry
+/// reports `Revoked`. Without the destination's check the handover's refresh
+/// would re-grant the seat to the successor, in force.
+#[tokio::test]
+async fn a_revoke_between_the_carrys_read_and_its_handover_is_kept() {
+    use fauna_client_backup::seat_carry::{SeatCarry, carry_listed_seat, carry_writer_seat};
+    use fauna_client_backup::trust::BackupNestSeam;
+
+    let (router, _fed, state) = destination().await;
+    register_user(&state, OWNER, "alice").await;
+    let (old_key, new_key) = (
+        SigningKey::from_bytes(&[0xC1; 32]),
+        SigningKey::from_bytes(&[0xC2; 32]),
+    );
+    let (predecessor, successor) = (
+        old_key.verifying_key().to_bytes(),
+        new_key.verifying_key().to_bytes(),
+    );
+    let chain = ServedChain(vec![
+        fauna_protocol::nest_rotation::NestRotation {
+            old_nest_actor_id: predecessor,
+            new_nest_actor_id: successor,
+            seq: 1,
+            rotated_at: 1_800_000_001,
+        }
+        .sign(&old_key, &new_key)
+        .unwrap(),
+    ]);
+    let router = Arc::new(router);
+    register_grant(&router, &state, OWNER, predecessor)
+        .await
+        .unwrap();
+    let seam = CarrySeam {
+        client: fauna_client_backup::BackupClient::new(OwnerLink {
+            router: Arc::clone(&router),
+            state: Arc::clone(&state),
+        }),
+    };
+
+    // The carry's read: the predecessor's seat, in force.
+    let listed = seam.writer_grant_list().await.unwrap();
+    assert_eq!(listed.grants.len(), 1);
+    assert!(!listed.grants[0].revoked);
+
+    // The owner revokes from another device before the carry registers.
+    assert!(
+        revoke_grant(&router, &state, OWNER, predecessor)
+            .await
+            .unwrap()
+            .revoked
+    );
+
+    assert_eq!(
+        carry_listed_seat(&seam, &listed, &successor, &chain)
+            .await
+            .expect("the carry settles"),
+        SeatCarry::Revoked,
+        "the destination kept the freeze"
+    );
+    let seat = list_grants(&router, &state, OWNER).await.grants;
+    assert_eq!(seat.len(), 1);
+    assert_eq!(
+        seat[0].writer_nest_id,
+        hex::encode(predecessor),
+        "the seat still names the predecessor"
+    );
+    assert!(seat[0].revoked, "and is still revoked");
+    assert!(
+        !state
+            .db
+            .has_backup_writer_grant(&OWNER, &successor)
+            .await
+            .unwrap(),
+        "the successor holds no grant"
+    );
+
+    // The owner's own enrollment re-grants (its confirm is the gesture); a
+    // carry over a seat in force then moves it.
+    register_grant(&router, &state, OWNER, predecessor)
+        .await
+        .unwrap();
+    assert_eq!(
+        carry_writer_seat(&seam, &successor, &chain).await.unwrap(),
+        SeatCarry::Carried
+    );
+    let seat = list_grants(&router, &state, OWNER).await.grants;
+    assert_eq!(seat[0].writer_nest_id, hex::encode(successor));
+    assert!(!seat[0].revoked);
+}

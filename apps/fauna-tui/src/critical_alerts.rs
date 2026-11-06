@@ -31,24 +31,19 @@ use fauna_client_alerts::{CriticalAlerts, CriticalAlertsObserver};
 
 use crate::app::UiMessage;
 
-/// Wakes the render loop when a feeder posts or clears. `UiMessage::Noop` is the
-/// channel's own "redraw, no state change" heartbeat — the loop redraws at the
-/// top of every iteration, so delivering *any* message is what makes the new
-/// alert visible.
-pub struct ChannelObserver {
-    tx: tokio::sync::mpsc::UnboundedSender<UiMessage>,
+crate::app::tick_observer! {
+    /// Wakes the render loop when a feeder posts or clears. `UiMessage::Noop` is the
+    /// channel's own "redraw, no state change" heartbeat — the loop redraws at the
+    /// top of every iteration, so delivering *any* message is what makes the new
+    /// alert visible.
+    pub ChannelObserver,
+    CriticalAlertsObserver,
+    UiMessage::Noop
 }
 
 impl ChannelObserver {
     pub fn new(tx: tokio::sync::mpsc::UnboundedSender<UiMessage>) -> Self {
         Self { tx }
-    }
-}
-
-impl CriticalAlertsObserver for ChannelObserver {
-    fn on_changed(&self) {
-        // A dead receiver means the app is shutting down: nothing to repaint.
-        let _ = self.tx.send(UiMessage::Noop);
     }
 }
 
@@ -101,7 +96,7 @@ pub fn spawn_session_start_sweep(
             &alerts,
             &actor_id,
             move || {
-                let notify = Arc::clone(&wake.notify);
+                let notify = wake.notify();
                 async move { notify.notified().await }
             },
         )
@@ -122,8 +117,8 @@ pub fn spawn_session_start_sweep(
 /// the detector runs*). One per identity: [`crate::session::establish`] mints a
 /// fresh one for each session it establishes, so a departed identity's loop —
 /// which lingers until its next wake reads the teardown — holds a handle nothing
-/// fires any more. The shape is the shared [`crate::loop_wake::LoopWake`].
-pub type SweepWake = crate::loop_wake::LoopWake;
+/// fires any more. The shape is the shared [`fauna_core::loop_wake::LoopWake`].
+pub type SweepWake = fauna_core::loop_wake::LoopWake;
 
 /// Run **one** sweep pass against the live session's client, at the converge
 /// arm of the universal post-auth hook ([`crate::session::apply_session_patch`]).

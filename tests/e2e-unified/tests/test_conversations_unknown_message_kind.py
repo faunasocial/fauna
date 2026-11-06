@@ -85,20 +85,20 @@ def test_a_message_of_an_unknown_kind_is_missed_alone_and_the_conversation_keeps
         )
     )
     conv_api.accept_contact(port, test_user, sender["actor_id_hex"])
-    conv_api.welcome_deliver(port, sender, me, channel_hex, welcome)
-    wait_until(
-        lambda: _thread(app, channel_hex) is not None,
-        MLS_HANDSHAKE_S,
-        diagnose=lambda: "waiting for the app to join the sender's Welcome",
-    )
+    inbox_id = conv_api.welcome_deliver(port, sender, me, channel_hex, welcome)
+    # The acked Welcome is the join witness: a Welcome-only 1:1 is listed on
+    # no rail until its first renderable message.
+    conv_api.await_welcome_applied(port, test_user, inbox_id, MLS_HANDSHAKE_S)
 
     # ── 2. The unknown kind, then an ordinary message: only the latter shows. ──
     conv_api.channel_send(port, sender, channel_hex, unknown)
     conv_api.channel_send(port, sender, channel_hex, first)
     # The walk is in channel order, so once the ordinary message (the second
-    # record) has landed, the unknown one (the first) has been passed over.
+    # record) has landed, the unknown one (the first) has been passed over. The
+    # thread is listed only once that ordinary message is in it, so it may be
+    # absent on the first polls.
     wait_until(
-        lambda: after in (_thread(app, channel_hex).snippet or ""),
+        lambda: after in (getattr(_thread(app, channel_hex), "snippet", None) or ""),
         MLS_HANDSHAKE_S,
         diagnose=lambda: "the ordinary message after the unknown kind never arrived "
         f"(thread: {vars(_thread(app, channel_hex)) if _thread(app, channel_hex) else None!r}) "

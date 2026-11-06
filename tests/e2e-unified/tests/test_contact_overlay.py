@@ -123,7 +123,17 @@ def test_a_nickname_notes_and_label_paint_on_the_roster_and_profile_and_survive_
     )
 
     open_other_profile(app, other)
-    header_public = app.profile.handle_text()
+    # The header paints the actor-id fallback until the Profile's own profile
+    # read returns, so wait for the public name the roster shows rather than
+    # reading whatever the header holds at the first instant (convention 14).
+    wait_until(
+        lambda: app.profile.handle_text() == public, PAINT_S,
+        diagnose=lambda: (
+            f"the Profile header read {app.profile.handle_text()!r}, never the roster's "
+            f"public name {public!r} (error-message {app.profile.error_text()!r})"
+        ),
+    )
+    header_public = public
     assert app.profile.public_name_text() == "", "no nickname yet: no secondary line"
 
     app.profile.set_private_nickname(nickname)
@@ -187,7 +197,11 @@ def test_a_label_used_on_another_person_is_offered_and_a_pick_stages_it(
     app = logged_in_app
     first = seed_accepted_contact(nest_instance, test_user)
     second = seed_accepted_contact(nest_instance, test_user)
-    label = f"Book club {_nonce()}"
+    # The nonce LEADS the label: the typed prefix below is per-run unique, so a
+    # `Book club …` label an earlier test left in the shared session nest
+    # cannot join the suggestions.
+    nonce = _nonce()
+    label = f"Zq{nonce} Book club"
 
     # Another person carries the label, saved — so it joins the vocabulary.
     open_other_profile(app, first)
@@ -196,7 +210,7 @@ def test_a_label_used_on_another_person_is_offered_and_a_pick_stages_it(
     _save_and_await_header(app, "First", where="labelling the first person")
 
     open_other_profile(app, second)
-    app.profile.type_private_label(label[:6].lower())
+    app.profile.type_private_label(f"zq{nonce}")
     wait_until(
         lambda: app.profile.label_suggestions() == [label], PAINT_S,
         diagnose=lambda: (

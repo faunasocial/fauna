@@ -60,13 +60,23 @@ public final class BridgeApprovalVM: MachineBackedVM {
             await hydrate()
             return
         }
+        let built: BridgeApprovalMachine
         do {
-            machine = try await api.bridgeApprovalMachine()
-            snapshot = machine?.snapshot()
+            built = try await api.bridgeApprovalMachine()
         } catch {
-            errorMessage = DisplayError.message(error)
+            // A concurrent build that succeeded owns the page; this one's
+            // failure is not the page's.
+            if machine == nil { errorMessage = DisplayError.message(error) }
             return
         }
+        // Re-entrant `configure`: the build that finishes first wins; a later
+        // one re-hydrates it, never replaces it (same shape as `LabelerCatalogVM`).
+        guard machine == nil else {
+            await hydrate()
+            return
+        }
+        machine = built
+        snapshot = built.snapshot()
         await hydrate()
     }
 
@@ -84,21 +94,39 @@ public final class BridgeApprovalVM: MachineBackedVM {
         await dispatch(.approve(pubkeyHex: pubkeyHex, role: role))
     }
 
-    /// Reject the pending bridge identified by `pubkeyHex` (→ revoked). The
-    /// machine re-reads the feed, dropping the card. Matches linux/web/windows —
-    /// a direct dispatch, no confirmation dialog.
-    public func reject(pubkeyHex: String) async {
-        await dispatch(.reject(pubkeyHex: pubkeyHex))
+    /// The confirm dialog the shared machine has open (`snapshot.armed`): reject
+    /// (`admin-bridges-reject-confirm`) or rotate (`admin-bridges-rotate-confirm`).
+    public var armed: BridgeConfirm? { snapshot?.armed }
+
+    /// Open the reject confirm for a pending card. Arming reaches no nest, so it
+    /// is sync and the inline reveal paints in the click's own frame.
+    public func armReject(pubkeyHex: String) {
+        arm(.reject(pubkeyHex: pubkeyHex))
     }
 
-    /// Rotate an **approved** bridge's service-user key (`mail-bridge-lifecycle.md`
-    /// § Service-user re-keying, step 3): dispatches `revoke_service_user`, which
-    /// the running bridge detects and exits; the supervisor restarts it, and on a
-    /// mail-enabled box the fresh key auto-approves. The machine re-reads the
-    /// feed, dropping the card from the Approved roster. The UI gates this behind
-    /// the `admin-bridges-rotate-confirm` reveal (no DKIM warning for any role).
-    public func rotate(pubkeyHex: String) async {
-        await dispatch(.rotate(pubkeyHex: pubkeyHex))
+    /// Open the rotate confirm for an **approved** bridge's service-user key
+    /// (`mail-bridge-lifecycle.md` § Service-user re-keying, step 3).
+    public func armRotate(pubkeyHex: String) {
+        arm(.rotate(pubkeyHex: pubkeyHex))
+    }
+
+    /// The open dialog's cancel button: close it, no write.
+    public func cancelConfirm() {
+        guard let machine else { return }
+        machine.disarm()
+        snapshot = machine.snapshot()
+    }
+
+    /// The open dialog's confirm button: the machine runs the armed act
+    /// (`reject_pending_bridge` / `revoke_service_user`) and re-reads the feed.
+    public func confirm() async {
+        await dispatch(.confirm)
+    }
+
+    private func arm(_ confirm: BridgeConfirm) {
+        guard let machine else { return }
+        machine.arm(confirm: confirm)
+        snapshot = machine.snapshot()
     }
 
     /// Dispatch an action; the machine runs it to completion (or records an

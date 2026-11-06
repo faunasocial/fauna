@@ -173,6 +173,19 @@ impl Default for InviteRequestSnapshot {
 /// sentence rather than wrapping it as `{cause}` prose.
 pub const ALREADY_REGISTERED_CAUSE: &str = "invite.error.already_registered";
 
+/// The redeem's register refused as `fauna.account.signature_failed`. A correct
+/// client signs over the typed address's own domain and the nest verifies only
+/// over the domains it hosts, so this refusal means the address is on a domain
+/// this nest does not host — a sentence the wire code cannot say by itself
+/// (the code is shared with lockout, so the shared `RpcError::localized` table
+/// cannot carry it). Rendered by [`message_for`] as its own sentence.
+pub const DOMAIN_NOT_HOSTED_CAUSE: &str = "invite.error.domain_not_hosted";
+
+/// The redeem's register never reached a nest answer (a transport fault). Its
+/// own sentence in place of the former raw "redeem failed" cause, which was
+/// English prose no string table owned.
+pub const UNREACHABLE_CAUSE: &str = "invite.error.unreachable";
+
 /// Map an `InviteRequestState` to the admin-flow row's localized status text
 /// (`invite-request-status`) per `onboarding.md` Architectural rule 4 — the
 /// same derive-on-read rule [`oob_message_for`] already implements for the
@@ -234,6 +247,10 @@ pub fn message_for(state: &InviteRequestState) -> LocalizedText {
             // string rather than being wrapped in a generic error frame.
             if cause == "invite.error.not_found" {
                 LocalizedText::key("onboarding.invite.error.not_found")
+            } else if cause == DOMAIN_NOT_HOSTED_CAUSE {
+                LocalizedText::key("onboarding.invite.error.domain_not_hosted")
+            } else if cause == UNREACHABLE_CAUSE {
+                LocalizedText::key("onboarding.invite.error.unreachable")
             } else if cause == ALREADY_REGISTERED_CAUSE {
                 // The submit's second sentinel: a key this nest already holds
                 // (for a user on this page, a suspended one). Its own honest

@@ -1,0 +1,602 @@
+# The surface registry — ONE description of which apps have built a surface.
+#
+# docs/goal/architecture/e2e-conventions.md convention 7, the paragraph *The
+# surface registry*, owns this file: one table per surface key (kebab-case; the
+# ui.yaml id where the surface is one), with
+#   kind    = "product" (the APP lacks it) | "harness" (the e2e driver lacks it
+#             for that app; the matrix reads it as unrun, never as unbuilt)
+#   built   = the apps that HAVE it — a positive list
+#   detail  = what is missing and what closes it
+#   tracked = where the work is captured
+# `helpers/app_surface.py::require_surface(driver, key)` and the
+# `@pytest.mark.requires_surface("<key>")` marker read it at run time;
+# `scripts/features_catalog.py::load_surface_registry` reads it without a run.
+# A gate's answer is a function of (surface, app) alone: widening a surface is
+# one edit here, and the commit that does it runs `just features-prune`.
+#
+# Seeded 2026-10-25 by `scripts/surface_survey.py --emit` from the gate sites
+# whose guard is a literal app set or a module constant, keys hand-named
+# (`SEED_KEYS`); `surface_survey.py --check` keeps those sites and this file
+# from disagreeing while the call sites migrate.
+
+[admin-claim-onboarding-drive]
+kind = "harness"
+built = ["android", "ios", "linux", "macos", "tui", "windows"]
+detail = "linux + macOS + iOS + tui + windows + android have it (android paints ClaimCodeScreen / NatModeChoiceScreen and the shared claim drive reaches them through the test agent; not yet run on a device). web is witnessed for this outcome by test_web_claim_pin_wasm_witness.py instead — its e2e origin is never TLS, so a native channel-binding pin has nothing to check against there. web's wizard reaches a nest only when that nest serves the SPA itself (test_onboarding_localhost.py), so its witness of encryption-settings outcome 10 is a nest-served twin too"
+tracked = "onboarding.md"
+
+[admin-mail-microsoft-registration]
+kind = "product"
+built = ["android", "ios", "linux", "macos", "tui", "windows"]
+detail = "rendered on tui, linux, android, macos, ios and windows; web renders neither it nor the sign-in"
+tracked = "mailbox-migration.md § Implementation status today"
+
+[app-log-reader]
+kind = "harness"
+built = ["android", "ios", "linux", "macos", "tui", "web", "windows"]
+detail = "the driver's reader of the app's own log (`app_log_text` / `app_stderr_text`, answered by `helpers/app_log_section.has_reader`): a test that reads the log as evidence needs one, since an absent marker with no log behind it proves nothing. Every leaf driver has one; the proof half pins this list against them"
+tracked = "docs/goal/architecture/e2e-self-diagnosing-failures.md § The convention"
+
+[author-seat-pump-cadence]
+kind = "harness"
+built = ["ios", "linux", "macos", "tui", "web", "windows"]
+detail = "the FAUNA_SUBS_POLL_SECS probe is native-only (a browser has no environment), and the two-GUI launch is proven on tui (lead), linux, macos, windows and ios"
+tracked = "monetization.md"
+
+[backup-audit-run-now]
+kind = "harness"
+built = ["android", "ios", "linux", "macos", "tui", "web", "windows"]
+detail = "the `backup_audit_run_now` agent command (the audit pass at a fake clock offset, convention 14) is armed on every app's test agent, android's included (the arm sets the clock offset, then pokes the Backups page's own audit refresh)"
+tracked = "ui/backups.md § Audit-alert surface"
+
+[backup-destination-trust-rows]
+kind = "harness"
+built = ["ios", "linux", "macos", "tui", "web", "windows"]
+detail = "android renders the backup trust rows (LinkedNestsScreen.kt, `nest-trust-backup-item`) but no witness has run there: unrun on android, not unbuilt, until the android e2e venue exists"
+tracked = "nests.md § Trust facet"
+
+[bound-location-upload-witness]
+kind = "harness"
+built = ["linux", "macos", "tui", "windows"]
+detail = "helpers/folder_content is the linux+tui+macOS+windows shape (each app runs the real fauna-sync-agent and its driver reads the engine log back: off the app's stderr for the three that direct-spawn it, off the isolated agent's own log for windows); web/iOS/Android have no bound local folder at all"
+tracked = ""
+
+[caldav-autoschedule-imip-drive]
+kind = "harness"
+built = ["linux"]
+detail = "drives the linux Fauna app UI as the observer; the other apps are the remaining cross-app follow-on"
+tracked = "caldav-server.md"
+
+[caldav-live-nest-drive]
+kind = "harness"
+built = ["linux"]
+detail = "drives the linux Fauna app UI as the 3rd client; the other apps are the remaining cross-app follow-on"
+tracked = "caldav-server.md"
+
+[calendar-after-reclaim]
+kind = "product"
+built = ["ios", "linux", "macos", "tui", "web"]
+detail = "each built app's Events page is the observation surface for the standalone factory-reset, re-claim, enable-mail, create-event cycle; windows and android are the remaining cross-app follow-on. The docker tier_4 twin is the separate harness surface calendar-after-reclaim-docker-drive"
+tracked = "caldav-server.md"
+
+[calendar-after-reclaim-docker-drive]
+kind = "harness"
+built = ["linux", "tui", "web"]
+detail = "wired on linux, then tui (the lead app: the same shared HttpBridgeDriver set_state / reset / connection-status read the linux leg drives), then web (the same calls, its session pointed at the image through the CORS-adding SPA proxy whose two hops speak TLS to the image's listener); each app's Events page is the observation surface for this docker tier_4 factory-reset, re-claim, create-event cycle, and the other apps are the cross-app follow-on. What actually gates a leg is a FRESH keyed test image on a docker-capable box (only the primary Linux dev VM has a daemon), not the app surface"
+tracked = "nest/common.md § Factory reset (outcome 13's docker witness)"
+
+[caltime-pan-visible-range]
+kind = "product"
+built = ["ios", "linux", "macos", "tui", "web", "windows"]
+detail = "events-prev/next-month still steps a month (or nothing) outside month view"
+tracked = "events.md § Where logic lives (view-mode + visible-range lift)"
+
+[compose-body-bulk-fill]
+kind = "product"
+built = ["android", "ios", "linux", "macos", "tui", "web"]
+detail = "measured 2026-10-28: the windows compose RichEditBox lays the whole document out inside Document.SetText, superlinearly in the body — the 2,000,000-character no-break body had not returned after 236 s in the e2e window's 52 px field (100,000 characters: 3.4 to 5.5 s), and prose with newlines stalls too (2,000,000 characters: 5.4 s even at 620 px). Only an unwrapped field bounds it (2,000,000 characters in 0.8 to 1.2 s), a windows-only display difference awaiting the owner's ruling"
+tracked = ""
+
+[connection-state-observable]
+kind = "harness"
+built = ["ios", "linux", "macos", "tui", "web", "windows"]
+detail = "this app publishes no connection state, so the shared connection barrier is a no-op on it and every OnlineOnly affordance it drives after launch is still racing the handshake"
+tracked = ""
+
+[conversations-archive-rail]
+kind = "product"
+built = ["ios", "linux", "macos", "tui", "web", "windows"]
+detail = "the Archive rail: the archive-import machine's thread source is registered with the conversations manager (threads::register_archive_threads over ConversationsManager::set_archive_thread_source — tui and linux in their own conv_backend, the FFI legs in the shared conversations factory, web through WsRpcClient::registerArchiveThreads) and re-read on each conversations-page visit, so an import's message threads list read-only on the Archive rail; an app that does not re-read it lists nothing"
+tracked = "archive-import.md § Implementation status today (slice 6's threads half); the batched per-app trickle-down"
+
+[cross-nest-mls-receive-seam]
+kind = "harness"
+built = ["ios", "linux", "macos", "tui", "web"]
+detail = "the real FaunaMlsBackend activates here only behind the launch-time gate with no client-side readiness signal, so a run would silently prove nothing (see `real_faunamls_app`'s docstring)"
+tracked = "`docs/goal/behavior/direct-messages.md` § Implementation status today (Track E, the same gate `test_fauna_mls_cross_nest_roundtrip` carries)"
+
+[custody-ceremony-resend]
+kind = "harness"
+built = ["android", "ios", "linux", "macos", "tui", "windows"]
+detail = "the app's test agent publishes the host's custody ceremony-ingest tally (`custody_ceremony_ingest`) and takes the owner's send-again poke (`custody_owner_resend_now`): wired on tui, linux, the two Apple apps, android and windows; web's agent carries neither"
+tracked = "docs/goal/behavior/identity-succession.md § Implementation status today"
+
+[discarded-machine-teardown]
+kind = "harness"
+built = ["android", "ios", "linux", "macos", "tui", "web"]
+detail = "the driver's teardown throws its machine away, so a launch's retirement of the shared actors it held is observable: android and web always do (their drivers answer True), linux, tui, macos and ios launch with a per-launch principal slot (tui's default file-backed store; a `headless_store`, `locked_keyring` or `probed_store` launch owns its store and discards nothing); windows keeps none. The proof half pins the two drivers that answer a constant True"
+tracked = "docs/goal/architecture/e2e-launch-isolation.md § The convention — convention 10, A discarded driver retires its machine (its Owed sentence)"
+
+[dm-message-timestamp-selected]
+kind = "harness"
+built = ["android", "linux", "macos", "tui", "windows"]
+detail = "SearchNav::Mail's message-selection half is built on tui (lead app, 2026-08-10) and linux (2026-08-15); the shared state is already in ConversationsManager, so an app that registers its local search arm owes only the paint"
+tracked = "conversations.md § The selected message; the per-app trickle-down NEXTs"
+
+[dns-provider-machine-dispatch]
+kind = "harness"
+built = ["linux", "web"]
+detail = "fake-cloud provider redirection; web + linux implement it, the other five apps do not"
+tracked = "the fake-cloud provisioning follow-up, Track 2"
+
+[email-attendee-encrypted-caldav]
+kind = "product"
+built = ["ios", "linux", "macos", "tui", "web", "windows"]
+detail = "linux + web + windows + tui + macOS + iOS have it; android e2e enablement is the remaining cross-app follow-on (route-3)"
+tracked = "caldav-server.md"
+
+[enable-mail-plain-carddav-read]
+kind = "harness"
+built = ["android", "ios", "linux", "macos", "tui", "web", "windows"]
+detail = "enabling mail with a KNOWN bridge password is wired on every app (android: the mail-settings form paints every element enable_mail_plain drives, as test_carddav_roundtrip already relies on)"
+tracked = "route-3 follow-on, per test_events"
+
+[enable-mail-plain-mua-seed]
+kind = "harness"
+built = ["android", "ios", "linux", "macos", "tui", "web", "windows"]
+detail = "every app with a mail-settings page drives it"
+tracked = "mail-settings.md"
+
+[event-card-rsvp]
+kind = "product"
+built = ["ios", "linux", "macos", "tui", "web", "windows"]
+detail = "the card-level `event-rsvp-*` trio on the agenda `event-card` (the detail-page trio is built everywhere); android carries it only on its separate invited-events quick-list"
+tracked = "events.md § Implementation status today (Inline card-level RSVP)"
+
+[events-day-cell]
+kind = "product"
+built = ["ios", "linux", "macos", "tui", "web", "windows"]
+detail = "the month grid's indexed day cells (`events-day-cell-{YYYY-MM-DD}`) and their Outlook single-click drill-in / double-click prefill; android still paints its month cells as untagged chrome"
+tracked = "events.md § Implementation status today (Month day-cell drill-in row)"
+
+[family-notify-check-now]
+kind = "harness"
+built = ["android", "ios", "linux", "macos", "tui", "web", "windows"]
+detail = "the `family_notify_check_now` agent command (the guardian-notify check on demand, convention 14) is armed on every app's test agent, android's included (the arm forces the notify store's due-check)"
+tracked = "behavior/family-client-enforcement.md § Guardian Notify"
+
+[family-policy-content-hint]
+kind = "product"
+built = ["ios", "linux", "macos", "tui", "web"]
+detail = "the content-category bound on the guardian's editor, tagged"
+tracked = "family-client-enforcement.md § Content policy"
+
+[federated-report-sheet]
+kind = "product"
+built = ["ios", "linux", "macos", "tui", "web", "windows"]
+detail = "the UI-driven two-nest leg of user-initiated reporting (moderation.md § User-initiated reporting → Routing) is driven on tui first"
+tracked = ""
+
+[firewalled-trust-differential-drive]
+kind = "harness"
+built = ["linux", "tui"]
+detail = "proven on linux and tui; the remaining NATIVE apps (windows, macos, ios) are ordinary cross-app trickle-down — they share trust.rs's TOFU model, so each one's leg is a driver swap, not new trust work. Every leg needs a fresh nest image on a docker-capable box, which is the actual gate here (web declares its absence in the test)"
+tracked = ""
+
+[first-setup-mail-auto-mint]
+kind = "product"
+built = ["android", "ios", "linux", "macos", "tui", "web"]
+detail = "linux wires FaunaClient::provision_mail_at_first_setup; macOS + iOS wire the same first-setup auto-mint via the shared FaunaKit MailEnableGlue (iOS confirmed in-process 2026-06-17); tui wires the ported mail_glue::provision_mail_at_first_setup (2026-07-19); android wires it through MailEnableGlueVM.applyPostClaimServingEnablement, latched on WizardOutcome::LoggedIn and run once at the first authed launch (built, not yet witnessed by an android run of this test); web wires the same shared step through the wasm applyPostClaimServingEnablement on its LoggedIn handoff (onboarding page); windows is the remaining cross-app follow-on"
+tracked = "mail-settings.md"
+
+[folder-location-free-space-button]
+kind = "product"
+built = ["linux", "tui", "windows"]
+detail = "built on every app the id is scoped to (linux, windows, tui); macOS renders neither the switch nor the verb, a bound location being always-resident there"
+tracked = "docs/goal/behavior/on-demand-files.md § The free-up-space gesture where the OS offers none"
+
+[folder-location-unreadable]
+kind = "product"
+built = ["linux", "macos", "tui", "windows"]
+detail = "the count reaches this app's binding rows via the shared fold; the render is owed"
+tracked = "delete-propagation.md § Unreadable is not absent (the Surface note names the owed renders)"
+
+[folder-place-accepts-hold]
+kind = "product"
+built = ["linux", "macos", "tui"]
+detail = "this app's leg of the journey has not landed"
+tracked = "docs/features/local-folder-sync.md outcome 15 (per-app trickle-down)"
+
+[folder-share-cross-nest]
+kind = "product"
+built = ["android", "ios", "linux", "macos", "tui", "web"]
+detail = "the owner-side share picker resolves a typed user@<peer> handle through the shared find_user and carries its nest_url as member_nest_url into FoldersAuthor::share_set; windows is owed (its row below)"
+tracked = "ui/folders.md § Implementation status today"
+
+[fresh-box-floor-cert-reach]
+kind = "product"
+built = ["ios", "linux", "macos", "tui", "windows"]
+detail = "a pre-claim box serves only its self-signed floor cert (it learns its name from the claim, so no ACME cert can exist yet) and this app's TLS stack cannot accept it — on web the browser owns TLS in wasm and the strict client is deliberate. Not a DNS race. Unblocks with the nest's IP bridge cert + the wizard claiming the box as Online's last substep"
+tracked = "onboarding.md § handle entry"
+
+[group-set-feed]
+kind = "product"
+built = ["linux", "macos", "tui", "windows"]
+detail = "the shared share-plane driver wires the group plane's feed on every native host's bound seat (`share_glue::GroupFeedWiring` over the facts the account runtime seats on its handle), so a member's group `fauna.sync.changes.list` is answered and a file in a set shared in person moves; witnessed end to end on tui, linux, windows and macos. Widen an app when its two-seat witness runs green"
+tracked = "group-set.md § Build design — the group set"
+
+[handover-agent-seam]
+kind = "harness"
+built = ["linux", "macos", "tui", "windows"]
+detail = "a per-launch sync-agent control endpoint the harness can send Shutdown to, with the agent's log in `app_stderr_text`: a unix socket on linux and tui (every launch) and on macOS (a launch that spawns a real agent — the handover witness carries `real_sync_agent` for it); a named pipe on windows and tui on windows, whose detached agent logs to its own file under the `isolated_sync_agent` data dir, stitched after the app's log (`drivers/base.py::stitch_agent_log`). `helpers/sync_agent_endpoint.py` picks the transport. The proof half pins the drivers that define the socket or pipe property"
+tracked = "docs/goal/architecture/account-runtime-roles.md § Implementation status today"
+
+[host-account-scope-fault-injection]
+kind = "harness"
+built = ["ios", "linux", "macos", "tui", "web", "windows"]
+detail = "a fault injected into the account-scoped state directory from the host (the sign-out residue journeys chmod one read-only): android's scoped directories sit in the app's own on-device filesDir, so the host cannot reach them (web's absence is declared where the journeys gate on it)"
+tracked = "docs/goal/architecture/long-term-store.md § Implementation status today"
+
+[host-credential-fault-injection]
+kind = "harness"
+built = ["ios", "linux", "macos", "tui", "web", "windows"]
+detail = "android's credential file is written by the on-device bridge into the app's own filesDir, so the host can neither read it back nor deny it writes — the same gap attach_cred_store documents. The seat's wiring (registry.clearAll → secureStorage.clear → reverifyErase → AccountStores.reportResidue) is pinned by its unit tests"
+tracked = "docs/goal/architecture/long-term-store.md § Implementation status today"
+
+[html-mail-inline-image]
+kind = "product"
+built = ["ios", "linux", "macos", "tui", "web", "windows"]
+detail = "landed on linux (lead, sets the placeholder + reveal-button shape), green on windows, macos, ios, tui and web; android is the cross-area follow-on work"
+tracked = "mail-settings.md"
+
+[html-mail-markdown-roundtrip]
+kind = "product"
+built = ["ios", "linux", "macos", "tui", "web", "windows"]
+detail = "wired on linux first (the lead client whose render + compose toolbar are verified working), green on macos, ios, tui, web and windows; android is the cross-app follow-on"
+tracked = "mail-settings.md"
+
+[live-drive-onboarding-bridge]
+kind = "harness"
+built = ["ios", "linux", "macos", "tui", "web", "windows"]
+detail = "this app's e2e bridge forwards the onboarding machine methods to the shared dispatcher, so a live run can drive the real provisioning path; android's bridge does not yet"
+tracked = "helpers/live_provision.py (why each app is in the set)"
+
+[machine-async-dispatch-bridge]
+kind = "harness"
+built = ["android", "ios"]
+detail = "the bridge routes the onboarding machine's async dispatcher (`request_age_nonce` through `call_machine_method`): android's and ios's test agents do (ios through `callMachineMethodAsync`, `FaunaApp.swift`); the desktop apps carry no age-notice journey by design"
+tracked = "docs/goal/behavior/account-age-band.md § Implementation status today"
+
+[mail-client-ui-enable-docker-drive]
+kind = "harness"
+built = ["linux", "tui", "web"]
+detail = "wired on linux, then tui, then web (through the CORS-adding SPA proxy, whose two hops speak TLS to the image's listener); the other apps are the cross-app follow-on (same scope as test_mail_client_full_roundtrip.py). Every app here has the mail-settings enable toggle already, so the leg is a driver swap — what actually gates it is a FRESH nest image on a docker-capable box, and only the primary Linux dev VM has a docker daemon at all"
+tracked = "mail-settings.md"
+
+[mail-enable-ui-docker-drive]
+kind = "harness"
+built = ["linux"]
+detail = "wired on linux first; the other apps are the cross-app follow-on (same scope as test_mail_client_full_roundtrip.py). Every app here has the mail-settings enable toggle already, so the leg is a driver swap — what actually gates it is a FRESH nest image on a docker-capable box, and only the primary Linux dev VM has a docker daemon at all "
+tracked = "mail-settings.md"
+
+[mail-export-drive]
+kind = "harness"
+built = ["android", "ios", "linux", "macos", "tui", "web", "windows"]
+detail = "the app builds the seam-only MailExportMachine (build_mail_export_machine_without_key_custody), so Start refuses honestly rather than opening a session nothing drives"
+tracked = "mail-export.md § Implementation status today"
+
+[mail-full-roundtrip]
+kind = "product"
+built = ["ios", "linux", "macos", "tui", "web", "windows"]
+detail = "wired on linux first, green on macos, ios, tui, web and windows; android is the cross-app follow-on"
+tracked = "mail-settings.md"
+
+[mail-import-failed-record]
+kind = "product"
+built = ["android", "ios", "linux", "macos", "tui", "windows"]
+detail = "witnessed on tui, linux, android, macos, ios and windows; web adopts but cannot run"
+tracked = "mailbox-migration.md § Implementation status today"
+
+[mail-import-full-mailbox-notice]
+kind = "product"
+built = ["android", "ios", "linux", "macos", "tui", "windows"]
+detail = "witnessed on tui, linux, android, macos, ios and windows; web never reaches a running import"
+tracked = "mailbox-migration.md § Implementation status today"
+
+[mail-import-review-skipped-log]
+kind = "product"
+built = ["android", "ios", "linux", "macos", "tui", "windows"]
+detail = "Review skipped toggles the skip log on the Done screen (a second press hides it); web never reaches a running import (its IMAP transport is unbuilt). Keyed as a capability, not the button's id, because the button exists on web's sibling surfaces"
+tracked = "behavior/mailbox-migration.md § Implementation status today"
+
+[mail-import-run-journeys-android-apple-windows]
+kind = "product"
+built = ["android", "ios", "linux", "macos", "tui", "windows"]
+detail = "the mail-import run journeys' progress step, for the journeys whose app work has also landed on windows ahead of web"
+tracked = "docs/goal/behavior/mailbox-migration.md § Implementation status today"
+
+[mail-import-run-journeys-apple-windows]
+kind = "product"
+built = ["ios", "linux", "macos", "tui", "windows"]
+detail = "the mail-import run journeys' progress step (since date, pause/resume/cancel, app-password help), witnessed on tui first and followed by linux, the Apple apps and windows; android and web have not built it"
+tracked = "docs/goal/behavior/mailbox-migration.md § Implementation status today"
+
+[mail-lists]
+kind = "product"
+built = ["ios", "linux", "macos", "tui", "web", "windows"]
+detail = "132525318a's android leg was a code review only, not a live run — no Robolectric or device execution backs it"
+tracked = ""
+
+[mail-reply-roundtrip]
+kind = "product"
+built = ["ios", "linux", "macos", "tui", "web", "windows"]
+detail = "wired on linux first, green on macos, ios, tui, web and windows; android is the cross-app follow-on"
+tracked = "mail-settings.md"
+
+[mail-token-refresh-clock]
+kind = "harness"
+built = ["android", "ios", "linux", "macos", "tui", "web"]
+detail = "the shared refresh and its clock are in place; this app's automation agent does not route the command yet (windows is the last app without the route)"
+tracked = "mail-credentials.md § Trigger taxonomy"
+
+[member-review-defer-button]
+kind = "product"
+built = ["ios", "linux", "macos", "tui", "web"]
+detail = "the ephemeral kit-side review pass (succession-propagation ruling 1, item (ii)): tui, web, macos, ios and linux paint its defer button; windows and android lack the pass"
+tracked = "docs/goal/behavior/succession-propagation.md § Implementation status today (the item-(ii) bullet's Gap)"
+
+[mls-cross-device-sync-proof]
+kind = "harness"
+built = ["ios", "linux", "macos", "tui", "windows"]
+detail = "runs on linux (slice 5 leg 1), macOS, iOS + windows (the shared native FFI-factory leg; iOS's device B is a second simulator, the alice_second_device seat), and tui (the shared tokio launcher consumed directly); android is pending on its machine"
+tracked = "devices.md"
+
+[mls-db-restart-persistence-proof]
+kind = "harness"
+built = ["windows"]
+detail = "only the windows recover() preserves the native mls.db data dir with no opt-in (a stable per-driver-instance data dir kept across relaunch); the other columns' restart-survival is witnessed by test_conversations_history_survives_restart_cross_app.py via the preserve_state_across_relaunch() pin"
+tracked = ""
+
+[moderation-queue-second-real-engine]
+kind = "harness"
+built = ["linux", "tui", "macos", "ios"]
+detail = "drives {…} through two real GUI engines — only linux, tui, macos and ios support the second-real-engine fixture today"
+tracked = "second_real_faunamls_app fixture (conftest.py)"
+
+[native-relaunch-sent-copy-proof]
+kind = "harness"
+built = ["linux", "macos", "tui", "web", "windows"]
+detail = "linux + windows + macOS + tui have it (PlatformDriver.recover() does a real teardown+relaunch); iOS + android are the cross-app follow-on"
+tracked = "docs/goal/behavior/smtp-server.md § Implementation status today"
+
+[nav-stack-actor-id]
+kind = "harness"
+built = ["android", "ios", "linux", "macos", "tui", "web", "windows"]
+detail = "the app's nav patch reads only the stack entry's `view`, so `navigate_to_actor` opens the SELF profile instead of the named actor"
+tracked = ""
+
+[nests-custody-restore]
+kind = "product"
+built = ["ios", "linux", "macos", "tui", "web", "windows"]
+detail = "the shared RestoreFromCustodian command is exported; android's Nests page paints the whole restore block (button, input, submit, cancel and notice: `LinkedNestsScreen.kt` `CustodyRestoreBlock`) but no custody witness carries the android mark yet, so `built` gains android with the witness"
+tracked = "nests.md § Implementation status today"
+
+[on-device-log-reader]
+kind = "harness"
+built = ["ios", "linux", "macos", "tui"]
+detail = "the driver's reader of the app's own on-device log file (`on_device_log_text`): tui and linux read the file from the host, the Apple in-process driver reads its own; android's and windows' drivers have none (web keeps no file and is declared absent where the journeys gate on it). The proof half pins this list against the leaf drivers"
+tracked = "docs/features/app-log.md outcome 6"
+
+[on-demand-replica-serve-seat]
+kind = "product"
+built = ["linux", "tui", "windows"]
+detail = "an on-demand replica that is itself a serving seat, so a sibling's ask reaches it and its placeholder declines: the agent-hosted roots (the FUSE root on linux, cfapi on windows) are; apple's on-demand replica is the File Provider extension, another process whose hosts no connection announces yet, and an evicted (dataless) file there still stands at its path (relay-serving.md § Relay serving → *Which seats hold*). Built when the extension serves; the witness then gains its macos arm through `folder-on-demand-toggle`"
+tracked = "relay-serving.md § Relay serving → *Which seats hold*"
+
+[picker-options-attr]
+kind = "harness"
+built = ["ios", "linux", "macos", "tui", "web"]
+detail = "the bridge reports every option a picker paints (the `options` attr, `drivers/base.py::option_texts`), without which an option's absence cannot be observed; windows and android do not serve it yet"
+tracked = "docs/goal/behavior/task-delegation.md § Implementation status today"
+
+[post-archive-comments]
+kind = "product"
+built = ["ios", "linux", "macos", "tui", "web", "windows"]
+detail = "the folded archive comments under the owner's imported post: the app registers the archive machine's comment source on its feed manager and paints post-archive-comments / post-archive-comment-item from PostSummary.archive_comments"
+tracked = "docs/goal/behavior/archive-import.md § Implementation status today, the slice-6 comments paragraph"
+
+[post-image-paint-state]
+kind = "harness"
+built = ["android", "ios", "linux", "macos", "tui", "web", "windows"]
+detail = "its test agent answers no get_attr(post-image, state) of painted / placeholder, so whether a post's fetched bytes opened, decoded and reached the picture cannot be read headlessly"
+tracked = "docs/goal/behavior/archive-import.md § Implementation status today"
+
+[post-logged-in-dial-seam]
+kind = "harness"
+built = ["android", "ios", "linux", "macos", "tui", "web", "windows"]
+detail = "web resolves every nest socket through `#lib/api` `nodeUrl()`, its TypeScript twin of the resolver (the Rust override cannot cross wasm chunks), seeded from the same `set_provider_base_urls` gesture. tui and linux both resolve the dial through the shared `fauna_launch_machine::resolved_dial_url` (tui at its `session::adopt`/`establish` call sites, linux at `launch_main_app_after_signin` + its stored-account relaunch; macos+ios now at `FaunaMacApp`/`FaunaApp`'s `completeAuthenticatedLaunch`/`enterOptimistically` + `applySessionPatch` call sites). android resolves through the same resolver in `AppLaunchVM` (the stored-launch dial and the post-auth silent sign-in); windows resolves through it too at its two store-read connection sites (`App.xaml.cs`, cold-boot connect and `StartMainAppAsync`)"
+tracked = "onboarding.md"
+
+[profile-actor-id-copy-btn-copied]
+kind = "harness"
+built = ["android", "ios", "linux", "macos", "tui", "web", "windows"]
+detail = "the button copies, but only tui, linux, web, macos, ios, windows and android report the value it wrote, so a test cannot assert what reached the clipboard"
+tracked = "profile.md § User actions; the cross-app lift"
+
+[profile-handle-primary-domain]
+kind = "product"
+built = ["android", "ios", "linux", "macos", "tui", "web"]
+detail = "windows' SELF header falls back to the bare handle (or the actor id) and never reads the account's live domain"
+tracked = ""
+
+[profile-offers-browse]
+kind = "product"
+built = ["ios", "linux", "macos", "tui", "web", "windows"]
+detail = "android has it too but no witness carries the android mark yet, so `built` gains android with the witness; every other app but windows is listed"
+tracked = "per-app NEXTs"
+
+[proxied-video-playback]
+kind = "product"
+built = ["ios", "linux", "macos", "web", "windows"]
+detail = "the video-thumbnail on a bridged post paints the glyph + path inert on the other apps; the tap is not wired to playback_source's ticketed Url yet"
+tracked = "render-model.md § D6c → Inline playback (each native app wires its ProxiedVideo tap)"
+
+[registry-refuse-secret-writes]
+kind = "harness"
+built = ["ios", "linux", "macos", "tui", "web", "windows"]
+detail = "one arm in this app's agent handing `fauna_client_accounts::call_registry_method_for_test` its own `AccountRegistry` — the fault and its name are already shared Rust"
+tracked = "behavior/onboarding.md § E2E bridge contract — the registry dispatcher's per-app delegation"
+
+[registry-set-account-reach]
+kind = "harness"
+built = ["ios", "linux", "macos", "tui", "windows"]
+detail = "one arm in this app's agent handing `fauna_client_accounts::call_registry_method_for_test` its own `AccountRegistry` — the name table and semantics are already shared Rust; web is a declared absence: its dial is `https://{ip}` literally, so a browser cannot dial a hint against the harness's local http nest without the box's IP bridge cert (`onboarding.md` § Reach hint), and the 2026-10-30 `--app web` run went red even earlier — the page launched signed out on the identity-choice wizard page instead of the set_state-injected account"
+tracked = "behavior/onboarding.md § E2E bridge contract — the registry dispatcher's per-app delegation, and § Implementation status today's reach bullet for the capture legs that give each app a hint to dial"
+
+[relaunch-environment]
+kind = "harness"
+built = ["android", "ios", "linux", "macos", "tui", "windows"]
+detail = "a cold relaunch (`recover()`) that re-reads the launch environment, which is how the e2e trust seed re-points an app at a nest its launch did not name: every native driver relaunches with one; web's browser page reads no process environment. The proof half pins this list against the drivers' own `recover()` overrides"
+tracked = "docs/goal/architecture/e2e-automation-surface-gating.md § The e2e trust seed"
+
+[relaunch-injected-identity]
+kind = "harness"
+built = ["android", "ios", "linux", "macos", "tui", "web", "windows"]
+detail = "a set_state-injected session that survives a relaunch (`relaunch_preserves_injected_identity`): kept as its own question beside the store pin, since a future driver may separate them. Every leaf driver answers yes; the proof half pins this list"
+tracked = "docs/goal/architecture/e2e-conventions.md convention 10"
+
+[relaunch-store-pin]
+kind = "harness"
+built = ["android", "ios", "linux", "macos", "tui", "web", "windows"]
+detail = "the driver's pin of the app's client-local store across a relaunch (`preserve_state_across_relaunch`, real code with a side effect, so the relaunch helper still calls it): without one a relaunched app returns as a new device. Every leaf driver overrides it; the proof half pins this list"
+tracked = "docs/goal/architecture/e2e-conventions.md convention 10"
+
+[retained-generation-rows]
+kind = "product"
+built = ["ios", "linux", "macos", "tui", "web", "windows"]
+detail = "android has it but is excluded here until its witness carries the android mark (the venue is fleet-wide work); `built` gains android with the witness"
+tracked = "nests.md § Trust facet — generation recovery"
+
+[second-device-same-user]
+kind = "harness"
+built = ["android", "ios", "linux", "macos", "tui", "web", "windows"]
+detail = "alice_second_device launches a second seat of the same identity: on tui, linux, macOS and windows the app's own, on iOS the app's own on a second simulator (one device cannot hold two seats, a launch there would uninstall the first), on web a twin page in its own browser context (its own storage and Web Locks, so its own runtime, never a runtime-less second tab), on android a tui seat (the phone's other device)"
+tracked = "tests/e2e-unified/conftest.py::alice_second_device"
+
+[second-seat-same-identity]
+kind = "harness"
+built = ["android", "ios", "linux", "macos", "tui", "web", "windows"]
+detail = "conftest.py::_alice_extra_seat launches tui, linux, macos, ios and windows seats, and web opens a twin page; android is paired with a tui seat (a journey on android swaps roles, as the turn-on-mail and spam witnesses do)"
+tracked = "; "
+
+[self-signed-handle-check-drive]
+kind = "harness"
+built = ["android", "ios", "linux", "macos", "tui", "web", "windows"]
+detail = "linux, tui, windows and android prove the shared-Rust OnboardingMachine::local_nest_probe_client fix end to end (android reaches the nest through adb reverse); macOS/iOS use the same shared client but are mac-machine-gated fleet-wide, not unbuilt)"
+tracked = "onboarding.md"
+
+[sell-post-seller-surfaces]
+kind = "product"
+built = ["ios", "linux", "macos", "tui", "web", "windows"]
+detail = "linux + tui + windows + web + macos + ios today"
+tracked = ""
+
+[server-offers-follow-location]
+kind = "product"
+built = ["ios", "linux", "macos", "tui", "windows"]
+detail = "android shares the shared-Rust re-list but has not witnessed these journeys yet; web omits the picker"
+tracked = "registry.md § Server offers follow the location"
+
+[set-provider-base-urls]
+kind = "harness"
+built = ["ios", "linux", "macos", "tui", "web", "windows"]
+detail = "fake-cloud provider redirection for the VPS verify; web + linux + tui + macos + ios + windows implement it (windows through the shared async call_machine_method dispatcher), android does not"
+tracked = "the fake-cloud provisioning follow-up, Track 2"
+
+[settings-general]
+kind = "product"
+built = ["ios", "linux", "macos", "tui", "web", "windows"]
+detail = "not built yet on android (settings.md § Sub-page heading conformance table)"
+tracked = "settings.md § Sub-page heading conformance"
+
+[share-serve-status]
+kind = "product"
+built = ["linux", "macos", "tui", "web", "windows"]
+detail = "iOS hosts the account runtime and its own row writes the device-local row, but its phone-peer leg (the share plane) is unbuilt, so no share-serve-status paints"
+tracked = "p2p.md § Implementation status today; p2p-shared-set-build.md § Cross-user shared-set transfer → Phone peers — design"
+
+[share-serve-tally]
+kind = "harness"
+built = ["linux", "macos", "tui", "windows"]
+detail = "the serve hold and the serve tally have no agent arm on this app"
+tracked = "p2p.md § Implementation status today (the resumed-transfer paragraph)"
+
+[sign-out-releases-instance-lock]
+kind = "product"
+built = ["linux", "macos", "tui", "windows"]
+detail = "a sign-out lets go of the window's instance lock and its shared-root serving lock on the account it left (account-scoping.md § Concurrent instances); windows releases through the shared call (SessionInstance.Release after ClearCredentialNamespace's erase); iOS, android and web take no lock file (declared absences)"
+tracked = "account-scoping.md § Concurrent instances"
+
+[single-engine-local-detection]
+kind = "harness"
+built = ["web"]
+detail = "only web has this leg today; the native FFI clients' equivalent is the cross-machine slice-4 legs, not yet built for any of them"
+tracked = "test_moderation_local_detection.py module docstring (slice-4 legs)"
+
+[state-protocol-messages-field]
+kind = "product"
+built = ["android", "ios", "linux", "macos", "tui", "windows"]
+detail = "the unified message display system serialised into the state protocol's `messages` field ({error, warning, info}): every app's test agent but web's"
+tracked = "tests/e2e-unified/tests/test_messages.py module docstring"
+
+[subscription-claim-void-button]
+kind = "product"
+built = ["ios", "linux", "macos", "tui", "web", "windows"]
+detail = "built on tui, web, linux, macos, ios, windows; android landed unverified"
+tracked = "monetization.md"
+
+[succession-witness-member-seat]
+kind = "harness"
+built = ["ios", "linux", "macos", "tui", "web", "windows"]
+detail = "the witness itself is no longer the gap on the native apps: linux and the four FFI apps (macOS, iOS, windows, android) all register one as of 2026-09-03, off the shared ChainWitness + NativeSuccessionChainSource + peer-anchor sweep in fauna-client-recovery. What is unbuilt here is a member seat this fixture can drive — only linux, tui, web, macOS, iOS and windows have one"
+tracked = "succession-propagation.md § Implementation status today — the witness/anchor entries"
+
+[trust-differential-drive]
+kind = "harness"
+built = ["linux", "web"]
+detail = "proven on linux; the remaining NATIVE apps (tui, windows, macos, ios) are ordinary cross-app trickle-down — they share trust.rs's TOFU model, so each one's leg is a driver swap, not new trust work. Every leg needs a fresh nest image on a docker-capable box, which is the actual gate here"
+tracked = ""
+
+[trust-facet-clock]
+kind = "harness"
+built = ["android", "ios", "linux", "macos", "tui", "web", "windows"]
+detail = "the shared clock and its UniFFI door are in place; this app's automation agent does not route the command yet"
+tracked = "nests.md § Implementation status today"
+
+[unclean-kill]
+kind = "harness"
+built = ["ios", "linux", "macos", "tui", "web", "windows"]
+detail = "the driver's unclean-kill primitive (`PlatformDriver.kill_uncleanly`, answered by `supports_unclean_kill`): the driver must own the app child it kills — a Popen, a pty session leader, a simulator pid, a bridge session — and the android bridge driver owns none"
+tracked = "docs/goal/architecture/e2e-conventions.md convention 7, mode 5"
+
+[vps-location-picker]
+kind = "product"
+built = ["android", "ios", "linux", "macos", "tui", "windows"]
+detail = "painted on every app but web (apps/fauna-tui/src/wizard/vps_config.rs paints the full onboarding.md § 5 VPS wizard); web's vps_config step has no location picker yet"
+tracked = "installers/vps.md"
+
+[window-capture]
+kind = "harness"
+built = ["windows"]
+detail = "a sized capture of the app's own window (`PlatformDriver.capture_window`), what the store-listing screenshots are taken with: built on windows (flaui-bridge /window/capture); the other store apps each need their own capture. The proof half pins this list against the drivers that override the method"
+tracked = "docs/goal/architecture/installers/windows.md § Store distribution"

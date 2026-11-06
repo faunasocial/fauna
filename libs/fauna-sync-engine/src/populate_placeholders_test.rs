@@ -724,8 +724,8 @@ fn already_tracked_placeholder_is_repointed_at_the_new_head() {
     assert_eq!(entry.size_bytes, 99);
     assert_eq!(entry.remote_mtime, 900);
     assert_eq!(
-        entry.content_key_version,
-        Some(5),
+        entry.content_stamp,
+        Some(fauna_core::blob_seal::SealStamp::Version(5)),
         "the generation must follow the head, or a sealed manifest fails to open",
     );
     assert_eq!(entry.state, SyncState::Placeholder, "still bytes-free");
@@ -752,7 +752,10 @@ fn repointing_is_idempotent_when_the_head_already_matches() {
 
     let entry = engine.db().get_entry("a").unwrap().unwrap();
     assert_eq!(entry.size_bytes, 10);
-    assert_eq!(entry.content_key_version, Some(3));
+    assert_eq!(
+        entry.content_stamp,
+        Some(fauna_core::blob_seal::SealStamp::Version(3))
+    );
 }
 
 /// **A re-point carries the row's local identity and drops the old head's proof**
@@ -789,7 +792,7 @@ fn a_repoint_carries_the_rows_local_identity_and_drops_the_old_heads_proof() {
             seeded.remote_mtime,
             seeded.size_bytes,
             seeded.version_num,
-            seeded.content_key_version,
+            seeded.content_stamp,
         )
         .unwrap();
     engine
@@ -881,7 +884,10 @@ fn already_tracked_synced_row_is_never_repointed() {
         ContentHash::from_digest_raw([0x02; 32])
     );
     assert_eq!(stale.size_bytes, 99);
-    assert_eq!(stale.content_key_version, Some(5));
+    assert_eq!(
+        stale.content_stamp,
+        Some(fauna_core::blob_seal::SealStamp::Version(5))
+    );
     assert_eq!(stale.remote_mtime, 900);
     assert_eq!(stale.version_num, 7, "the row's version_num is preserved");
 }
@@ -907,7 +913,7 @@ fn synced_row_at_the_current_head_is_not_reported() {
             5,
             42,
             1,
-            Some(2),
+            Some(fauna_core::blob_seal::SealStamp::Version(2)),
         )
         .unwrap();
 
@@ -1094,8 +1100,8 @@ fn mark_placeholder_is_a_noop_for_an_unknown_path() {
 /// A fresh create folds `recorded > 0`, so the tick must report "something
 /// changed" — the signal the appex uses to decide whether to call
 /// `signalEnumerator` again.
-#[test]
-fn apply_refresh_fold_reports_true_when_a_new_placeholder_was_recorded() {
+#[tokio::test]
+async fn apply_refresh_fold_reports_true_when_a_new_placeholder_was_recorded() {
     let watch = tempfile::tempdir().unwrap();
     let engine = test_engine(watch.path().to_path_buf());
 
@@ -1105,7 +1111,7 @@ fn apply_refresh_fold_reports_true_when_a_new_placeholder_was_recorded() {
         .unwrap();
     assert_eq!(fold.recorded, 1);
 
-    let changed = engine.apply_refresh_fold(&fold).unwrap();
+    let changed = engine.apply_refresh_fold(&fold, None).await.unwrap();
     assert!(
         changed,
         "a newly-recorded placeholder must report changed=true"
@@ -1118,8 +1124,8 @@ fn apply_refresh_fold_reports_true_when_a_new_placeholder_was_recorded() {
 /// layer: reporting `true` here on every tick would make the File Provider
 /// live-refresh loop `signalEnumerator` (and so re-invoke `enumerateChanges`)
 /// forever, even with nothing new to enumerate.
-#[test]
-fn apply_refresh_fold_reports_false_on_a_true_noop() {
+#[tokio::test]
+async fn apply_refresh_fold_reports_false_on_a_true_noop() {
     let watch = tempfile::tempdir().unwrap();
     let engine = test_engine(watch.path().to_path_buf());
 
@@ -1135,19 +1141,21 @@ fn apply_refresh_fold_reports_false_on_a_true_noop() {
     assert_eq!(fold.recorded, 0);
     assert!(fold.stale_hydrated.is_empty());
 
-    let changed = engine.apply_refresh_fold(&fold).unwrap();
+    let changed = engine.apply_refresh_fold(&fold, None).await.unwrap();
     assert!(
         !changed,
         "an unchanged-head re-fold must report changed=false"
     );
 }
 
-/// A remote delete of a file this host holds only as a placeholder: the row going is
-/// the whole delete here (the OS keeps whatever bytes a File Provider file holds), and
-/// the tick must report `changed=true` — or the enumerator is never signalled and the
-/// gone file stays listed. A hydrated row's delete is left as it is.
-#[test]
-fn apply_refresh_fold_drops_a_remotely_deleted_placeholder_and_reports_it() {
+/// A remote delete on the File Provider (the OS keeps the bytes): a placeholder's row
+/// and a hydrated `Synced` row's both go — the enumerator, signalled, drops the item and
+/// fileproviderd evicts its copy — and the tick reports `changed=true`, or the gone file
+/// stays listed. A staging copy the extension left behind goes with its row, and is
+/// never mistaken for the user's file: here it is an OLDER version than the row's,
+/// which a disk re-hash would read as an unsynced edit and upload as the survivor.
+#[tokio::test]
+async fn apply_refresh_fold_applies_a_remote_delete_of_a_placeholder_and_a_hydrated_row() {
     let watch = tempfile::tempdir().unwrap();
     let engine = test_engine(watch.path().to_path_buf());
 
@@ -1158,10 +1166,21 @@ fn apply_refresh_fold_drops_a_remotely_deleted_placeholder_and_reports_it() {
             change(2, "hydrated", Some(&m), 10, 100),
         ])
         .unwrap();
+    // Hydrated by a served fetch: `mark_hydrated` stamps the served content.
     engine
-        .db()
-        .update_state("hydrated", SyncState::Synced)
+        .mark_hydrated("hydrated", ContentHash::from_digest_raw([0x07; 32]))
         .unwrap();
+    assert_eq!(
+        engine.db().get_entry("hydrated").unwrap().map(|e| e.state),
+        Some(SyncState::Synced),
+        "precondition: the row is hydrated"
+    );
+    let staged = watch.path().join("hydrated");
+    std::fs::write(
+        &staged,
+        b"an older version, staged by an earlier createItem",
+    )
+    .unwrap();
 
     let fold = engine
         .record_placeholders_from_changes(&[
@@ -1170,8 +1189,9 @@ fn apply_refresh_fold_drops_a_remotely_deleted_placeholder_and_reports_it() {
         ])
         .unwrap();
     assert_eq!(fold.recorded, 0, "precondition: nothing recorded");
+    assert_eq!(fold.deleted.len(), 2, "precondition: both deletes reported");
 
-    let changed = engine.apply_refresh_fold(&fold).unwrap();
+    let changed = engine.apply_refresh_fold(&fold, None).await.unwrap();
     assert!(
         changed,
         "a dropped row is a change the enumerator must hear of"
@@ -1180,10 +1200,167 @@ fn apply_refresh_fold_drops_a_remotely_deleted_placeholder_and_reports_it() {
         engine.db().get_entry("cloud").unwrap().is_none(),
         "the remotely deleted placeholder's row goes"
     );
+    assert!(
+        engine.db().get_entry("hydrated").unwrap().is_none(),
+        "the remotely deleted hydrated row goes too"
+    );
+    assert!(!staged.exists(), "its staging copy goes with it");
+    assert!(
+        engine.db().list_unresolved_conflicts().unwrap().is_empty(),
+        "a settled row's delete is no conflict"
+    );
+}
+
+/// An edit the OS delivered (`modifyItem` staged it and the row went in flight) that
+/// the nest has not recorded is content the nest lacks: the remote delete is declined,
+/// the row and the staged bytes stay, and the delete-vs-edit conflict is reported —
+/// the same verdict the resident pull runs.
+#[tokio::test]
+async fn apply_refresh_fold_keeps_a_delivered_unrecorded_edit_and_reports_the_conflict() {
+    let watch = tempfile::tempdir().unwrap();
+    let engine = test_engine(watch.path().to_path_buf());
+
+    let m = manifest_hex(0x01);
+    engine
+        .record_placeholders_from_changes(&[change(1, "notes.txt", Some(&m), 10, 100)])
+        .unwrap();
+    engine
+        .db()
+        .update_state("notes.txt", SyncState::LocallyModified)
+        .unwrap();
+    let staged = watch.path().join("notes.txt");
+    std::fs::write(&staged, b"the edit the OS handed over").unwrap();
+
+    let fold = engine
+        .record_placeholders_from_changes(&[change(2, "notes.txt", None, 0, 200)])
+        .unwrap();
     assert_eq!(
-        engine.db().get_entry("hydrated").unwrap().map(|e| e.state),
-        Some(SyncState::Synced),
-        "a hydrated row is not dropped here"
+        fold.deleted.len(),
+        1,
+        "precondition: the delete is reported"
+    );
+
+    let changed = engine.apply_refresh_fold(&fold, None).await.unwrap();
+    assert!(!changed, "nothing left the enumeration");
+    assert!(
+        engine.db().get_entry("notes.txt").unwrap().is_some(),
+        "the row stays"
+    );
+    assert_eq!(
+        std::fs::read(&staged).unwrap(),
+        b"the edit the OS handed over"
+    );
+    let conflicts = engine.db().list_unresolved_conflicts().unwrap();
+    assert!(
+        conflicts
+            .iter()
+            .any(|(_, path, kind, _, _)| path == "notes.txt" && kind == "delete_declined"),
+        "the declined delete is a `delete_declined` conflict; got {conflicts:?}"
+    );
+}
+
+/// An edit the OS held and had NOT delivered when the remote delete arrived: the
+/// row was settled, so the delete applies and the row goes; the OS then fails to
+/// remove its edited copy and re-creates the item through `createItem` with the
+/// `deletionConflicted` option. That create must report the delete-vs-edit
+/// conflict — naming the device the applied delete came from — not land as a
+/// plain create.
+#[tokio::test]
+async fn a_deletion_conflicted_recreate_reports_the_declined_delete() {
+    let watch = tempfile::tempdir().unwrap();
+    let engine = test_engine(watch.path().to_path_buf());
+
+    let m = manifest_hex(0x01);
+    engine
+        .record_placeholders_from_changes(&[change(1, "notes.txt", Some(&m), 10, 100)])
+        .unwrap();
+    engine
+        .mark_hydrated("notes.txt", ContentHash::from_digest_raw([0x07; 32]))
+        .unwrap();
+    let fold = engine
+        .record_placeholders_from_changes(&[change(2, "notes.txt", None, 0, 200)])
+        .unwrap();
+    assert!(engine.apply_refresh_fold(&fold, None).await.unwrap());
+    assert!(
+        engine.db().get_entry("notes.txt").unwrap().is_none(),
+        "precondition: the settled row's delete applied"
+    );
+
+    // The OS re-creates the item it held edited: the extension stages its bytes.
+    std::fs::write(watch.path().join("notes.txt"), b"the edit the OS held").unwrap();
+    // No nest in this engine, so the upload cannot land and the ack is withheld;
+    // what is pinned here is the conflict the re-create reports.
+    let _ = crate::provider_face::serve_ingest_deletion_conflicted(&engine, "notes.txt").await;
+
+    let conflicts = engine.db().list_unresolved_conflicts().unwrap();
+    let declined = conflicts
+        .iter()
+        .find(|(_, path, kind, _, _)| path == "notes.txt" && kind == "delete_declined");
+    assert!(
+        declined.is_some(),
+        "the re-create is a `delete_declined` conflict; got {conflicts:?}"
+    );
+    assert!(
+        format!("{declined:?}").contains("from device device"),
+        "the report names the device the applied delete came from; got {declined:?}"
+    );
+}
+
+/// A host that keeps its own bytes (the owned tree: `watch_dir` is its kept root):
+/// the verdict re-hashes the kept body. One that is the recorded version goes, and
+/// `own_copies` drops every body of the path; one that holds an edit the nest lacks
+/// stays, with its conflict reported, and `own_copies` is never asked.
+#[tokio::test]
+async fn apply_refresh_fold_on_an_owned_tree_rehashes_the_kept_root() {
+    let watch = tempfile::tempdir().unwrap();
+    let engine = test_engine(watch.path().to_path_buf());
+    crate::pull_remote_changes_test::seed_tracked_file(&engine, watch.path(), "same.txt", b"v1");
+    crate::pull_remote_changes_test::seed_tracked_file(&engine, watch.path(), "edited.txt", b"v1");
+    std::fs::write(watch.path().join("edited.txt"), b"an edit the nest lacks").unwrap();
+
+    let fold = engine
+        .record_placeholders_from_changes(&[
+            change(10, "edited.txt", None, 0, 200),
+            change(11, "same.txt", None, 0, 200),
+        ])
+        .unwrap();
+    assert_eq!(fold.deleted.len(), 2, "precondition: both deletes reported");
+
+    let dropped = std::cell::RefCell::new(Vec::<String>::new());
+    let own_copies = |rel: &str| -> anyhow::Result<()> {
+        dropped.borrow_mut().push(rel.to_string());
+        std::fs::remove_file(watch.path().join(rel)).or_else(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                Ok(())
+            } else {
+                Err(e.into())
+            }
+        })
+    };
+    let changed = engine
+        .apply_refresh_fold(&fold, Some(&own_copies))
+        .await
+        .unwrap();
+
+    assert!(changed);
+    assert!(engine.db().get_entry("same.txt").unwrap().is_none());
+    assert!(!watch.path().join("same.txt").exists());
+    assert!(
+        dropped.borrow().iter().all(|rel| rel == "same.txt"),
+        "only the applied delete reaches the host's bodies; got {:?}",
+        dropped.borrow()
+    );
+    assert!(engine.db().get_entry("edited.txt").unwrap().is_some());
+    assert_eq!(
+        std::fs::read(watch.path().join("edited.txt")).unwrap(),
+        b"an edit the nest lacks"
+    );
+    let conflicts = engine.db().list_unresolved_conflicts().unwrap();
+    assert!(
+        conflicts
+            .iter()
+            .any(|(_, path, kind, _, _)| path == "edited.txt" && kind == "delete_declined"),
+        "got {conflicts:?}"
     );
 }
 
@@ -1191,8 +1368,8 @@ fn apply_refresh_fold_drops_a_remotely_deleted_placeholder_and_reports_it() {
 /// must be re-pointed at the nest's new head, marked back to `Placeholder`,
 /// have its dehydration proof cleared (so `content_version` changes and the OS
 /// re-fetches), and the tick must report `changed=true`.
-#[test]
-fn apply_refresh_fold_repoints_stale_hydrated_row_and_clears_recorded_content_hash() {
+#[tokio::test]
+async fn apply_refresh_fold_repoints_stale_hydrated_row_and_clears_recorded_content_hash() {
     let watch = tempfile::tempdir().unwrap();
     let engine = test_engine(watch.path().to_path_buf());
 
@@ -1246,7 +1423,7 @@ fn apply_refresh_fold_repoints_stale_hydrated_row_and_clears_recorded_content_ha
     );
     assert_eq!(fold.stale_hydrated.len(), 1);
 
-    let changed = engine.apply_refresh_fold(&fold).unwrap();
+    let changed = engine.apply_refresh_fold(&fold, None).await.unwrap();
     assert!(
         changed,
         "a re-pointed stale-hydrated row must report changed=true"
@@ -1368,7 +1545,7 @@ fn a_reported_head_that_names_its_signer_is_stamped_by_both_row_doors() {
         relative_path: rel.to_string(),
         manifest_hash: ContentHash::from_digest_raw([0x02; 32]),
         size_bytes: 12,
-        content_key_version: None,
+        content_stamp: None,
         remote_mtime: 900,
         version_num: 7,
         signed_as: Some([0x5c; 32]),

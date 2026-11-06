@@ -44,7 +44,6 @@ from __future__ import annotations
 
 import pytest
 
-from helpers.app_surface import app_name, skip_unbuilt
 from helpers.budgets import APP_RELAUNCH_S, ORCHESTRATION_STEP_S, UI_SETTLE_S
 from helpers.provisioning_drive import (
     HANDLE_DOMAIN,
@@ -195,13 +194,6 @@ def test_the_exit_retires_the_slot_so_a_relaunch_no_longer_resumes_the_box(
     rather than the assertion racing a page that has not painted yet
     (convention 14).
     """
-    if app_name(app.driver) not in ("tui", "windows", "web", "linux", "android", "macos", "ios"):
-        skip_unbuilt(
-            app.driver,
-            surface="awaiting-dns-fallthrough-button",
-            detail="the Almost-ready exit this whole journey drives landed on tui (lead app) 2026-09-25, then windows",
-            tracked="onboarding-provisioning.md § \"Almost ready\" surface → Exit",
-        )
     require_durable_client_store(app)
 
     fake_cloud.hetzner_cloud.create_server_always_fails()

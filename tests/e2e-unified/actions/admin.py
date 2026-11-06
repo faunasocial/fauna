@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING
 
 from drivers.http_bridge import SelectOptionNotOffered
 from helpers.indexed_rows import row_texts
+from helpers.settings_tab_click import click_settings_tab
 
 if TYPE_CHECKING:
     from drivers.base import PlatformDriver
@@ -151,7 +152,7 @@ class AdminActions:
         opens first there. Waits for nothing past the click: what the entry
         lands on is the caller's assertion."""
         if self.driver.is_mobile():
-            self.driver.click("settings-tab")
+            click_settings_tab(self.driver, timeout)
         self.driver.wait_for("admin-tab", timeout=timeout)
         self.driver.click("admin-tab")
 
@@ -178,6 +179,10 @@ class AdminActions:
         # sleep — the finding generalizes here).
         self.driver.wait_for("admin-dns-add-domain-input", timeout=10.0)
         self.driver.type_text("admin-dns-add-domain-input", domain)
+        # The submit control enables once the typed text has reached the view
+        # state (a native binding lands a tick after the type returns) — poll
+        # for it rather than click a control the real UI still shows disabled.
+        self.driver.wait_until_enabled("admin-dns-add-domain-submit-button", timeout=10.0)
         self.driver.click("admin-dns-add-domain-submit-button")
         time.sleep(1)
 
@@ -194,10 +199,9 @@ class AdminActions:
 
         Resolves the row by name: the per-row `admin-dns-domain-remove-button`
         index aligns with `admin-dns-domain-name` because the app renders a
-        remove button on EVERY row (just insensitive on the primary). On an app
-        with the remove-confirm dialog (``mail-multidomain.md`` § Removing a
-        local domain) the press opens it and removes nothing; on an app not yet
-        lifted onto it the press removes."""
+        remove button on EVERY row (just insensitive on the primary). The press
+        opens the remove-confirm dialog (``mail-multidomain.md`` § Removing a
+        local domain) and removes nothing; only the dialog's confirm removes."""
         idx = self.dns_domain_names().index(domain)  # ValueError if absent — fail loud
         self.driver.click("admin-dns-domain-remove-button", index=idx)
 
@@ -218,14 +222,11 @@ class AdminActions:
     def remove_domain(self, domain: str) -> None:
         """Soft-delete the local mail domain named `domain` from admin-dns: press
         its row's remove control, then the confirm the press opens (soft-delete
-        with a 30-day restore window). An app not yet lifted onto the confirm
-        removes on the press itself and opens no dialog, so the confirm is
-        pressed only when the dialog is there — that branch goes when all seven
-        apps carry the dialog. Async round-trip — poll `dns_domain_names()` /
-        `dns_removed_domain_names()` for the result rather than asserting here."""
+        with a 30-day restore window). Async round-trip — poll
+        `dns_domain_names()` / `dns_removed_domain_names()` for the result
+        rather than asserting here."""
         self.press_domain_remove(domain)
-        if self.remove_confirm_open():
-            self.confirm_domain_remove()
+        self.confirm_domain_remove()
         time.sleep(1)
 
     # --- Primary-domain rename on admin-dns (mail-primary-domain-rename.md § UX) ---
@@ -285,9 +286,14 @@ class AdminActions:
         return self.driver.count("admin-dns-credential-item")
 
     def dns_credential_providers(self) -> list[str]:
-        """Provider id rendered for each held credential
-        (`admin-dns-credential-item-provider`)."""
-        return [t or "" for t in self.driver.get_texts("admin-dns-credential-item-provider")]
+        """Provider named on each held credential
+        (`admin-dns-credential-item-provider`), lowercased: the row paints the
+        credential's label, which is the provider's display name on some apps
+        and its bare id on others, so a caller compares against the id."""
+        return [
+            (t or "").strip().lower()
+            for t in self.driver.get_texts("admin-dns-credential-item-provider")
+        ]
 
     def dns_credential_zones(self) -> list[str]:
         """Covered-zone text rendered for each held credential
@@ -303,6 +309,24 @@ class AdminActions:
         here."""
         self.driver.click("admin-dns-credential-item-clear-button", index=index)
         time.sleep(1)
+
+    #: How long `clear_all_dns_credentials` keeps clearing before it fails.
+    CLEAR_ALL_BUDGET_S = 60
+
+    def clear_all_dns_credentials(self, budget_s: float = CLEAR_ALL_BUDGET_S) -> None:
+        """Remove every held credential, bounded (e2e-conventions.md convention
+        9). A clear the app never applies (its account store refusing the
+        write, say) fails here naming the count left and the page's error,
+        instead of spinning a cleanup loop past the per-test timeout, which
+        fires once: an unbounded loop in a ``finally`` hangs the whole run."""
+        deadline = time.monotonic() + budget_s
+        while (left := self.dns_credential_count()) > 0:
+            if time.monotonic() >= deadline:
+                raise AssertionError(
+                    f"{left} held DNS credential(s) still listed after {budget_s:.0f}s "
+                    f"of clearing: {self.driver.diagnose('error-message')}"
+                )
+            self.clear_dns_credential(0)
 
     def dns_domain_modes(self) -> list[str]:
         """The per-domain mode-control labels (`admin-dns-domain-mode`), aligned
@@ -327,19 +351,28 @@ class AdminActions:
         # own (the background re-check, a fold landing): a render between two
         # reads leaves them one row apart. Re-read until one pass agrees — a
         # consistent snapshot, not a wait on time — and fail only when none does.
+        # A render inside one read takes away a row it had counted: LookupError.
+        columns: dict[str, list[str]] = {}
+        in_step = False
         for _ in range(5):
-            columns = {
-                key: [t or "" for t in self.driver.get_texts(eid, scope=scope)]
-                for key, eid in fields.items()
-            }
-            rows = len(columns["name"])
-            if all(len(c) == rows for c in columns.values()):
+            try:
+                columns = {
+                    key: [t or "" for t in self.driver.get_texts(eid, scope=scope)]
+                    for key, eid in fields.items()
+                }
+            except LookupError:
+                continue
+            in_step = len({len(c) for c in columns.values()}) == 1
+            if in_step:
                 break
-        assert all(len(c) == rows for c in columns.values()), (
+        assert in_step, (
             f"admin-dns-record leaves out of step under {scope}: "
             f"{ {k: len(v) for k, v in columns.items()} }"
         )
-        return [{key: columns[key][i] for key in fields} for i in range(rows)]
+        return [
+            {key: columns[key][i] for key in fields}
+            for i in range(len(columns["name"]))
+        ]
 
     def copy_dns_record(self, domain_index: int, record_index: int) -> None:
         """Click the copy button of one record (`admin-dns-record-copy-button`),
@@ -1677,6 +1710,11 @@ class AdminActions:
         opt-in. Local until `save_mail_dmarc` (an in-group toggle, not a dispatch)."""
         self.driver.click("admin-mail-dmarc-ruf-publish-toggle")
 
+    def toggle_mail_dmarc_outbound_aggregate(self) -> None:
+        """Flip the `admin-mail-dmarc-outbound-aggregate-toggle` draft — whether this
+        nest sends daily aggregate reports. Local until `save_mail_dmarc`."""
+        self.driver.click("admin-mail-dmarc-outbound-aggregate-toggle")
+
     def select_mail_dmarc_fo_mode(self, tag: str) -> None:
         """Pick the `fo=` tag (`1` / `0` / `d` / `s`) on
         `admin-mail-dmarc-fo-mode-select` — a raw-value picker; local until Save."""
@@ -2180,43 +2218,6 @@ class AdminActions:
         except TimeoutError as e:
             raise TimeoutError(f"{e}; {self.driver.diagnose('connection-status')}") from e
         self.driver.click("admin-users-admit-button")
-
-    def require_admit_guardian_supported(self) -> None:
-        """Skip unless this app renders the Admit section's guardian picker
-        (e2e convention 7 — the platform check lives in the action layer).
-        tui led; linux, web and android followed; the apple pair and windows
-        follow in their trickle-down legs."""
-        d = self.driver
-        if not (d.is_tui() or d.is_linux() or d.is_web() or d.is_android()):
-            from helpers.app_surface import skip_unbuilt
-
-            skip_unbuilt(
-                self.driver,
-                surface="admin-users-admit-guardian-select",
-                detail="built on tui, linux, web and android; the apple "
-                       "pair and windows follow in their trickle-down legs",
-                tracked=" (Admit-section guardian "
-                        "picker trickle-down)",
-            )
-
-    def require_admit_age_band_supported(self) -> None:
-        """Skip unless this app renders the Admit section's age-band select
-        (e2e convention 7 — the platform check lives in the action layer).
-        tui led; web, linux and android followed; the apple pair and
-        windows follow with their Admit guardian picker legs."""
-        d = self.driver
-        if not (d.is_tui() or d.is_web() or d.is_linux() or d.is_android()):
-            from helpers.app_surface import skip_unbuilt
-
-            skip_unbuilt(
-                self.driver,
-                surface="admin-users-admit-age-band-select",
-                detail="built on tui, web, linux and android; the apple "
-                       "pair and windows follow with their Admit guardian "
-                       "picker legs",
-                tracked=" (Admit-section age-band "
-                        "select trickle-down)",
-            )
 
     def user_count(self) -> int:
         """Count users in the admin user list."""
@@ -2751,7 +2752,7 @@ class AdminActions:
 
     def copy_button_visible(self) -> bool:
         """Whether the minted-code copy button is shown (after a mint)."""
-        return self.driver.is_visible("admin-users-invite-code-copy-btn")
+        return self.driver.is_visible_scrolled("admin-users-invite-code-copy-btn")
 
     def copy_minted_code(self) -> None:
         """Click the minted-code copy button."""

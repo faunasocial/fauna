@@ -76,6 +76,14 @@ public struct WebSettingsView: View {
                         get: { webPublish.view?.enabled ?? false },
                         set: { on in Task { await webPublish.setSubdomainEnabled(on) } }
                     ))
+                    // Live only once the page has hydrated: before that there is
+                    // no nest-confirmed state to flip from and no client to send
+                    // the write on, so a flip would be dropped and the hydrate
+                    // landing after it would paint OFF over the user's gesture
+                    // (tui's `ToggleWebSubdomain` refuses an un-hydrated flip the
+                    // same way). Disabled, the early click is refused loudly
+                    // instead — the driver's 409, the user's greyed switch.
+                    .disabled(!webPublish.isHydrated)
                     .accessibilityIdentifier(Ids.webSettingsSubdomainToggle)
                     // In-process driver: one Entry so `/element/click` flips the
                     // opt-in and `/element/attr?attr=state` reads the cross-app
@@ -85,6 +93,9 @@ public struct WebSettingsView: View {
                     // toggle's own state is the round-trip proof the test asserts.
                     .automationActivate(
                         Ids.webSettingsSubdomainToggle,
+                        // Mirrors the `.disabled` above by hand: it sits INSIDE
+                        // this modifier, so the inherited-enabled fold cannot see it.
+                        isEnabled: { webPublish.isHydrated },
                         value: { (webPublish.view?.enabled ?? false) ? "on" : "off" }
                     ) { Task { await webPublish.setSubdomainEnabled(!(webPublish.view?.enabled ?? false)) } }
                     // A dispatch-on-change toggle whose value is deliberately

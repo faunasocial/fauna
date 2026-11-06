@@ -6,9 +6,11 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
+use crate::archive_glue::LinkGesture;
 use crate::client::FaunaClient;
 use crate::conversations::overlays;
 use crate::i18n::strings::{common, contacts as contacts_strings};
+use fauna_archive_import_machine::link::ArchiveLinkView;
 
 /// Side-index mapping a contact's `actor_id` (the row's `widget_name`) to its
 /// `(handle, domain)`. Populated by [`update_contacts_list`] and read by the
@@ -25,6 +27,49 @@ thread_local! {
     /// [`update_contacts_list`]; read by the row's tap-through, which opens the
     /// peer's Profile with that home carried.
     static CONTACT_HOMES: RefCell<HashMap<String, String>> = RefCell::new(HashMap::new());
+    /// Each roster row's relationship status, keyed like [`CONTACT_HOMES`]. The
+    /// list box's header function reads it to decide where a status section
+    /// starts (`contacts.md` § Where logic lives → Roster status grouping).
+    static CONTACT_STATUSES: RefCell<HashMap<String, String>> = RefCell::new(HashMap::new());
+}
+
+/// The roster's paint order: `contacts` grouped by relationship status in
+/// [`fauna_core::format::contact_roster_group_order`]'s order (an unknown
+/// status after the canonical ones, in first-seen order), each group's rows in
+/// roster order. The grouping itself is shared
+/// ([`fauna_core::format::contact_roster_paint_order`]).
+fn roster_paint_order(contacts: &[crate::rows::ContactRow]) -> Vec<&crate::rows::ContactRow> {
+    fauna_core::format::contact_roster_paint_order(contacts, |c| c.status.as_str())
+}
+
+/// The `GtkListBox` header function: a section heading, headed by the resolved
+/// shared status label, above the first *visible* row of each status. GTK hands
+/// it the previous visible row, so a section the filter empties loses its
+/// heading with no extra bookkeeping. Headings carry no element id.
+fn roster_header_func(row: &gtk::ListBoxRow, before: Option<&gtk::ListBoxRow>) {
+    let status_of = |r: &gtk::ListBoxRow| {
+        CONTACT_STATUSES.with(|s| s.borrow().get(r.widget_name().as_str()).cloned())
+    };
+    let status = status_of(row);
+    let starts_section = match before {
+        None => true,
+        Some(prev) => status_of(prev) != status,
+    };
+    match (starts_section, status) {
+        (true, Some(status)) => {
+            let text = fauna_core::format::contact_status_label(&status)
+                .resolve(crate::i18n::strings::lookup);
+            let heading = gtk::Label::new(Some(&text));
+            heading.set_halign(gtk::Align::Start);
+            heading.set_margin_start(12);
+            heading.set_margin_top(8);
+            heading.set_margin_bottom(4);
+            heading.add_css_class("heading");
+            heading.add_css_class("dim-label");
+            row.set_header(Some(&heading));
+        }
+        _ => row.set_header(None::<&gtk::Widget>),
+    }
 }
 
 /// The home nest `peer_actor_id`'s roster row recorded (`ContactItem.home_nest_url`),
@@ -184,6 +229,7 @@ pub fn update_contacts_list(
     filter_index: &ContactFilterIndex,
     contacts: &[crate::rows::ContactRow],
     member_reviews: &[fauna_core::data::MemberReview],
+    archive_views: &[ArchiveLinkView],
     client: &Rc<FaunaClient>,
 ) {
     // Refresh the filter side-index in its own scope so the mutable borrow is
@@ -214,7 +260,14 @@ pub fn update_contacts_list(
     // canonical short id (`contacts.md` § The private overlay → *Where the
     // nickname paints*); this view resolves no name itself.
     let overlays = overlays::projection();
-    for contact in contacts {
+    CONTACT_STATUSES.with(|statuses| {
+        let mut statuses = statuses.borrow_mut();
+        statuses.clear();
+        for contact in contacts {
+            statuses.insert(contact.peer_actor_id.clone(), contact.status.clone());
+        }
+    });
+    for contact in roster_paint_order(contacts) {
         let name =
             overlays.peer_label(None, contact.peer_handle.as_deref(), &contact.peer_actor_id);
         let labels = overlays.labels_line(&contact.peer_actor_id);
@@ -225,6 +278,19 @@ pub fn update_contacts_list(
             let pid = contact.peer_actor_id.clone();
             move || c.confirm_contact(&pid)
         });
+        // Phase two's affordances, appended inside this row's scope
+        // (`archive-import.md` § Linking and merging, ruling 8).
+        append_archive_link_rows(
+            &row,
+            &name.primary,
+            &views_for(archive_views, &contact.peer_actor_id),
+            {
+                let tx = client.ui_sender();
+                move |contact, platform, gesture| {
+                    crate::archive_glue::run_link_gesture(contact, platform, gesture, tx.clone())
+                }
+            },
+        );
         row.set_widget_name(&contact.peer_actor_id);
         list_box.append(&row);
     }
@@ -339,11 +405,14 @@ pub fn build_contact_list_with_boxes(
         let c = Rc::clone(client);
         let results_list = find_results_list.clone();
         let results_label = find_results_label.clone();
+        let error_label = find_error_label.clone();
         search.connect_activate(move |entry| {
             let input = entry.text().to_string().trim().to_lowercase();
             if input.is_empty() {
                 return;
             }
+            // A new search clears the previous refusal.
+            error_label.set_visible(false);
 
             // Clear previous find results.
             crate::views::layout::clear_list_box_rows(&results_list);
@@ -370,7 +439,10 @@ pub fn build_contact_list_with_boxes(
                     results_list.set_visible(true);
                     results_label.set_visible(true);
                 }
-                fauna_core::resolve::RecipientInput::Handle { user, domain } => {
+                fauna_core::resolve::RecipientInput::Handle {
+                    user,
+                    domain: Some(domain),
+                } => {
                     // user@domain: the shared cross-nest lookup — home probe, then a
                     // direct dial of the peer when the domain is foreign; the hit
                     // carries the nest it resolved on for the knock.
@@ -378,12 +450,18 @@ pub fn build_contact_list_with_boxes(
                     results_list.set_visible(true);
                     results_label.set_visible(true);
                 }
-                fauna_core::resolve::RecipientInput::Invalid => {
-                    // Bare handle (no `@`) or otherwise unsplit input: resolve on the
-                    // local nest. Covers "find a user on my own nest by handle".
-                    c.resolve_handle(&input);
+                fauna_core::resolve::RecipientInput::Handle { user, domain: None } => {
+                    // A bare localpart: the shared classification addresses it on
+                    // the home nest ("find a user on my own nest by handle").
+                    c.resolve_handle(&user);
                     results_list.set_visible(true);
                     results_label.set_visible(true);
+                }
+                fauna_core::resolve::RecipientInput::Invalid => {
+                    // Neither an actor id nor a handle: the find error every app
+                    // gives, without a nest hop.
+                    error_label.set_text(contacts_strings::HANDLE_OR_ACTOR_ID);
+                    error_label.set_visible(true);
                 }
             }
         });
@@ -480,6 +558,7 @@ pub fn build_contact_list_with_boxes(
     // `update_contacts_list`); the query is read live from the entry, so one
     // filter func + `invalidate_filter` serves both keystrokes and list reloads.
     let filter_index: ContactFilterIndex = Rc::new(RefCell::new(HashMap::new()));
+    contacts_list.set_header_func(roster_header_func);
     {
         let index = filter_index.clone();
         let entry = contacts_search.clone();
@@ -750,6 +829,104 @@ pub fn build_contact_row(
     row
 }
 
+/// The views naming `contact` (case-insensitively — tui's filter; nothing
+/// promises the roster and the links spell an actor id in one case).
+fn views_for<'a>(views: &'a [ArchiveLinkView], contact: &str) -> Vec<&'a ArchiveLinkView> {
+    views
+        .iter()
+        .filter(|v| v.contact.eq_ignore_ascii_case(contact))
+        .collect()
+}
+
+/// Phase two's per-row affordances (`archive-import.md` § Linking and merging,
+/// ruling 8), appended under the row's own line so `scope="contact-row[i]"`
+/// reaches them: while a pair is `Asked`, the same-person question
+/// (`contact-archive-link-prompt`) and its `contact-archive-link-yes` / `-no`;
+/// while `Linked`, the linked line (`contact-archive-linked`) and
+/// `contact-archive-unlink`; nothing for the other states. The state is the
+/// shared `ArchiveLinkView` and the words the machine crate's `text` composers
+/// — this only paints them (tui's `archive_link_elements`). `on_gesture` gets
+/// the view's own `(contact, platform)` tokens, so the row stays a pure widget
+/// builder a GTK unit test can drive (the `on_confirm` seam's reason).
+fn append_archive_link_rows(
+    row: &gtk::ListBoxRow,
+    contact_name: &str,
+    views: &[&ArchiveLinkView],
+    on_gesture: impl Fn(String, String, LinkGesture) + 'static,
+) {
+    use crate::i18n::strings::archive_import as ai;
+    use fauna_archive_import_machine::link::ArchiveLinkState;
+    use fauna_archive_import_machine::text::{link_prompt, linked_label};
+
+    let shown: Vec<&&ArchiveLinkView> = views
+        .iter()
+        .filter(|v| matches!(v.state, ArchiveLinkState::Asked | ArchiveLinkState::Linked))
+        .collect();
+    if shown.is_empty() {
+        return;
+    }
+    let Some(line) = row.child() else {
+        return;
+    };
+    // The row's child becomes a column: its existing line, then one line per
+    // shown pair. The ListBoxRow (the scope) stays the same widget.
+    row.set_child(None::<&gtk::Widget>);
+    let column = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    column.append(&line);
+    let on_gesture = Rc::new(on_gesture);
+    let resolve = |t: fauna_core::localized::ComposedText| t.resolve(crate::i18n::strings::lookup);
+    for view in shown {
+        let pair = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        pair.set_margin_start(12);
+        pair.set_margin_end(12);
+        pair.set_margin_bottom(8);
+        let (text, text_id) = match view.state {
+            ArchiveLinkState::Asked => (
+                resolve(link_prompt(view, contact_name)),
+                ids::CONTACT_ARCHIVE_LINK_PROMPT,
+            ),
+            _ => (resolve(linked_label(view)), ids::CONTACT_ARCHIVE_LINKED),
+        };
+        let label = gtk::Label::new(Some(&text));
+        label.set_halign(gtk::Align::Start);
+        label.set_hexpand(true);
+        label.set_wrap(true);
+        label.add_css_class("caption");
+        crate::testid::set_test_id(&label, text_id);
+        pair.append(&label);
+        let buttons: &[(&str, &str, LinkGesture)] = match view.state {
+            ArchiveLinkState::Asked => &[
+                (
+                    ai::LINK_YES,
+                    ids::CONTACT_ARCHIVE_LINK_YES,
+                    LinkGesture::Answer(true),
+                ),
+                (
+                    ai::LINK_NO,
+                    ids::CONTACT_ARCHIVE_LINK_NO,
+                    LinkGesture::Answer(false),
+                ),
+            ],
+            _ => &[(ai::UNLINK, ids::CONTACT_ARCHIVE_UNLINK, LinkGesture::Unlink)],
+        };
+        for (text, id, gesture) in buttons {
+            let button = gtk::Button::with_label(text);
+            button.add_css_class("flat");
+            button.set_valign(gtk::Align::Center);
+            crate::testid::set_test_id(&button, id);
+            let on_gesture = Rc::clone(&on_gesture);
+            let (contact, platform, gesture) =
+                (view.contact.clone(), view.platform.clone(), gesture.clone());
+            button.connect_clicked(move |_| {
+                on_gesture(contact.clone(), platform.clone(), gesture.clone())
+            });
+            pair.append(&button);
+        }
+        column.append(&pair);
+    }
+    row.set_child(Some(&column));
+}
+
 /// Picks the contacts-list empty-state title: a non-empty roster-filter query
 /// distinguishes "search matched nothing" from "there is nothing to show" —
 /// showing "No contacts yet." while the user is mid-search would misreport a
@@ -782,6 +959,52 @@ fn contacts_placeholder_title(filter_query: &str) -> &'static str {
         contacts_strings::NO_CONTACTS
     } else {
         contacts_strings::NO_MATCHING_CONTACTS
+    }
+}
+
+#[cfg(test)]
+mod roster_grouping_tests {
+    use super::*;
+
+    fn row(id: &str, status: &str) -> crate::rows::ContactRow {
+        crate::rows::ContactRow {
+            peer_actor_id: id.to_string(),
+            peer_handle: None,
+            peer_domain: None,
+            peer_home_nest_url: None,
+            status: status.to_string(),
+            updated_at: None,
+        }
+    }
+
+    /// The roster paints grouped by status in the shared order, an unknown
+    /// status after the canonical ones, rows inside a group in roster order.
+    #[test]
+    fn paint_order_groups_by_status_in_the_shared_order() {
+        let contacts = vec![
+            row("a", "sent"),
+            row("b", "accepted"),
+            row("c", "pending"),
+            row("d", "accepted"),
+            row("e", "sent"),
+        ];
+        let statuses: Vec<String> = contacts.iter().map(|c| c.status.clone()).collect();
+        let order = fauna_core::format::contact_roster_group_order(&statuses);
+        let painted: Vec<&str> = roster_paint_order(&contacts)
+            .iter()
+            .map(|c| c.peer_actor_id.as_str())
+            .collect();
+        let expected: Vec<&str> = order
+            .iter()
+            .flat_map(|s| contacts.iter().filter(move |c| &c.status == s))
+            .map(|c| c.peer_actor_id.as_str())
+            .collect();
+        assert_eq!(painted, expected);
+        assert_eq!(painted.len(), contacts.len());
+        // The unknown status ("sent") paints last, in roster order.
+        assert_eq!(&painted[painted.len() - 2..], ["a", "e"]);
+        let pos = |id: &str| painted.iter().position(|p| *p == id).unwrap();
+        assert!(pos("b") < pos("d"));
     }
 }
 
@@ -1331,6 +1554,165 @@ mod no_matches_tests {
             // the placeholder version ship. The only witness that can tell these
             // apart is a running app, i.e. `test_roster_filter_narrows_by_handle`.
             // What this test *can* pin is the sibling contract above, and it does.
+        });
+    }
+}
+
+#[cfg(test)]
+mod archive_link_tests {
+    use super::*;
+    use fauna_archive_import_machine::link::ArchiveLinkState;
+
+    fn a_link_view(contact: &str, state: ArchiveLinkState, unmatched: u64) -> ArchiveLinkView {
+        ArchiveLinkView {
+            contact: contact.to_string(),
+            state,
+            platform: "facebook".into(),
+            archived_name: "Friend Two".into(),
+            claimed: 0,
+            unmatched,
+        }
+    }
+
+    type Gestures = Rc<RefCell<Vec<(String, String, LinkGesture)>>>;
+
+    /// One roster row as `update_contacts_list` builds it: the row, then its
+    /// archive affordances from the views naming it.
+    fn a_row(
+        name: &str,
+        actor: &str,
+        views: &[ArchiveLinkView],
+        gestures: &Gestures,
+    ) -> gtk::Widget {
+        let row = build_contact_row(&plain(name), None, "accepted", false, || {});
+        let gestures = Rc::clone(gestures);
+        append_archive_link_rows(&row, name, &views_for(views, actor), move |c, p, g| {
+            gestures.borrow_mut().push((c, p, g))
+        });
+        row.upcast()
+    }
+
+    const ARCHIVE_IDS: [&str; 5] = [
+        ids::CONTACT_ARCHIVE_LINK_PROMPT,
+        ids::CONTACT_ARCHIVE_LINK_YES,
+        ids::CONTACT_ARCHIVE_LINK_NO,
+        ids::CONTACT_ARCHIVE_LINKED,
+        ids::CONTACT_ARCHIVE_UNLINK,
+    ];
+
+    fn present(root: &gtk::Widget) -> Vec<&'static str> {
+        ARCHIVE_IDS
+            .into_iter()
+            .filter(|id| crate::automation::find::find_in(root, id).is_some())
+            .collect()
+    }
+
+    /// Phase two's row affordances (`archive-import.md` § Linking and merging,
+    /// ruling 8) — tui's pin
+    /// `the_archive_link_prompt_renders_only_on_its_asked_row_and_unlink_only_when_linked`
+    /// on linux: the question and its yes / no only on an `Asked` row, the
+    /// linked line and unlink only on a `Linked` one, nothing for the other
+    /// states — each inside its own row, the asked contact deliberately SECOND
+    /// so a row painting another's view would name the wrong person — with the
+    /// shared composers' words.
+    #[test]
+    fn the_archive_link_prompt_renders_only_on_its_asked_row_and_unlink_only_when_linked() {
+        crate::testid::run_on_gtk_thread(|| {
+            let (a, b, c) = ("aa".repeat(32), "bb".repeat(32), "cc".repeat(32));
+            let views = vec![
+                a_link_view(&a, ArchiveLinkState::Offered, 0),
+                a_link_view(&b, ArchiveLinkState::Asked, 0),
+                a_link_view(&c, ArchiveLinkState::Linked, 2),
+            ];
+            let gestures: Gestures = Rc::default();
+            let rows = [
+                a_row("ada", &a, &views, &gestures),
+                a_row("bo", &b, &views, &gestures),
+                a_row("cy", &c, &views, &gestures),
+            ];
+            assert_eq!(present(&rows[0]), Vec::<&str>::new());
+            assert_eq!(
+                present(&rows[1]),
+                vec![
+                    ids::CONTACT_ARCHIVE_LINK_PROMPT,
+                    ids::CONTACT_ARCHIVE_LINK_YES,
+                    ids::CONTACT_ARCHIVE_LINK_NO,
+                ]
+            );
+            assert_eq!(
+                present(&rows[2]),
+                vec![ids::CONTACT_ARCHIVE_LINKED, ids::CONTACT_ARCHIVE_UNLINK]
+            );
+            // The row's own line survives the affordances being added.
+            for row in &rows {
+                assert!(crate::automation::find::find_in(row, ids::CONTACT_ROW).is_some());
+                assert!(crate::automation::find::find_in(row, ids::CONTACT_CONFIRM).is_some());
+            }
+            let text = |root: &gtk::Widget, id: &str| {
+                crate::automation::find::text_of(
+                    &crate::automation::find::find_in(root, id).expect(id),
+                )
+            };
+            assert_eq!(
+                text(&rows[1], ids::CONTACT_ARCHIVE_LINK_PROMPT),
+                "Is bo the “Friend Two” from your Facebook friends?"
+            );
+            assert_eq!(
+                text(&rows[2], ids::CONTACT_ARCHIVE_LINKED),
+                "Linked: Facebook · 2 could not be matched to a post"
+            );
+
+            // Declined and unlinked rows ask nothing and offer nothing.
+            let views = vec![
+                a_link_view(&b, ArchiveLinkState::Declined, 0),
+                a_link_view(&c, ArchiveLinkState::Unlinked, 0),
+            ];
+            assert!(present(&a_row("bo", &b, &views, &gestures)).is_empty());
+            assert!(present(&a_row("cy", &c, &views, &gestures)).is_empty());
+        });
+    }
+
+    /// The row's yes / no / unlink are real, connected buttons that carry the
+    /// row's own contact and platform into the shared calls.
+    #[test]
+    fn the_archive_link_buttons_dispatch_their_rows_gesture() {
+        crate::testid::run_on_gtk_thread(|| {
+            let (b, c) = ("bb".repeat(32), "cc".repeat(32));
+            let views = vec![
+                a_link_view(&b, ArchiveLinkState::Asked, 0),
+                a_link_view(&c, ArchiveLinkState::Linked, 0),
+            ];
+            let gestures: Gestures = Rc::default();
+            let asked = a_row("bo", &b, &views, &gestures);
+            let linked = a_row("cy", &c, &views, &gestures);
+            let click = |root: &gtk::Widget, id: &str| {
+                let found = crate::automation::find::find_in(root, id).expect(id);
+                assert!(
+                    found.downcast_ref::<gtk::Button>().is_some(),
+                    "{id} is a button"
+                );
+                let reply = crate::automation::agent::actuate_click(&found);
+                assert_eq!(
+                    reply.get("ok").and_then(|v| v.as_bool()),
+                    Some(true),
+                    "{reply:?}"
+                );
+            };
+            click(&asked, ids::CONTACT_ARCHIVE_LINK_NO);
+            click(&asked, ids::CONTACT_ARCHIVE_LINK_YES);
+            click(&linked, ids::CONTACT_ARCHIVE_UNLINK);
+            assert_eq!(
+                *gestures.borrow(),
+                vec![
+                    (
+                        b.clone(),
+                        "facebook".to_string(),
+                        LinkGesture::Answer(false)
+                    ),
+                    (b.clone(), "facebook".to_string(), LinkGesture::Answer(true)),
+                    (c.clone(), "facebook".to_string(), LinkGesture::Unlink),
+                ]
+            );
         });
     }
 }

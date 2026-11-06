@@ -18,6 +18,19 @@ fauna-protocol = { path = "../fauna-protocol", default-features = false }
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 fauna-protocol = { path = "../fauna-protocol", default-features = false, features = ["js"] }
 
+# `native`: the knock send (`knock::send_knock`) — it builds the signed payload
+# and classifies the native `NestClientError`, so it is native-only (the wasm
+# SPA sends through its own port). Same split as `fauna-client-connected-apps`.
+[features]
+default = []
+native = ["dep:fauna-client", "dep:fauna-client-core", "dep:fauna-client-inbox", "dep:fauna-core"]
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+fauna-client = { path = "../fauna-client", optional = true }
+fauna-client-core = { path = "../fauna-client-core", optional = true }
+fauna-client-inbox = { path = "../fauna-client-inbox", optional = true }
+fauna-core = { path = "../fauna-core", default-features = false, optional = true }
+
 [dev-dependencies]
 # The shared `RecordingRequester` / `block_on` test double the wire-contract
 # tests below drive (one owner for the `RpcRequester` seam's fake).

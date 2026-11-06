@@ -59,7 +59,9 @@ from common import get_repo_root
 from helpers.app_surface import skip_environment
 from helpers.macos_artifact import FFI_FLAVOR_MARKER_RELPATH, ffi_flavor_refusal, run
 
-pytestmark = [pytest.mark.tier_4, pytest.mark.ios]
+# The archive is this file's subject, so its build stays in a test (e2e-conventions.md
+# point 9): the clock sits above the bounds it nests, a 3600 s archive and a 1800 s export.
+pytestmark = [pytest.mark.tier_4, pytest.mark.ios, pytest.mark.timeout(7200)]
 
 #: The device slice the archive links against. `just apple-ffi-host*` (a dep of
 #: mac-debug/mac-app/swift-test) reassembles the xcframework host-only, silently
@@ -204,6 +206,20 @@ def test_the_archived_app_embeds_every_extension(ios_archive):
         f"the archived app is missing {missing} under {plugins} (present: {present}) "
         f"— the target stopped embedding them, and nothing but this list notices."
     )
+
+
+def test_the_archived_app_carries_its_privacy_manifest(ios_archive):
+    """The app and its File Provider extension each carry `PrivacyInfo.xcprivacy`
+    declaring their required-reason APIs — App Store Connect checks it at upload
+    and no local build does (installers/ios.md § Upload mechanics)."""
+    app = next((ios_archive / "Products" / "Applications").glob("*.app"))
+    for bundle in (app, app / "PlugIns" / "Fauna-iOS-FileProvider.appex"):
+        manifest = bundle / "PrivacyInfo.xcprivacy"
+        assert manifest.is_file(), f"{bundle.name} carries no privacy manifest"
+        declared = plistlib.loads(manifest.read_bytes())["NSPrivacyAccessedAPITypes"]
+        assert {e["NSPrivacyAccessedAPIType"] for e in declared} >= {
+            "NSPrivacyAccessedAPICategoryUserDefaults",
+        }, declared
 
 
 def test_the_archive_declares_the_apps_entitlements(ios_archive):
@@ -353,6 +369,25 @@ def test_the_exported_ipa_is_signed_by_the_distribution_identity(exported_ipa):
         assert f"TeamIdentifier={_TEAM_ID}" in info, f"{rel}:\n{info}"
 
 
+def test_the_exported_app_carries_what_upload_validation_demands(exported_ipa):
+    """The icon and orientation keys App Store Connect's upload validation
+    refused the first upload without (2026-11-01, installers/ios.md § Upload
+    mechanics) — read off the exported bundle, since no local step checks them."""
+    app = exported_ipa / "Fauna-iOS.app"
+    info = plistlib.loads((app / "Info.plist").read_bytes())
+    for key in ("CFBundleIcons", "CFBundleIcons~ipad"):
+        primary = info.get(key, {}).get("CFBundlePrimaryIcon", {})
+        assert primary.get("CFBundleIconName") == "AppIcon", f"{key}: {info.get(key)!r}"
+    assert (app / "AppIcon60x60@2x.png").is_file(), "no 120x120 iPhone icon tier in the bundle"
+    assert (app / "AppIcon76x76@2x~ipad.png").is_file(), "no 152x152 iPad icon tier in the bundle"
+    assert len(info.get("UISupportedInterfaceOrientations~ipad", [])) == 4, info.get(
+        "UISupportedInterfaceOrientations~ipad")
+    assert info.get("UISupportedInterfaceOrientations"), "no iPhone orientations declared"
+    for rel in ("Fauna-iOS.app", "Fauna-iOS.app/PlugIns/Fauna-iOS-FileProvider.appex"):
+        assert (exported_ipa / rel / "PrivacyInfo.xcprivacy").is_file(), (
+            f"{rel} carries no privacy manifest")
+
+
 def test_every_bundle_embeds_its_app_store_profile(exported_ipa):
     """Each bundle carries the App Store profile for its own bundle id — no device list."""
     for rel, (bundle_id, _) in _SIGNED_BUNDLES.items():
@@ -384,3 +419,26 @@ def test_the_signed_entitlements_carry_the_app_group(exported_ipa):
             assert not groups, (
                 f"{rel} declares no entitlements, yet its signature claims {groups}"
             )
+
+
+#: The app's profile-backed entitlements as the SIGNATURE must carry them — the
+#: same three `test_apple_identifier_pins.py` pins in the source file. An export
+#: may only re-stamp what the App Store profile grants, so reading them here is
+#: the proof that the profile backs every one.
+_APP_PROFILE_BACKED = {
+    "aps-environment": "production",
+    "com.apple.developer.declared-age-range": True,
+    "com.apple.developer.devicecheck.appattest-environment": "production",
+}
+
+
+def test_the_signed_app_carries_push_age_range_and_app_attest(exported_ipa):
+    """Push, Declared Age Range and App Attest survive into the app's signature.
+
+    Without them APNs registration fails (apps/common.md § Push Notifications)
+    and the store-age arm's DeclaredAgeRange read and App Attest assertion throw
+    (behavior/account-age-band.md D3/D5) — on a device, with no build symptom.
+    """
+    ents = _signed_entitlements(exported_ipa / "Fauna-iOS.app")
+    got = {k: ents.get(k) for k in _APP_PROFILE_BACKED}
+    assert got == _APP_PROFILE_BACKED, f"signed app entitlements {got}, want {_APP_PROFILE_BACKED}"

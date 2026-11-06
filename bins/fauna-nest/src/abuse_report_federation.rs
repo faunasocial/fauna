@@ -100,11 +100,25 @@ fn ack() -> Result<Bytes, RpcError> {
     ))
 }
 
-/// The host (with any port) of a peer URL — how a destination is named to the
-/// reporter and the admin.
+/// The host (with any non-default port) of a peer URL — how a destination is
+/// named to the reporter and the admin. Read through the URL parser, so
+/// user-info never reaches the label; a bare host with no scheme is
+/// taken as it stands, up to any path.
 pub(crate) fn url_host(url: &str) -> String {
+    if let Ok(parsed) = url::Url::parse(url)
+        && let Some(host) = parsed.host_str()
+    {
+        return match parsed.port() {
+            Some(port) => format!("{host}:{port}"),
+            None => host.to_string(),
+        };
+    }
     let rest = url.split_once("://").map_or(url, |(_, rest)| rest);
-    rest.split('/').next().unwrap_or(rest).to_string()
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or(rest);
+    authority
+        .rsplit_once('@')
+        .map_or(authority, |(_, host)| host)
+        .to_string()
 }
 
 // ── origin side ─────────────────────────────────────────────────────────────
@@ -708,6 +722,10 @@ mod tests {
         assert_eq!(url_host("https://b.example/"), "b.example");
         assert_eq!(url_host("http://127.0.0.1:8443/x"), "127.0.0.1:8443");
         assert_eq!(url_host("b.example"), "b.example");
+        assert_eq!(url_host("https://evil@b.example/x"), "b.example");
+        assert_eq!(url_host("http://u:p@127.0.0.1:8443"), "127.0.0.1:8443");
+        assert_eq!(url_host("https://b.example:443"), "b.example");
+        assert_eq!(url_host("https://[::1]:8443"), "[::1]:8443");
     }
 
     #[test]

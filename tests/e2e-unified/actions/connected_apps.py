@@ -105,14 +105,23 @@ class ConnectedAppsActions:
 
     def _poll(self, probe, timeout: float, *, renavigate: bool):
         deadline = time.monotonic() + timeout
+        # The deadline waits for one re-read: on a slow box a single probe can spend
+        # the whole budget on the page as it stood before the change it waits for.
+        reread = not renavigate
         while True:
-            found = probe()
-            if found is not None or time.monotonic() >= deadline:
+            # A revoke repaints the roster under a probe's walk, so a row it
+            # counted can be gone when it reads it: no answer yet, not a failure.
+            try:
+                found = probe()
+            except LookupError:
+                found = None
+            if found is not None or (reread and time.monotonic() >= deadline):
                 return found
             if renavigate:
                 # A revisit re-reads, and paints nothing until that read is
                 # back — so the next probe waits for it rather than racing it.
-                self.visit(max(deadline - time.monotonic(), 0.5))
+                self.visit(max(deadline - time.monotonic(), RPC_ROUNDTRIP_S))
+                reread = True
             time.sleep(0.3)
 
     def wait_for_request_code(

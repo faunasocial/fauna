@@ -28,7 +28,8 @@
 //!   owner's).
 //! - `GET /api/v1/records/{kind}?cursor=N` — the cursor walk: one page of the
 //!   kind's rows past `cursor`, and the cursor to ask for next.
-//! - `GET /api/v1/records/{kind}/{key}` — the walk filtered to one item.
+//! - `GET /api/v1/records/{kind}/{key}` — the walk filtered to one item, the
+//!   filter riding the read (a by-key read, never a walk of the scope).
 //!
 //! The nest validates only the floor — the kind string (the handler's
 //! `ext:<kind>` parse: a `fauna.*` kind is reachable by no name), the size
@@ -89,7 +90,7 @@ pub async fn walk_handler(
         Ok(caller) => caller,
         Err(response) => return response,
     };
-    match list_page(&state, caller, &kind, query.cursor).await {
+    match list_page(&state, caller, &kind, query.cursor, None).await {
         Ok(page) => (
             StatusCode::OK,
             axum::Json(serde_json::json!({
@@ -122,40 +123,47 @@ pub async fn get_handler(
     let Some(item_key) = parse_item_key(&key) else {
         return bad_key();
     };
-    let wanted = hex::encode(item_key);
+    match item_records(&state, caller, &kind, item_key).await {
+        Ok(found) if found.is_empty() => (
+            StatusCode::NOT_FOUND,
+            axum::Json(serde_json::json!({ "error": "not_found" })),
+        )
+            .into_response(),
+        Ok(found) => (
+            StatusCode::OK,
+            axum::Json(serde_json::json!({ "records": found })),
+        )
+            .into_response(),
+        Err(response) => response,
+    }
+}
+
+/// Every row the kind's feed serves at `item_key`: the walk from the start,
+/// filtered to the item IN the read (`SyncChangesListRequest::item_key`), so
+/// a single-record GET loads that item's rows — never a page-by-page walk of
+/// the whole scope, each page under the database lock, for one counted
+/// request. It still pages, because one item holds a row
+/// per writer.
+pub(crate) async fn item_records(
+    state: &Arc<AppState>,
+    caller: PrincipalCaller,
+    kind: &str,
+    item_key: [u8; 32],
+) -> Result<Vec<serde_json::Value>, Response> {
     let mut found = Vec::new();
     let mut cursor = 0;
     loop {
-        let page = match list_page(&state, caller.clone(), &kind, cursor).await {
-            Ok(page) => page,
-            Err(response) => return response,
-        };
-        found.extend(
-            page.changes
-                .iter()
-                .filter(|c| c.path_hash == wanted)
-                .map(record_json),
-        );
+        let page = list_page(state, caller.clone(), kind, cursor, Some(item_key)).await?;
+        found.extend(page.changes.iter().map(record_json));
         let next = next_cursor(&page, cursor);
         // A page that served nothing, or a cursor that did not move, is the
-        // end of the feed.
+        // end of the item's rows.
         if page.changes.is_empty() || next <= cursor {
             break;
         }
         cursor = next;
     }
-    if found.is_empty() {
-        return (
-            StatusCode::NOT_FOUND,
-            axum::Json(serde_json::json!({ "error": "not_found" })),
-        )
-            .into_response();
-    }
-    (
-        StatusCode::OK,
-        axum::Json(serde_json::json!({ "records": found })),
-    )
-        .into_response()
+    Ok(found)
 }
 
 /// `PUT /api/v1/records/{kind}/{key}?writer_seq=N` — put one sealed row.
@@ -288,18 +296,21 @@ async fn admit(
 /// writer — the principal itself — is served from above it, not from 0, which
 /// is what makes the walk move (`account-sync-plane.md` § Feeds and cursors →
 /// *Compaction is a serve-order watermark*). The principal handler marks no
-/// walker, so the walk holds back no retire.
+/// walker, so the walk holds back no retire. `item_key` narrows the page to
+/// one item's rows.
 async fn list_page(
     state: &Arc<AppState>,
     caller: PrincipalCaller,
     kind: &str,
     cursor: i64,
+    item_key: Option<[u8; 32]>,
 ) -> Result<SyncChangesListReply, Response> {
     let request = SyncChangesListRequest {
         scope: Some(ext_scope(kind)),
         item_class: Some(ItemClass::StateEntry.as_wire().to_string()),
         since: cursor,
         held_through_seq: Some(cursor),
+        item_key: item_key.map(|key| ByteBuf::from(key.to_vec())),
         ..Default::default()
     };
     let payload = fauna_protocol::encode_canonical(&request)

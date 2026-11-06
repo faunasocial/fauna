@@ -19,6 +19,7 @@ driver participates.
 """
 
 import base64
+import contextlib
 import gzip
 import time
 
@@ -176,79 +177,96 @@ def _forensic_message(rcpt: str, domain: str, tag: str) -> bytes:
     return "\r\n".join(lines).encode()
 
 
+@contextlib.contextmanager
+def _forensic_opted_in(nest):
+    """Opt the deployment in to forensic reports for the block, then withdraw
+    the opt-in (a full PUT of the empty catalog) so later tests see the
+    shipped default: the forensic leg stores nothing while ``ruf_publish`` is
+    off (``dmarc-reporting.md`` § Forensic-report receive → *Default off*)."""
+    with _admin_ws(nest) as ws:
+        ws.call("fauna.bridges.put_dmarc_policy", {"ruf_publish": True})
+    try:
+        yield
+    finally:
+        with _admin_ws(nest) as ws:
+            ws.call("fauna.bridges.put_dmarc_policy", {})
+
+
 @pytest.mark.feature("dmarc-reporting")
 def test_dmarc_forensic_report_is_stored_without_recipients_in_the_index(dmarc_venue):
     """A forensic (RFC 6591 auth-failure) report mailed to the same address is
     told apart from an aggregate one and stored in its own table: the admin's
     list names the failure but no recipient of the forged message, the full
     report is readable per report, an abuse-type feedback report is dropped,
-    and none of them reaches a mailbox."""
+    and none of them reaches a mailbox. The deployment opts in first: with
+    ``ruf_publish`` off the nest stores no forensic report at all."""
     handle = dmarc_venue
     domain = handle.domain
     rcpt = f"dmarc-report@{domain}"
     tag = f"ruf-{int(time.time() * 1000)}"
     good = _forensic_message(rcpt, domain, tag)
 
-    _mail(handle, rcpt, good)
-    # Strict wrapper: a feedback report that is not `auth-failure` → 250, dropped.
-    _mail(
-        handle,
-        rcpt,
-        _forensic_message(rcpt, domain, f"abuse-{tag}").replace(
-            b"Feedback-Type: auth-failure", b"Feedback-Type: abuse"
-        ),
-    )
-
-    with _admin_ws(handle.nest) as ws:
-        listed = ws.call("fauna.bridges.list_dmarc_forensic_reports", {"window_days": 1})
-        reports = [r for r in listed["reports"] if tag in r["reported_message_id"]]
-        assert [r["reported_message_id"] for r in reports] == [
-            f"forged-{tag}@forger.test"
-        ], f"only the auth-failure report is stored; listed {listed['reports']}"
-        entry = reports[0]
-        assert entry["our_domain"] == domain.lower()
-        assert entry["submitter"] == "DMARC Reports <dmarc-noreply@reporter.test>"
-        summary = entry["summary"]
-        assert summary["auth_failure"] == "dmarc", summary
-        assert summary["source_ip"] == "203.0.113.9", summary
-        assert summary["header_from"] == f"billing@{domain.lower()}", summary
-        assert summary["partial"] is False, summary
-        # The PII rule: the list read names no recipient and no subject.
-        assert "victim" not in repr(listed), "a recipient reached the list read"
-        assert "overdue" not in repr(listed), "a subject reached the list read"
-
-        got = ws.call("fauna.bridges.get_dmarc_forensic_report", {"id": entry["id"]})
-        archived = gzip.decompress(bytes(got["payload_raw_gz"]))
-        # The MTA prepends its own `Received:` trace header; the rest is the
-        # report mail byte for byte, recipients included.
-        assert archived.startswith(b"Received: ") and archived.endswith(good), (
-            f"the archived report is the report mail as received: {archived[:200]!r}"
+    with _forensic_opted_in(handle.nest):
+        _mail(handle, rcpt, good)
+        # Strict wrapper: a feedback report that is not `auth-failure` → 250, dropped.
+        _mail(
+            handle,
+            rcpt,
+            _forensic_message(rcpt, domain, f"abuse-{tag}").replace(
+                b"Feedback-Type: auth-failure", b"Feedback-Type: abuse"
+            ),
         )
 
-        # The forensic report did not land in the aggregate table.
-        assert not any(
-            tag in r["report_id"]
-            for r in ws.call(
-                "fauna.bridges.list_dmarc_aggregate_reports", {"window_days": 1}
-            )["reports"]
-        )
+        with _admin_ws(handle.nest) as ws:
+            listed = ws.call("fauna.bridges.list_dmarc_forensic_reports", {"window_days": 1})
+            reports = [r for r in listed["reports"] if tag in r["reported_message_id"]]
+            assert [r["reported_message_id"] for r in reports] == [
+                f"forged-{tag}@forger.test"
+            ], f"only the auth-failure report is stored; listed {listed['reports']}"
+            entry = reports[0]
+            assert entry["our_domain"] == domain.lower()
+            assert entry["submitter"] == "DMARC Reports <dmarc-noreply@reporter.test>"
+            summary = entry["summary"]
+            assert summary["auth_failure"] == "dmarc", summary
+            assert summary["source_ip"] == "203.0.113.9", summary
+            assert summary["header_from"] == f"billing@{domain.lower()}", summary
+            assert summary["partial"] is False, summary
+            # The PII rule: the list read names no recipient and no subject.
+            assert "victim" not in repr(listed), "a recipient reached the list read"
+            assert "overdue" not in repr(listed), "a subject reached the list read"
 
-        health = ws.call("fauna.bridges.mail_health", {})
-        assert health.get("last_inbound_accepted_at") is None, (
-            "no report may reach a mailbox: this venue's inbound heartbeat moved "
-            f"({health.get('last_inbound_accepted_at')})"
-        )
+            got = ws.call("fauna.bridges.get_dmarc_forensic_report", {"id": entry["id"]})
+            archived = gzip.decompress(bytes(got["payload_raw_gz"]))
+            # The MTA prepends its own `Received:` trace header; the rest is the
+            # report mail byte for byte, recipients included.
+            assert archived.startswith(b"Received: ") and archived.endswith(good), (
+                f"the archived report is the report mail as received: {archived[:200]!r}"
+            )
+
+            # The forensic report did not land in the aggregate table.
+            assert not any(
+                tag in r["report_id"]
+                for r in ws.call(
+                    "fauna.bridges.list_dmarc_aggregate_reports", {"window_days": 1}
+                )["reports"]
+            )
+
+            health = ws.call("fauna.bridges.mail_health", {})
+            assert health.get("last_inbound_accepted_at") is None, (
+                "no report may reach a mailbox: this venue's inbound heartbeat moved "
+                f"({health.get('last_inbound_accepted_at')})"
+            )
 
 
-# ── Outbound: the reports this nest sends peers ─────────────────────────────
-#
-# `dmarc-reporting.md` § Outbound aggregate-report sender: every inbound
-# message the MTA verifies is counted toward the domain its From claims, and
-# once a day the nest mails each peer whose `_dmarc` record publishes
-# `rua=mailto:` a gzipped RFC 7489 report through the ordinary outbound queue.
-# The pass runs from the test hook at a scripted moment against a stub TXT map
-# (the pass never touches DNS here); the report then leaves through the real
-# MTA to the venue's stub MX, which `external.test` routes to.
+    # ── Outbound: the reports this nest sends peers ─────────────────────────────
+    #
+    # `dmarc-reporting.md` § Outbound aggregate-report sender: every inbound
+    # message the MTA verifies is counted toward the domain its From claims, and
+    # once a day the nest mails each peer whose `_dmarc` record publishes
+    # `rua=mailto:` a gzipped RFC 7489 report through the ordinary outbound queue.
+    # The pass runs from the test hook at a scripted moment against a stub TXT map
+    # (the pass never touches DNS here); the report then leaves through the real
+    # MTA to the venue's stub MX, which `external.test` routes to.
 
 
 def _nest_hook(handle, path: str, body: dict | None = None) -> dict:
@@ -363,6 +381,85 @@ def test_peer_publishing_a_mailto_rua_receives_our_aggregate_report(dmarc_venue)
     assert len(sent) == 1, sent
     assert sent[0]["destination"] == f"dmarc-agg@{peer}"
     assert sent[0]["xml"] == xml, "the archived report is the one sent"
+
+
+def _reports_at_stub(handle, subject: str) -> list[bytes]:
+    return [m for m in handle.stub_mx.messages() if subject.encode() in m]
+
+
+@pytest.mark.feature("admin-mail-policy")
+def test_outbound_dmarc_reports_switched_off_sends_no_report(dmarc_venue):
+    """``dmarc-reporting.md`` § Generation is on by default: with
+    ``mail.dmarc.outbound_aggregate_enabled`` off (``put_dmarc_policy``), the
+    daily pass queues nothing for a peer that publishes ``rua=mailto:`` and
+    discards the window it counted; switched back on, the next window's report
+    reaches the peer's MX again, counting only the mail since."""
+    handle = dmarc_venue
+    domain = handle.domain.lower()
+    peer = "external.test"
+    rcpt = f"dmarc-report@{domain}"
+    txt = {f"_dmarc.{peer}": [f"v=DMARC1; p=none; rua=mailto:dmarc-agg@{peer}"]}
+    subject = f"Report Domain: {peer} Submitter: {domain}"
+    stamp = int(time.time() * 1000)
+
+    def sent_to_peer() -> int:
+        rows = _nest_hook(handle, "/api/v1/test/outbound/dmarc_sent")["rows"]
+        return sum(1 for r in rows if r["peer_domain"] == peer)
+
+    def mail_from_peer(n: int, tag: str) -> None:
+        for i in range(n):
+            sender = f"news@{peer}"
+            _mail_as(handle, sender, rcpt, _peer_message(sender, rcpt, f"{tag}-{stamp}-{i}"))
+
+    with _admin_ws(handle.nest) as ws:
+        try:
+            ws.call("fauna.bridges.put_dmarc_policy", {"outbound_aggregate_enabled": False})
+            got = ws.call("fauna.bridges.get_dmarc_policy", {})
+            assert got["outbound_aggregate_enabled"] is False, got
+
+            sent_before = sent_to_peer()
+            at_stub_before = len(_reports_at_stub(handle, subject))
+            mail_from_peer(2, "off")
+            buckets = _nest_hook(handle, "/api/v1/test/outbound/dmarc_aggregator")["domains"]
+            assert sum(r["count"] for r in buckets.get(peer, [])) == 2, buckets
+
+            queued = _nest_hook(
+                handle,
+                "/api/v1/test/outbound/emit_dmarc_now",
+                {"now": int(time.time()), "txt": txt},
+            )["queued"]
+            assert queued == 0, f"switched off, the pass queues nothing; queued {queued}"
+            assert sent_to_peer() == sent_before, "no report recorded as sent while off"
+            after = _nest_hook(handle, "/api/v1/test/outbound/dmarc_aggregator")["domains"]
+            assert peer not in after, f"the window counted while off is discarded: {after!r}"
+
+            # Back on (full PUT, the field absent ⇒ the default).
+            ws.call("fauna.bridges.put_dmarc_policy", {})
+            assert ws.call("fauna.bridges.get_dmarc_policy", {})["outbound_aggregate_enabled"] is True
+            mail_from_peer(1, "on")
+            queued = _nest_hook(
+                handle,
+                "/api/v1/test/outbound/emit_dmarc_now",
+                {"now": int(time.time()), "txt": txt},
+            )["queued"]
+            assert queued == 1, f"switched back on, one report queued; queued {queued}"
+        finally:
+            ws.call("fauna.bridges.put_dmarc_policy", {})
+
+    deadline = time.monotonic() + 90.0
+    while time.monotonic() < deadline:
+        reports = _reports_at_stub(handle, subject)
+        if len(reports) > at_stub_before:
+            break
+        time.sleep(0.25)
+    reports = _reports_at_stub(handle, subject)
+    assert len(reports) == at_stub_before + 1, (
+        f"exactly one new report reaches the peer's MX (none from the off window); "
+        f"{at_stub_before} before, {len(reports)} now"
+    )
+    xml = _report_attachment_xml(reports[-1])
+    assert "<count>1</count>" in xml, f"only the mail since switching on is counted:\n{xml}"
+    assert sent_to_peer() == sent_before + 1
 
 
 def _dmarc_record_tags(ws, domain: str) -> dict:

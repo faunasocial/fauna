@@ -54,6 +54,7 @@ from clients._ws_rpc_core import RpcCallError
 from clients.ws_rpc_admin_client import WsRpcAdminClient
 from clients.ws_rpc_anon_client import WsRpcAnonClient
 from common.auth import (
+    create_actor_and_register,
     ensure_tier,
     mint_token_via_handshake,
     set_registration_mode,
@@ -88,6 +89,32 @@ def posture_nest(request, nest_mode, tmp_path_factory):
 
     nest, cleanup = _start_dedicated_nest(
         request, nest_mode, tmp_path_factory, "posture-nest", claim_domain=NEST_DOMAIN,
+    )
+    nest["admin_sk"] = _as_signing_key(nest["admin"]["signing_key"])
+    ensure_tier(nest["port"], base_url=nest["url"], admin_signing_key=nest["admin_sk"],
+                name=CODE_TIER)
+    yield nest
+    cleanup()
+
+
+# The shipped `fauna.account.register` budget is 10 per source per minute
+# (`anonymous_rate_limit::REGISTER_MAX_EVENTS`), and under `--nest docker` every
+# test reaches the nest from the one gateway address, so a nest's budget is
+# what every test on it spends together (testing.md § Default app and nest
+# mode, the shipped-limit fit rule). The module fits it: a member whose own
+# admission is not under test is admitted over the admin path (`_admitted`),
+# and the free-cap journey — six registers on its own — runs on a nest of its
+# own. `posture_nest` carries nine; `cap_nest` six.
+
+
+@pytest.fixture(scope="module")
+def cap_nest(request, nest_mode, tmp_path_factory):
+    """`posture_nest`'s twin for the free-cap journey: its six registers and
+    the free-account count it reads stay off the shared budget."""
+    from conftest import _start_dedicated_nest
+
+    nest, cleanup = _start_dedicated_nest(
+        request, nest_mode, tmp_path_factory, "cap-nest", claim_domain=NEST_DOMAIN,
     )
     nest["admin_sk"] = _as_signing_key(nest["admin"]["signing_key"])
     ensure_tier(nest["port"], base_url=nest["url"], admin_signing_key=nest["admin_sk"],
@@ -150,6 +177,16 @@ def _refusal(fn, *args, **kwargs) -> str:
     with pytest.raises(RpcCallError) as ei:
         fn(*args, **kwargs)
     return ei.value.code
+
+
+def _admitted(nest) -> tuple[SigningKey, str]:
+    """A member the admin admitted (`fauna.admin.users.create`) — for a test
+    whose subject is not self-service admission, so it spends none of the
+    nest's register budget. Returns the key and the handle."""
+    actor = create_actor_and_register(
+        nest["port"], base_url=nest["url"], admin_signing_key=nest["admin_sk"],
+    )
+    return SigningKey(bytes(actor["signing_key"])), actor["handle"]
 
 
 def _account(nest, sk: SigningKey) -> dict:
@@ -227,9 +264,7 @@ def test_a_new_nest_lets_nobody_register_until_its_admin_opens_it(
 def test_closing_registration_never_locks_out_an_existing_member(posture_nest):
     """Outcome 19: the mode gates registration, never authentication."""
     nest = posture_nest
-    _mode(nest, "open")
-    handle = _handle("member")
-    member = _register(nest, handle)
+    member, handle = _admitted(nest)
 
     _mode(nest, "closed")
     assert _refusal(_register, nest, _handle("stranger")) == REGISTRATION_CLOSED, (
@@ -302,8 +337,7 @@ def test_a_member_redeems_a_code_to_move_tier_whatever_the_mode(posture_nest, mo
     """Outcome 23: `fauna.account.upgrade` is not registration, so the mode
     never gates it."""
     nest = posture_nest
-    _mode(nest, "open")
-    member = _register(nest, _handle("upgrader"))
+    member, _ = _admitted(nest)
     assert _account(nest, member)["tier"] != CODE_TIER
 
     _mode(nest, mode)
@@ -400,14 +434,14 @@ def test_a_sign_up_reported_as_a_minor_is_pointed_to_a_guardian(posture_nest):
 
 @pytest.mark.feature("admin-users")
 def test_once_the_free_cap_is_reached_the_next_free_sign_up_is_refused_whatever_the_mode(
-        posture_nest):
+        cap_nest):
     """Outcome 24: the ceiling is checked at the self-service door for every
     admission that would land at the free tier — a no-code sign-up under open,
     a free-tier invite code under invite-only — and a non-free code, or a
     raised cap, is what gets the next person in (`public-mode.md`
     § Registration Modes → *What "regardless of mode" binds*). The refused code
     is not consumed: the same code admits once the cap is raised."""
-    nest = posture_nest
+    nest = cap_nest
     try:
         # Open: the cap is set to exactly the free accounts the nest holds.
         free_now = _free_account_count(nest)

@@ -93,6 +93,10 @@ pub struct BlobStore {
     /// The hash of the most recently POSTed manifest. The upload pipeline does
     /// not return it to `upload_file`'s caller, so it is captured server-side.
     pub last_manifest_hash: Arc<Mutex<Option<ContentHash>>>,
+    /// Every manifest hash POSTed, in order — an image upload posts its
+    /// file's manifest and then its thumbnail's, so "the last one" names the
+    /// thumbnail there.
+    pub posted_manifests: Arc<Mutex<Vec<ContentHash>>>,
     /// The **blob** store — a different store from `manifests`: thumbnails,
     /// each addressed by its own hash.
     pub blobs: Arc<Mutex<HashMap<String, Vec<u8>>>>,
@@ -311,6 +315,7 @@ impl MockNest {
         {
             let manifests = Arc::clone(&store.manifests);
             let last = Arc::clone(&store.last_manifest_hash);
+            let posted = Arc::clone(&store.posted_manifests);
             Mock::given(method("POST"))
                 .and(path("/api/v1/manifests"))
                 .respond_with(move |req: &Request| {
@@ -318,6 +323,7 @@ impl MockNest {
                     let hex = hex::encode(hash.digest());
                     manifests.lock().unwrap().insert(hex, req.body.clone());
                     *last.lock().unwrap() = Some(hash);
+                    posted.lock().unwrap().push(hash);
                     ResponseTemplate::new(200)
                 })
                 .mount(server)

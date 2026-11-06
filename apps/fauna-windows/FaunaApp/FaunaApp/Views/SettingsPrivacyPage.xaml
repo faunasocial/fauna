@@ -62,7 +62,13 @@
                 <TextBlock Text="{loc:Localize Key=status/spam/spam_threshold}" Opacity="0.7" FontSize="12" />
                 <Slider x:Name="SpamThresholdSlider"
                         AutomationProperties.AutomationId="{x:Bind ids:Ids.SpamThreshold}"
-                        Minimum="0" Maximum="1" StepFrequency="0.1" Value="0.5" />
+                        Minimum="0" Maximum="1" StepFrequency="0.1" Value="0.5"
+                        ValueChanged="SpamThresholdSlider_ValueChanged" />
+                <!-- The slider's value in words (settings.md § Spam threshold slider
+                     labels): the band is shared Rust's, painted in code-behind. -->
+                <TextBlock x:Name="SpamThresholdBandText"
+                           AutomationProperties.AutomationId="{x:Bind ids:Ids.SpamThresholdBand}"
+                           Opacity="0.7" FontSize="12" />
                 <TextBlock Text="{loc:Localize Key=status/spam/phishing_threshold}" Opacity="0.7" FontSize="12" />
                 <Slider x:Name="PhishingThresholdSlider"
                         AutomationProperties.AutomationId="{x:Bind ids:Ids.PhishingThreshold}"

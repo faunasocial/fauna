@@ -14,11 +14,12 @@ import Foundation
 /// share ONE implementation, covered by `swift-test` unlike the app targets.
 ///
 /// **Awaited.** The route's page work lands before this acks: the shell
-/// navigates to Connected apps and the page's visit opens the staged request
-/// through the shared machine, then clears it — this waits for that, so the card
-/// is painted when the command returns and the driver's next read cannot see the
-/// pre-open frame. Signed out, the door holds the route (it applies after
-/// sign-in) and the command acks at once, as tui's does.
+/// navigates to the route's landing and the page opens what the door staged —
+/// the consent request through the shared machine (cleared once its open
+/// returned), a share route's target once the Media or Folders page has taken it
+/// — and this waits for that, so the driver's next read cannot see the pre-open
+/// frame. Signed out, the door holds the route (it applies after sign-in) and the
+/// command acks at once, as tui's does.
 public enum OpenRouteTestCommand {
     /// The longest a route's page work may take before the command refuses.
     /// Generous: the open is one nest round trip behind a fresh visit's read.
@@ -33,19 +34,23 @@ public enum OpenRouteTestCommand {
     public static func apply(
         _ command: [String: Any],
         authenticated: Bool,
-        navigate: @MainActor () -> Void
+        navigate: @MainActor (ConsentHandoff.Landing) -> Void
     ) async -> String? {
         guard let uri = command["uri"] as? String, let url = URL(string: uri) else {
             return "open_route: no parseable `uri` in the command"
         }
-        guard ConsentHandoff.shared.receive(url, authenticated: authenticated) else {
-            return "open_route: `\(uri)` is not a route this app takes (only `fauna://consent/<request_uri>` "
-                + "has a producer on Apple)"
+        let landing: ConsentHandoff.Landing
+        switch ConsentHandoff.shared.receive(url, authenticated: authenticated) {
+        case .notARoute:
+            return "open_route: `\(uri)` is not a route this app takes"
+        case .held:
+            return nil
+        case .apply(let applied):
+            landing = applied
         }
-        guard authenticated else { return nil }
-        navigate()
+        navigate(landing)
         guard await ConsentHandoff.shared.waitUntilDrained(timeout: openDeadline) else {
-            return "open_route: the Connected apps page did not open the request within "
+            return "open_route: the \(landing) page did not open the route within "
                 + "\(Int(openDeadline)) s (no live page, or no machine in this session)"
         }
         return nil

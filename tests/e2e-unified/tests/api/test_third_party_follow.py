@@ -62,14 +62,12 @@ def _entry_for(blob_data: bytes, subscriber: bytes) -> dict:
 
 @pytest.mark.feature("connected-apps")
 def test_a_principal_follows_and_reads_only_the_followers_bit(consent_nest, consent_bridge):
-    from common.auth import register_handled_actor
+    from helpers.admin_wire import admit_adult
 
     nest = consent_nest
     owner = _actor(nest, nest["user"])
     owner_id = bytes.fromhex(owner.actor_id)
-    bob = register_handled_actor(
-        nest["port"], handle="bob", domain=HANDLE_DOMAIN, base_url=nest["url"]
-    )
+    bob = admit_adult(nest, "bob", domain=HANDLE_DOMAIN, token=True)
     author = _actor(nest, bob)
     author_id = bytes.fromhex(author.actor_id)
     _, gold_key = author.subscription_create_tier_with_key("gold", rank=1)

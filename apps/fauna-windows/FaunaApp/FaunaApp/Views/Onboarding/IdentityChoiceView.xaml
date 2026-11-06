@@ -96,6 +96,14 @@
                     Content="{loc:Localize Key=onboarding/identity_choice/recover_lost_box}"
                     Command="{Binding BeginRecoverLostBoxCommand}"
                     HorizontalAlignment="Stretch" />
+                <!-- The signed-out lock door (ui/sessions.md § The signed-out door):
+                     restores nothing — it locks an account from a device the owner
+                     will not sign in on, and persists nothing. -->
+                <Button
+                    AutomationProperties.AutomationId="{x:Bind ids:Ids.EmergencyLockoutEntryButton}"
+                    Content="{loc:Localize Key=onboarding/identity_choice/emergency_lockout_entry}"
+                    Command="{Binding BeginEmergencyLockoutEntryCommand}"
+                    HorizontalAlignment="Stretch" />
                 <!-- Append-mode ("Add account") escape hatch. Windows has no window
                      to close (onboarding is frame-hosted, unlike linux/apple's native
                      window/sheet dismissal) — user-approved 2026-07-20. Visibility is

@@ -7,8 +7,11 @@
 //! that is a dumb renderer of the shared
 //! `fauna_archive_import_machine::ArchiveImportSnapshot` and a dispatcher of
 //! `ArchiveImportAction`. The FSM, the parser, the folder writes and the
-//! authoring are shared Rust (priority #2); tui is the lead app (2026-09-08),
-//! no other app renders this page yet.
+//! authoring are shared Rust (priority #2), and so are the page's token words
+//! (`archive_import_category_label` and its siblings) and every line it paints
+//! (`fauna_archive_import_machine::text`); tui is the lead app
+//! (2026-09-08), the other apps reaching the same machine through its UniFFI
+//! face.
 //!
 //! # The archive is a PATH here
 //!
@@ -22,18 +25,20 @@
 //! `archive-import-view-imported-button` → `Gesture::Nav(Page::Feed)` (the
 //! feed carries no per-source filter yet). `archive-import-review-skipped-button`
 //! toggles the skip log onto the Done screen (`ArchiveImportState::show_skipped`).
-//! `archive-import-profile-prefill-button` paints DISABLED: the machine exposes
-//! no archive profile yet, so there is nothing to prefill — offered, never
-//! applied silently, and never faked (testing.md point 11; the slice-4 gap
-//! named in `archive-import.md` § Implementation status today).
+//! `archive-import-profile-prefill-button` dispatches `ApplyArchiveProfile`,
+//! enabled only while the snapshot carries the archive's profile and the tap
+//! has not applied it yet — offered, never applied silently.
 
 use fauna_ui_ids as ids;
 use std::sync::Arc;
 
+use fauna_archive_import_machine::text::page_text;
 use fauna_archive_import_machine::{
-    ArchiveImportAction, ArchiveImportMachine, ArchiveImportSnapshot, ArchiveImportStep,
-    ArchiveSourceKind, AudienceMode, RunState,
+    AUDIENCE_MODES, ArchiveImportAction, ArchiveImportMachine, ArchiveImportPageText,
+    ArchiveImportSnapshot, ArchiveImportStep, ArchiveSourceKind, AudienceMode, RunState,
+    SOURCE_KINDS,
 };
+use fauna_core::localized::ComposedText;
 use fauna_i18n::strings::archive_import as t;
 
 use super::{Action, SettingsField, SettingsState};
@@ -137,11 +142,8 @@ impl ArchiveImportState {
 /// The picker's option text — the crate's canonical platform label (a brand
 /// name, not translated), a **label** round-trip like `MailImportSourceKind`.
 pub(crate) fn source_kind_label(kind: ArchiveSourceKind) -> String {
-    kind.label().to_string()
+    fauna_archive_import_machine::archive_import_source_kind_label(kind)
 }
-
-pub(crate) const SOURCE_KINDS: [ArchiveSourceKind; 2] =
-    [ArchiveSourceKind::Facebook, ArchiveSourceKind::Instagram];
 
 /// An unrecognized label keeps the default (Facebook) rather than panicking —
 /// the `mail_import::source_kind_for_label` contract.
@@ -152,13 +154,10 @@ pub(crate) fn source_kind_for_label(label: &str) -> ArchiveSourceKind {
         .unwrap_or(ArchiveSourceKind::Facebook)
 }
 
-pub(crate) const AUDIENCE_MODES: [AudienceMode; 2] = [AudienceMode::Original, AudienceMode::OnlyMe];
-
 pub(crate) fn audience_mode_label(mode: AudienceMode) -> String {
-    match mode {
-        AudienceMode::Original => t::AUDIENCE_ORIGINAL.to_string(),
-        AudienceMode::OnlyMe => t::AUDIENCE_ONLY_ME.to_string(),
-    }
+    crate::wizard::localized(
+        &fauna_archive_import_machine::archive_import_audience_mode_label(mode),
+    )
 }
 
 pub(crate) fn audience_mode_for_label(label: &str) -> AudienceMode {
@@ -188,13 +187,16 @@ pub(super) fn archive_import_elements(state: &SettingsState) -> Vec<Element> {
     let step = snapshot
         .map(|s| s.step)
         .unwrap_or(ArchiveImportStep::Source);
+    // Every line the page paints, composed once by the shared machine crate —
+    // over the machine's own empty snapshot before the first hydrate.
+    let text = page_text(snapshot.unwrap_or(&ArchiveImportSnapshot::empty()));
     match step {
-        ArchiveImportStep::Source => els.extend(source_step_elements(snapshot)),
-        ArchiveImportStep::Archive => els.extend(archive_step_elements(e, snapshot)),
-        ArchiveImportStep::Scope => els.extend(scope_step_elements(e, snapshot)),
-        ArchiveImportStep::Confirm => els.extend(confirm_step_elements(snapshot)),
-        ArchiveImportStep::Progress => els.extend(progress_step_elements(e, snapshot)),
-        ArchiveImportStep::Done => els.extend(done_step_elements(e, snapshot)),
+        ArchiveImportStep::Source => els.extend(source_step_elements(snapshot, &text)),
+        ArchiveImportStep::Archive => els.extend(archive_step_elements(e, &text)),
+        ArchiveImportStep::Scope => els.extend(scope_step_elements(e, snapshot, &text)),
+        ArchiveImportStep::Confirm => els.extend(confirm_step_elements(&text)),
+        ArchiveImportStep::Progress => els.extend(progress_step_elements(e, snapshot, &text)),
+        ArchiveImportStep::Done => els.extend(done_step_elements(e, snapshot, &text)),
     }
     els.push(nav_back());
     els
@@ -228,45 +230,9 @@ fn back_button() -> Element {
     )
 }
 
-/// `YYYY-MM-DD` (UTC) of an epoch-micros instant — the workspace's one civil
-/// calendar (`fauna_core::caltime`, priority #2), the `run.rs::today_ymd` shape.
-fn ymd(micros: u64) -> String {
-    let days = (micros / 1_000_000 / 86_400) as i64;
-    let (year, month, day) = fauna_core::caltime::civil_from_days(days);
-    format!("{year:04}-{month:02}-{day:02}")
-}
-
-fn bytes_text(bytes: u64) -> String {
-    crate::wizard::localized(&fauna_core::format::byte_size(bytes))
-}
-
-/// The localized label of a `fauna_archive::Category` token; an unknown token
-/// (a newer machine) shows itself rather than nothing.
-fn category_label(token: &str) -> String {
-    match token {
-        "posts" => t::CATEGORY_POSTS,
-        "albums" => t::CATEGORY_ALBUMS,
-        "comments" => t::CATEGORY_COMMENTS,
-        "reactions" => t::CATEGORY_REACTIONS,
-        "events" => t::CATEGORY_EVENTS,
-        "groups" => t::CATEGORY_GROUPS,
-        "friends" => t::CATEGORY_FRIENDS,
-        "threads" => t::CATEGORY_THREADS,
-        "messages" => t::CATEGORY_MESSAGES,
-        "profile" => t::CATEGORY_PROFILE,
-        other => return other.to_string(),
-    }
-    .to_string()
-}
-
-fn run_state_label(state: Option<RunState>) -> &'static str {
-    match state {
-        Some(RunState::Running) | None => t::STATE_RUNNING,
-        Some(RunState::Paused) => t::STATE_PAUSED,
-        Some(RunState::Cancelled) => t::STATE_CANCELLED,
-        Some(RunState::Completed) => t::STATE_COMPLETED,
-        Some(RunState::Errored) => t::STATE_ERRORED,
-    }
+/// A line the shared machine crate composed (`fauna_archive_import_machine::text`).
+fn composed(text: &ComposedText) -> String {
+    text.resolve(fauna_i18n::strings::lookup)
 }
 
 /// The platform step 1 shows: the snapshot's, or Facebook before the first
@@ -281,20 +247,21 @@ fn source_kind(snapshot: Option<&ArchiveImportSnapshot>) -> ArchiveSourceKind {
 /// derived `source_export_url`, or the shared constant before the first
 /// hydrate. Never typed by anyone, so it is safe to hand to the OS opener.
 pub(super) fn source_export_url(snapshot: Option<&ArchiveImportSnapshot>) -> String {
-    snapshot
-        .map(|s| s.source_export_url.clone())
-        .filter(|url| !url.is_empty())
-        .unwrap_or_else(|| source_kind(snapshot).export_request_url().to_string())
+    fauna_archive_import_machine::text::source_export_url(
+        snapshot.unwrap_or(&ArchiveImportSnapshot::empty()),
+    )
 }
 
 /// Step 1 — the platform picker, how to request the export there, and the
 /// link that opens the platform's page (§ The wizard and its machine, step 1).
-fn source_step_elements(snapshot: Option<&ArchiveImportSnapshot>) -> Vec<Element> {
+fn source_step_elements(
+    snapshot: Option<&ArchiveImportSnapshot>,
+    text: &ArchiveImportPageText,
+) -> Vec<Element> {
     let kind = source_kind(snapshot);
-    let help = match kind {
-        ArchiveSourceKind::Facebook => t::SOURCE_HELP_FACEBOOK,
-        ArchiveSourceKind::Instagram => t::SOURCE_HELP_INSTAGRAM,
-    };
+    let help = crate::wizard::localized(&fauna_archive_import_machine::archive_import_source_help(
+        kind,
+    ));
     vec![
         Element::chrome(t::SOURCE_TITLE),
         Element::select(
@@ -307,7 +274,7 @@ fn source_step_elements(snapshot: Option<&ArchiveImportSnapshot>) -> Vec<Element
         Element::label(ids::ARCHIVE_IMPORT_SOURCE_HELP, help),
         Element::gesture_button(
             ids::ARCHIVE_IMPORT_SOURCE_EXPORT_LINK,
-            t::source_link_fmt(&source_export_url(snapshot)),
+            composed(&text.source_link),
             true,
             Gesture::Settings(Action::ArchiveImportOpenExportPage),
         ),
@@ -316,10 +283,7 @@ fn source_step_elements(snapshot: Option<&ArchiveImportSnapshot>) -> Vec<Element
 }
 
 /// Step 2 — the path field, the open button, and the summary once indexed.
-fn archive_step_elements(
-    e: &ArchiveImportState,
-    snapshot: Option<&ArchiveImportSnapshot>,
-) -> Vec<Element> {
+fn archive_step_elements(e: &ArchiveImportState, text: &ArchiveImportPageText) -> Vec<Element> {
     let mut els = vec![
         Element::chrome(t::ARCHIVE_TITLE),
         Element::input(
@@ -335,27 +299,11 @@ fn archive_step_elements(
             Gesture::Settings(Action::ArchiveImportOpenArchive),
         ),
     ];
-    if let Some(summary) = snapshot.and_then(|s| s.summary.as_ref()) {
-        let archive_size = bytes_text(summary.archive_bytes);
-        let media_size = bytes_text(summary.media_bytes);
-        let text = if summary.first_at == 0 {
-            t::archive_summary_undated(
-                &summary.platform_label,
-                &summary.owner_display_name,
-                &archive_size,
-                &media_size,
-            )
-        } else {
-            t::archive_summary_fmt(
-                &summary.platform_label,
-                &summary.owner_display_name,
-                &ymd(summary.first_at),
-                &ymd(summary.last_at),
-                &archive_size,
-                &media_size,
-            )
-        };
-        els.push(Element::label(ids::ARCHIVE_IMPORT_ARCHIVE_SUMMARY, text));
+    if let Some(summary) = &text.archive_summary {
+        els.push(Element::label(
+            ids::ARCHIVE_IMPORT_ARCHIVE_SUMMARY,
+            composed(summary),
+        ));
     }
     els.push(back_button());
     els.push(next_button());
@@ -366,6 +314,7 @@ fn archive_step_elements(
 fn scope_step_elements(
     e: &ArchiveImportState,
     snapshot: Option<&ArchiveImportSnapshot>,
+    text: &ArchiveImportPageText,
 ) -> Vec<Element> {
     let mut els = vec![
         Element::chrome(t::SCOPE_TITLE),
@@ -374,14 +323,13 @@ fn scope_step_elements(
             t::SCOPE_CATEGORIES_LABEL,
         ),
     ];
-    for row in snapshot.map(|s| s.categories.as_slice()).unwrap_or(&[]) {
-        let label = category_label(&row.token);
-        let count = row.count.to_string();
+    let rows = snapshot.map(|s| s.categories.as_slice()).unwrap_or(&[]);
+    for (row, line) in rows.iter().zip(&text.scope_rows) {
         if row.importable {
             els.push(
                 Element::checkbox_gesture(
                     ids::ARCHIVE_IMPORT_SCOPE_CATEGORY_ITEM,
-                    t::scope_category_row_fmt(&label, &count),
+                    composed(line),
                     row.selected,
                     Gesture::Settings(Action::ArchiveImportToggleCategory(row.token.clone())),
                 )
@@ -391,11 +339,8 @@ fn scope_step_elements(
             // Model-only in phase one: kept in the folder, never selectable
             // (§ What each category becomes) — a label, not a checkbox.
             els.push(
-                Element::label(
-                    ids::ARCHIVE_IMPORT_SCOPE_CATEGORY_ITEM,
-                    t::scope_category_kept_fmt(&label, &count),
-                )
-                .attr("state", "kept"),
+                Element::label(ids::ARCHIVE_IMPORT_SCOPE_CATEGORY_ITEM, composed(line))
+                    .attr("state", "kept"),
             );
         }
     }
@@ -414,18 +359,9 @@ fn scope_step_elements(
         )
         .labelled(t::SCOPE_AUDIENCE_MODE_LABEL),
     );
-    let (known, unknown) = snapshot
-        .and_then(|s| s.summary.as_ref())
-        .map(|s| (s.known_audience, s.unknown_audience))
-        .unwrap_or((0, 0));
     els.push(Element::label(
         ids::ARCHIVE_IMPORT_SCOPE_AUDIENCE_SUMMARY,
-        match mode {
-            AudienceMode::OnlyMe => t::SCOPE_AUDIENCE_SUMMARY_ONLY_ME.to_string(),
-            AudienceMode::Original => {
-                t::scope_audience_summary_fmt(&known.to_string(), &unknown.to_string())
-            }
-        },
+        composed(&text.audience_summary),
     ));
     if snapshot.is_some_and(|s| s.nest_supports_hidden_tiers == Some(false)) {
         els.push(Element::chrome(t::SCOPE_HIDDEN_TIERS_UNAVAILABLE));
@@ -452,15 +388,12 @@ fn scope_step_elements(
 }
 
 /// Step 4 — totals and the durable commit.
-fn confirm_step_elements(snapshot: Option<&ArchiveImportSnapshot>) -> Vec<Element> {
-    let (records, bytes) = snapshot
-        .map(|s| (s.confirm_records, s.confirm_bytes))
-        .unwrap_or((0, 0));
+fn confirm_step_elements(text: &ArchiveImportPageText) -> Vec<Element> {
     vec![
         Element::chrome(t::CONFIRM_TITLE),
         Element::label(
             ids::ARCHIVE_IMPORT_CONFIRM_SUMMARY,
-            t::confirm_summary_fmt(&records.to_string(), &bytes_text(bytes)),
+            composed(&text.confirm_summary),
         ),
         back_button(),
         Element::gesture_button(
@@ -472,42 +405,20 @@ fn confirm_step_elements(snapshot: Option<&ArchiveImportSnapshot>) -> Vec<Elemen
     ]
 }
 
-/// Step 5's "elapsed + ETA" (§ The wizard and its machine), from the
-/// machine's derived snapshot fields.
-fn progress_timing(elapsed_secs: u64, eta_secs: Option<u64>) -> String {
-    let duration = |secs| crate::wizard::localized(&fauna_core::format::duration_secs(secs));
-    match eta_secs {
-        Some(eta) => t::progress_timing_fmt(&duration(elapsed_secs), &duration(eta)),
-        None => t::progress_timing_estimating_fmt(&duration(elapsed_secs)),
-    }
-}
-
 /// Step 5 — counters, the bar, pause/resume/cancel, the skip log, the
 /// per-category rows (FLAT — the `mail_import.rs` progress-row shape).
 fn progress_step_elements(
     e: &ArchiveImportState,
     snapshot: Option<&ArchiveImportSnapshot>,
+    text: &ArchiveImportPageText,
 ) -> Vec<Element> {
-    let (imported, skipped, total, run_state) = snapshot
-        .map(|s| (s.imported, s.skipped, s.total, s.run_state))
-        .unwrap_or((0, 0, 0, None));
-    let elapsed_secs = snapshot.map_or(0, |s| s.elapsed_secs);
-    let eta_secs = snapshot.and_then(|s| s.eta_secs);
-    let fraction = fauna_core::format::quota_fraction((imported + skipped) as i64, total as i64);
+    let run_state = snapshot.and_then(|s| s.run_state);
+    let fraction = text.progress_fraction;
     let mut els = vec![
         Element::chrome(t::PROGRESS_TITLE),
         Element::label(
             ids::ARCHIVE_IMPORT_PROGRESS_SUMMARY,
-            format!(
-                "{} · {}",
-                t::progress_summary_fmt(
-                    run_state_label(run_state),
-                    &imported.to_string(),
-                    &total.to_string(),
-                    &skipped.to_string(),
-                ),
-                progress_timing(elapsed_secs, eta_secs),
-            ),
+            composed(&text.progress_summary),
         ),
         Element::label(
             ids::ARCHIVE_IMPORT_PROGRESS_BAR,
@@ -546,11 +457,8 @@ fn progress_step_elements(
             t::PROGRESS_TITLE,
         ),
     ];
-    for row in snapshot.map(|s| s.categories.as_slice()).unwrap_or(&[]) {
-        if !(row.importable && row.selected) {
-            continue;
-        }
-        let label = category_label(&row.token);
+    for row in &text.progress_rows {
+        let label = crate::wizard::localized(&row.label);
         els.push(Element::label(
             ids::ARCHIVE_IMPORT_CATEGORY_PROGRESS_LIST_ITEM,
             label.clone(),
@@ -561,11 +469,7 @@ fn progress_step_elements(
         ));
         els.push(Element::label(
             ids::ARCHIVE_IMPORT_CATEGORY_PROGRESS_LIST_ITEM_PROGRESS,
-            t::progress_row_fmt(
-                &row.imported.to_string(),
-                &row.count.to_string(),
-                &row.skipped.to_string(),
-            ),
+            composed(&row.progress),
         ));
     }
     // A concluded run may be left (the machine starts a fresh wizard on Back);
@@ -576,24 +480,37 @@ fn progress_step_elements(
     els
 }
 
-/// Step 6 — counts, the feed link, the skip log behind a toggle, the (inert)
-/// profile offer, the folder link, and Back into a fresh wizard.
+/// "View imported" — the Feed page on the imported-posts selection for the
+/// archive's platform (`archive-import.md` § The wizard and its machine,
+/// step 6; `feed.md` § State & data shape → *The imported-posts selection*).
+/// With no snapshot to name a platform it opens the feed as it stands.
+fn view_imported_gesture(snapshot: Option<&ArchiveImportSnapshot>) -> Gesture {
+    match snapshot {
+        Some(s) => Gesture::Feed(crate::feed::Action::SelectImported(
+            s.source_kind.platform().token().to_string(),
+        )),
+        None => Gesture::Nav(Page::Feed),
+    }
+}
+
+/// Step 6 — counts, the feed link, the skip log behind a toggle, the profile
+/// offer, the folder link, and Back into a fresh wizard.
 fn done_step_elements(
     e: &ArchiveImportState,
     snapshot: Option<&ArchiveImportSnapshot>,
+    text: &ArchiveImportPageText,
 ) -> Vec<Element> {
-    let (imported, skipped) = snapshot.map(|s| (s.imported, s.skipped)).unwrap_or((0, 0));
     let mut els = vec![
         Element::chrome(t::DONE_TITLE),
         Element::label(
             ids::ARCHIVE_IMPORT_DONE_SUMMARY,
-            t::done_summary_fmt(&imported.to_string(), &skipped.to_string()),
+            composed(&text.done_summary),
         ),
         Element::gesture_button(
             ids::ARCHIVE_IMPORT_VIEW_IMPORTED_BUTTON,
             t::VIEW_IMPORTED_BUTTON,
             true,
-            Gesture::Nav(Page::Feed),
+            view_imported_gesture(snapshot),
         ),
         Element::gesture_button(
             ids::ARCHIVE_IMPORT_REVIEW_SKIPPED_BUTTON,
@@ -608,20 +525,18 @@ fn done_step_elements(
             snapshot.map(|s| s.skip_log.join("\n")).unwrap_or_default(),
         ));
     }
-    // Offered, never applied silently — and DISABLED: the machine exposes no
-    // archive profile yet (module docs).
+    // Offered, never applied silently: enabled while the run's end found a
+    // profile in the archive and the tap has not applied it yet.
+    let offered = snapshot.is_some_and(|s| s.archive_profile.is_some() && !s.profile_applied);
     els.push(Element::gesture_button(
         ids::ARCHIVE_IMPORT_PROFILE_PREFILL_BUTTON,
         t::PROFILE_PREFILL_BUTTON,
-        false,
+        offered,
         Gesture::Settings(Action::ArchiveImportProfilePrefill),
     ));
-    let folder = snapshot
-        .and_then(|s| s.folder_name.clone())
-        .unwrap_or_default();
     els.push(Element::gesture_button(
         ids::ARCHIVE_IMPORT_FOLDER_LINK,
-        t::folder_link_fmt(&folder),
+        composed(&text.folder_link),
         true,
         Gesture::Settings(Action::OpenFolders),
     ));
@@ -1008,7 +923,9 @@ mod tests {
             format!(
                 "{} · {}",
                 t::progress_summary_fmt(t::STATE_RUNNING, "2", "4", "1"),
-                progress_timing(0, None)
+                t::progress_timing_estimating_fmt(&crate::wizard::localized(
+                    &fauna_core::format::duration_secs(0)
+                ))
             )
         );
     }
@@ -1122,9 +1039,12 @@ mod tests {
         let mut state = state_with(snap);
         let els = archive_import_elements(&state);
         let find = |els: &[Element], id: &str| els.iter().find(|e| e.id == id).cloned().expect(id);
+        // View imported runs the imported-posts selection for the archive's
+        // platform, never a bare nav to the unfiltered feed.
         assert!(matches!(
             find(&els, "archive-import-view-imported-button").role,
-            crate::element::Role::Button(Gesture::Nav(crate::pages::Page::Feed))
+            crate::element::Role::Button(Gesture::Feed(crate::feed::Action::SelectImported(ref token)))
+                if token == "facebook"
         ));
         assert!(matches!(
             find(&els, "archive-import-folder-link").role,
@@ -1136,14 +1056,35 @@ mod tests {
         );
         assert!(
             !find(&els, "archive-import-profile-prefill-button").enabled,
-            "offered, never applied silently — and not built yet"
+            "no profile offered, nothing to apply"
         );
         assert!(
             !ids(&els).contains(&"archive-import-error-log".to_string()),
             "the skip log is behind Review skipped"
         );
         state.archive_import.show_skipped = true;
+        let mut offered = state.archive_import.snapshot.clone().unwrap();
+        offered.archive_profile = Some(fauna_archive_import_machine::ArchiveProfileView {
+            display_name: "Test Owner".into(),
+            bio: None,
+            links: vec![],
+            has_picture: false,
+        });
+        state.archive_import.snapshot = Some(offered.clone());
         let els = archive_import_elements(&state);
+        let prefill = find(&els, "archive-import-profile-prefill-button");
+        assert!(prefill.enabled, "the run's end found a profile to offer");
+        assert!(matches!(
+            prefill.role,
+            crate::element::Role::Button(Gesture::Settings(Action::ArchiveImportProfilePrefill))
+        ));
+        offered.profile_applied = true;
+        state.archive_import.snapshot = Some(offered);
+        let els = archive_import_elements(&state);
+        assert!(
+            !find(&els, "archive-import-profile-prefill-button").enabled,
+            "applied once, never twice"
+        );
         assert_eq!(
             text_of(&els, "archive-import-error-log", 0),
             "posts: already imported"
@@ -1159,6 +1100,23 @@ mod tests {
         assert_eq!(
             text_of(&els, "archive-import-done-summary", 0),
             t::done_summary_fmt("10", "1")
+        );
+    }
+
+    #[test]
+    fn the_done_summary_names_the_unplaced_comments_when_there_are_any() {
+        let mut snap = a_snapshot(ArchiveImportStep::Done);
+        snap.imported = 10;
+        snap.skipped = 1;
+        snap.comments_unplaced = 3;
+        let els = archive_import_elements(&state_with(snap));
+        assert_eq!(
+            text_of(&els, "archive-import-done-summary", 0),
+            format!(
+                "{} · {}",
+                t::done_summary_fmt("10", "1"),
+                t::done_unplaced_comments_fmt("3")
+            )
         );
     }
 

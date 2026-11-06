@@ -20,6 +20,7 @@ internal static class RenderBlockFixture
         VerificationStatus verification = VerificationStatus.Unchecked,
         AuthoringOriginStatus authoringOrigin = AuthoringOriginStatus.Unknown,
         string? legalTakedownRef = null,
-        bool notFound = false) =>
-        new RenderBlock.QuotedPost(postId, author, body, verification, authoringOrigin, legalTakedownRef, notFound, null);
+        bool notFound = false,
+        string? adminBlockReason = null) =>
+        new RenderBlock.QuotedPost(postId, author, body, verification, authoringOrigin, legalTakedownRef, notFound, adminBlockReason);
 }

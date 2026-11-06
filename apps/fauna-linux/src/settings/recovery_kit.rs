@@ -18,8 +18,8 @@
 //! **in-process**: linux is Rust-native like tui, so the
 //! `succession_retry_group_sweep` UniFFI face apple and windows call is not a
 //! layer this app goes through. Still NOT ported here: the escrow-reseal
-//! button, the pending-replacement veto, and the ephemeral member-review pass
-//! (the permanent review surface is `settings::member_review`).
+//! button and the pending-replacement veto (the ephemeral member-review pass is
+//! built by `settings::member_review::build_ephemeral_pass`, mounted below).
 //!
 //! **The eight aftermath-progress lines are ported here — render-only, mirroring tui's `apps/fauna-tui/src/settings/recovery.rs`
 //! shape.** Each reads a shared projection's `status_line()` — a pure function,
@@ -268,12 +268,22 @@ pub(crate) fn park_succession_sweep(sweep: SweepStatus) {
     *LANDED_SWEEP.lock().unwrap_or_else(|e| e.into_inner()) = Some(sweep);
 }
 
+/// Whether a succession's sweep is parked — i.e. this is the successor's first
+/// session, the only place the ephemeral member-review pass renders.
+pub(crate) fn succession_sweep_parked() -> bool {
+    LANDED_SWEEP
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .is_some()
+}
+
 /// Forget the parked sweep — sign-out and factory reset only.
 ///
 /// A plain account *switch* must never call this: carrying the sweep across
 /// exactly one switch is the whole point of parking it.
 pub(crate) fn clear_succession_sweep() {
     *LANDED_SWEEP.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    super::member_review::reset_ephemeral_deferral();
 }
 
 /// The parked sweep as the e2e state provider's `data.succession_sweep` — the
@@ -652,6 +662,14 @@ pub fn build_recovery_kit_group(error_label: &gtk::Label) -> (adw::PreferencesGr
     crate::testid::set_test_id(&sweep_retry_btn, ids::RECOVERY_KIT_SWEEP_RETRY_BUTTON);
     crate::offline_gate::declare_wire_kind(&sweep_retry_btn, "fauna.conversations.channel.send");
     group.add(&sweep_retry_btn);
+
+    // The ephemeral member-review pass (`settings.md` § Recovery kit → *The
+    // ephemeral member-review pass*): renders only in the successor's first
+    // session, behind the parked sweep. The permanent surface is
+    // `settings::member_review`; both draw their rows with one builder.
+    let (member_review_pass, member_review_refresh) =
+        super::member_review::build_ephemeral_pass(error_label);
+    group.add(&member_review_pass);
 
     // Succession is irreversible and re-points the whole account, so it is the
     // one action gated behind a type-to-confirm field as well as its status
@@ -1081,6 +1099,7 @@ pub fn build_recovery_kit_group(error_label: &gtk::Label) -> (adw::PreferencesGr
         let minted_box = widgets.minted_box.clone();
         let secret_label = widgets.secret_label.clone();
         move || {
+            member_review_refresh();
             // **The kit is shown ONCE** (`identity-succession.md` § The
             // RecoveryKey — *Custody*): entering the section drops any secret
             // still on screen from an earlier mint, so there is no "show it

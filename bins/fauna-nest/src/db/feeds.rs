@@ -55,7 +55,12 @@ pub enum FeedLocality {
     /// The account on its own box: the nest-wide rows plus the delivered
     /// envelopes of the authors it holds an `approved` remote follow of — or
     /// of an identity one of those authors succeeded (stored posts keep their
-    /// author; `actor_successions` maps the retired id onto the successor).
+    /// author; `actor_successions` maps the retired id onto the successor) —
+    /// **delivered through the home that follow names** (a
+    /// `follow_delivery_homes` custody row whose origin is the follow's
+    /// `home_nest_id`): a reader who follows an author at one home never
+    /// lists what only another nest delivered (`federated-follow.md`
+    /// § Decision 4).
     ForReader([u8; 32]),
 }
 
@@ -66,18 +71,15 @@ impl FeedLocality {
     fn guard(self) -> String {
         match self {
             FeedLocality::NestWide => "c.follow_delivered = 0".to_string(),
-            FeedLocality::ForReader(reader) => {
-                let followed = format!(
-                    "SELECT author_id FROM remote_follows \
-                     WHERE subscriber_id = X'{}' AND state = 'approved'",
-                    hex::encode(reader)
-                );
-                format!(
-                    "(c.follow_delivered = 0 OR c.author IN ({followed}) \
-                     OR c.author IN (SELECT old_actor_id FROM actor_successions \
-                     WHERE new_actor_id IN ({followed})))"
-                )
-            }
+            FeedLocality::ForReader(reader) => format!(
+                "(c.follow_delivered = 0 OR EXISTS (SELECT 1 FROM remote_follows rf \
+                 JOIN follow_delivery_homes h ON h.post_id = c.id \
+                 AND h.origin_nest_id = rf.home_nest_id \
+                 WHERE rf.subscriber_id = X'{}' AND rf.state = 'approved' \
+                 AND (rf.author_id = c.author OR rf.author_id IN \
+                 (SELECT new_actor_id FROM actor_successions WHERE old_actor_id = c.author))))",
+                hex::encode(reader)
+            ),
         }
     }
 }
@@ -344,6 +346,34 @@ fn push_rule_conditions(
 }
 
 impl CacheDb {
+    /// Whether a stored post is a follow-delivered envelope (`follow_delivered
+    /// = 1`) that `caller` may NOT read: every caller but a local reader the
+    /// per-reader locality admits (`FeedLocality::ForReader`) — so the
+    /// anonymous and peer single-post reads (`caller = None`) are refused it
+    /// (`federated-follow.md` § Decision 4, ). A row that is not
+    /// delivered, or is absent, is never hidden here. Errors propagate so
+    /// the caller can fail closed.
+    pub async fn delivered_post_hidden_from(
+        &self,
+        post_id: &[u8; 32],
+        caller: Option<[u8; 32]>,
+    ) -> Result<bool> {
+        let locality = match caller {
+            Some(reader) => FeedLocality::ForReader(reader),
+            None => FeedLocality::NestWide,
+        };
+        let sql = format!(
+            "SELECT EXISTS(SELECT 1 FROM content c WHERE c.id = ?1 \
+             AND c.follow_delivered = 1 AND NOT ({guard}))",
+            guard = locality.guard()
+        );
+        let conn = self.conn.lock().await;
+        let hidden: bool = conn
+            .query_row(&sql, [post_id.as_slice()], |row| row.get(0))
+            .context("read a delivered post's reader locality")?;
+        Ok(hidden)
+    }
+
     // ==================== Feeds ====================
 
     /// Create a new feed. Returns the generated feed_id (hex string).
@@ -1145,6 +1175,7 @@ impl CacheDb {
                 reposted_gated_room: None,
                 viewer_repost_id: None,
                 viewer_liked: false,
+                reactions: Vec::new(),
                 source,
                 score: None,
                 web_slug: None,
@@ -1195,7 +1226,7 @@ impl CacheDb {
         // read here — this fn is viewer-independent; `augment_viewer_state`
         // fills it for the local query paths only.
         project_repost_targets(&conn, &mut results)?;
-        project_home_nest_urls(&conn, &mut results)?;
+        project_home_nest_urls(&conn, &mut results, locality)?;
 
         // Per-row content-label projection (`moderation.md` § Per-row badge
         // data path): one entry per category, the highest-confidence row.
@@ -1248,6 +1279,9 @@ impl CacheDb {
     /// `unrepost` takes the target (it looks the record up by the target's
     /// AT-URI), so the target is exactly `unrepost`'s argument, as the
     /// carrier promises. A nest without the Bluesky tables skips the pass.
+    ///
+    /// The same pass fills the per-emoji reaction tally
+    /// ([`ReactionTallyStmts`]) on every non-`bluesky` row.
     pub async fn augment_viewer_state(
         &self,
         viewer: &[u8; 32],
@@ -1276,10 +1310,17 @@ impl CacheDb {
             .ok();
         let viewer_hex = hex::encode(viewer);
         let viewer_actor = fauna_core::identity::ActorId(*viewer);
+        let mut tally = ReactionTallyStmts::prepare(&conn)?;
         for row in rows.iter_mut() {
-            if let Some(stmt) = bluesky_stmt.as_mut().filter(|_| {
-                fauna_core::source::normalize(&row.source).as_deref() == Some("bluesky")
-            }) {
+            let is_bluesky =
+                fauna_core::source::normalize(&row.source).as_deref() == Some("bluesky");
+            // The per-emoji tally (`feed.md` § Layout & flow → *Reaction posts
+            // count and paint*, rulings 2 and 5) — every local row but a
+            // `bluesky` one, whose counters live at the origin.
+            if !is_bluesky {
+                row.reactions = tally.read(&row.post_id, Some(viewer))?;
+            }
+            if let Some(stmt) = bluesky_stmt.as_mut().filter(|_| is_bluesky) {
                 let kinds = stmt
                     .query_map(
                         rusqlite::params![hex::encode(&row.post_id), viewer_hex],
@@ -1319,6 +1360,19 @@ impl CacheDb {
                 .is_some();
         }
         Ok(())
+    }
+
+    /// The per-emoji reaction tally of one post as `viewer` sees it — the
+    /// post-act fold `fauna.posts.interact` answers with
+    /// (`PostEngagementCounts.reactions`), read exactly as
+    /// [`Self::augment_viewer_state`] reads it for a feed row.
+    pub async fn get_reaction_tally(
+        &self,
+        post_id: &[u8; 32],
+        viewer: Option<&[u8; 32]>,
+    ) -> Result<Vec<fauna_protocol::feed::PostReactionGroup>> {
+        let conn = self.conn.lock().await;
+        ReactionTallyStmts::prepare(&conn)?.read(post_id.as_slice(), viewer)
     }
 
     pub async fn query_feed_scored(
@@ -1618,6 +1672,7 @@ impl CacheDb {
                 reposted_gated_room: None,
                 viewer_repost_id: None,
                 viewer_liked: false,
+                reactions: Vec::new(),
                 source,
                 score: Some(score),
                 web_slug: None,
@@ -1668,7 +1723,7 @@ impl CacheDb {
         // read here — this fn is viewer-independent; `augment_viewer_state`
         // fills it for the local query paths only.
         project_repost_targets(&conn, &mut results)?;
-        project_home_nest_urls(&conn, &mut results)?;
+        project_home_nest_urls(&conn, &mut results, locality)?;
 
         // Per-row content-label projection (`moderation.md` § Per-row badge
         // data path): one entry per category, the highest-confidence row.
@@ -1864,6 +1919,7 @@ impl CacheDb {
                 reposted_gated_room: None,
                 viewer_repost_id: None,
                 viewer_liked: false,
+                reactions: Vec::new(),
                 source,
                 score: None,
                 web_slug: None,
@@ -1914,7 +1970,7 @@ impl CacheDb {
         // read here — this fn is viewer-independent; `augment_viewer_state`
         // fills it for the local query paths only.
         project_repost_targets(&conn, &mut results)?;
-        project_home_nest_urls(&conn, &mut results)?;
+        project_home_nest_urls(&conn, &mut results, locality)?;
 
         // Per-row content-label projection (`moderation.md` § Per-row badge
         // data path): one entry per category, the highest-confidence row.
@@ -2006,22 +2062,67 @@ fn project_web_slug(
 /// (`transport-trust.md` § The post arm). `None` for every post this nest
 /// holds as its own; the identity is `None` too for a discovery stub, which
 /// no verified channel delivered, and never rides without its URL.
-fn project_home_nest_urls(conn: &rusqlite::Connection, results: &mut [FeedPostRow]) -> Result<()> {
+///
+/// **Per reader for a delivered row** (`federated-follow.md` § Decision 4):
+/// under [`FeedLocality::ForReader`] a `follow_delivered` row projects the
+/// custody (`follow_delivery_homes`) the reader's own `approved` follow names
+/// — the oldest by `delivered_at` when the reader's tiers name several homes —
+/// so two readers list one row each from their own home; every other row, and
+/// every row under [`FeedLocality::NestWide`], projects the `content` columns.
+fn project_home_nest_urls(
+    conn: &rusqlite::Connection,
+    results: &mut [FeedPostRow],
+    locality: FeedLocality,
+) -> Result<()> {
     use rusqlite::OptionalExtension;
     let mut stmt = conn
         .prepare("SELECT origin_nest_url, origin_nest_id FROM content WHERE id = ?1")
         .context("prepare home nest lookup")?;
+    let mut per_reader = match locality {
+        FeedLocality::ForReader(_) => Some(
+            conn.prepare(
+                "SELECT h.origin_nest_url, h.origin_nest_id FROM content c \
+                 JOIN follow_delivery_homes h ON h.post_id = c.id \
+                 JOIN remote_follows rf ON rf.home_nest_id = h.origin_nest_id \
+                 WHERE c.id = ?1 AND c.follow_delivered = 1 \
+                 AND rf.subscriber_id = ?2 AND rf.state = 'approved' \
+                 AND (rf.author_id = c.author OR rf.author_id IN \
+                 (SELECT new_actor_id FROM actor_successions WHERE old_actor_id = c.author)) \
+                 ORDER BY h.delivered_at, h.origin_nest_id LIMIT 1",
+            )
+            .context("prepare the per-reader home lookup")?,
+        ),
+        FeedLocality::NestWide => None,
+    };
     for result in results.iter_mut() {
-        let (url, id) = stmt
-            .query_row([result.post_id.as_slice()], |row| {
-                Ok((
-                    row.get::<_, Option<String>>(0)?,
-                    row.get::<_, Option<Vec<u8>>>(1)?,
-                ))
-            })
-            .optional()
-            .context("query home nest")?
-            .unwrap_or_default();
+        let own_home = match (&mut per_reader, locality) {
+            (Some(stmt), FeedLocality::ForReader(reader)) => stmt
+                .query_row(
+                    rusqlite::params![result.post_id.as_slice(), reader.as_slice()],
+                    |row| {
+                        Ok((
+                            row.get::<_, Option<String>>(0)?,
+                            row.get::<_, Option<Vec<u8>>>(1)?,
+                        ))
+                    },
+                )
+                .optional()
+                .context("query the reader's home")?,
+            _ => None,
+        };
+        let (url, id) = match own_home {
+            Some(home) => home,
+            None => stmt
+                .query_row([result.post_id.as_slice()], |row| {
+                    Ok((
+                        row.get::<_, Option<String>>(0)?,
+                        row.get::<_, Option<Vec<u8>>>(1)?,
+                    ))
+                })
+                .optional()
+                .context("query home nest")?
+                .unwrap_or_default(),
+        };
         result.home_nest_url = url.filter(|u| !u.is_empty());
         result.home_nest_actor_id = id
             .filter(|id| id.len() == 32 && result.home_nest_url.is_some())
@@ -2102,6 +2203,99 @@ fn project_content_labels(
     Ok(labels)
 }
 
+/// The most per-emoji groups one post's reaction tally carries on any read
+/// (`docs/goal/ui/feed.md` § Layout & flow → *Reaction posts count and
+/// paint*, ruling 2).
+pub(crate) const REACTION_TALLY_MAX_GROUPS: usize = 20;
+
+/// The two indexed reads behind a post's reaction tally (`docs/goal/ui/feed.md`
+/// § Layout & flow → *Reaction posts count and paint*, ruling 2), over the
+/// actor-keyed `content_links link_type='react'` rows `write_post_index` mints
+/// (emoji in `status`): per emoji, the number of **distinct actors** with a
+/// row, the groups ordered by their earliest row; and the viewer's own rows,
+/// the latest per emoji naming `viewer_react_id` (the repost read's rule —
+/// each `React` post is individually deletable, so the pair converges). No
+/// counter column, no `engagement_events` row: a deleted `React` post leaves
+/// the tally with its link. At most [`REACTION_TALLY_MAX_GROUPS`] groups are
+/// read — the most-reacted ones (ties to the earliest), then presented in
+/// first-added order — so no peer can grow one post's tally, or the reply
+/// carrying it, without bound.
+pub(crate) struct ReactionTallyStmts<'c> {
+    groups: rusqlite::Statement<'c>,
+    viewer: rusqlite::Statement<'c>,
+}
+
+impl<'c> ReactionTallyStmts<'c> {
+    pub(crate) fn prepare(conn: &'c rusqlite::Connection) -> Result<Self> {
+        Ok(Self {
+            groups: conn
+                .prepare(&format!(
+                    "SELECT status, actors FROM ( \
+                       SELECT status, COUNT(DISTINCT actor_id) AS actors, \
+                              MIN(created_at) AS first_at, MIN(id) AS first_id \
+                       FROM content_links \
+                       WHERE target_id = ?1 AND link_type = 'react' AND status IS NOT NULL \
+                       GROUP BY status \
+                       ORDER BY actors DESC, first_at, first_id \
+                       LIMIT {REACTION_TALLY_MAX_GROUPS} \
+                     ) ORDER BY first_at, first_id",
+                ))
+                .context("prepare reaction tally")?,
+            viewer: conn
+                .prepare(
+                    "SELECT source_id, status FROM content_links \
+                     WHERE target_id = ?1 AND link_type = 'react' AND actor_id = ?2 \
+                     ORDER BY id DESC",
+                )
+                .context("prepare viewer reaction lookup")?,
+        })
+    }
+
+    pub(crate) fn read(
+        &mut self,
+        post_id: &[u8],
+        viewer: Option<&[u8; 32]>,
+    ) -> Result<Vec<fauna_protocol::feed::PostReactionGroup>> {
+        let mut groups = self
+            .groups
+            .query_map(rusqlite::params![post_id], |r| {
+                Ok(fauna_protocol::feed::PostReactionGroup {
+                    emoji: r.get(0)?,
+                    count: r.get(1)?,
+                    ..Default::default()
+                })
+            })
+            .context("query reaction tally")?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .context("read reaction tally")?;
+        let Some(viewer) = viewer else {
+            return Ok(groups);
+        };
+        if groups.is_empty() {
+            return Ok(groups);
+        }
+        let own = self
+            .viewer
+            .query_map(rusqlite::params![post_id, viewer.as_slice()], |r| {
+                Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, Option<String>>(1)?))
+            })
+            .context("query viewer reactions")?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .context("read viewer reactions")?;
+        // Newest first: the first row seen per emoji wins.
+        for (source, emoji) in own {
+            let Some(emoji) = emoji else { continue };
+            if let Some(group) = groups
+                .iter_mut()
+                .find(|g| g.emoji == emoji && g.viewer_react_id.is_none())
+            {
+                group.viewer_react_id = Some(hex::encode(source));
+            }
+        }
+        Ok(groups)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{FeedAudience, FeedLocality};
@@ -2165,6 +2359,40 @@ mod tests {
         .into_iter()
         .map(|r| r.post_id.try_into().unwrap())
         .collect()
+    }
+
+    ///  The single-post read's guard: a delivered envelope is hidden
+    /// from the anonymous/peer caller and from a reader who does not follow
+    /// its author, admitted to the follower; a nest-wide row is never hidden.
+    #[tokio::test]
+    async fn a_delivered_envelope_is_hidden_from_every_single_post_caller_but_its_follower() {
+        let db = CacheDb::open_in_memory().unwrap();
+        let (local, remote) = (ActorKeypair::generate(), ActorKeypair::generate());
+        let (follower, neighbour) = ([0xF1; 32], [0xF2; 32]);
+        let (own_wire, own_id) = post_wire(&local, "a local post");
+        db.put_post_index_only(&own_id, &own_wire).await.unwrap();
+        let (wire, delivered) = post_wire(&remote, "a followed author's post");
+        db.put_delivered_post_index_only(&delivered, &wire, HOME_URL, &HOME)
+            .await
+            .unwrap();
+        follow(&db, follower, remote.actor_id().0).await;
+
+        assert!(
+            db.delivered_post_hidden_from(&delivered, None)
+                .await
+                .unwrap()
+        );
+        assert!(
+            db.delivered_post_hidden_from(&delivered, Some(neighbour))
+                .await
+                .unwrap()
+        );
+        assert!(
+            !db.delivered_post_hidden_from(&delivered, Some(follower))
+                .await
+                .unwrap()
+        );
+        assert!(!db.delivered_post_hidden_from(&own_id, None).await.unwrap());
     }
 
     /// `federated-follow.md` § Decision 4: a delivered envelope is one
@@ -2286,6 +2514,96 @@ mod tests {
         assert_eq!(
             listed(&db, FeedLocality::ForReader(follower)).await,
             vec![delivered]
+        );
+    }
+
+    /// Custody is per home (`federated-follow.md` § Decision 3, *What a
+    /// reader-named home is trusted for*): each of two readers following the
+    /// author at a different home lists the row once both homes have
+    /// delivered it, neither lists a row only the other's home delivered, and
+    /// each is shown their own home's URL and identity.
+    #[tokio::test]
+    async fn a_delivered_row_lists_to_each_homes_followers_from_their_own_home() {
+        let db = CacheDb::open_in_memory().unwrap();
+        let author = ActorKeypair::generate();
+        let (at_home, at_other) = ([0xF1; 32], [0xF2; 32]);
+        let other: [u8; 32] = [0xA3; 32];
+        const OTHER_URL: &str = "https://other.example";
+        follow(&db, at_home, author.actor_id().0).await;
+        db.upsert_remote_follow(
+            &at_other,
+            &author.actor_id().0,
+            fauna_core::subscription::FOLLOWERS_TIER,
+            &other,
+            OTHER_URL,
+            RemoteFollowState::Approved,
+            None,
+            1,
+        )
+        .await
+        .unwrap();
+        let rows = async |reader: [u8; 32]| {
+            db.query_feed_for(
+                &[],
+                FilterCombination::All,
+                &[],
+                None,
+                50,
+                FeedAudience::OnBox,
+                FeedLocality::ForReader(reader),
+            )
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|r| {
+                (
+                    <[u8; 32]>::try_from(r.post_id).unwrap(),
+                    r.home_nest_url,
+                    r.home_nest_actor_id,
+                )
+            })
+            .collect::<Vec<_>>()
+        };
+        let (wire, post) = post_wire(&author, "delivered by both homes");
+        db.put_delivered_post_index_only(&post, &wire, OTHER_URL, &other)
+            .await
+            .unwrap();
+        assert!(
+            rows(at_home).await.is_empty(),
+            "the home's follower never lists what only another nest delivered"
+        );
+        assert_eq!(
+            rows(at_other).await,
+            vec![(post, Some(OTHER_URL.into()), Some(hex::encode(other)))]
+        );
+        assert_eq!(
+            db.put_delivered_post_index_only(&post, &wire, HOME_URL, &HOME)
+                .await
+                .unwrap(),
+            crate::db::posts::DeliveredStore::CustodyAdded
+        );
+        assert_eq!(
+            rows(at_home).await,
+            vec![(post, Some(HOME_URL.into()), Some(hex::encode(HOME)))],
+            "the real home's delivery is not kept out, and its follower lists it from there"
+        );
+        assert_eq!(
+            rows(at_other).await,
+            vec![(post, Some(OTHER_URL.into()), Some(hex::encode(other)))],
+            "the first home's follower still lists it from their own home"
+        );
+        let (wire, only_home) = post_wire(&author, "delivered by the home alone");
+        db.put_delivered_post_index_only(&only_home, &wire, HOME_URL, &HOME)
+            .await
+            .unwrap();
+        assert!(
+            rows(at_other).await.iter().all(|(id, ..)| *id != only_home),
+            "the other nest's follower never lists what only the home delivered"
+        );
+        assert_eq!(
+            rows(at_home).await.len(),
+            2,
+            "the home's follower lists both"
         );
     }
 

@@ -37,8 +37,18 @@ use crate::timing::RunClock;
 /// `Archive` a refusal by the parser layer (an unrecognized zip, the HTML
 /// export, a malformed member), `InvalidState` an action the current step
 /// cannot take.
+///
+/// Named for this crate rather than `DispatchError`: UniFFI keys every type
+/// on its Rust ident across the whole library, and `fauna-ffi` already
+/// exports `fauna_client_mail_settings::DispatchError` (the `DnsDispatchError`
+/// precedent, `libs/fauna-ffi/src/mail_admin.rs` § Error-type naming).
+/// `flat_error` crosses the boundary as the `Display` string, so the inner
+/// [`ArchiveNestError`] needs no annotation — the page shows the snapshot's
+/// `error` either way.
 #[derive(Debug, thiserror::Error)]
-pub enum DispatchError {
+#[cfg_attr(feature = "uniffi", derive(uniffi::Error))]
+#[cfg_attr(feature = "uniffi", uniffi(flat_error))]
+pub enum ArchiveImportDispatchError {
     #[error(transparent)]
     Nest(#[from] ArchiveNestError),
     #[error("archive: {0}")]
@@ -140,6 +150,12 @@ impl Future for StopRequestedWait<'_> {
 /// Every field is `pub(crate)`: the run ([`crate::run`]) is a sibling module
 /// and drives all of them — the seams, the snapshot, the opened archive and
 /// the cooperative stop flag.
+///
+/// The native apps reach it as a UniFFI Object (the `MailImportMachine`
+/// shape): `snapshot`, `hydrate`, `dispatch` and `run_import` are its face,
+/// built by `fauna_ffi::build_archive_import_machine`; tui calls the same
+/// methods inline.
+#[cfg_attr(feature = "uniffi", derive(uniffi::Object))]
 pub struct ArchiveImportMachine {
     pub(crate) nest: Arc<dyn ArchiveNest>,
     pub(crate) opener: Arc<dyn ArchiveOpener>,
@@ -169,6 +185,120 @@ pub struct ArchiveImportMachine {
     /// The Progress step's elapsed/ETA clock (`timing.rs`). Lock order:
     /// never held while taking [`Self::inner`].
     pub(crate) clock: Mutex<RunClock>,
+    /// The account's phase-two links, when the app attached them
+    /// ([`Self::attach_links`]): a run that completes puts their counts on
+    /// the snapshot and runs the announce round itself (rulings 4 and 11),
+    /// so no app glues the round onto its own spawn.
+    pub(crate) links: Mutex<Option<Arc<crate::link::ArchiveLinks>>>,
+}
+
+/// Phase two's hand-over (`archive-import.md` § Linking and merging, rulings
+/// 4 and 11): one call at login, or before a Start or Resume, on every app.
+#[cfg_attr(feature = "uniffi", uniffi::export)]
+impl ArchiveImportMachine {
+    /// Attach the account's archive links. From here a run that completes
+    /// puts [`crate::link::ArchiveLinks::counts`] on the snapshot before the
+    /// Done step paints, then runs the announce round for its platform — the
+    /// run task, not a page, knows the run ended. Attaching again replaces
+    /// the links (a re-login builds new ones).
+    pub fn attach_links(&self, links: Arc<crate::link::ArchiveLinks>) {
+        *self.links.lock().expect("links mutex") = Some(links);
+    }
+}
+
+/// The page's face — what every app renders and dispatches, inline on tui and
+/// through UniFFI on the native apps (`fauna_uniffi_async::export` runs each
+/// async call on a runtime worker; the run's drive loop is `run.rs`'s
+/// `run_import`, exported the same way beside it).
+#[cfg_attr(feature = "uniffi", fauna_uniffi_async::export)]
+impl ArchiveImportMachine {
+    /// The page's state, with the derived fields filled at the moment of the
+    /// read: step 1's export link, and step 5's elapsed time and estimate
+    /// (which advance with the clock, not with an action).
+    pub fn snapshot(&self) -> ArchiveImportSnapshot {
+        let mut snap = fauna_core::clone_locked(&self.inner, |s| s);
+        snap.source_export_url = snap.source_kind.export_request_url().to_string();
+        if snap.run_state.is_some() {
+            let (elapsed, eta) = self.clock.lock().expect("clock mutex").timing(
+                Timestamp::now().0,
+                snap.imported + snap.skipped,
+                snap.total,
+            );
+            snap.elapsed_secs = elapsed;
+            snap.eta_secs = eta;
+        }
+        snap
+    }
+
+    /// Initial page load — and the `Refresh` action, which is the same thing.
+    /// Goes through the same capture tail as [`Self::dispatch`]: a nest that
+    /// refuses the very first call must leave a banner behind, not a page
+    /// stuck on `Loading` with no explanation.
+    pub async fn hydrate(&self) -> Result<(), ArchiveImportDispatchError> {
+        let result = self.refresh().await;
+        self.capture(result)
+    }
+
+    pub async fn dispatch(
+        &self,
+        action: ArchiveImportAction,
+    ) -> Result<(), ArchiveImportDispatchError> {
+        self.inner.lock().expect("snapshot mutex").error = None;
+        if self.apply_client_action(&action) {
+            return Ok(());
+        }
+        let result = match action {
+            ArchiveImportAction::Refresh => self.refresh().await,
+            ArchiveImportAction::OpenArchive => self.open_archive(),
+            ArchiveImportAction::Next => self.next(),
+            // The run (`run.rs`). `Start` is the durable commit; the app
+            // spawns `run_import` after it, and `Pause`/`Cancel` are read by
+            // that loop between records.
+            ArchiveImportAction::Start => self.start().await,
+            ArchiveImportAction::Pause => self.pause(),
+            ArchiveImportAction::Resume => self.resume().await,
+            ArchiveImportAction::Cancel => self.cancel().await,
+            ArchiveImportAction::ApplyArchiveProfile => self.apply_archive_profile().await,
+            // The client-side variants were handled above.
+            _ => Ok(()),
+        };
+        self.capture(result)
+    }
+}
+
+/// The one-shot e2e anchors' setters ([`TestAnchor`]), the automation
+/// surface's only door to them. Two gates, deliberately not one (testing.md
+/// convention 15, the `ConversationsManager::inject_inbound_for_test` shape):
+/// the methods exist in any test-capable build (`debug_assertions` lets the
+/// tui debug build, which passes no features, reach them), while the UniFFI
+/// export keys on the FEATURE alone, so the generated C# / Swift / Kotlin
+/// faces are a pure function of the feature set and a production flavor —
+/// any profile — exports neither.
+#[cfg(any(debug_assertions, feature = "test-helpers"))]
+#[cfg_attr(all(feature = "uniffi", feature = "test-helpers"), uniffi::export)]
+impl ArchiveImportMachine {
+    /// Arm the one-shot pause-after-N-records anchor ([`TestAnchor::PauseAfter`]).
+    /// The automation surfaces' `archive_import_pause_after` command is its
+    /// one caller.
+    ///
+    /// N greater than or equal to the records the run still has to settle
+    /// never pauses — the run completes and the arm is spent; N = 0 behaves
+    /// as 1 (the check runs after a record settles). Arming replaces any
+    /// other armed anchor.
+    pub fn set_pause_after_records_for_test(&self, records: u64) {
+        *self.test_anchor.lock().expect("test anchor mutex") =
+            Some(TestAnchor::PauseAfter(records));
+    }
+
+    /// Arm the one-shot hold-after-N-records anchor ([`TestAnchor::HoldAfter`]):
+    /// the run stays `Running` with N records settled until the user's own
+    /// `Pause` or `Cancel` arrives, which it then takes at the next record.
+    /// The automation surfaces' `archive_import_hold_after` command is its one
+    /// caller. The same N rules as [`Self::set_pause_after_records_for_test`]; a
+    /// hold armed at or past the run's last record never holds.
+    pub fn set_hold_after_records_for_test(&self, records: u64) {
+        *self.test_anchor.lock().expect("test anchor mutex") = Some(TestAnchor::HoldAfter(records));
+    }
 }
 
 /// The claim [`index_archive`] is written to protect, pinned at compile time:
@@ -198,25 +328,18 @@ impl ArchiveImportMachine {
             test_anchor: Mutex::new(None),
             stop_waker: Mutex::new(None),
             clock: Mutex::new(RunClock::default()),
+            links: Mutex::new(None),
         }
     }
 
-    /// The page's state, with the derived fields filled at the moment of the
-    /// read: step 1's export link, and step 5's elapsed time and estimate
-    /// (which advance with the clock, not with an action).
-    pub fn snapshot(&self) -> ArchiveImportSnapshot {
-        let mut snap = fauna_core::clone_locked(&self.inner, |s| s);
-        snap.source_export_url = snap.source_kind.export_request_url().to_string();
-        if snap.run_state.is_some() {
-            let (elapsed, eta) = self.clock.lock().expect("clock mutex").timing(
-                Timestamp::now().0,
-                snap.imported + snap.skipped,
-                snap.total,
-            );
-            snap.elapsed_secs = elapsed;
-            snap.eta_secs = eta;
-        }
-        snap
+    /// Records phase two's totals for the Done step's line (ruling 11) —
+    /// what a completed run does itself with the links an app attached
+    /// ([`Self::attach_links`]); kept public for a caller holding counts of
+    /// its own.
+    pub fn set_link_counts(&self, counts: crate::link::LinkCounts) {
+        let mut snap = self.inner.lock().expect("snapshot mutex");
+        snap.link_claimed = counts.claimed;
+        snap.link_unmatched = counts.unmatched;
     }
 
     /// The run is running from now (`timing.rs`); `fresh` restarts the clock
@@ -237,32 +360,6 @@ impl ArchiveImportMachine {
             .stop(Timestamp::now().0);
     }
 
-    /// Arm the one-shot pause-after-N-records anchor ([`TestAnchor::PauseAfter`]).
-    /// Test-capable builds only — the tui automation surface's
-    /// `archive_import_pause_after` command is its one caller.
-    ///
-    /// N greater than or equal to the records the run still has to settle
-    /// never pauses — the run completes and the arm is spent; N = 0 behaves
-    /// as 1 (the check runs after a record settles). Arming replaces any
-    /// other armed anchor.
-    #[cfg(any(debug_assertions, feature = "test-helpers"))]
-    pub fn set_test_pause_after_records(&self, records: u64) {
-        *self.test_anchor.lock().expect("test anchor mutex") =
-            Some(TestAnchor::PauseAfter(records));
-    }
-
-    /// Arm the one-shot hold-after-N-records anchor ([`TestAnchor::HoldAfter`]):
-    /// the run stays `Running` with N records settled until the user's own
-    /// `Pause` or `Cancel` arrives, which it then takes at the next record.
-    /// Test-capable builds only — the tui automation surface's
-    /// `archive_import_hold_after` command is its one caller. The same N
-    /// rules as [`Self::set_test_pause_after_records`]; a hold armed at or
-    /// past the run's last record never holds.
-    #[cfg(any(debug_assertions, feature = "test-helpers"))]
-    pub fn set_test_hold_after_records(&self, records: u64) {
-        *self.test_anchor.lock().expect("test anchor mutex") = Some(TestAnchor::HoldAfter(records));
-    }
-
     /// The armed anchor, exactly once, when its count is reached; spends it.
     pub(crate) fn test_anchor_due(&self, settled: u64) -> Option<TestAnchor> {
         let mut slot = self.test_anchor.lock().expect("test anchor mutex");
@@ -278,41 +375,13 @@ impl ArchiveImportMachine {
         StopRequestedWait { machine: self }
     }
 
-    /// Initial page load — and the `Refresh` action, which is the same thing.
-    /// Goes through the same capture tail as [`Self::dispatch`]: a nest that
-    /// refuses the very first call must leave a banner behind, not a page
-    /// stuck on `Loading` with no explanation.
-    pub async fn hydrate(&self) -> Result<(), DispatchError> {
-        let result = self.refresh().await;
-        self.capture(result)
-    }
-
-    pub async fn dispatch(&self, action: ArchiveImportAction) -> Result<(), DispatchError> {
-        self.inner.lock().expect("snapshot mutex").error = None;
-        if self.apply_client_action(&action) {
-            return Ok(());
-        }
-        let result = match action {
-            ArchiveImportAction::Refresh => self.refresh().await,
-            ArchiveImportAction::OpenArchive => self.open_archive(),
-            ArchiveImportAction::Next => self.next(),
-            // The run (`run.rs`). `Start` is the durable commit; the app
-            // spawns `run_import` after it, and `Pause`/`Cancel` are read by
-            // that loop between records.
-            ArchiveImportAction::Start => self.start().await,
-            ArchiveImportAction::Pause => self.pause(),
-            ArchiveImportAction::Resume => self.resume().await,
-            ArchiveImportAction::Cancel => self.cancel().await,
-            // The client-side variants were handled above.
-            _ => Ok(()),
-        };
-        self.capture(result)
-    }
-
     /// The `dispatch_capturing_error!` tail, inlined: on a failure record the
     /// message on the shared `error-message` banner and drop status back to
     /// idle, so no failure can leave the page spinning.
-    fn capture(&self, result: Result<(), DispatchError>) -> Result<(), DispatchError> {
+    fn capture(
+        &self,
+        result: Result<(), ArchiveImportDispatchError>,
+    ) -> Result<(), ArchiveImportDispatchError> {
         if let Err(ref e) = result {
             let mut snap = self.inner.lock().expect("snapshot mutex");
             set_snapshot_error(&mut snap.error, e.to_string());
@@ -331,7 +400,7 @@ impl ArchiveImportMachine {
     /// session, so a restart — on this device or another — resumes from
     /// `state/import.cbor` alone. Nothing unfinished ⇒ the wizard starts at
     /// step 1.
-    async fn refresh(&self) -> Result<(), DispatchError> {
+    async fn refresh(&self) -> Result<(), ArchiveImportDispatchError> {
         // A run in flight owns the page: it paints progress from its own
         // handle, so a folder scan here would replace the live counts with
         // the last checkpoint's and flip a running import to Paused (with a
@@ -483,7 +552,7 @@ impl ArchiveImportMachine {
     /// and show the summary. A zip no parser recognizes, or an HTML-format
     /// export, is refused here with the message naming what to request
     /// instead. Synchronous: the opener seam is, and no nest call is made.
-    fn open_archive(&self) -> Result<(), DispatchError> {
+    fn open_archive(&self) -> Result<(), ArchiveImportDispatchError> {
         // Every failure arm below forgets whatever was open before returning:
         // an archive that failed to open must never leave the machine holding
         // the *previous* one behind a snapshot that names the new path.
@@ -494,7 +563,7 @@ impl ArchiveImportMachine {
         result
     }
 
-    fn open_archive_inner(&self) -> Result<(), DispatchError> {
+    fn open_archive_inner(&self) -> Result<(), ArchiveImportDispatchError> {
         let path = self
             .inner
             .lock()
@@ -502,7 +571,7 @@ impl ArchiveImportMachine {
             .archive_path
             .clone();
         if path.is_empty() {
-            return Err(DispatchError::InvalidState(
+            return Err(ArchiveImportDispatchError::InvalidState(
                 "choose an archive first".into(),
             ));
         }
@@ -572,7 +641,7 @@ impl ArchiveImportMachine {
     /// `Next` — Source → Archive → Scope → Confirm. Archive advances only
     /// once an archive is indexed; Scope validates the optional date range and
     /// recomputes the Confirm totals from the current scope.
-    fn next(&self) -> Result<(), DispatchError> {
+    fn next(&self) -> Result<(), ArchiveImportDispatchError> {
         let mut snap = self.inner.lock().expect("snapshot mutex");
         match snap.step {
             ArchiveImportStep::Source => {
@@ -580,7 +649,7 @@ impl ArchiveImportMachine {
             }
             ArchiveImportStep::Archive => {
                 if snap.summary.is_none() {
-                    return Err(DispatchError::InvalidState(
+                    return Err(ArchiveImportDispatchError::InvalidState(
                         "open an archive before choosing what to import".into(),
                     ));
                 }
@@ -716,6 +785,9 @@ fn clear_run_fields(snap: &mut ArchiveImportSnapshot) {
     snap.run_state = None;
     snap.total = 0;
     snap.imported = 0;
+    snap.comments_unplaced = 0;
+    snap.archive_profile = None;
+    snap.profile_applied = false;
     snap.skipped = 0;
     snap.errored = 0;
     snap.current_category = None;
@@ -728,9 +800,12 @@ fn clear_run_fields(snap: &mut ArchiveImportSnapshot) {
 /// wrong bytes to the right posts. Length first (free), then the hash — a
 /// whole read of the local file, the price of a resume, paid once. A marker
 /// from before either field existed checks nothing.
-fn verify_handed_back(source: &SharedSource, marker: &ArchiveMarker) -> Result<(), DispatchError> {
+fn verify_handed_back(
+    source: &SharedSource,
+    marker: &ArchiveMarker,
+) -> Result<(), ArchiveImportDispatchError> {
     let mismatch = || {
-        DispatchError::Archive(format!(
+        ArchiveImportDispatchError::Archive(format!(
             "this is not the archive the import started from — hand back {}{}",
             marker.raw_file_name,
             marker
@@ -773,21 +848,22 @@ fn prev_step(step: ArchiveImportStep) -> ArchiveImportStep {
 /// `Send` for the run's `tokio::spawn`.
 pub(crate) fn index_archive(
     source: &SharedSource,
-) -> Result<(Platform, ArchiveSummary), DispatchError> {
+) -> Result<(Platform, ArchiveSummary), ArchiveImportDispatchError> {
     let readable: &dyn fauna_archive::ArchiveSource = &**source;
     let mut reader = fauna_archive::ArchiveReader::open(readable)
-        .map_err(|e| DispatchError::Archive(e.to_string()))?;
-    let (parser, detected) = fauna_archive::detect(reader.directory())
-        .ok_or_else(|| DispatchError::Archive("not a Facebook or Instagram export".into()))?;
+        .map_err(|e| ArchiveImportDispatchError::Archive(e.to_string()))?;
+    let (parser, detected) = fauna_archive::detect(reader.directory()).ok_or_else(|| {
+        ArchiveImportDispatchError::Archive("not a Facebook or Instagram export".into())
+    })?;
     if detected.format == ExportFormat::Html {
-        return Err(DispatchError::Archive(format!(
+        return Err(ArchiveImportDispatchError::Archive(format!(
             "this is the HTML export — request the JSON format from {}",
             detected.platform.label()
         )));
     }
     let summary = parser
         .index(&mut reader)
-        .map_err(|e| DispatchError::Archive(e.to_string()))?;
+        .map_err(|e| ArchiveImportDispatchError::Archive(e.to_string()))?;
     Ok((detected.platform, summary))
 }
 
@@ -829,20 +905,20 @@ pub(crate) fn parse_ymd(value: &str) -> Option<Timestamp> {
 pub(crate) fn resolve_date_range(
     since: &str,
     until: &str,
-) -> Result<(Option<Timestamp>, Option<Timestamp>), DispatchError> {
-    let day = |value: &str| -> Result<Option<Timestamp>, DispatchError> {
+) -> Result<(Option<Timestamp>, Option<Timestamp>), ArchiveImportDispatchError> {
+    let day = |value: &str| -> Result<Option<Timestamp>, ArchiveImportDispatchError> {
         if value.is_empty() {
             return Ok(None);
         }
-        parse_ymd(value)
-            .map(Some)
-            .ok_or_else(|| DispatchError::InvalidState("date must be YYYY-MM-DD".into()))
+        parse_ymd(value).map(Some).ok_or_else(|| {
+            ArchiveImportDispatchError::InvalidState("date must be YYYY-MM-DD".into())
+        })
     };
     let (from, until) = (day(since)?, day(until)?);
     if let (Some(f), Some(u)) = (from, until)
         && f > u
     {
-        return Err(DispatchError::InvalidState(
+        return Err(ArchiveImportDispatchError::InvalidState(
             "the since date is after the until date".into(),
         ));
     }
@@ -852,13 +928,13 @@ pub(crate) fn resolve_date_range(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::nest::fakes::{FakeNest, VecOpener};
+    use crate::nest::fakes::{FakeNest, MemoryOpener};
     use crate::snapshot::AudienceMode;
     use fauna_archive::testing::fixture_zip;
 
     fn machine_with(zip: Vec<u8>) -> (ArchiveImportMachine, Arc<FakeNest>) {
         let nest = Arc::new(FakeNest::new());
-        let mut opener = VecOpener::default();
+        let opener = MemoryOpener::default();
         opener.insert("/exports/facebook.zip", zip);
         let keypair = fauna_core::identity::ActorKeypair::from_secret([7u8; 32]);
         (

@@ -7,9 +7,13 @@
 //! loopback port as if it were a remote origin. MCP's transport rule is the
 //! defence, enforced on every request — a request whose `Host` is not this
 //! listener's own loopback name and port, or whose `Origin` is present and not
-//! a loopback origin, is refused `403` and never reaches the method layer. The bind itself is `127.0.0.1` and the
-//! caller ([`bind`]) takes no address, so a non-loopback bind is not possible
-//! by construction.
+//! this listener's own loopback origin (same port — a page on another local
+//! port is a different origin), is refused `403` and never reaches the method
+//! layer. A `POST` whose `Content-Type` is not `application/json` is refused
+//! `415`: a `text/plain` body is a CORS "simple request" a browser sends
+//! cross-origin without a preflight (CSRF), and a real MCP host always sends
+//! JSON. The bind itself is `127.0.0.1` and the caller ([`bind`]) takes no
+//! address, so a non-loopback bind is not possible by construction.
 //!
 //! **What it serves.** A request is answered with `application/json` (`200`), a
 //! notification or a bare response with `202`. The shell offers no server-sent
@@ -82,7 +86,7 @@ async fn respond_to<H: Host, W: AsyncWrite + Unpin>(
         return respond(out, 403, "Forbidden", &[], "unexpected Host").await;
     }
     if let Some(origin) = request.header("origin")
-        && !origin_allowed(origin)
+        && !origin_allowed(origin, port)
     {
         return respond(out, 403, "Forbidden", &[], "unexpected Origin").await;
     }
@@ -91,6 +95,16 @@ async fn respond_to<H: Host, W: AsyncWrite + Unpin>(
     }
     if request.method != "POST" {
         return respond(out, 405, "Method Not Allowed", &[("Allow", "POST")], "").await;
+    }
+    if !is_json(request.header("content-type")) {
+        return respond(
+            out,
+            415,
+            "Unsupported Media Type",
+            &[],
+            "expected application/json",
+        )
+        .await;
     }
     match server.handle(&String::from_utf8_lossy(&request.body)).await {
         Some(answer) => {
@@ -117,19 +131,31 @@ pub fn host_allowed(host: Option<&str>, port: u16) -> bool {
     p.parse::<u16>() == Ok(port) && is_loopback_name(name)
 }
 
-/// An `Origin` is allowed when it is a loopback origin (`scheme://loopback[:port]`).
-pub fn origin_allowed(origin: &str) -> bool {
+/// The request body is JSON: `Content-Type` is `application/json`, parameters
+/// (`; charset=utf-8`) ignored. A `text/plain`, form or missing type is the
+/// CORS "simple request" a browser sends cross-origin with no preflight, so
+/// refusing it makes every cross-origin browser call a preflighted one — and
+/// the listener answers no `OPTIONS`, so none is ever sent.
+pub fn is_json(content_type: Option<&str>) -> bool {
+    content_type
+        .and_then(|v| v.split(';').next())
+        .is_some_and(|m| m.trim().eq_ignore_ascii_case("application/json"))
+}
+
+/// An `Origin` is allowed when it is this listener's own loopback origin
+/// (`scheme://loopback:<port>`). A page on any other local port is a different
+/// origin, and a non-browser MCP host sends none.
+pub fn origin_allowed(origin: &str, port: u16) -> bool {
     let Some((scheme, rest)) = origin.split_once("://") else {
         return false;
     };
     if scheme != "http" && scheme != "https" {
         return false;
     }
-    let name = match rest.strip_prefix('[') {
-        Some(v6) => v6.split_once(']').map(|(inside, _)| format!("[{inside}]")),
-        None => Some(rest.split(':').next().unwrap_or("").to_owned()),
+    let Some((name, p)) = rest.rsplit_once(':') else {
+        return false;
     };
-    name.is_some_and(|n| is_loopback_name(&n))
+    p.parse::<u16>() == Ok(port) && is_loopback_name(name)
 }
 
 fn is_loopback_name(name: &str) -> bool {
@@ -273,12 +299,14 @@ mod tests {
 
     #[test]
     fn only_a_loopback_origin_is_allowed() {
-        assert!(origin_allowed("http://localhost:3000"));
-        assert!(origin_allowed("http://127.0.0.1"));
-        assert!(origin_allowed("https://[::1]:8443"));
-        assert!(!origin_allowed("https://evil.example"));
-        assert!(!origin_allowed("http://localhost.evil.example"));
-        assert!(!origin_allowed("null"));
-        assert!(!origin_allowed("file://localhost"));
+        assert!(origin_allowed("http://localhost:3000", 3000));
+        assert!(origin_allowed("http://127.0.0.1:3000", 3000));
+        assert!(origin_allowed("https://[::1]:3000", 3000));
+        assert!(!origin_allowed("http://localhost:3001", 3000));
+        assert!(!origin_allowed("http://127.0.0.1", 3000));
+        assert!(!origin_allowed("https://evil.example:3000", 3000));
+        assert!(!origin_allowed("http://localhost.evil.example:3000", 3000));
+        assert!(!origin_allowed("null", 3000));
+        assert!(!origin_allowed("file://localhost:3000", 3000));
     }
 }

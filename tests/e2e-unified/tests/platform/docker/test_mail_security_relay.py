@@ -72,11 +72,13 @@ from .helpers import (
     put_auth_policy,
     register_primary_domain,
     relax_spam_policy,
+    scanner_wired_network,
     relay_attempt_loopback_curl,
     remove_container,
     remove_network,
     start_container_with_ports,
     start_fake_dns_sidecar,
+    start_fake_scanner_sidecars,
     unauth_submission_mail_code,
     wait_for_health,
 )
@@ -134,39 +136,45 @@ def serving_nest(docker_image):
     http_port, *mail = find_free_ports(5)
     mail_ports = dict(zip((25, 465, 587, 993), mail))  # container_port -> host_port
     name = f"fauna-mail-security-{http_port}"
-    start_container_with_ports(
-        name,
-        {443: http_port, **mail_ports},
-        env={
-            "FAUNA_CLAIM_CODE": CLAIM_CODE,
-            "FAUNA_PORT": "3000",
-        },
-        add_hosts={"host.docker.internal": "host-gateway"},
-    )
-    try:
-        wait_for_health(http_port, name)
-        admin = claim_admin_api(http_port, CLAIM_CODE, handle="admin")
-        nest = {
-            "name": name,
-            "port": http_port,
-            "url": f"https://127.0.0.1:{http_port}",
-            "admin": admin,
-            "mail_ports": mail_ports,
-        }
-        register_primary_domain(nest, DOMAIN)
-        # Fully relax the spam perimeter: this PROVES relay denial is independent
-        # of it — even with dnsbl/greylist/fcrdns off, RCPT to an external domain
-        # is still rejected. (Also lets the loopback peer past the connect-time
-        # DNSBL that would otherwise 550 a 127.0.0.1 reverse before RCPT.)
-        relax_spam_policy(nest)
+    # Mail enable needs content scanners beside the nest (a box with none refuses
+    # `set_mail_enabled(true)` with `mail_unavailable_here`); the scanners are never
+    # reached because both tests reject before DATA.
+    with scanner_wired_network("fauna-mail-security") as (network, scan_env):
+        start_container_with_ports(
+            name,
+            {443: http_port, **mail_ports},
+            env={
+                "FAUNA_CLAIM_CODE": CLAIM_CODE,
+                "FAUNA_PORT": "3000",
+                **scan_env,
+            },
+            add_hosts={"host.docker.internal": "host-gateway"},
+            network=network,
+        )
         try:
-            bring_bridges_to_serving(name, nest, mail_ports, DOMAIN)
-        except (AssertionError, TimeoutError) as e:
-            raise AssertionError(
-                f"{e}\n\n── bridge diagnostics ──\n{bridge_diag(name)}") from e
-        yield nest
-    finally:
-        remove_container(name)
+            wait_for_health(http_port, name)
+            admin = claim_admin_api(http_port, CLAIM_CODE, handle="admin")
+            nest = {
+                "name": name,
+                "port": http_port,
+                "url": f"https://127.0.0.1:{http_port}",
+                "admin": admin,
+                "mail_ports": mail_ports,
+            }
+            register_primary_domain(nest, DOMAIN)
+            # Fully relax the spam perimeter: this PROVES relay denial is independent
+            # of it — even with dnsbl/greylist/fcrdns off, RCPT to an external domain
+            # is still rejected. (Also lets the loopback peer past the connect-time
+            # DNSBL that would otherwise 550 a 127.0.0.1 reverse before RCPT.)
+            relax_spam_policy(nest)
+            try:
+                bring_bridges_to_serving(name, nest, mail_ports, DOMAIN)
+            except (AssertionError, TimeoutError) as e:
+                raise AssertionError(
+                    f"{e}\n\n── bridge diagnostics ──\n{bridge_diag(name)}") from e
+            yield nest
+        finally:
+            remove_container(name)
 
 
 # ── Tests ──────────────────────────────────────────────────────────────
@@ -239,6 +247,8 @@ def spoofing_nest(docker_image):
     suffix = find_free_port()  # unique token for network + sidecar names
     network = f"fauna-spoof-net-{suffix}"
     dns_name = f"fauna-spoof-dns-{suffix}"
+    clamd_name = f"fauna-spoof-clamd-{suffix}"
+    rspamd_name = f"fauna-spoof-rspamd-{suffix}"
     fakes_dir = str(get_repo_root() / "tests" / "e2e-unified" / "fakes")
     http_port, *mail = find_free_ports(5)
     mail_ports = dict(zip((25, 465, 587, 993), mail))  # container_port -> host_port
@@ -255,12 +265,18 @@ def spoofing_nest(docker_image):
                 SPOOF_DOMAIN: "v=spf1 -all",
             },
         )
+        # Mail enable needs scanners wired (else `mail_unavailable_here`); the DMARC
+        # reject fires before the scan gate, so they are never consulted.
+        scan = start_fake_scanner_sidecars(
+            network, fakes_dir, clamd_name=clamd_name, rspamd_name=rspamd_name)
         start_container_with_ports(
             name,
             {443: http_port, **mail_ports},
             env={
                 "FAUNA_CLAIM_CODE": SPOOF_CLAIM_CODE,
                 "FAUNA_PORT": "3000",
+                "FAUNA_CLAMD_ADDR": scan["clamd_addr"],
+                "FAUNA_RSPAMD_URL": scan["rspamd_url"],
             },
             network=network,
             dns=dns_ip,
@@ -280,6 +296,8 @@ def spoofing_nest(docker_image):
             remove_container(name)
     finally:
         remove_container(dns_name)
+        remove_container(clamd_name)
+        remove_container(rspamd_name)
         remove_network(network)
 
 

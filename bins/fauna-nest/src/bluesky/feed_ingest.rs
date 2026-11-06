@@ -520,6 +520,28 @@ mod tests {
         let undone = rows(viewer).await;
         assert!(!undone[0].viewer_liked, "unlike clears the projection");
         assert_eq!(undone[0].viewer_repost_id, None, "unrepost clears it too");
+
+        // A `react` link naming the Bluesky row projects no tally: its
+        // counters live at the origin (`feed.md` § Layout & flow → *Reaction
+        // posts count and paint*, ruling 5).
+        {
+            let conn = state.db.conn().await;
+            crate::db::links::insert_link(
+                &conn,
+                "react",
+                Some([5u8; 32].as_slice()),
+                Some(target.as_slice()),
+                Some(viewer.as_slice()),
+                Some("❤️"),
+                None,
+                0,
+            )
+            .unwrap();
+        }
+        assert!(
+            rows(viewer).await[0].reactions.is_empty(),
+            "a bluesky row carries no reaction tally"
+        );
     }
 
     /// Ruling 3: a parent the page carries (listed first by the shared

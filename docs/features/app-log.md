@@ -42,25 +42,25 @@ Stamped 2026-10-21 at 77c610862e.
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ⚠ partial | 0.1.5-dev+110d1248 standalone |
-| linux | ⚠ partial | 0.1.4-dev+ea391d07 standalone |
-| windows | ⚠ partial | 0.1.2-dev+6d8dc256.dirty standalone |
-| macos | ⚠ partial | 0.1.2-dev+5893bba8 standalone |
-| ios | ⚠ partial | 0.1.2-dev+5893bba8 standalone |
+| web | ✅ full | 0.1.5-dev+36883152.dirty standalone |
+| linux | ✅ full | 0.1.5-dev+cbd813be standalone |
+| windows | ⚠ partial | 0.1.5-dev+fbba25bc standalone |
+| macos | ✅ full | 0.1.5-dev+03b5332b standalone |
+| ios | ✅ full | 0.1.5-dev+03b5332b standalone |
 | android |  no run recorded | |
-| tui | ⚠ partial | 0.1.3-dev+680a14c2.dirty standalone |
+| tui | ✅ full | 0.1.5-dev+1c323650.dirty standalone |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
-| 1 | app | `tests/e2e-unified/tests/test_settings_logs.py::test_logs_page_renders` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 1 | app | `tests/e2e-unified/tests/test_settings_logs.py::test_logs_level_filter_narrows` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 1 | app | `tests/e2e-unified/tests/test_settings_logs.py::test_logs_copy_and_clear` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 1 | app | `tests/e2e-unified/tests/test_settings_logs.py::test_logs_page_heading_is_visible` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 2 | app | `tests/e2e-unified/tests/test_settings_logs.py::test_displayed_settings_error_is_captured` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 2 | app | `tests/e2e-unified/tests/test_settings_logs.py::test_displayed_banner_reaches_ring` | web (linux): passed, linux (linux): skipped, windows (windows): skipped, macos (macos): failed, ios (macos): failed, tui (linux): skipped |
-| 3 | app | `tests/e2e-unified/tests/test_settings_logs.py::test_a_copied_notice_reaches_the_ring_at_info` | web (linux): failed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
-| 4 | app | `tests/e2e-unified/tests/test_settings_logs.py::test_what_the_app_printed_or_swallowed_reaches_the_ring` | web (linux): failed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
-| 5 | app | `tests/e2e-unified/tests/test_settings_logs.py::test_message_text_never_reaches_the_log` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
-| 6 | app | `tests/e2e-unified/tests/test_settings_logs.py::test_a_relaunch_finds_the_previous_launchs_line_in_the_on_device_file` | linux (linux): passed, tui (linux): passed |
+| 1 | app | `tests/e2e-unified/tests/test_settings_logs.py::test_logs_page_renders` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 1 | app | `tests/e2e-unified/tests/test_settings_logs.py::test_logs_level_filter_narrows` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 1 | app | `tests/e2e-unified/tests/test_settings_logs.py::test_logs_copy_and_clear` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 1 | app | `tests/e2e-unified/tests/test_settings_logs.py::test_logs_page_heading_is_visible` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 2 | app | `tests/e2e-unified/tests/test_settings_logs.py::test_displayed_settings_error_is_captured` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 2 | app | `tests/e2e-unified/tests/test_settings_logs.py::test_displayed_banner_reaches_ring` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 3 | app | `tests/e2e-unified/tests/test_settings_logs.py::test_a_copied_notice_reaches_the_ring_at_info` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 4 | app | `tests/e2e-unified/tests/test_settings_logs.py::test_what_the_app_printed_or_swallowed_reaches_the_ring` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 5 | app | `tests/e2e-unified/tests/test_settings_logs.py::test_message_text_never_reaches_the_log` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 6 | app | `tests/e2e-unified/tests/test_settings_logs.py::test_a_relaunch_finds_the_previous_launchs_line_in_the_on_device_file` — requires `on-device-log-reader` (test harness) (not built: web, windows, android) | web (linux): skipped, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
 | 6 | app | absent by design on web | — |
 <!-- features-render:end -->

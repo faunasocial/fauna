@@ -92,11 +92,11 @@ def _login_as(app, request, nest, user, *, handle: str) -> None:
 @pytest.mark.tui
 @pytest.mark.windows
 @pytest.mark.linux
+@pytest.mark.android
 @pytest.mark.feature("feed-interactions")
 def test_words_under_a_restricted_post_are_refused_and_a_bare_repost_or_quote_still_works(
     app, request, restricted_nest
 ):
-    app.subscriptions.require_sell_post_authoring_supported()
 
     admin_sk = _as_signing_key(restricted_nest["admin"]["signing_key"])
     seller = create_actor_and_register(

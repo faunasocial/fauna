@@ -329,14 +329,15 @@ pub fn update_folder_list(
     }
 
     // Group scopes are sets like any other, so they are `folder-row`s like
-    // any other — appended after the M2 sets, continuing the list. They carry
-    // no per-row body in v1: a group scope has no local seat config to edit
-    // and no name to rename, so what a row owes is exactly what it can
-    // honestly show — the set, and who it is shared with (mirrors tui's
-    // `group_scope_row_elements`).
+    // any other — appended after the M2 sets, continuing the list, each with
+    // the device-local `folder-location-*` binding section under the scope's
+    // `GroupScopeView::folder_id` (`group-set.md` § Build design — the group
+    // set; tui's `group_scope_row_elements` is the same shape).
     #[cfg(feature = "p2p-share")]
     for scope in group_scopes {
-        list_box.append(&build_group_scope_row(scope));
+        let row = build_group_scope_row(scope, fauna_client, location_map);
+        list_box.append(&row);
+        restore_expansion(&row, &expanded_titles);
     }
 
     // The owner rows a `folder-share` route can land on — only the owner
@@ -355,22 +356,42 @@ pub fn update_folder_list(
     apply_pending_share(list_box);
 }
 
-/// One thin, read-only `folder-row` for a shared set this device holds the
-/// machinery for (the co-present ceremony's own listing — `p2p.md` §
-/// Offline share initiation). Not an `ExpanderRow`: toggling would expand a
-/// body this row does not have (no local seat config, no rename, no leave —
-/// severance is the authority's mint, not a self-scoped roster drop,
-/// `account-data-plane.md` § The recipient-set scheme). The set's identity is
-/// its short scope id (nameless in v1), and its `folder-shared-badge` reads
-/// "Shared by ‹them›" on someone else's scope, "Shared · N" on your own —
-/// the same two readings the M2 rows use.
+/// A group set's label on the page: its recorded name, else its short scope id
+/// — the `folder-row` title and the set its review rows name.
 #[cfg(feature = "p2p-share")]
-fn build_group_scope_row(scope: &crate::offline_share::GroupScopeView) -> adw::ActionRow {
-    let row = adw::ActionRow::builder()
-        .title(strings::folders::offline_share_set(&scope.short_id))
-        .build();
+pub(super) fn group_scope_label(scope: &crate::offline_share::GroupScopeView) -> String {
+    scope
+        .name
+        .clone()
+        .unwrap_or_else(|| strings::folders::offline_share_set(&scope.short_id))
+}
+
+/// One `folder-row` for a shared set this device holds the machinery for (the
+/// co-present ceremony's own listing — `p2p.md` § Offline share initiation).
+/// Its body is the device-local folder binding and nothing else: no rename,
+/// no leave — severance is the authority's mint, not a self-scoped roster drop
+/// (`account-data-plane.md` § The recipient-set scheme). A folder bound here
+/// runs an engine with no nest leg, its content moving over the group plane
+/// (`group-set.md` § Build design — the group set). The row reads as the
+/// set's recorded name, else its short scope id; its `folder-shared-badge`
+/// reads "Shared by ‹them›" on someone else's scope, "Shared · N" on your
+/// own — the same two readings the M2 rows use.
+///
+/// The bindings are keyed by the scope's `FolderRef::Group` wire form, never
+/// its label: a name can change and can equal an M2 set's, the ref can do
+/// neither (`GroupScopeView::folder_id`).
+#[cfg(feature = "p2p-share")]
+fn build_group_scope_row(
+    scope: &crate::offline_share::GroupScopeView,
+    fauna_client: &Rc<FaunaClient>,
+    location_map: &Rc<RefCell<Vec<LocationBinding>>>,
+) -> adw::ExpanderRow {
+    let label = group_scope_label(scope);
+    let row = adw::ExpanderRow::builder().title(&label).build();
     set_test_id(&row, ids::FOLDER_ROW);
-    crate::testid::set_test_text(&row, &strings::folders::offline_share_set(&scope.short_id));
+    // Label-only read, as on the member rows: an `ExpanderRow` would otherwise
+    // read back as the join of every descendant label.
+    crate::testid::set_test_text(&row, &label);
 
     let badge = gtk::Label::builder()
         .css_classes(["accent", "caption"])
@@ -381,6 +402,15 @@ fn build_group_scope_row(scope: &crate::offline_share::GroupScopeView) -> adw::A
         .build();
     set_test_id(&badge, SHARED_BADGE_ID);
     row.add_suffix(&badge);
+
+    let folder_id = scope.folder_id();
+    row.add_row(&location_binding::build_location_binding(
+        &folder_id,
+        Some(folder_id.clone()),
+        location_map,
+        fauna_client,
+        None,
+    ));
 
     row
 }
@@ -3007,8 +3037,10 @@ fn unfollow_error_text(e: fauna_client_folders::follow_ops::FollowOpError) -> St
     strings::devices::error_unfollow_failed(&e.to_string())
 }
 
-/// The Folders page's `error-message` plus the follow-family failure it holds —
-/// the page's own slot for a gesture the devices machine never sees.
+/// The Folders page's `error-message` plus the gesture failure it holds — the
+/// page's own slot for a gesture the devices machine never sees: a follow or
+/// unfollow, and a group set's *use the other version*, which runs on the sync
+/// agent (`conflicts::restore_retained_button`).
 ///
 /// A follow or unfollow runs outside [`DevicesMachine`] (the shared `follow_ops`
 /// recipe), so its failure is not in `snapshot().error`, and every snapshot
@@ -3019,12 +3051,12 @@ fn unfollow_error_text(e: fauna_client_folders::follow_ops::FollowOpError) -> St
 /// error until a visit or the next follow gesture replaces it: the lifetime
 /// tui's page slot gives the same failure (`Outcome::FolderAuthorGestureFailed`).
 #[derive(Clone)]
-pub struct FollowErrorSlot {
+pub struct GestureErrorSlot {
     label: gtk::Label,
     held: Rc<RefCell<Option<String>>>,
 }
 
-impl FollowErrorSlot {
+impl GestureErrorSlot {
     pub fn new(label: &gtk::Label) -> Self {
         Self {
             label: label.clone(),
@@ -3040,6 +3072,12 @@ impl FollowErrorSlot {
     /// Drop the held failure — a visit or a new follow gesture replaces it.
     pub fn clear(&self) {
         self.held.borrow_mut().take();
+    }
+
+    /// Set and HOLD an already-worded failure on the page's `error-message`.
+    pub fn hold(&self, text: String) {
+        crate::settings::render_error_label(&self.label, Some(&text));
+        *self.held.borrow_mut() = Some(text);
     }
 
     /// Paint a follow-family outcome onto the page's `error-message`: clear it
@@ -3062,7 +3100,7 @@ impl FollowErrorSlot {
 /// page's `error-message`.
 pub fn unfollow_handler(
     machine: &Arc<DevicesMachine>,
-    error_slot: &FollowErrorSlot,
+    error_slot: &GestureErrorSlot,
 ) -> impl Fn(String, i64) + Clone + 'static {
     let machine = Arc::clone(machine);
     let error_slot = error_slot.clone();
@@ -3100,7 +3138,7 @@ pub fn wire_followed_section(
     section: &FollowedSection,
     machine: &Arc<DevicesMachine>,
     client: &Rc<FaunaClient>,
-    error_slot: &FollowErrorSlot,
+    error_slot: &GestureErrorSlot,
 ) {
     {
         let form = section.form.clone();
@@ -4296,37 +4334,6 @@ fn find_tagged_widget(list_box: &gtk::ListBox, name: &str, tag: &str) -> Option<
     None
 }
 
-/// The `error-message` texts the folder-row reads put up, one slot per (read,
-/// set) — so a later good answer of the same read retires exactly that text and
-/// never a gesture's (`folders.md` § Errors & edge cases; tui's
-/// `PageErrors::retire_own` is the same rule over its own page map).
-///
-/// The rows' device, member, actor and destination reads fire on expand and on
-/// every list rebuild, and a reconnect re-runs them (`StaleSurfaces::devices`).
-/// Without the slot their failure — "the connection to the nest was lost",
-/// painted while the nest is down — stood on the banner after the nest came
-/// back and the same reads answered.
-#[derive(Default)]
-pub struct RowReadErrors(std::collections::HashMap<(&'static str, String), String>);
-
-impl RowReadErrors {
-    /// Remember that `read` for `set` put `message` on the banner.
-    pub fn put(&mut self, read: &'static str, set: &str, message: String) {
-        self.0.insert((read, set.to_owned()), message);
-    }
-
-    /// `read` answered for `set`: forget its error, and answer whether the
-    /// banner — now showing `shown` — should be cleared. Only when it still
-    /// shows that read's own text, and no other row read still owns the same
-    /// text (two open rows failing one read paint identical words).
-    pub fn retire(&mut self, read: &'static str, set: &str, shown: &str) -> bool {
-        let Some(own) = self.0.remove(&(read, set.to_owned())) else {
-            return false;
-        };
-        own == shown && !self.0.values().any(|m| m == shown)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4393,60 +4400,6 @@ mod tests {
             assert!(released.get() && row.is_expanded());
             assert_eq!(clicks.get(), 1);
         });
-    }
-
-    // ── A row read retires only its own banner text ──
-
-    #[test]
-    fn a_good_row_read_retires_the_error_it_put_up() {
-        let mut own = RowReadErrors::default();
-        let lost = "fauna.backup.destination.list: The connection to the nest was lost.";
-        own.put("fauna.backup.destination.list", "Photos", lost.into());
-        assert!(own.retire("fauna.backup.destination.list", "Photos", lost));
-        // Forgotten once retired: a second answer clears nothing.
-        assert!(!own.retire("fauna.backup.destination.list", "Photos", lost));
-    }
-
-    #[test]
-    fn a_good_row_read_leaves_a_gesture_error_standing() {
-        let mut own = RowReadErrors::default();
-        own.put(
-            "fauna.folders.members.list",
-            "Photos",
-            "fauna.folders.members.list: lost".into(),
-        );
-        assert!(!own.retire(
-            "fauna.folders.members.list",
-            "Photos",
-            "Couldn't save the paths."
-        ));
-    }
-
-    #[test]
-    fn a_good_row_read_leaves_another_reads_error_standing() {
-        let mut own = RowReadErrors::default();
-        let members = "fauna.folders.members.list: lost";
-        let places = "fauna.backup.destination.list: lost";
-        own.put("fauna.folders.members.list", "Photos", members.into());
-        own.put("fauna.backup.destination.list", "Photos", places.into());
-        assert!(!own.retire("fauna.folders.members.list", "Photos", places));
-        assert!(own.retire("fauna.backup.destination.list", "Photos", places));
-    }
-
-    #[test]
-    fn a_good_row_read_leaves_the_same_text_another_open_row_still_owns() {
-        let mut own = RowReadErrors::default();
-        let lost = "fauna.folders.devices: lost";
-        own.put("fauna.folders.devices", "Photos", lost.into());
-        own.put("fauna.folders.devices", "Notes", lost.into());
-        assert!(!own.retire("fauna.folders.devices", "Photos", lost));
-        assert!(own.retire("fauna.folders.devices", "Notes", lost));
-    }
-
-    #[test]
-    fn a_read_that_never_failed_clears_nothing() {
-        let mut own = RowReadErrors::default();
-        assert!(!own.retire("fauna.folders.devices", "Photos", ""));
     }
 
     // ── Destination places across a list rebuild (`backup-destinations.md`

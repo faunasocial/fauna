@@ -162,7 +162,7 @@ pub fn edge_verdict(
 /// its `id` — the shared `folder_ref_for_row` with no home nest. A
 /// [`FolderRef::Foreign`] therefore matches nothing here by construction: a
 /// cross-nest set has no row on this nest; its facts are its holder's custody
-/// record.
+/// record. Nor does a [`FolderRef::Group`]: a group set has no nest row at all.
 ///
 /// Matching by identity is the whole point: two sets can share a name, and the
 /// by-name lookup this replaced would have bound whichever row the list carried
@@ -171,7 +171,7 @@ pub fn edge_verdict(
 pub fn summary_for_ref(list: &[FolderSummary], folder_ref: FolderRef) -> Option<&FolderSummary> {
     match folder_ref {
         FolderRef::Local(id) => list.iter().find(|fs| fs.id == id),
-        FolderRef::Foreign(_) => None,
+        FolderRef::Foreign(_) | FolderRef::Group(_) => None,
     }
 }
 
@@ -432,6 +432,7 @@ mod tests {
             "same-named rows are told apart by id"
         );
         assert!(summary_for_ref(&list, FolderRef::Foreign([2; 32])).is_none());
+        assert!(summary_for_ref(&list, FolderRef::Group([2; 32])).is_none());
     }
 
     #[test]

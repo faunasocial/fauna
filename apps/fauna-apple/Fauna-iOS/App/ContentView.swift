@@ -5,6 +5,48 @@ struct ContentView: View {
     @Environment(AppState.self) private var appState
     let onboardingVM: OnboardingVM
 
+    /// The Fauna Kids refusal of an account that is not supervised; always
+    /// `false` outside the kids target, so the other builds never reach the gate.
+    private var kidsIneligible: Bool {
+        #if FAUNA_KIDS
+        appState.familyStatus.kidsEligible == false
+        #else
+        false
+        #endif
+    }
+
+    /// The `nest_retire` entry in flight — always `nil` in the Fauna Kids build,
+    /// which compiles the retire surface out with the rest of nest setup.
+    private var retiring: RetireEntry? {
+        #if FAUNA_KIDS
+        nil
+        #else
+        appState.retiring
+        #endif
+    }
+
+    /// `launch-retire-button`'s act — `nil` in the Fauna Kids build, which hides
+    /// the button with the rest of nest setup.
+    private var retireFromLaunch: (() -> Void)? {
+        #if FAUNA_KIDS
+        nil
+        #else
+        { appState.onRetireFromLaunch?() }
+        #endif
+    }
+
+    @ViewBuilder
+    private var retirePage: some View {
+        #if !FAUNA_KIDS
+        if let vm = appState.retireVM {
+            NestRetireView(vm: vm) { sessionDropped in
+                appState.retiring = nil
+                if sessionDropped { appState.onRetireDroppedSession?() }
+            }
+        }
+        #endif
+    }
+
     var body: some View {
         if let changed = appState.identityChanged {
             // BLOCKING: the nest's pinned deployment identity changed, or a pinned nest
@@ -20,6 +62,7 @@ struct ContentView: View {
             LaunchIdentityChangedView(
                 pinnedHex: changed.pinnedHex,
                 seenHex: changed.seenHex,
+                isFork: changed.isFork,
                 onTrust: { appState.onTrustNestIdentity?() },
                 onUseDifferentNest: { appState.onUseDifferentNest?() }
             )
@@ -39,6 +82,16 @@ struct ContentView: View {
                 onStartOver: { appState.onAccountIndexStartOver?() },
                 onConfirmStartOver: { appState.onAccountIndexConfirmStartOver?() }
             )
+        } else if let model = appState.accountLocked {
+            // The account is locked (the machine's terminal `Offline{transient:false}`
+            // carrying `locked_until_secs`): `launch_account_locked` and its
+            // `identity_stolen_entry` step. NO retry, NO fallthrough
+            // (ui/sessions.md § The locked surface). Ahead of the generic
+            // needs-update surface, which would paint a dead end over it.
+            // Shared FaunaKit view, also used by macOS (priority #2).
+            LaunchAccountLockedView(model: model) { successor in
+                try? await appState.onSwitchAccount?(successor, false)
+            }
         } else if let message = appState.signInRefusedMessage {
             // The saved nest no longer signs this identity in (the machine's
             // terminal `Offline{transient:false}` carrying `sign_in_refused`):
@@ -61,8 +114,43 @@ struct ContentView: View {
                 message: message,
                 onUseDifferentNest: { appState.onUseDifferentNest?() }
             )
+        } else if appState.launchPending {
+            // The launch verdict is still out and the optimistic entry did not
+            // enter (`AppState.launchPending`): neither the wizard's default
+            // `identity_choice` nor the tabs are known to be right yet. The
+            // shared FaunaKit `launch_progress` spinner, as macOS (priority #2).
+            LaunchProgressView()
+        } else if retiring != nil {
+            // `nest_retire` takes the shell over in place, as the wizard host does
+            // (`nest-retirement.md` § Layout & flow) — over `launch_retry` (no
+            // session, so ahead of the wizard below) or the live admin session.
+            retirePage
+        } else if let error = appState.launchRetryError {
+            // `launch_retry`: a transient verdict on a launch that entered no
+            // session, or an entered one left because its nest may be lost
+            // (`AppState.launchRetryError`). Without it the wizard's default
+            // `identity_choice` paints over the identity the store holds. Shared
+            // FaunaKit view, also used by macOS (priority #2).
+            LaunchRetryView(
+                error: error,
+                onRetry: { appState.onRetryLaunch?() },
+                onUseDifferentNest: { appState.onUseDifferentNest?() },
+                loadRecoverableBoxes: { await RecoverableBoxes.loadForServedAccount() },
+                onRecover: { appState.onRecoverFromLaunch?($0) },
+                onRetire: retireFromLaunch)
         } else if appState.isOnboarding {
             WelcomeView(vm: onboardingVM)
+        } else if kidsIneligible {
+            // The Fauna Kids build refuses an account that is not supervised
+            // (`account-age-band.md` § The account age band, kids-app bullet,
+            // item (3)): one explanatory surface with a sign-out replaces the
+            // whole shell. The verdict is the shared `kidsAppEligible`, re-read
+            // with every family status read (`MainTabView`'s refreshes), so a
+            // graduated account lands here at its next read. Android twin:
+            // `KidsIneligibleScreen`.
+            #if FAUNA_KIDS
+            KidsIneligibleGate()
+            #endif
         } else if appState.inAdmin {
             // Admin is a top-level nav peer, not nested under Settings: the shell
             // shows in place of the main TabView and `admin-nav-back` exits to the
@@ -75,6 +163,28 @@ struct ContentView: View {
         }
     }
 }
+
+#if FAUNA_KIDS
+/// Mounts FaunaKit's `KidsIneligibleView` with the iOS sign-out re-root, the
+/// same one Settings → Account runs (`SettingsView`'s `onAccountReset`).
+private struct KidsIneligibleGate: View {
+    @Environment(AppState.self) private var appState
+    @State private var watchManager = IOSWatchConnectivityManager()
+
+    var body: some View {
+        KidsIneligibleView(session: appState.session) {
+            appState.onSignOut?()
+            watchManager.sendSignOut()
+            appState.isOnboarding = true
+            // The gate replaced `MainTabView`, whose refresh would have dropped the
+            // departing account's verdict: clear it here so the next sign-in starts
+            // from "no read yet", not a stale refusal.
+            Task { @MainActor in await appState.familyStatus.refresh(api: nil) }
+        }
+        .task { watchManager.activate() }
+    }
+}
+#endif
 
 /// The global chrome `ui.yaml`'s `global` section mandates on **every
 /// authenticated page** — `critical-alerts`, `connection-status` and
@@ -132,6 +242,15 @@ private struct GlobalChrome: ViewModifier {
                 // tap-to-dismiss.
                 RecoveryCustodyBanner(session: appState.session)
                 ConnectionStatusBar(client: client)
+                // The one-line changed-rules notice (nest-rules.md § Acceptance
+                // at joining, and a change of rules): names the nest; a tap opens
+                // Settings → Status, whose rules surface clears it.
+                NestRulesChangedNotice(nestRules: appState.region.nestRules) {
+                    appState.inAdmin = false
+                    appState.selectedTab = "more"
+                    appState.moreSelectedView = "settings"
+                    appState.selectedSettingsPage = .status
+                }
                 // The global `supervised-indicator` (family-safety.md § App
                 // surface — permanent, non-dismissable chrome on every page for
                 // a supervised account). Tapping it opens the Family page in the
@@ -188,6 +307,13 @@ struct MainTabView: View {
                 .tag("more")
         }
         .accessibilityIdentifier(Ids.mainTabView)
+        // A `dm-message-withheld-badge` tap opens the Moderation page (a More entry);
+        // the queue reads itself and opens the appeal draft (`PendingAppealStore`).
+        .onReceive(NotificationCenter.default.publisher(for: .faunaOpenModerationAppeal)) { _ in
+            appState.inAdmin = false
+            appState.selectedTab = "more"
+            appState.moreSelectedView = "moderation"
+        }
         // Presence marker: the authenticated-root container many tests assert via
         // is_visible("main-tab-view") to confirm "logged in / on the main UI"
         // (iOS-only; desktop checks feed visibility instead).
@@ -343,7 +469,7 @@ struct MainTabView: View {
         // local-index attach (mirrors macOS — the first attempt inside `configure`
         // can race the login-time `conversationsSession` build).
         .onReconnect {
-            await refreshAdminStatus()
+            await refreshAdminStatus(keepingLastAnswer: true)
             await appState.familyStatus.refresh(api: client?.api)
             await appState.contentPolicy.refresh(api: client?.api)
             await appState.region.refresh(api: client?.api)
@@ -376,8 +502,11 @@ struct MainTabView: View {
     /// the Account page is already rendering the pre-write row. Rooting it also
     /// makes `appState.isAdmin` resolve on every launch instead of only for a user
     /// who happens to open Settings.
-    private func refreshAdminStatus() async {
-        appState.isAdmin = await FaunaClient.refreshAdminStatus(client: client)
+    /// `keepingLastAnswer` is the reconnect re-read: a failed read moves nothing.
+    /// The login/identity read starts from "not admin".
+    private func refreshAdminStatus(keepingLastAnswer: Bool = false) async {
+        appState.isAdmin = await FaunaClient.refreshAdminStatus(
+            client: client, lastAnswer: keepingLastAnswer && appState.isAdmin)
     }
 
     #if !FAUNA_KIDS
@@ -441,8 +570,92 @@ struct MoreView: View {
         .init(id: "settings", label: L.common.settings, icon: "gearshape"),
     ]
 
+    /// The stack's path while Settings is its content — derived from
+    /// `selectedSettingsPage`: empty on the Settings root (the page list),
+    /// `[page]` on a sub-page. A computed binding (not `@State`) keeps
+    /// `selectedSettingsPage` the single source of truth — a human tapping a
+    /// `NavigationLink(value:)` appends to the path (→ `selectedSettingsPage`
+    /// set); the system back pops it (→ `nil`); a jump setting
+    /// `selectedSettingsPage` (the e2e state protocol, the feed card's "New
+    /// trained topic…") makes the getter return `[page]` so the stack pushes
+    /// it. Mirrors `AdminShellView.path`.
+    ///
+    /// ONE stack: `SettingsView` is this stack's root, not a stack of its own.
+    /// It used to nest its own `NavigationStack` in this one, and a jump that
+    /// brought it on screen and named a sub-page in one transaction — the More
+    /// tab re-selected, or More's content swapped to Settings — was pushed and
+    /// then written back to `[]`, landing on the Settings root (witnessed
+    /// 2026-10-28: `devices → nil` before `DevicesView` built its machine; the
+    /// Personalization jump on a re-visit). The path still reads empty until a
+    /// swapped-in Settings root has mounted, so the sub-page is pushed a beat
+    /// later, through the destination that root declares.
+    ///
+    /// A write that drops the selected page before it has settled on screen
+    /// — it never appeared, or appeared inside the push transition
+    /// (`settingsPushSettle`) — is the stack refusing the push, not a human's
+    /// back: nobody can pop a page that is not yet on screen. It is not taken;
+    /// the push is issued again a beat later, a bounded number of times
+    /// (`settingsReseedsLeft`). Traced 2026-10-28: right after a swapped-in
+    /// root mounts, the stack fires the page's `onAppear` and then writes `[]`
+    /// back 10–30 ms later (3 jumps in ~60 under load); each re-push landed.
+    private var settingsPath: Binding<[SettingsPage]> {
+        Binding(
+            get: {
+                guard appState.moreSelectedView == "settings", appState.settingsRootMounted else { return [] }
+                return appState.selectedSettingsPage.map { [$0] } ?? []
+            },
+            set: { newPath in
+                guard appState.moreSelectedView == "settings", appState.settingsRootMounted else { return }
+                if let page = appState.selectedSettingsPage, newPath.last != page,
+                   page != appearedSettingsPage || !settingsPageSettled, settingsReseedsLeft > 0 {
+                    settingsReseedsLeft -= 1
+                    appState.settingsReseedGeneration += 1
+                    appState.settingsRootMounted = false
+                    Task { appState.settingsRootMounted = true }
+                    return
+                }
+                if newPath.isEmpty {
+                    appearedSettingsPage = nil
+                    appearedSettingsPageAt = nil
+                    settingsReseedsLeft = Self.settingsReseeds
+                }
+                appState.selectedSettingsPage = newPath.last
+            }
+        )
+    }
+
+    /// The Settings sub-page last seen on screen, and when (`settingsPath`).
+    @State private var appearedSettingsPage: SettingsPage?
+    @State private var appearedSettingsPageAt: ContinuousClock.Instant?
+    /// How long a pushed page stays unpoppable by a human: UIKit ignores
+    /// touches while the push transition (~0.35 s) runs, so a pop inside
+    /// this window is the stack's own write-back.
+    private static let settingsPushSettle: Duration = .milliseconds(600)
+    private var settingsPageSettled: Bool {
+        guard let at = appearedSettingsPageAt else { return false }
+        return ContinuousClock.now - at >= Self.settingsPushSettle
+    }
+    /// Re-pushes left for a refused push; refilled by a fresh root or a taken pop.
+    @State private var settingsReseedsLeft = Self.settingsReseeds
+    private static let settingsReseeds = 3
+
+    /// A Settings root has mounted as this stack's content: release the path
+    /// (`AppState.settingsRootMounted`, which every assignment away from
+    /// Settings clears) and forget the old root's pages.
+    private func settingsRootDidMount() {
+        appearedSettingsPage = nil
+        appearedSettingsPageAt = nil
+        settingsReseedsLeft = Self.settingsReseeds
+        appState.settingsRootMounted = true
+    }
+
+    private func settingsPageAppeared(_ page: SettingsPage) {
+        appearedSettingsPage = page
+        appearedSettingsPageAt = .now
+    }
+
     var body: some View {
-        NavigationStack {
+        NavigationStack(path: settingsPath) {
             if let selected = appState.moreSelectedView {
                 moreDestination(selected)
                     .toolbar {
@@ -457,22 +670,34 @@ struct MoreView: View {
             } else {
                 List(Self.items) { item in
                     Button {
-                        // Entering Settings starts at the root list, not a stale
-                        // sub-page from a previous visit.
-                        if item.id == "settings" { appState.selectedSettingsPage = nil }
-                        // The More-list profile row opens the viewer's OWN profile
-                        // (a contact-row tap sets profileActorId for another's).
-                        if item.id == "profile" { appState.profileActorId = nil }
-                        appState.moreSelectedView = item.id
+                        open(item)
                     } label: {
                         Label(item.label, systemImage: item.icon)
                     }
                     .accessibilityIdentifier("\(item.id)-tab")
+                    // Registered with the in-process driver (an identifier alone is
+                    // invisible to it), so a gesture-bound test reaches
+                    // `settings-tab` etc. through `more-tab` the way a human does.
+                    .automationActivate("\(item.id)-tab") { open(item) }
                 }
                 .navigationTitle(L.common.more)
                 .accessibilityIdentifier(Ids.moreView)
             }
         }
+    }
+
+    /// Open a More-list row (shared by its `Button` and its `automationActivate`).
+    private func open(_ item: MoreItem) {
+        // Entering Settings starts at the root list, not a stale
+        // sub-page from a previous visit.
+        if item.id == "settings" { appState.selectedSettingsPage = nil }
+        // The More-list profile row opens the viewer's OWN profile
+        // (a contact-row tap sets profileActorId for another's).
+        if item.id == "profile" {
+            appState.profileActorId = nil
+            appState.profileHome = nil
+        }
+        appState.moreSelectedView = item.id
     }
 
     /// Real "leave the More sub-view" action (drop the sub-view and any stale
@@ -490,11 +715,24 @@ struct MoreView: View {
         case "profile": ProfileView(
                 session: appState.session,
                 actorId: appState.profileActorId,
+                homeNestUrl: appState.profileHome,
                 onStartDm: { actorIdHex in
                     // Seed the new-thread composer (shared FaunaKit) then switch to
                     // the Conversations tab (mirrors linux start_dm).
                     conversationsVM.startDirectMessage(actorIdHex: actorIdHex)
                     appState.selectedTab = "conversations"
+                },
+                postCardAppState: appState,
+                onOpenFeed: { appState.selectedTab = "feed" },
+                onNavigateToPersonalization: {
+                    // Settings lives under the "more" tab on iOS (the feed
+                    // card's own jump, `FeedListView`). The Fauna Kids build has
+                    // no personalization page — and no Posts tab to jump from.
+                    #if !FAUNA_KIDS
+                    appState.selectedSettingsPage = .personalization
+                    appState.moreSelectedView = "settings"
+                    appState.selectedTab = "more"
+                    #endif
                 }
             )
         // `reloadToken` (the Media/Devices idiom): a nav patch targeting events
@@ -522,7 +760,8 @@ struct MoreView: View {
         // but it lives in the More stack so the cross-app `{"view":"family"}`
         // nav lands it. `navGeneration` makes a re-navigation refetch.
         case "family": FamilyView(reloadToken: appState.navGeneration).pageTitle(L.family.title)
-        case "settings": SettingsView()
+        case "settings": SettingsView(rootMounted: settingsRootDidMount,
+                                      pageAppeared: settingsPageAppeared)
         default: Text("Unknown: \(viewId)")
         }
     }

@@ -37,7 +37,6 @@ import secrets
 
 import pytest
 
-from helpers.app_surface import app_name, declared_absence, skip_unbuilt
 from helpers.labeler_publish import FIXTURES, publish_wasm_labeler
 from helpers.room_seats import (  # noqa: F401 — room_app is a pytest fixture adopted by import
     MEMBERSHIP_BUDGET_S,
@@ -71,6 +70,7 @@ pytestmark = [
     pytest.mark.linux,
     pytest.mark.macos,
     pytest.mark.ios,
+    pytest.mark.windows,
 ]
 
 CROSSING_BUDGET_S = WELCOME_BUDGET_S
@@ -110,6 +110,7 @@ def _founded_room(seat):
     return None
 
 
+@pytest.mark.android
 @pytest.mark.feature("group-conversations")
 def test_a_member_of_another_nest_joins_a_community_room_through_the_relay(
     cross_nest_room_seats, cross_nest_foreign_ephemeral
@@ -211,6 +212,7 @@ def test_a_member_of_another_nest_joins_a_community_room_through_the_relay(
     )
 
 
+@pytest.mark.android
 @pytest.mark.feature("group-conversations")
 @pytest.mark.feature("room-restricted-posts")
 def test_a_member_of_another_nest_searches_the_room_and_opens_a_room_post_through_the_relay(
@@ -253,13 +255,6 @@ def test_a_member_of_another_nest_searches_the_room_and_opens_a_room_post_throug
     Latency-independent (convention 14): every wait is a deadline poll over
     a painted row, the detail body or ``error-message``."""
     founder, member = cross_nest_room_seats
-    if app_name(member.app.driver) == "windows":
-        skip_unbuilt(
-            member.app.driver,
-            surface="room-search-button (the room's search strip)",
-            detail="windows follows in its trickle-down",
-            tracked="behavior/room-search.md § Implementation status today",
-        )
     away = cross_nest_foreign_ephemeral
     labeler = publish_wasm_labeler(
         run_seal_helper, cross_nest_foreign, FIXTURES / "room_commercial_labeler.wat"
@@ -359,15 +354,9 @@ def test_a_member_of_another_nest_searches_the_room_and_opens_a_room_post_throug
     )
 
     # ── The sealed words open, fetched from the room's home over the pin. ─
-    if app_name(member.app.driver) == "web":
-        # A browser's fetch is WebPKI-only and holds no pin; these fixtures'
-        # home serves the self-signed floor, so web's byte leg is the declared
-        # browser residual — never a silent pass (the surface above ran).
-        declared_absence(
-            member.app.driver,
-            capability="a pinned byte plane for a self-signed foreign home",
-            doc="architecture/transport-trust.md § The post arm → Implementation status today",
-        )
+    # A browser holds no pin; the harness's `ignore_https_errors` lets web's
+    # direct fetch through, so on web this witnesses the home pick and the fetch
+    # (`transport-trust.md` § The post arm, *The witness splits the mile*).
     wait_for(
         "the post detail unsealing the room post's words from its home nest",
         member.app.feed.post_detail_body,

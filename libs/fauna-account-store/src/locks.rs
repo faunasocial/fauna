@@ -15,7 +15,7 @@
 //! | [`SeedLegLock`] | the **seed-leg role** — one seed-holding process runs the legs only a signed-in app can run (escrow recovery, the linked-nest secondary leg), in its pass when it also pumps and in a seed pass beside a seedless engine holder | **try**-acquire, held for the role's lifetime; a seedless process never asks |
 //! | [`MigrationLock`] (W5.3) | **schema migration/adoption** at store open | **blocking** acquire, held only across the section |
 //! | [`ServingLock`] | **presence, not exclusion** — "an app instance is serving this account out of this root" | **shared** for a serving instance's lifetime; a momentary **exclusive try** is the erase's question |
-//! | [`AgentPresenceLock`] | **presence, not exclusion** — "the sync agent hosts this store", which gives it the engine role over any app | **exclusive, blocking** for the agent mount's lifetime; a momentary **shared try** is a seed-holding app's question — [`ServingLock`]'s sides swapped |
+//! | [`AgentPresenceLock`] | **presence, not exclusion** — "the sync agent hosts this store", which gives it the engine role over any app | **exclusive**, waiting out the probes up to a deadline, for the agent mount's lifetime; a momentary **shared try** is a seed-holding app's question — [`ServingLock`]'s sides swapped |
 //!
 //! So the count of exclusive sections is unchanged by the last two rows: three
 //! in the store, and the conversations-engine role outside it. The serving lock
@@ -72,8 +72,19 @@
 
 use std::fs::File;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
+pub use crate::lock_outcome::LockOutcome;
 use crate::store::{agent_lock_path, engine_lock_path, migration_lock_path, seed_legs_lock_path};
+
+/// How long [`AgentPresenceLock::acquire`] waits for the shared holders of
+/// `agent.lock` to let go before it degrades. Every legitimate shared holder
+/// is an app's probe, held for one `try_lock_shared`; two seconds is that
+/// instant many times over, and short beside the agent's mount.
+pub const AGENT_PRESENCE_ACQUIRE_DEADLINE: Duration = Duration::from_secs(2);
+
+/// The acquire's re-try interval while a probe holds the file.
+const AGENT_PRESENCE_RETRY: Duration = Duration::from_millis(10);
 
 /// The serving lock's path for one actor —
 /// `<store root>/serving-<actor-id-hex>.lock`, reserved at the store **root**
@@ -96,20 +107,8 @@ pub fn serving_lock_path(store_root: &Path, actor_id_hex: &str) -> anyhow::Resul
     Ok(store_root.join(format!("serving-{}.lock", scope.display())))
 }
 
-/// Result of [`EngineLock::try_acquire`].
-#[derive(Debug)]
-pub enum EngineLockOutcome {
-    /// This process now holds the engine-singleton role; the lock releases
-    /// when the value drops (or the process dies).
-    Held(EngineLock),
-    /// Another live open file description holds the role — usually another
-    /// process, possibly another runtime in this one. Run as a plain
-    /// reader/writer and re-try on the backstop cadence.
-    Refused,
-    /// The lock could not be taken for a reason other than a live holder.
-    /// The caller owns what this means (see module docs).
-    Degraded(std::io::Error),
-}
+/// Result of [`EngineLock::try_acquire`] — [`LockOutcome`] over the held role.
+pub type EngineLockOutcome = LockOutcome<EngineLock>;
 
 /// Held engine-singleton election lock; RAII — dropping releases.
 #[derive(Debug)]
@@ -136,21 +135,8 @@ impl EngineLock {
     }
 }
 
-/// Result of [`SeedLegLock::try_acquire`] — [`EngineLockOutcome`]'s arms, for
-/// the store's other role.
-#[derive(Debug)]
-pub enum SeedLegLockOutcome {
-    /// This process now holds the seed-leg role; the lock releases when the
-    /// value drops (or the process dies).
-    Held(SeedLegLock),
-    /// Another live open file description holds the role — another
-    /// seed-holding process, or another runtime in this one. Run no seed-only
-    /// leg and re-try on the backstop cadence.
-    Refused,
-    /// The lock could not be taken for a reason other than a live holder.
-    /// The caller owns what this means (see module docs).
-    Degraded(std::io::Error),
-}
+/// Result of [`SeedLegLock::try_acquire`] — [`LockOutcome`] over the held role.
+pub type SeedLegLockOutcome = LockOutcome<SeedLegLock>;
 
 /// Held seed-leg role lock; RAII — dropping releases.
 #[derive(Debug)]
@@ -341,21 +327,50 @@ impl AgentPresenceLock {
     /// its engine election; a seedless runtime never takes it itself — its
     /// host does.
     ///
-    /// An **exclusive blocking** acquire, and the wait is bounded by
-    /// construction: the agent is single-instance per user, so no second
-    /// exclusive taker exists, and every other taker is [`Self::is_present`],
-    /// which holds a shared lock for the length of one `try_lock_shared`. A
-    /// `try` here would instead read a probe's instant as "another agent" —
-    /// the race the blocking acquire exists to close ([`ServingLock::acquire`]
-    /// with the sides swapped).
+    /// An **exclusive** acquire that waits out the apps' probes, **within
+    /// [`AGENT_PRESENCE_ACQUIRE_DEADLINE`]**. Every legitimate other taker is
+    /// [`Self::is_present`], which holds a shared lock for the length of one
+    /// `try_lock_shared`, and the agent is single-instance per user, so the
+    /// wait is normally one probe's instant. A single `try` would instead read
+    /// that instant as "another agent" — the race the waiting acquire exists to
+    /// close ([`ServingLock::acquire`] with the sides swapped). But a shared
+    /// holder that lingers (a stuck probe, another descriptor on the file) must
+    /// not stall the agent's mount for ever: past the deadline the acquire
+    /// answers [`AgentPresenceLockOutcome::Degraded`] (`TimedOut`), and the
+    /// agent mounts without presence — the election's own degrade.
+    ///
+    /// Blocking for at most the deadline: an async caller runs it on a
+    /// blocking thread.
     pub fn acquire(store_dir: &Path) -> AgentPresenceLockOutcome {
+        Self::acquire_within(store_dir, AGENT_PRESENCE_ACQUIRE_DEADLINE)
+    }
+
+    /// [`Self::acquire`] with its deadline named — the seam the bound's pin
+    /// drives with a short one.
+    pub fn acquire_within(store_dir: &Path, deadline: Duration) -> AgentPresenceLockOutcome {
         let file = match open_lock_file(store_dir, &agent_lock_path(store_dir)) {
             Ok(f) => f,
             Err(e) => return AgentPresenceLockOutcome::Degraded(e),
         };
-        match file.lock() {
-            Ok(()) => AgentPresenceLockOutcome::Held(Self { _file: file }),
-            Err(e) => AgentPresenceLockOutcome::Degraded(e),
+        let started = Instant::now();
+        loop {
+            match file.try_lock() {
+                Ok(()) => return AgentPresenceLockOutcome::Held(Self { _file: file }),
+                Err(std::fs::TryLockError::WouldBlock) => {}
+                Err(std::fs::TryLockError::Error(e)) => {
+                    return AgentPresenceLockOutcome::Degraded(e);
+                }
+            }
+            if started.elapsed() >= deadline {
+                return AgentPresenceLockOutcome::Degraded(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    format!(
+                        "agent.lock still held shared after {} ms",
+                        deadline.as_millis()
+                    ),
+                ));
+            }
+            std::thread::sleep(AGENT_PRESENCE_RETRY);
         }
     }
 
@@ -733,6 +748,35 @@ mod tests {
         about_to_block_rx.recv().unwrap();
         drop(probe);
         let _held = waiter.join().expect("the agent acquires after the probe");
+    }
+
+    /// **The wait is bounded**: a shared holder that never
+    /// lets go — another descriptor on `agent.lock` — makes the acquire give up
+    /// at its deadline with `TimedOut` instead of stalling the agent's mount,
+    /// and the lock is takeable again once that holder is gone.
+    #[test]
+    fn the_agent_acquire_gives_up_at_its_deadline_on_a_lingering_shared_holder() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store_dir = tmp.path().join("store");
+
+        let lingering = fauna_core::fs_lock::open_lock_file(&agent_lock_path(&store_dir)).unwrap();
+        lingering.lock_shared().unwrap();
+        let deadline = Duration::from_millis(200);
+        let started = Instant::now();
+        match AgentPresenceLock::acquire_within(&store_dir, deadline) {
+            AgentPresenceLockOutcome::Degraded(e) => {
+                assert_eq!(e.kind(), std::io::ErrorKind::TimedOut, "{e}");
+            }
+            other => panic!("a lingering shared holder must time the acquire out: {other:?}"),
+        }
+        let waited = started.elapsed();
+        assert!(waited >= deadline, "it waited the deadline out: {waited:?}");
+        assert!(
+            waited < Duration::from_secs(10),
+            "and gave up near it: {waited:?}"
+        );
+        drop(lingering);
+        let _held = agent(AgentPresenceLock::acquire(&store_dir));
     }
 
     /// The reserved name, independent of every other lock, never deleted. The

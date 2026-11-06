@@ -35,6 +35,20 @@ def _isolate_seed_ledger(request, monkeypatch, tmp_path):
         )
 
 
+@pytest.fixture(autouse=True)
+def _isolate_prebuild_timings(monkeypatch, tmp_path):
+    """The prebuild timings record (helpers/prebuild_donor.py) is a module
+    constant every `_run_prebuild_jobs` call appends to: redirected for every
+    test, so a fake builder's wall never reaches the real
+    `~/.cache/fauna-e2e-prebuild-timings.jsonl` and a real one never colours a
+    test's estimate."""
+    from helpers import prebuild_donor
+
+    monkeypatch.setattr(
+        prebuild_donor, "PREBUILD_TIMINGS_LOG", str(tmp_path / "prebuild-timings.jsonl")
+    )
+
+
 #: What a granted acquire_slot exports into its holder's environment and every
 #: descendant inherits (build-slot-pool.md § Build/e2e slot locks): the held
 #: marker, the slot index, the fenced cpu list, the core figure and win's job

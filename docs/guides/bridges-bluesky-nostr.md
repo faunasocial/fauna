@@ -55,8 +55,7 @@ nest a session, and from then on **your nest is your Bluesky client**:
 - **Cross-posting** is a setting with three positions: off (the default), every
   public post you write automatically, or manual — only the public posts you tag `crosspost`. A cross-post
   carries your post's text; its photos and video stay on Fauna. Remember what
-  "on" means: your public Fauna posts are published to Bluesky — public and
-  searchable. Deleting a post on Fauna deletes its Bluesky copy too, though
+  "on" means: your public Fauna posts, apart from posts you imported from another service, are published to Bluesky — public and searchable. Deleting a post on Fauna deletes its Bluesky copy too, though
   servers and apps that already copied it may keep it. A reply you write under one of your own cross-posted posts
   is threaded under it on Bluesky, so a thread you continue in Fauna stays a
   thread there.
@@ -99,12 +98,11 @@ removes it.
 
 The next step goes further: instead of linking an account hosted on
 `bsky.social`, **your nest itself becomes your Bluesky server** (in AT
-Protocol terms, your PDS). Your AT Protocol identity would live on your box, your handle would be at your nest's domain, and your public Fauna posts would appear on Bluesky natively — no second account anywhere.
+Protocol terms, your PDS). Your AT Protocol identity would live on your box, your handle would be at your nest's domain, and your public Fauna posts, apart from posts you imported from another service, would appear on Bluesky natively — no second account anywhere.
 
 This is a real, working feature, not just a design: turn it on from
 Settings → AT Protocol and your nest mints the identity, holds the repo, and
-starts publishing. Only **public** posts ever project — encrypted
-conversations and gated content stay on Fauna by design — and publishing
+starts publishing. Only **public** posts ever project — encrypted conversations, gated content and posts you imported from another service stay on Fauna by design — and publishing
 your existing post history is a separate, deliberate opt-in. Your **profile
 travels too**: display name, bio, and your profile picture and banner appear
 on Bluesky and follow your edits, so people who find you there see an account
@@ -134,8 +132,7 @@ selector offers four ordered choices —
 - **Off** — no Bluesky presence.
 - **Linked account** — the account link described above: read, interact,
   and cross-post through an existing Bluesky account.
-- **Hosted here — visible** — your nest holds your identity and publishes
-  your public posts to the Bluesky network.
+- **Hosted here — visible** — your nest holds your identity and publishes your public posts, apart from posts you imported from another service, to the Bluesky network.
 - **Hosted here — full access** — additionally, other Bluesky apps can sign
   in as you against your nest.
 
@@ -153,7 +150,7 @@ the same identity rather than making a new one. The two "hosted" levels are
 greyed out, with a reason, until your nest is reachable at a real public
 domain (they can't work on a `localhost` or IP-only box).
 
-The deepest level reveals **App credentials**, for signing other AT Protocol apps in against your nest, plus a single toggle that instantly shuts off every external app's access without touching any individual credential; the apps you connect are listed on Settings → **Connected apps**. Logging another AT Protocol
+The deepest level reveals **App credentials**, for signing other AT Protocol apps in against your nest; the apps you connect are listed on Settings → **Connected apps**, where a single switch, **Allow external apps**, pauses every app it affects at once without touching any individual credential. Logging another AT Protocol
 app in to read, interact, post and edit your profile through your nest works
 end to end — posting and profile edits after you grant the separate approval
 described next.
@@ -167,9 +164,9 @@ there is a separate, stronger action below the selector: **Delete my Bluesky
 presence**.
 
 It asks first. A confirmation card spells out what will happen: every post you
-published to Bluesky is deleted and the network is told to remove them, the
-Bluesky apps you are signed in to are disconnected, other apps can no longer
-post as you, and your Bluesky setting returns to Off.
+published to Bluesky is deleted and the network is told to remove them, the Bluesky apps you are signed in to are disconnected, and your Bluesky setting returns to Off.
+
+If you have let other apps post as you, that permission is kept, under **Posting from other apps**; choose **Stop other apps posting as me** there if you want it ended too.
 
 **Your AT Protocol identity is kept.** This removes what you published, not who
 you are — the handle stays yours, and turning AT Protocol hosting back on later
@@ -331,7 +328,7 @@ feeds, never anyone else's, and no keys of yours are shared with it.
 
 An app can also ask to **read one person's posts** — the public posts of any one author on your nest, newest first, the list a profile's Posts tab shows. The card shows this as its own row. It reaches public posts only: a post meant for paying subscribers or shared with a closed audience never reaches the app. If the app may also read your feeds, it sees those posts as you do — which ones you liked and reposted, and nothing from people you blocked. No keys of yours are shared with it.
 
-An app that connects to your nest directly can also ask to **post as you** or to **edit your profile**. These are two more rows on the same card. Approving either one also turns on the posting permission described further down under **Posting from other apps**, if it is not on already — the two share one posting key — so a Bluesky app you have signed in can then post as you and edit your profile too. With the first, the app can publish public posts in your name and delete the ones it published — never a post meant for paying subscribers or shared with a closed audience, and never a post you wrote yourself. With the second, it can change your profile's display name, bio and links, and nothing else on it; it cannot change your profile picture or banner. Either way your key is never handed to the app: your nest signs for you with a key it keeps for posting that your approval set up, never your own. That stops the moment you disconnect the app under **Connected apps** — or, at the deepest level of Settings → AT Protocol, choose **Stop other apps posting as me**, which ends that posting key for every outside app at once. What the app did most recently shows on its row under **Connected apps**.
+An app that connects to your nest directly can also ask to **post as you** or to **edit your profile**. These are two more rows on the same card. Approving either one also turns on the posting permission described further down under **Posting from other apps**, if it is not on already — the two share one posting key — so a Bluesky app you have signed in can then post as you and edit your profile too. With the first, the app can publish public posts in your name and delete the ones it published — never a post meant for paying subscribers or shared with a closed audience, and never a post you wrote yourself. With the second, the app can change your profile's display name, bio and links, and nothing else on it; it cannot change your profile picture or banner. A Bluesky app you have signed in edits a different set, described further down under **Posting from other apps**: your display name, bio, picture and banner, but not your links. Either way your key is never handed to the app: your nest signs for you with a key it keeps for posting that your approval set up, never your own. This app's posting and profile edits stop the moment you disconnect it under **Connected apps**. Disconnecting leaves the posting permission itself as it is: to end that too, for every outside app at once, choose **Stop other apps posting as me** on Settings → AT Protocol. Whatever level you have chosen there, the **Posting from other apps** row shows the permission while it is on. It lasts roughly three months and then stops on its own, until you renew it there or approve a posting or profile row again. What the app did most recently shows on its row under **Connected apps**.
 
 An app can also ask to **keep its own records in your account** — notes, tasks,
 or whatever kinds of data it was built around, each one published under the
@@ -376,17 +373,9 @@ have an explanation months later. An app you allowed to ask your nest for
 short-lived Bluesky service tokens — signed with your account's key, which never
 leaves your nest — also shows how many your nest issued for it in the current
 window and which service the most recent one was for, and when; an app asking
-far more often than you expect is easy to spot, and to disconnect. That last figure is a genuine "last seen", not a usage log: your nest
-notices an app when it renews its access, so a recent time means it is
-definitely still in use, while an older one only means it has not renewed
-lately. Revoking it there
+far more often than you expect is easy to spot, and to disconnect. The time your nest last saw the app is when it last noticed it — when it renews its access, and whenever your nest or a Fauna app of yours does something for it — so a recent time means it is still in use, while an older one only means neither has happened lately. Revoking it there
 ends the connection: the app stops being able to refresh, and drops off within
-about fifteen minutes. The kill-switch above it does the same to every app at
-once — including apps that talk to your nest directly rather than through
-Bluesky, which are cut off immediately rather than at their next renewal — and
-is reversible: flip it back and the apps you kept are usable again, with nothing
-to set up afresh. The note under the toggle says as much. While it is off,
-every app it affects stays on the **Connected apps** list marked **Paused**,
+about fifteen minutes. The **Allow external apps** switch on Settings → **Connected apps** pauses every app it affects at once — immediately rather than at its next renewal, including apps that talk to your nest directly rather than through Bluesky — and is reversible: flip it back and the apps you kept are usable again, with nothing to set up afresh. The note under the switch says as much. While it is off, every app it affects stays on the list marked **Paused**,
 with a reminder of how to turn it back on, so you can still see what you
 have connected and disconnect any of it for good.
 
@@ -406,19 +395,17 @@ every Fauna app, exactly as if you had posted it here.
 
 **Signing in is not permission to post.** Letting another Bluesky app sign in
 lets it *read* as you; posting on your behalf is a separate decision you make
-separately, under **Posting from other apps**. Until it is granted — here, or by approving the posting or profile row of an app that connects to your nest directly, which sets up the same
-permission — other apps can sign in and browse, but every attempt to post is refused. Choose *Let
+separately, under **Posting from other apps**. Until it is granted — here, or by approving the posting or profile row of an app that connects to your nest directly, which sets up the same permission at any level — other apps can sign in and browse, but every attempt to post is refused. Choose *Let
 other apps post as me* and the row fills in with what you allowed, when you
 allowed it, and when the permission runs out — roughly three months, after
 which it stops on its own rather than lasting forever. It warns you a couple
 of weeks ahead, and renewing is the same single button; you never have to
-revoke first. *Stop other apps posting as me* ends it immediately.
+revoke first. **Stop other apps posting as me** ends it immediately. Once the permission is on, its row shows on Settings → AT Protocol at every level, not only the deepest one, so you can always see it, renew it and stop it there. Below the deepest level the row appears only once a permission has been turned on — and it stays after the permission runs out, so you can renew it there — since turning one on there happens by approving a posting or profile row under **Connected apps**. Changing your level, or deleting your Bluesky presence, leaves the permission on — an app you approved under **Connected apps** can go on posting with it — until you choose **Stop other apps posting as me** or it runs out on its own.
 
 The same permission also lets those apps **edit your profile** — change the
 display name, bio, profile picture and banner you show the world from whichever
 app you happen to be in. Only those four things: an app over there has no way
-to express the rest of what your Fauna profile holds, so your links, the list of
-nests that make you reachable and everything else are left exactly as they were.
+to express the rest of what your Fauna profile holds, so your links, the list of nests that make you reachable and everything else are left exactly as they were. (An app that connects to your nest directly, described above, edits a different set: your display name, bio and links, never your picture or banner.)
 
 Clearing any of the four in the other app clears it here, which is the point —
 otherwise you could never remove a name or a picture from the app you set it in.
@@ -513,7 +500,7 @@ other box holds your key; here, *your* box signs for everyone else.)
 your feed the way you would any other post: your nest signs it with your key
 and sends it to your relays, and Nostr apps show it in the right thread (a
 quote embeds the post you quoted). Two switches on the Nostr page decide the
-rest: **Publish replies** lets your replies go out to Nostr at all, and **Auto-publish posts** sends your ordinary posts there too. A reply or quote needs a key your nest holds and at least one relay
+rest: **Publish replies** lets your replies go out to Nostr at all, and **Auto-publish posts** sends your ordinary posts there too, apart from posts you imported from another service. A reply or quote needs a key your nest holds and at least one relay
 in your list — if either is missing, the reply button says what to fix and
 nothing is sent.
 
@@ -544,7 +531,7 @@ link step once more to switch it on — it's safe to repeat.)
 ## The Fediverse (Mastodon & friends)
 
 ActivityPub support lets your nest federate with Mastodon and the rest. Turn it on from the app's Bridges page and your nest mints a Mastodon-compatible actor (`@you@example.com`): remote fediverse accounts can find and follow you
-and receive your public posts, and you can follow remote accounts back into
+and receive your public posts, apart from posts you imported from another service, and you can follow remote accounts back into
 your unified feed. Delivery has been confirmed end-to-end against real
 Mastodon and GoToSocial servers.
 
@@ -580,7 +567,7 @@ shares only with their followers are not direct messages and are not shown.
 | Bluesky: notifications & DMs in Fauna | **Available** |
 | Bluesky: cross-posting (off / auto / per-post) | **Available** |
 | Bluesky: follow/block from Fauna | **Not bridged** — manage follows in a Bluesky app |
-| Bluesky: your nest as your own Bluesky server (PDS), domain handle | **Early** — the Settings → AT Protocol depth selector can mint your identity and publish your public posts today; not yet confirmed on a live deployment: whether Bluesky's network actually crawls and indexes it. App credentials + Connected apps let another AT Protocol app log in and read/interact; once you grant *Let other apps post as me*, it writes as you — posts with photos, replies, quotes and profile edits all arrive as the real thing |
+| Bluesky: your nest as your own Bluesky server (PDS), domain handle | **Early** — the Settings → AT Protocol depth selector can mint your identity and publish your public posts, apart from posts you imported from another service, today; not yet confirmed on a live deployment: whether Bluesky's network actually crawls and indexes it. App credentials + Connected apps let another AT Protocol app log in and read/interact; once you grant *Let other apps post as me*, it writes as you — posts with photos, replies, quotes and profile edits all arrive as the real thing |
 | Nostr: personal relay, NIP-05 identity, relay sync, DMs, key import or external signer | **Available** — signing, follow sync and DMs need your Nostr key held on your nest (generated or imported); the relay is served only while a key is held there, or while your nest is paired with a home box |
 | Nostr: sign in to other Nostr apps with your nest (Nostr Connect) | **Available** — needs your Nostr key held on your nest (generated or imported); connect an app from the **Connected apps** section on the Nostr page, and each one is then listed, and disconnected, under Settings → **Connected apps**, in every Fauna app |
 | Nostr: reply to and quote Nostr posts from Fauna | **Available** — needs a key your nest holds; *Publish replies* on the Nostr page controls replies |

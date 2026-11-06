@@ -63,8 +63,8 @@ use crate::account_runtime::AccountStoreHandle;
 use crate::share_body::{BodySource, OnDemandBodySource, TreeBodySource};
 use crate::share_landing::Landing;
 use crate::share_pump::{
-    AdvertiseState, SetPullOutcome, ShareIngestDoor, ShareIngestSummary, SharedSetSpec, pull_pass,
-    refresh_serve_sources,
+    AdvertiseState, SetPullOutcome, ShareIngestDoor, ShareIngestSummary, ShareStoreDoors,
+    SharedSetSpec, pull_pass, refresh_serve_sources,
 };
 
 /// How often the pump refreshes serve sources, advertises due endpoints and
@@ -137,48 +137,11 @@ pub struct ReplicaAccess {
     pub door: Arc<dyn ShareIngestDoor>,
 }
 
-/// The convergence loop's **bearer hook** over an app's shared
-/// [`fauna_nest_http::BearerSource`] (the WS-handshake bearer cache —
-/// auto-refreshing, so each tick pushes a currently-valid token).
-///
-/// Same rule as [`AgentShareInfo`] below: every app that drives the external
-/// `fauna-sync-agent` shares this adapter rather than writing its own. tui and
-/// linux each had a byte-identical private copy, and the four apps still owed
-/// sync-agent provisioning would each have written a fifth.
-///
-/// The pushed expiry is the source's own
-/// [`fauna_nest_http::BearerSource::bearer_with_expiry`] — the deadline on this
-/// machine's clock, anchored at receipt (`login.md` § Token lifetime on the
-/// client's clock), which the agent on the same machine plans its renewal on.
-/// A bearer the source refuses to produce reads as *not authenticated*, and the
-/// tick skips — the same fold both app copies made. So does a bearer whose
-/// source **cannot say** its expiry: the agent is never handed a deadline this
-/// seam would have to guess.
-pub struct AgentBearerSource(pub Arc<dyn fauna_nest_http::BearerSource>);
-
-impl fauna_client_sync::agent::ProvisioningBearerSource for AgentBearerSource {
-    fn current_bearer(
-        &self,
-    ) -> impl std::future::Future<Output = Option<fauna_client_sync::agent::ProvisioningBearerToken>>
-    + Send {
-        let source = Arc::clone(&self.0);
-        async move {
-            let (token, expires_at) = source.bearer_with_expiry().await.ok()?;
-            let Some(expires_at) = expires_at else {
-                // A wiring defect, not a runtime state: every app's bearer
-                // source mints its own bearer and publishes its expiry. Loud,
-                // because the skipped tick is otherwise invisible.
-                tracing::warn!(
-                    "sync agent: bearer source publishes no expiry — tick skipped, agent not provisioned"
-                );
-                return None;
-            };
-            Some(fauna_client_sync::agent::ProvisioningBearerToken::new(
-                token, expires_at,
-            ))
-        }
-    }
-}
+/// The convergence loop's bearer hook every agent-driving app shares — moved
+/// beside its trait in `fauna_client_sync::agent` so the UniFFI apps' provisioner
+/// (`fauna-ffi`) reaches it in every feature set; re-exported here for the
+/// share-plane hosts that name it from this module.
+pub use fauna_client_sync::agent::AgentBearerSource;
 
 /// The serve-info seam over the shared agent control client
 /// (`GetShareServeInfo`) — every app that drives the external
@@ -549,8 +512,8 @@ pub async fn transfer_policy(nest: Arc<fauna_client::NestClient>) -> Option<Effe
 /// network I/O: is there anything to serve, and does rule 7's brake admit?
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PassGate {
-    /// No bound cross-user set — nothing to serve, and no listener bound for
-    /// serving (rule 5's no-unconditional-bind).
+    /// No bound cross-user set and no held group scope — nothing to serve,
+    /// and no listener bound for serving (rule 5's no-unconditional-bind).
     NoSets,
     /// The brake refused: no `p2p-share` token, live or cached.
     BrakeRefused,
@@ -679,6 +642,9 @@ pub async fn run<H: SharePlaneHost>(plane: SharePlane<H>) {
     // drops (or the next bind is admitted) within the pass it triggers
     // rather than a whole cadence later.
     let mut participation_changed = plane.account.p2p_participation_watch();
+    // The group feed this loop wired on the bound seat, re-wired when the
+    // seat or the store's writer changes (`GroupFeedWiring`).
+    let mut group_feed = GroupFeedWiring::default();
 
     loop {
         tokio::select! {
@@ -722,11 +688,20 @@ pub async fn run<H: SharePlaneHost>(plane: SharePlane<H>) {
         let Some(specs) = specs_for_pass(load_specs(&plane).await, &mut last_specs) else {
             continue;
         };
+        // A group scope this device is a live member of is something to
+        // serve and pull too, folder sets or none (`crate::group_pump`). A
+        // failed read counts as none for this pass.
+        let has_groups = plane
+            .account
+            .group_pump_scopes(plane.own_actor)
+            .await
+            .is_ok_and(|scopes| !scopes.is_empty());
+        let has_work = !specs.is_empty() || has_groups;
 
         if seat.is_none() {
             // The brake is read only when there is something to serve — the
             // `NoSets` arm never touches the nest (`pass_gate`'s own rule).
-            let evidence = if specs.is_empty() {
+            let evidence = if !has_work {
                 None
             } else {
                 composed_evidence(
@@ -737,7 +712,7 @@ pub async fn run<H: SharePlaneHost>(plane: SharePlane<H>) {
             // A refusal shapes only the cell: rule 7 says no evidence refuses,
             // and the status line says so rather than hiding the plane.
             let capabilities = evidence.as_ref().map(|f| f.capabilities.as_slice());
-            match pass_gate(!specs.is_empty(), capabilities) {
+            match pass_gate(has_work, capabilities) {
                 PassGate::NoSets => {
                     update_cell(&plane, ServeStatus::NoSets, Vec::new());
                     continue;
@@ -770,6 +745,94 @@ pub async fn run<H: SharePlaneHost>(plane: SharePlane<H>) {
 
         refresh_group_roster(&plane.account, &live_group_roster).await;
         let routed = refresh_serve_sources(node, &specs);
+        // The group plane's feed (`group-set.md` § decision 6): without it the
+        // seat answers every member's pull `unsupported`. Wired only once a
+        // group scope is held — a folder-only seat opens no second connection.
+        if has_groups {
+            group_feed
+                .ensure(
+                    bound_seat,
+                    node,
+                    plane.account.serve_store_facts(),
+                    |connection| plane.account.register_second_connection(connection),
+                )
+                .await;
+        }
+
+        // The reachability this seat publishes — on each folder set's channel
+        // below, and as its own endpoints cell in every group scope here.
+        let lan_ips = crate::share_pump::discover_lan_candidates();
+        let endpoints = share_advertisement(&plane.own_actor, bound_addrs, &lan_ips, node);
+
+        // The pull half's price, read once for both families — live policy
+        // when the nest answers, tier-1 constants otherwise.
+        let live_policy = plane.host.transfer_policy().await;
+        // The byte gate's nest fact (`p2p.md` § The relay, ruling 4): the
+        // nest answered this pass's policy read, so its path carries the
+        // bodies a relayed connection leaves. An answer without the feature
+        // reads as unavailable — the side that keeps today's delivery.
+        let nest = if live_policy.is_some() {
+            fauna_transport::NestPath::Reachable
+        } else {
+            fauna_transport::NestPath::Unavailable
+        };
+        let policy =
+            live_policy.unwrap_or_else(|| effective_policy(GatedFeature::P2pShare, &[], &[]));
+        let today = fauna_core::day_bucket::local_day_bucket(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0),
+            0,
+        );
+
+        // The two families part here: a group set is lifted, walked and
+        // folded by the group leg; only a folder set is advertised on its
+        // MLS channel and pulled by the share leg. Both are served above.
+        let (group_specs, folder_specs): (Vec<SharedSetSpec>, Vec<SharedSetSpec>) =
+            specs.iter().cloned().partition(|spec| {
+                matches!(
+                    spec.content_keys,
+                    fauna_core::folder_keys::SetContentKeys::Group(_)
+                )
+            });
+
+        // The group leg (`crate::group_pump`): this seat's endpoints cell,
+        // then each held scope lifted, pulled from its other members and
+        // folded into its bound set.
+        if has_groups {
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as i64)
+                .unwrap_or(0);
+            let mut ledger = plane
+                .account
+                .share_transfer_ledger()
+                .await
+                .ok()
+                .flatten()
+                .unwrap_or_default();
+            crate::group_pump::group_pass(
+                node,
+                &plane.account,
+                plane.own_actor,
+                &endpoints,
+                &lan_ips,
+                now_ms,
+                crate::group_pump::GroupSetsLeg {
+                    specs: &group_specs,
+                    door: plane.replica.door.as_ref(),
+                    spool_root: &plane.spool_root,
+                    policy: &policy,
+                    ledger: &mut ledger,
+                    today,
+                },
+            )
+            .await;
+            if let Err(e) = plane.account.put_share_transfer_ledger(ledger).await {
+                tracing::warn!(error = %e, "share plane: the group leg's transfer spend is in-memory only");
+            }
+        }
 
         // Everything got unshared while the seat stayed bound. The refresh
         // above already unrouted the serve map (it is rebuilt from `specs`
@@ -781,16 +844,27 @@ pub async fn run<H: SharePlaneHost>(plane: SharePlane<H>) {
             update_cell(&plane, ServeStatus::NoSets, Vec::new());
             continue;
         }
+        // Group sets only: served and pulled above, nothing to advertise on
+        // an MLS channel and no folder pull.
+        if folder_specs.is_empty() {
+            update_cell(&plane, ServeStatus::Serving(routed), Vec::new());
+            continue;
+        }
 
         // The publish half. The composition mirrors the same-account leg's
         // published facts; the relay is the one this seat was bound with, so
         // the advertisement tells the truth about its transport — `None` for a
         // seat bound relay-less, for that seat's life (`p2p.md` § The relay →
         // *The cross-user seat and the relay*, rulings 1 and 3).
-        let lan_ips = crate::share_pump::discover_lan_candidates();
-        let endpoints = share_advertisement(&plane.own_actor, bound_addrs, &lan_ips, node);
+        tracing::debug!(
+            bound = bound_addrs.len(),
+            lan_ips = lan_ips.len(),
+            lan_addrs = endpoints.lan_addrs.len(),
+            relay = endpoints.relay_url.is_some(),
+            "share plane: the advertisement's reachability"
+        );
         let now = std::time::Instant::now();
-        for due in advertise.due(&specs, &plane.own_actor, &endpoints, now) {
+        for due in advertise.due(&folder_specs, &plane.own_actor, &endpoints, now) {
             match plane
                 .host
                 .send_share_endpoints(&due.channel_hex, due.bytes)
@@ -817,33 +891,14 @@ pub async fn run<H: SharePlaneHost>(plane: SharePlane<H>) {
             }
         }
 
-        // The pull half, priced through the one shared feature verdict —
-        // live policy when the nest answers, tier-1 constants otherwise.
-        let live_policy = plane.host.transfer_policy().await;
-        // The byte gate's nest fact (`p2p.md` § The relay, ruling 4): the
-        // nest answered this pass's policy read, so its path carries the
-        // bodies a relayed connection leaves. An answer without the feature
-        // reads as unavailable — the side that keeps today's delivery.
-        let nest = if live_policy.is_some() {
-            fauna_transport::NestPath::Reachable
-        } else {
-            fauna_transport::NestPath::Unavailable
-        };
-        let policy =
-            live_policy.unwrap_or_else(|| effective_policy(GatedFeature::P2pShare, &[], &[]));
-        let today = fauna_core::day_bucket::local_day_bucket(
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs() as i64)
-                .unwrap_or(0),
-            0,
-        );
+        // The pull half, priced through the one shared feature verdict read
+        // above.
         let outcomes = pull_pass(
             node,
             &plane.account,
             &membership,
             plane.replica.door.as_ref(),
-            &specs,
+            &folder_specs,
             &plane.spool_root,
             &lan_ips,
             &policy,
@@ -871,6 +926,89 @@ async fn refresh_group_roster(
         Err(e) => {
             tracing::debug!("share plane: group roster read failed; refusing group witnesses: {e}");
             live.clear();
+        }
+    }
+}
+
+/// The group feed on the share serve set (`group-set.md` § decision 6): a
+/// serve handle over a second connection to the account's own store
+/// ([`crate::peer_leg::open_serve_store`], from the facts the runtime seats on
+/// its handle), wired on the bound seat's node with
+/// [`CeremonyNode::set_group_feed`]. Re-wired whenever the seat is not the one
+/// it was wired on — a re-bind after the participation switch, or the panel's
+/// door binding afresh — and whenever the runtime's writer is not the one the
+/// feed opened under: a store reassembled under a rotated writer refuses a
+/// connection that still writes as the retired one, so the feed is replaced
+/// with the seat's facts, never kept.
+pub struct GroupFeedWiring<S> {
+    wired: Option<(std::sync::Weak<S>, fauna_account_store::types::WriterId)>,
+}
+
+impl<S> Default for GroupFeedWiring<S> {
+    fn default() -> Self {
+        Self { wired: None }
+    }
+}
+
+impl<S> GroupFeedWiring<S> {
+    /// Wire the feed on `seat`'s `node` unless it already carries one opened
+    /// under `facts`' writer. `None` facts (no native host seated them yet)
+    /// and an open that fails leave the seat as it is; the next pass retries.
+    /// Answers whether this call wired a feed.
+    ///
+    /// A wired feed is handed to `register` as a
+    /// [`SecondConnection`](crate::account_runtime::SecondConnection) — in
+    /// production the runtime handle's
+    /// [`register_second_connection`](crate::account_runtime::AccountStoreHandle::register_second_connection),
+    /// so the shared stop releases it and waits its serving thread closed
+    /// before an erase: the seat holding it outlives the runtime's shutdown
+    /// (this loop lets go only once it sees [`AccountStoreHandle::closed`],
+    /// and the panel and the session slot hold clones of their own), and
+    /// windows refuses to delete an open store (`account-scoping.md`
+    /// § Erasure follows scope, *The stop's receipt covers the runtime's
+    /// SECOND connections too*).
+    pub async fn ensure(
+        &mut self,
+        seat: &Arc<S>,
+        node: &CeremonyNode,
+        facts: Option<crate::account_runtime::ServeStoreFacts>,
+        register: impl FnOnce(crate::account_runtime::SecondConnection),
+    ) -> bool {
+        let Some(facts) = facts else {
+            return false;
+        };
+        let current = self.wired.as_ref().is_some_and(|(wired_seat, writer)| {
+            wired_seat
+                .upgrade()
+                .is_some_and(|wired_seat| Arc::ptr_eq(&wired_seat, seat))
+                && *writer == facts.writer
+        });
+        if current {
+            return false;
+        }
+        let writer = facts.writer;
+        match crate::peer_leg::open_serve_store(facts).await {
+            Ok(feed) => {
+                let closed = feed.closed();
+                node.set_group_feed(feed);
+                register(crate::account_runtime::SecondConnection::new(
+                    "the share plane's group feed",
+                    node.group_feed_release(),
+                    {
+                        let closed = closed.clone();
+                        move || closed.is_closed()
+                    },
+                    move || -> crate::account_runtime::SecondConnectionClose {
+                        Box::pin(closed.clone().wait())
+                    },
+                ));
+                self.wired = Some((Arc::downgrade(seat), writer));
+                true
+            }
+            Err(e) => {
+                tracing::debug!("share plane: group feed open failed; next pass retries: {e:#}");
+                false
+            }
         }
     }
 }
@@ -905,13 +1043,48 @@ async fn load_specs<H: SharePlaneHost>(
     if serve.is_empty() {
         return Ok(Vec::new());
     }
-    Ok(compose_specs(serve, &plane.host.key_bindings().await?))
+    // A group set's keys are this account's own group plane, read here; a
+    // ring that will not read keeps that set out of this pass only.
+    let mut group_rings = std::collections::BTreeMap::new();
+    for info in &serve {
+        if let Some(fauna_core::folder_keys::FolderRef::Group(scope)) =
+            fauna_core::folder_keys::FolderRef::parse(&info.folder_id)
+        {
+            match plane.account.group_set_keys(scope).await {
+                Ok(ring) => {
+                    group_rings.insert(scope, ring);
+                }
+                Err(e) => tracing::debug!("share plane: a group set's ring did not read: {e:#}"),
+            }
+        }
+    }
+    let has_folder_rows = serve.iter().any(|info| {
+        !matches!(
+            fauna_core::folder_keys::FolderRef::parse(&info.folder_id),
+            Some(fauna_core::folder_keys::FolderRef::Group(_))
+        )
+    });
+    // The key bindings are a nest-backed read the group family never needs:
+    // a device whose only sets are group sets composes them offline.
+    let bindings = if has_folder_rows {
+        plane.host.key_bindings().await?
+    } else {
+        Vec::new()
+    };
+    Ok(compose_specs(serve, &bindings, &group_rings))
 }
 
 /// Join the serve info with the identity holder's key bindings: only an
 /// MLS-bound set with resolvable content keys is a cross-user set the plane
 /// serves (an unbound folder has no roster to admit against, and
 /// bound-but-keyless is the resolver's fail-closed arm).
+///
+/// **The group family** (`p2p-shared-set-build.md` § Build design — the
+/// group set, decision 7): a serve row bound by a `group:` ref joins the
+/// scope's ring in `group_rings` instead — this account's own group plane,
+/// read by the caller — and serves under the scope id as its set id. A ring
+/// holding no tip serves nothing, the agent's own naming rule; the key
+/// bindings are never consulted for it.
 ///
 /// The join is by `FolderRef` ONLY: a serve row matches the binding
 /// wearing the same ref, never one wearing the same name — names are unique
@@ -926,9 +1099,27 @@ async fn load_specs<H: SharePlaneHost>(
 pub fn compose_specs(
     serve: Vec<ServeFolderInfo>,
     bindings: &[FolderEngineKeys],
+    group_rings: &std::collections::BTreeMap<[u8; 32], fauna_core::group_content::GroupContentKeys>,
 ) -> Vec<SharedSetSpec> {
     let mut specs: Vec<SharedSetSpec> = Vec::new();
     for info in serve {
+        if let Some(fauna_core::folder_keys::FolderRef::Group(scope)) =
+            fauna_core::folder_keys::FolderRef::parse(&info.folder_id)
+        {
+            let Some(ring) = group_rings.get(&scope).filter(|r| r.tip().is_some()) else {
+                continue; // no keyable tip: nothing this member may serve
+            };
+            specs.push(SharedSetSpec {
+                folder: info.folder,
+                folder_id: info.folder_id,
+                set_id: scope,
+                db_path: info.db_path,
+                body: info.body,
+                landing: info.landing,
+                content_keys: fauna_core::folder_keys::SetContentKeys::Group(ring.clone()),
+            });
+            continue;
+        }
         let binding = bindings
             .iter()
             .find(|b| b.folder_id == info.folder_id && b.mls_group_id.is_some());
@@ -946,7 +1137,7 @@ pub fn compose_specs(
             db_path: info.db_path,
             body: info.body,
             landing: info.landing,
-            content_keys: content_keys.clone(),
+            content_keys: fauna_core::folder_keys::SetContentKeys::Folder(content_keys.clone()),
         });
     }
     // The serve-side duplicate guard: two rows resolving to one set pair one
@@ -1112,6 +1303,17 @@ pub fn transfer_state_label(outcome: &SetPullOutcome) -> LocalizedText {
             TRANSFER_SOURCE_FREE_SPACE,
         );
     }
+    // A failed pull keeps its row (`p2p-shared-set.md` § Cross-user shared-set transfer
+    // → *The transfer row of a pull that failed*): before admission it is
+    // unreachable — never "admission pending", which would blame the peer's
+    // roster for a dial that never connected — after it, interrupted.
+    if outcome.failed {
+        return LocalizedText::key(if outcome.admitted {
+            "folders.share_transfer_state_interrupted"
+        } else {
+            "folders.share_transfer_state_unreachable"
+        });
+    }
     if !outcome.admitted {
         return LocalizedText::key("folders.share_transfer_state_admission_pending");
     }
@@ -1214,7 +1416,7 @@ mod tests {
             db_path: PathBuf::from("/d"),
             body: TreeBodySource::shared("/w"),
             landing: Landing::Resident,
-            content_keys: fauna_core::folder_keys::FolderContentKeys::genesis([9u8; 32], 1),
+            content_keys: fauna_core::folder_keys::FolderContentKeys::genesis([9u8; 32], 1).into(),
         }
     }
 
@@ -1281,6 +1483,46 @@ mod tests {
     /// The spec join: only an MLS-bound set with keys becomes a spec; an
     /// unbound folder and a bound-but-keyless one never serve; and two bound
     /// sets sharing a NAME are told apart by their refs, never guessed between.
+    /// The group family (decision 7): a `group:` serve row joins this
+    /// account's ring for the scope — never a key binding — and serves under
+    /// the scope id; a ring with no keyable tip, or none at all, serves
+    /// nothing.
+    #[test]
+    fn compose_specs_serves_a_group_set_under_its_scope_by_its_ring() {
+        use fauna_core::crypto::GenerationKey;
+        use fauna_core::folder_keys::{FolderRef, SetContentKeys};
+        use fauna_core::group_content::GroupContentKeys;
+        let (tipped, tipless, ringless) = ([0x61; 32], [0x62; 32], [0x63; 32]);
+        let key = GenerationKey::from_bytes([0x11; 32]);
+        let gen_id = [0x7a; 32];
+        let mut rings = std::collections::BTreeMap::new();
+        rings.insert(
+            tipped,
+            GroupContentKeys::from_generation_keys(Some(gen_id), [(&gen_id, &key)]),
+        );
+        rings.insert(
+            tipless,
+            GroupContentKeys::from_generation_keys(None, [(&gen_id, &key)]),
+        );
+        let group_row = |scope: [u8; 32]| {
+            let mut row = info("holiday");
+            row.folder_id = FolderRef::Group(scope).to_wire();
+            row
+        };
+        // A folder binding wearing the group ref grants nothing either.
+        let mut squatter = binding("holiday", Some(&[9]), true);
+        squatter.folder_id = FolderRef::Group(ringless).to_wire();
+        let specs = compose_specs(
+            vec![group_row(tipped), group_row(tipless), group_row(ringless)],
+            &[squatter],
+            &rings,
+        );
+        assert_eq!(specs.len(), 1, "only the tipped ring's set serves");
+        assert_eq!(specs[0].set_id, tipped, "served under the scope id");
+        assert_eq!(specs[0].folder_id, FolderRef::Group(tipped).to_wire());
+        assert!(matches!(specs[0].content_keys, SetContentKeys::Group(_)));
+    }
+
     #[test]
     fn compose_specs_serves_only_keyed_bound_sets_joined_by_ref() {
         let mut twin_a = binding("twin", Some(&[5]), true);
@@ -1299,6 +1541,7 @@ mod tests {
         let specs = compose_specs(
             vec![info("plain"), info("shared"), info("keyless"), twin_row],
             &bindings,
+            &Default::default(),
         );
         assert_eq!(
             specs.len(),
@@ -1329,7 +1572,7 @@ mod tests {
         first.db_path = PathBuf::from("/a");
         let mut second = info("docs");
         second.db_path = PathBuf::from("/b");
-        let specs = compose_specs(vec![first, second], &bindings);
+        let specs = compose_specs(vec![first, second], &bindings, &Default::default());
         assert_eq!(
             specs.len(),
             0,
@@ -1352,7 +1595,7 @@ mod tests {
         let mut theirs = info("docs");
         theirs.folder_id = "ref-b".to_string();
         theirs.db_path = PathBuf::from("/b");
-        let specs = compose_specs(vec![ours, theirs], &bindings);
+        let specs = compose_specs(vec![ours, theirs], &bindings, &Default::default());
         assert_eq!(specs.len(), 1);
         assert_eq!(specs[0].db_path, PathBuf::from("/a"));
         assert_eq!(specs[0].folder_id, "ref-a");
@@ -1364,7 +1607,10 @@ mod tests {
     fn a_name_match_without_a_ref_match_pairs_nothing() {
         let mut other_docs = binding("docs", Some(&[1, 2, 3]), true);
         other_docs.folder_id = "ref-someone-elses-docs".to_string();
-        assert_eq!(compose_specs(vec![info("docs")], &[other_docs]).len(), 0);
+        assert_eq!(
+            compose_specs(vec![info("docs")], &[other_docs], &Default::default()).len(),
+            0
+        );
     }
 
     /// Every serve status and every outcome state has its own reading, and a
@@ -1416,6 +1662,55 @@ mod tests {
             limited.args.get("source"),
             Some(&fauna_client_features::tier_label(fauna_core::feature_gate::RuleTier::Admin).key),
             "the refusal names the binding tier, as a key the app resolves"
+        );
+    }
+
+    /// A failed pull keeps its row and reads the failure, in the ruled
+    /// precedence: after "limited by …" (a refusal, a cap, free space), before
+    /// admission pending — a failure before admission reads unreachable, never
+    /// admission pending; a failure after it reads interrupted, never pulling,
+    /// whatever the pass moved before the cut.
+    #[test]
+    fn a_failed_pull_reads_unreachable_or_interrupted_in_the_ruled_precedence() {
+        let mut outcome = SetPullOutcome {
+            failed: true,
+            ..SetPullOutcome::default()
+        };
+        assert_eq!(
+            transfer_state_label(&outcome).key,
+            "folders.share_transfer_state_unreachable",
+            "a dial or admission that failed reads unreachable, not admission pending"
+        );
+
+        outcome.admitted = true;
+        outcome.rows_accepted = 2;
+        outcome.materialized = 1;
+        assert_eq!(
+            transfer_state_label(&outcome).key,
+            "folders.share_transfer_state_interrupted",
+            "a pull that broke after admission reads interrupted, not pulling"
+        );
+
+        outcome.storage_limited = true;
+        assert_eq!(
+            transfer_state_label(&outcome).args.get("source"),
+            Some(&TRANSFER_SOURCE_FREE_SPACE.to_string()),
+            "free space outranks the failure"
+        );
+
+        outcome.storage_limited = false;
+        outcome.admitted = false;
+        outcome.refusal = Some(fauna_core::feature_gate::FeatureVerdict::Deny {
+            tier: fauna_core::feature_gate::RuleTier::Admin,
+        });
+        let limited = transfer_state_label(&outcome);
+        assert_eq!(
+            limited.key, "folders.share_transfer_state_limited",
+            "a refusal outranks the failure"
+        );
+        assert_eq!(
+            limited.args.get("source"),
+            Some(&fauna_client_features::tier_label(fauna_core::feature_gate::RuleTier::Admin).key)
         );
     }
 
@@ -1575,48 +1870,6 @@ mod tests {
                 .await
                 .is_err(),
             "a set no host holds is refused, never routed by its name"
-        );
-    }
-
-    /// A source that mints its own bearer and so can say its deadline.
-    struct ExpiringBearer;
-
-    #[async_trait::async_trait]
-    impl fauna_nest_http::BearerSource for ExpiringBearer {
-        async fn bearer(&self) -> Result<String, fauna_nest_http::ApiError> {
-            Ok("tok".into())
-        }
-        async fn bearer_with_expiry(
-            &self,
-        ) -> Result<(String, Option<u64>), fauna_nest_http::ApiError> {
-            Ok(("tok".into(), Some(1_900_000_000)))
-        }
-    }
-
-    /// The agent is handed the source's own client-clock deadline, so it
-    /// plans its renewal on a real expiry rather than a blind cadence.
-    #[tokio::test]
-    async fn agent_bearer_source_pushes_the_sources_own_expiry() {
-        use fauna_client_sync::agent::ProvisioningBearerSource;
-        let b = AgentBearerSource(Arc::new(ExpiringBearer))
-            .current_bearer()
-            .await
-            .expect("a minting source yields a bearer");
-        assert_eq!(b.token, "tok");
-        assert_eq!(b.expires_at, 1_900_000_000);
-    }
-
-    /// A source that cannot say its expiry (an opaque `StaticBearer`) skips the
-    /// tick — never a guessed deadline handed to the agent.
-    #[tokio::test]
-    async fn agent_bearer_source_skips_a_bearer_with_no_expiry() {
-        use fauna_client_sync::agent::ProvisioningBearerSource;
-        let b = AgentBearerSource(Arc::new(fauna_nest_http::StaticBearer("tok".into())))
-            .current_bearer()
-            .await;
-        assert!(
-            b.is_none(),
-            "no published expiry ⇒ not authenticated, tick skipped"
         );
     }
 }

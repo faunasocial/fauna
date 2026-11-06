@@ -15,11 +15,12 @@ namespace FaunaApp.Core.ViewModels;
 /// line, the receipt's three-state status, the held-bytes line and the revoke
 /// button's state. <see cref="GrantId"/>/<see cref="Holder"/> are the revoke
 /// gesture's own args — never a row index, which a refold can re-point at a
-/// different custody.
+/// different custody. <see cref="Url"/> is the custodian's address, pre-filled
+/// into the row's <c>nest-trust-custody-restore-button</c> gesture.
 /// </summary>
 internal sealed record NestCustodyRow(
     byte[] GrantId, byte[]? Holder, string Label, string Scope, string ReceiptStatusText,
-    string HeldBytesText, bool Stale, bool Pending)
+    string HeldBytesText, bool Stale, bool Pending, string Url)
 {
     /// <summary>A pending ceremony has minted nothing to revoke yet.</summary>
     public bool RevokeEnabled => !Pending;
@@ -60,7 +61,8 @@ internal sealed class NestsCustodyView
             Strings.CustodyReceiptStatusText(r.@receipt),
             Strings.CustodyHeldBytesText(r.@receipt),
             r.@receiptState == CustodyReceiptStateView.Stale,
-            r.@pending))
+            r.@pending,
+            r.@custodianNestUrl!))
         .ToList();
 
     /// <summary>Whether the nest row <paramref name="nestIdHex"/> is among the
@@ -140,4 +142,96 @@ internal sealed class NestsCustodyView
             Error = Strings.Error(ex);
         }
     }
+
+    // ── Restore from a custodian nest (ui/nests.md § Trust facet — restore from
+    // a custodian nest): the page-level form, the last restore's notice and the
+    // one command both entries dispatch. android's LinkedNestsVM.restoreFromCustodian
+    // + RestoreNotice, tui's push_custody_restore. No dial, handshake or walk
+    // logic here, and no outcome→string mapping: the copy is shared Rust's
+    // notice_parts, the form decision its closes_form.
+
+    /// <summary>Whether the restore form (<c>nests-custody-restore-input</c> and
+    /// its submit/cancel) is revealed.</summary>
+    public bool RestoreFormOpen { get; private set; }
+
+    /// <summary>The form's address as typed — kept across every failure.</summary>
+    public string RestoreAddress { get; private set; } = string.Empty;
+
+    /// <summary>A restore is in flight (the notice reads <i>running</i>).</summary>
+    public bool RestoreRunning { get; private set; }
+
+    /// <summary><c>nests-custody-restore-notice</c>: <c>null</c> until a restore
+    /// ran this session (the element is absent), the running copy while one is
+    /// in flight, then the outcome's shared copy. A <c>Failed</c> gesture is no
+    /// notice state — its reason rides <see cref="Error"/>.</summary>
+    public string? RestoreNotice { get; private set; }
+
+    /// <summary>Submit is offered only for a non-blank address with no restore
+    /// in flight. No own-nest wire kind gates it: the restore dials the
+    /// custodian, never this session's own nest.</summary>
+    public bool RestoreSubmitEnabled => !string.IsNullOrWhiteSpace(RestoreAddress) && !RestoreRunning;
+
+    /// <summary><c>nests-custody-restore-button</c> — reveal the form.</summary>
+    public void OpenRestoreForm() => RestoreFormOpen = true;
+
+    /// <summary><c>nests-custody-restore-cancel-button</c> — close the form and
+    /// drop the typed address.</summary>
+    public void CancelRestoreForm()
+    {
+        RestoreFormOpen = false;
+        RestoreAddress = string.Empty;
+    }
+
+    /// <summary>The input's text changed.</summary>
+    public void SetRestoreAddress(string? text) => RestoreAddress = text ?? string.Empty;
+
+    /// <summary>Dispatch <c>RestoreFromCustodian { url }</c> — the typed address
+    /// (<c>nests-custody-restore-submit-button</c>) or a custodian row's own
+    /// (<c>nest-trust-custody-restore-button</c>). A blank address, or a restore
+    /// already in flight, dispatches nothing. The running state is set before the
+    /// first await, so the caller paints it before awaiting the returned task.
+    /// A reached custodian closes the form (shared <c>closes_form</c>); every
+    /// failure keeps it open with the address kept. Then the custody fold re-reads,
+    /// so a restored custodian row paints beside the notice. Never throws.</summary>
+    public async Task RestoreAsync(INestRpcClient rpc, string? raw)
+    {
+        var url = (raw ?? string.Empty).Trim();
+        if (url.Length == 0 || RestoreRunning) return;
+        RestoreRunning = true;
+        RestoreNotice = Strings.Get("nests/custody_restore_running");
+        FfiCustodianRestoreOutcome outcome;
+        try
+        {
+            outcome = await rpc.AccountRestoreFromCustodianAsync(url);
+        }
+        catch (Exception ex)
+        {
+            outcome = new FfiCustodianRestoreOutcome.Failed(ex.Message);
+        }
+        RestoreRunning = false;
+        if (outcome is FfiCustodianRestoreOutcome.Failed failed)
+        {
+            // The gesture never ran: no notice state, the reason on error-message,
+            // the form left as it stood (address kept).
+            RestoreNotice = null;
+            Error = failed.@reason;
+        }
+        else
+        {
+            Error = null;
+            RestoreNotice = NoticeText(outcome);
+            if (FaunaFfiMethods.CustodianRestoreClosesForm(outcome))
+            {
+                RestoreFormOpen = false;
+                RestoreAddress = string.Empty;
+            }
+        }
+        await LoadAsync(rpc);
+    }
+
+    /// <summary>The outcome's notice: the shared <c>custodian_restore_notice</c>
+    /// parts, each resolved NESTED (the revoked reason is itself a key) and
+    /// joined with a space — android's and macOS's shape.</summary>
+    private static string NoticeText(FfiCustodianRestoreOutcome outcome)
+        => string.Join(" ", FaunaFfiMethods.CustodianRestoreNotice(outcome).Select(Strings.ResolveNested));
 }

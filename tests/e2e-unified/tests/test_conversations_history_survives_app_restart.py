@@ -44,7 +44,7 @@ from __future__ import annotations
 import pytest
 
 from clients.ws_rpc_admin_client import WsRpcAdminClient
-from helpers.app_surface import skip_unbuilt
+from helpers.app_surface import require_surface
 from helpers.conversations_restart import (
     fauna_thread,
     wait_fauna_thread,
@@ -73,16 +73,7 @@ def test_conversations_history_survives_app_restart(
     logged_in_app, nest_instance, test_user
 ):
     app = logged_in_app
-    if not app.driver.is_windows():
-        skip_unbuilt(
-            app.driver,
-            surface="a same-device-restart mls.db data-dir persistence proof",
-            detail="only the windows recover() preserves the native mls.db "
-            "data dir with no opt-in (a stable per-driver-instance data dir "
-            "kept across relaunch); the other columns' restart-survival is "
-            "witnessed by test_conversations_history_survives_restart_"
-            "cross_app.py via the preserve_state_across_relaunch() pin"
-        )
+    require_surface(app.driver, "mls-db-restart-persistence-proof")
 
     port = nest_instance["port"]
     node_url = nest_instance["url"]

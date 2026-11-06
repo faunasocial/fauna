@@ -80,8 +80,7 @@ pub fn plane_ref(channel_id_hex: &str, envelope: &[u8]) -> Option<PlaneRef> {
 }
 
 fn decode_hex32(hex_str: &str) -> Option<[u8; 32]> {
-    let bytes = hex::decode(hex_str).ok()?;
-    bytes.as_slice().try_into().ok()
+    fauna_core::hex32::decode(hex_str).ok()
 }
 
 #[cfg(test)]

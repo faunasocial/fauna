@@ -106,6 +106,20 @@ public class ContactOverlayTests
         Assert.Equal("", vm.Nickname);
     }
 
+    /// <summary>Label completion crosses the real UniFFI face (<c>string[]</c> staged in,
+    /// <c>string[]</c> out): over the empty projection nobody has a vocabulary, so every
+    /// typed prefix — blank included — completes to nothing, staged labels or not.</summary>
+    [Fact]
+    public void LabelSuggestions_OverAnEmptyVocabulary_AreEmpty()
+    {
+        var vm = new ProfilePrivateViewModel();
+        vm.Open(Aa);
+        Assert.Empty(vm.LabelSuggestions(""));
+        Assert.Empty(vm.LabelSuggestions("Bo"));
+        Assert.True(vm.AddLabel("Book club"));
+        Assert.Empty(vm.LabelSuggestions("Bo"));
+    }
+
     // ── the names ────────────────────────────────────────────────────────────
 
     /// <summary>With no overlay the roster row, the knock card and the Profile header

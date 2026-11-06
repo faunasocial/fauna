@@ -98,6 +98,68 @@ public class MediaUploadTests
         Assert.Equal("application/octet-stream", mime);
     }
 
+    // ── Client-computed media hash (security.md § Signed-envelope shape) ──
+    // The nest's upload reply is checked against the blake3 of the bytes just POSTed
+    // through the shared UniFFI VerifyBlobUploadEcho; a reply naming another blob is refused.
+
+    private sealed class EchoHandler(Func<string> hash) : HttpMessageHandler
+    {
+        public int Posts;
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
+        {
+            Posts++;
+            var body = new StringContent("{\"hash\":\"" + hash() + "\"}", System.Text.Encoding.UTF8, "application/json");
+            return Task.FromResult(new HttpResponseMessage(System.Net.HttpStatusCode.OK) { Content = body });
+        }
+    }
+
+    private static DirectNestClient ClientWith(HttpMessageHandler h)
+        => new("https://nest.invalid", new MockCryptoService(), h, "test-bearer");
+
+    private static readonly string OtherHash = new('a', 64);
+
+    private static readonly byte[] PublicBytes = System.Text.Encoding.UTF8.GetBytes("public attachment bytes");
+
+    // The local hash, read from the refusal message ("... local <hex>") so the test
+    // needs no blake3 of its own.
+    private static async Task<string> LocalHashAsync(Func<DirectNestClient, Task<string>> upload)
+    {
+        var ex = await Assert.ThrowsAnyAsync<Exception>(() => upload(ClientWith(new EchoHandler(() => OtherHash))));
+        var m = System.Text.RegularExpressions.Regex.Match(ex.ToString(), @"local ([0-9a-f]{64})");
+        Assert.True(m.Success, ex.ToString());
+        return m.Groups[1].Value;
+    }
+
+    private static Task<string> UploadPublic(DirectNestClient c)
+        => c.UploadBlobAsync(PublicBytes, new UploadAudience.PublicPost());
+
+    private static Task<string> UploadPrepared(DirectNestClient c)
+        => c.UploadPreparedBlobAsync(new byte[] { 1, 2, 3 }, PublicBytes, null, null);
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Upload_RefusesAnEchoNamingAnotherBlob(bool prepared)
+    {
+        var handler = new EchoHandler(() => OtherHash);
+        var client = ClientWith(handler);
+        var ex = await Assert.ThrowsAnyAsync<Exception>(() => prepared ? UploadPrepared(client) : UploadPublic(client));
+        Assert.Equal(1, handler.Posts); // the POST really reached the stub
+        Assert.Contains("blob upload hash mismatch", ex.ToString());
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Upload_MatchingEchoReturnsTheLocalLowercaseHash(bool prepared)
+    {
+        Func<DirectNestClient, Task<string>> upload = prepared ? UploadPrepared : UploadPublic;
+        var local = await LocalHashAsync(upload);
+        var echoUpper = local.ToUpperInvariant();
+        var returned = await upload(ClientWith(new EchoHandler(() => echoUpper)));
+        Assert.Equal(local, returned);
+    }
+
     private static string PartName(System.Net.Http.HttpContent part)
         => part.Headers.ContentDisposition!.Name!.Trim('"');
 

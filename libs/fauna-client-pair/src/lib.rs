@@ -621,6 +621,12 @@ pub trait LinkedNestsNest: MaybeSendSync {
     /// [`LinkedNestsMachine::bound_nest_id`], which compares it against
     /// [`Self::bound_nest_id`] and refuses a nest whose claim disagrees.
     async fn this_nest(&self) -> Result<SelfNest, PairNestError>;
+    /// The address this seam is connected on — no round trip. A reader that
+    /// needs only where the connection goes (the home row's url) reads this,
+    /// never [`Self::this_nest`], whose `fauna.nest.info` round trip spends the
+    /// actor's discovery budget (`transport-trust.md` § Transport trust → *The
+    /// nest's self-description is read once per connection*).
+    fn nest_url(&self) -> String;
     /// The `nest_actor_id` this **connection** is bound to — never the nest's
     /// own `fauna.nest.info` claim, which any box can answer with a sibling's
     /// id it learned from the pairing list. Every trust decision keyed on
@@ -640,6 +646,13 @@ pub trait LinkedNestsNest: MaybeSendSync {
     /// under: a reconnect is a new number, so it proves afresh.
     fn live_connection(&self) -> Option<u64> {
         None
+    }
+    /// [`Self::live_connection`], once a connection is live: the transport's
+    /// own in-gap wait (`RpcRequester::ready_connection_id`), so a proof a
+    /// sign-in starts while the socket is still dialling is remembered for the
+    /// connection it then runs on. The default waits for nothing.
+    async fn ready_connection(&self) -> Option<u64> {
+        self.live_connection()
     }
     /// What this seam's transport has proven about the nest at its far end,
     /// per connection — the transport's own [`ProvenIdentityMemo`] (native
@@ -999,10 +1012,21 @@ impl LinkedNestsMachine {
     /// fold reads (`nests.md` § Expiry / renewal → *Duration and blessing*).
     async fn build_home_row(&self) -> Result<LinkedNestRow, PairDispatchError> {
         let seams = self.trust_seams()?;
-        let this = self.nest.this_nest().await?;
-        // The row names — and its blessing toggle writes — the identity this
-        // connection proved, never `this.id` (the nest's own claim).
-        let bound = self.nest.bound_nest_id().await?;
+        // The row's address is where this connection goes (the seam's own
+        // url, no round trip); the row names — and its blessing toggle writes
+        // — the identity this connection proved, never the nest's own claim:
+        // a proof this connection already passed (`security.md` § Transport
+        // trust → *The proven identity is remembered per connection*; one in
+        // flight is waited for) answers it, otherwise the binding is read.
+        // The claim (`this_nest`, a `fauna.nest.info` round trip) is read by
+        // neither half, so the home row draws no discovery budget, and a nest
+        // whose claim disagrees still gets its row, under the bound id, so the
+        // user can see and revoke it.
+        let url = self.nest.nest_url();
+        let bound = match remembered_self(&*self.nest).await {
+            Some(proven) => proven.id,
+            None => self.nest.bound_nest_id().await?,
+        };
         // Holder discovery rides `fauna.bridges.list_service_users`, which any
         // user may call (`User | Admin`, class-scoped reply — `nests.md` §
         // Implementation status). A failed call must not blank the Nests page
@@ -1138,7 +1162,7 @@ impl LinkedNestsMachine {
             expires_at: None,
             created_at: 0,
             label: None,
-            nest_url: Some(this.url),
+            nest_url: Some(url),
             is_home: true,
             trust_grants: facet
                 .grants
@@ -1348,6 +1372,19 @@ impl LinkedNestsMachine {
         };
         let scope_tuples: Vec<ScopeTuple> = scope.iter().map(trust::scope_tuple_from).collect();
         let event_scopes: Vec<_> = scope.iter().map(trust::grant_event_scope_from).collect();
+        // The holder view lists every approved holder to every member, so the
+        // catalog's derived holder is not the only guard: a scope must belong
+        // with the holder's role (`nests.md` § Mint), checked before any side
+        // effect against the same mapping the catalog derives from.
+        if let Some(stray) = event_scopes
+            .iter()
+            .find(|s| view_model::holder_role_for_scope(s) != Some(holder.role.as_str()))
+        {
+            return Err(PairDispatchError::InvalidState(format!(
+                "scope {stray:?} does not belong with holder {holder_bridge_id:?} (role {:?})",
+                holder.role
+            )));
+        }
 
         let mail = seams.mail.load().await?;
         let now = seams.platform.now_epoch_secs();
@@ -2442,9 +2479,40 @@ pub fn nest_error<E: RpcErrorClass + core::fmt::Display>(e: E) -> PairNestError 
 /// address, or a client bound to another nest is a new connection number and
 /// proves afresh; a refusal remembers nothing. A seam without a memo (a
 /// fake, a port-built web client) proves on every call as before.
+/// The identity this connection has already proven, waiting out a proof in
+/// flight on it (`ProvenIdentityMemo::proving`) — `None` when nothing passed
+/// on this connection, or the seam keeps no memo. Never proves.
+async fn remembered_self(nest: &dyn LinkedNestsNest) -> Option<SelfNest> {
+    let memo = nest.proven_identity_memo()?;
+    let connection = nest.live_connection()?;
+    let _gate = memo.proving().await;
+    memo.get(connection).map(|proven| SelfNest {
+        id: proven.nest_id.to_vec(),
+        url: proven.url,
+    })
+}
+
 async fn proven_self(nest: &dyn LinkedNestsNest) -> Result<SelfNest, PairNestError> {
     let memo = nest.proven_identity_memo();
-    let ticket = nest.live_connection();
+    // The ticket is taken once a connection is live (the transport's in-gap
+    // wait), so a proof a sign-in starts while the socket is still dialling
+    // is remembered for the connection it runs on.
+    let ticket = nest.ready_connection().await;
+    if let (Some(memo), Some(connection)) = (memo, ticket)
+        && let Some(proven) = memo.get(connection)
+    {
+        return Ok(SelfNest {
+            id: proven.nest_id.to_vec(),
+            url: proven.url,
+        });
+    }
+    // Concurrent readers on one connection wait for the first proof and are
+    // then served from the memo (`ProvenIdentityMemo::proving`); the ticket
+    // taken above is still the one the proof is attributed to.
+    let _gate = match memo {
+        Some(memo) => Some(memo.proving().await),
+        None => None,
+    };
     if let (Some(memo), Some(connection)) = (memo, ticket)
         && let Some(proven) = memo.get(connection)
     {
@@ -2786,6 +2854,10 @@ mod native_seam {
                 .map_err(nest_error)
         }
 
+        fn nest_url(&self) -> String {
+            self.nest.nest_url().to_string()
+        }
+
         async fn this_nest(&self) -> Result<SelfNest, PairNestError> {
             // `fauna.nest.info` is an anonymous-discovery kind, but it carries no
             // permission-class gate, so it answers on the authenticated
@@ -2819,6 +2891,10 @@ mod native_seam {
             self.nest.live_connection()
         }
 
+        async fn ready_connection(&self) -> Option<u64> {
+            fauna_protocol::RpcRequester::ready_connection_id(&self.nest).await
+        }
+
         fn proven_identity_memo(&self) -> Option<&ProvenIdentityMemo> {
             Some(self.nest.proven_identity_memo())
         }
@@ -2830,7 +2906,9 @@ mod native_seam {
             // The user's identity is registered on both nests, so we open a
             // second authenticated connection to the other nest with the *same*
             // keypair (reconstructed from the connected nest's auth) and seam
-            // over it. `request`/`connect` wait for the WS to come up internally
+            // over it. The mint goes first, so a peer no nest answers for fails
+            // here (`connect()` alone is `Ok` over it, its supervisor
+            // retrying); `request` waits for the WS to come up internally
             // (bounded by the kind deadline), so no explicit Connected wait.
             let keypair = ActorKeypair::from_secret(
                 *self
@@ -2841,7 +2919,12 @@ mod native_seam {
                     .secret_bytes(),
             );
             let peer = NestClient::new(peer_url.to_string(), keypair);
-            peer.connect().await.map_err(nest_error)?;
+            async {
+                peer.authenticate().await?;
+                peer.connect().await
+            }
+            .await
+            .map_err(nest_error)?;
             Ok(Arc::new(RpcLinkedNestsNest { nest: peer }))
         }
 
@@ -3143,10 +3226,15 @@ mod native_seam {
                 url.to_string(),
                 ActorKeypair::from_secret(self.owner_secret),
             );
-            client
-                .connect()
-                .await
-                .map_err(|e| format!("connect to backup destination {url}: {e}"))?;
+            // The mint first: an unreachable destination is this connect's
+            // failure (`connect()` alone is `Ok` over it, its supervisor
+            // retrying, and a pinned origin would then bind it).
+            async {
+                client.authenticate().await?;
+                client.connect().await
+            }
+            .await
+            .map_err(|e| format!("connect to backup destination {url}: {e}"))?;
             // The identity this connection is bound to (the host's pin, else a
             // possession proof over it) — what the shared door holds to the
             // enrolled `destination_actor_pubkey`.
@@ -3417,6 +3505,10 @@ mod wasm_seam {
                 .map_err(nest_error)
         }
 
+        fn nest_url(&self) -> String {
+            self.nest.nest_url().to_string()
+        }
+
         async fn this_nest(&self) -> Result<SelfNest, PairNestError> {
             let reply: NestInfoReply = self
                 .nest
@@ -3446,6 +3538,10 @@ mod wasm_seam {
 
         fn live_connection(&self) -> Option<u64> {
             self.nest.live_connection()
+        }
+
+        async fn ready_connection(&self) -> Option<u64> {
+            fauna_protocol::RpcRequester::ready_connection_id(&self.nest).await
         }
 
         fn proven_identity_memo(&self) -> Option<&ProvenIdentityMemo> {
@@ -3875,8 +3971,15 @@ mod tests {
             Ok(())
         }
 
+        fn nest_url(&self) -> String {
+            self.self_url.clone()
+        }
+
         async fn this_nest(&self) -> Result<SelfNest, PairNestError> {
             self.state.lock().unwrap().this_nest_calls += 1;
+            // A real read is a round trip: yield, so readers racing on one
+            // connection interleave here as they do against a nest.
+            tokio::task::yield_now().await;
             if let Some(next) = self.rebind_during_this_nest.lock().unwrap().take() {
                 self.set_connection(Some(next));
             }
@@ -4572,6 +4675,27 @@ mod tests {
             nest.this_nest_calls(),
             5,
             "remembered again once a proof passed"
+        );
+    }
+
+    /// Readers that ask at once on one connection — a sign-in loading the
+    /// custody leg, the Nests page's home row and the backups page together —
+    /// share one proof: the later ones wait for the first and are served from
+    /// the memo. Before the gate each missed and proved, and a linux launch
+    /// drew three `fauna.nest.info` cross-checks where one was owed.
+    #[tokio::test]
+    async fn concurrent_readers_on_one_connection_share_one_proof() {
+        let nest = Arc::new(FakeNest::with_id(0xaa, "https://this.test"));
+        nest.set_connection(Some(1));
+        let m = LinkedNestsMachine::new(nest.clone());
+        let (a, b, c) = tokio::join!(m.bound_nest_id(), m.bound_nest_id(), m.bound_nest_id());
+        for id in [a, b, c] {
+            assert_eq!(id.unwrap(), vec![0xaa; 32]);
+        }
+        assert_eq!(
+            nest.this_nest_calls(),
+            1,
+            "three readers racing on one connection prove once"
         );
     }
 
@@ -6372,6 +6496,153 @@ mod tests {
         );
     }
 
+    /// The tap hands the web-serve holder the author's PAID tiers only
+    /// (`nests.md` § Trust facet — grants → *Mint* → *Which tiers*, ruled
+    /// 2026-10-23). The free `followers` key and the hidden `only-me` key sit
+    /// in the same custody on a real device (recorded at the first approved
+    /// follow and by an archive import), and until this ruling the tap minted
+    /// them too — the box's key to every followers-only and only-me post, for
+    /// a paywall that serves neither. Pinned at the tap, not only at the
+    /// catalog: this is the gesture the consent copy describes.
+    #[tokio::test]
+    async fn the_default_set_leaves_the_followers_and_only_me_keys_on_the_device() {
+        use fauna_core::subscription::{FOLLOWERS_TIER, OWNER_ONLY_TIER};
+        let kp = ActorKeypair::generate();
+        let nest = Arc::new(FakeNest::default());
+        nest.state.lock().unwrap().holders = vec![mda_holder(), web_serve_holder()];
+        let store = trust_store(trust_cfg(kp.actor_id()));
+        let platform = Arc::new(FakePlatform {
+            now: StdMutex::new(NOW),
+            next_id: StdMutex::new(1),
+        });
+        let mut custody = fauna_core::data::SubscriptionsConfig::default();
+        for (tier, byte) in [
+            (FOLLOWERS_TIER, 0x33u8),
+            ("gold", 0x11),
+            (OWNER_ONLY_TIER, 0x44),
+        ] {
+            fauna_client_subscriptions::custody::record_new_tier(
+                &mut custody,
+                kp.actor_id(),
+                tier,
+                [byte; 32],
+                1000,
+            );
+        }
+        let period_keys = fauna_client_subscriptions::period_keys::MemoryPeriodKeyStore::new();
+        period_keys.restore_to(&custody);
+        let seams = TrustSeams {
+            actor_id: kp.actor_id().0,
+            ledger: store.ledger.clone(),
+            period_keys: period_keys.shared(),
+            mail: Arc::new(fauna_client_config::test_helpers::FakeMailStore::with(
+                &mail_enabled(),
+            )),
+            signer: Arc::new(FakeSigner {
+                key: kp.signing_key().clone(),
+            }),
+            platform,
+            blessings: Arc::new(FakeBlessings::default()),
+            backup: None,
+            folder_names: None,
+        };
+        let machine =
+            LinkedNestsMachine::new_with_trust(nest.clone() as Arc<dyn LinkedNestsNest>, seams);
+
+        machine
+            .dispatch(LinkedNestsAction::MintDefaultSet)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            nest.state.lock().unwrap().minted_blobs.len(),
+            3,
+            "mail, calendar and the one paid tier — not five"
+        );
+        let post_tiers: Vec<String> = stored_events(&store)
+            .iter()
+            .flat_map(|e| e.scope.iter())
+            .filter(|s| s.kind.as_deref() == Some("post"))
+            .filter_map(|s| s.tier.clone())
+            .collect();
+        assert_eq!(
+            post_tiers,
+            vec!["gold".to_string()],
+            "the only post key the box receives is the paid tier's"
+        );
+        let home = machine.snapshot().home.expect("home row");
+        assert_eq!(
+            home.mint_options
+                .iter()
+                .filter_map(|o| o.tier.clone())
+                .collect::<Vec<_>>(),
+            vec!["gold".to_string()],
+            "and the Nests picker offers no more than the tap minted"
+        );
+    }
+
+    /// **The mint checks the scope against the holder's role** (`nests.md`
+    /// § Trust facet — grants → *Mint* → *Who may let the nest serve their
+    /// paid posts*, ruled 2026-10-23): the holder view lists the box's own
+    /// web-serve key to every member, so a `Mint` naming it for a mail scope —
+    /// a key the catalog would never derive for that holder — is refused before
+    /// any side effect, while the `mda` paths are unchanged.
+    #[tokio::test]
+    async fn a_mint_whose_scope_does_not_belong_with_the_holder_role_is_refused() {
+        let kp = ActorKeypair::generate();
+        let nest = Arc::new(FakeNest::default());
+        nest.state.lock().unwrap().holders = vec![mda_holder(), web_serve_holder()];
+        let (machine, store, _plat) = trust_machine(nest.clone(), &kp);
+        let mail_read = TrustScope {
+            class: "content.read".into(),
+            kind: Some("mail".into()),
+            tier: None,
+        };
+        let post_read = TrustScope {
+            class: "content.read".into(),
+            kind: Some("post".into()),
+            tier: Some("gold".into()),
+        };
+
+        for (holder, scope) in [
+            ("web-serve", vec![mail_read]),
+            ("web-serve", vec![label_write_scope()]),
+            ("mda-1", vec![post_read.clone()]),
+            // One stray scope refuses the whole mint.
+            ("mda-1", vec![label_write_scope(), post_read]),
+        ] {
+            let err = machine
+                .dispatch(LinkedNestsAction::Mint {
+                    nest_id: "home".into(),
+                    holder_bridge_id: holder.into(),
+                    scope: scope.clone(),
+                    duration: Some(TrustGrantDuration::Standard),
+                })
+                .await
+                .expect_err("a scope outside the holder's role is refused");
+            assert!(
+                matches!(err, PairDispatchError::InvalidState(_)),
+                "{holder} {scope:?}: {err:?}"
+            );
+        }
+        assert!(
+            nest.state.lock().unwrap().minted_blobs.is_empty(),
+            "nothing deposited"
+        );
+        assert!(stored_events(&store).is_empty(), "nothing recorded");
+
+        machine
+            .dispatch(LinkedNestsAction::Mint {
+                nest_id: "home".into(),
+                holder_bridge_id: "mda-1".into(),
+                scope: vec![label_write_scope()],
+                duration: Some(TrustGrantDuration::Standard),
+            })
+            .await
+            .expect("the mda path is unchanged");
+        assert_eq!(nest.state.lock().unwrap().minted_blobs.len(), 1);
+    }
+
     /// The tap is idempotent: a scope already covered by a live grant to that
     /// holder is not minted a second time. The onboarding handoff is
     /// best-effort glue that can re-run (a retried session, a re-entered
@@ -6818,6 +7089,34 @@ mod tests {
             "an unreadable roster is flagged, never rendered as an empty one"
         );
         assert_eq!(snap.pairings.len(), 1, "pairings still listed");
+    }
+
+    /// The home row reads where the connection goes off the seam, never the
+    /// nest's own claim: building it draws no `fauna.nest.info`, so the
+    /// pairings refresh every app runs at sign-in spends none of the actor's
+    /// discovery budget (`transport-trust.md` § Transport trust → *The nest's
+    /// self-description is read once per connection*). On a connection whose identity is already proven the whole
+    /// refresh reads nothing from the claim.
+    #[tokio::test]
+    async fn the_home_row_reads_no_claim_of_its_own() {
+        let kp = ActorKeypair::generate();
+        let nest = Arc::new(FakeNest::with_id(0xaa, "https://this.test"));
+        nest.set_connection(Some(1));
+        let (machine, _store, _plat) = trust_machine(nest.clone(), &kp);
+        // The connection's one proof, as the sign-in's resolver makes it.
+        assert_eq!(machine.bound_nest_id().await.unwrap(), vec![0xaa; 32]);
+        let proofs = nest.this_nest_calls();
+
+        machine.hydrate().await.expect("hydrate");
+        machine.hydrate().await.expect("a second refresh");
+
+        let home = machine.snapshot().home.expect("the home row");
+        assert_eq!(home.nest_url.as_deref(), Some("https://this.test"));
+        assert_eq!(
+            nest.this_nest_calls(),
+            proofs,
+            "building the home row read the nest's own claim (`fauna.nest.info`) again"
+        );
     }
 
     /// A live `content.label-write` grant to `holder` in a fresh log, minted by
@@ -7716,5 +8015,20 @@ mod tests {
         assert_eq!(kind, "fauna.pair.revoke");
         let req: PairRevokeRequest = fauna_protocol::decode_strict(&payload).expect("decodes");
         assert_eq!(req.private_nest_id.as_ref(), vec![0xcd; 32].as_slice());
+    }
+
+    /// An unreachable backup destination is the connector's failure at the
+    /// connect — not a session that never came up, read one step later as an
+    /// identity failure.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn an_unreachable_backup_destination_fails_at_the_connect() {
+        let connector = native_backup_destination_connector([0x24; 32]);
+        // Nothing listens on port 1 of the loopback.
+        let err = match connector.connect("http://127.0.0.1:1").await {
+            Ok(_) => panic!("an unreachable destination connected"),
+            Err(e) => e,
+        };
+        assert!(err.starts_with("connect to backup destination"), "{err}");
     }
 }

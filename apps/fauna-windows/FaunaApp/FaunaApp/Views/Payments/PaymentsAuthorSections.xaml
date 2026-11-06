@@ -8,7 +8,7 @@
   XAML compiler emits every one into the generated .g.cs and the binary XBF, both
   of which ship inside FaunaApp.dll. Removing the ITEM is the only construct that
   removes the markup, so FaunaApp.csproj drops `Views\Payments\**` from Page and
-  Compile when `/p:FaunaStoreSafe=true` (dynamic-features.md § Platform-family
+  Compile when `/p:FaunaExcisePayments=true` (dynamic-features.md § Platform-family
   surface excision; the C# twin of web's isolated-module pattern and android's
   per-build-type source sets).
 
@@ -27,7 +27,12 @@
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     xmlns:loc="using:FaunaApp.Markup"
-    xmlns:ids="using:FaunaApp.UiIds">
+    xmlns:ids="using:FaunaApp.UiIds"
+    xmlns:views="using:FaunaApp.Views">
+
+    <UserControl.Resources>
+        <views:BoolToVisibilityConverter x:Key="BoolToVis" />
+    </UserControl.Resources>
 
     <!-- Spacing mirrors ProfilePage's SelfAuthorSections (20), so hosting the two
          sections inside one ContentControl leaves the page's rhythm unchanged. -->
@@ -188,6 +193,8 @@
                                 <ColumnDefinition Width="*" />
                                 <ColumnDefinition Width="Auto" />
                                 <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="Auto" />
                             </Grid.ColumnDefinitions>
                             <TextBlock Grid.Column="0" VerticalAlignment="Center"
                                        TextTrimming="CharacterEllipsis"
@@ -199,6 +206,17 @@
                             <TextBlock Grid.Column="2" VerticalAlignment="Center" Opacity="0.7"
                                        AutomationProperties.AutomationId="subscription-claim-status"
                                        Text="{Binding StatusLabel}" />
+                            <!-- Two-press Void (monetization.md § Pillar 3): the first press arms the
+                                 row (text becomes the consequence), the second calls claims.void. -->
+                            <Button Grid.Column="3"
+                                    AutomationProperties.AutomationId="subscription-claim-void-button"
+                                    Visibility="{Binding CanVoid, Converter={StaticResource BoolToVis}}"
+                                    Tag="{Binding}" Click="VoidClaim_Click"
+                                    Content="{Binding VoidText}" />
+                            <Button Grid.Column="4"
+                                    Visibility="{Binding Armed, Converter={StaticResource BoolToVis}}"
+                                    Click="KeepClaim_Click"
+                                    Content="{loc:Localize Key=subscriptions/void_claim_cancel}" />
                         </Grid>
                     </DataTemplate>
                 </ItemsControl.ItemTemplate>

@@ -38,8 +38,10 @@
 //!   ([`crate::db::CacheDb::list_event_webhooks`]): a remote server with no
 //!   live session is exactly who the webhook is for. The filter is the
 //!   push's live reach — [`fauna_scope::event_reaches`] over the row's
-//!   granted scopes, the account's authority, its external-apps switch
-//!   ([`targets`]).
+//!   granted scopes, a live grant family of its client, the account's
+//!   authority, its identity not superseded, its external-apps switch — and
+//!   a row whose tokens could carry no subject now is skipped rather than
+//!   named by the internal account id ([`targets`]).
 //! - **Off the put path, coalesced per principal.** [`notify`] spawns the
 //!   walk; one delivery runs per principal at a time, and a change landing
 //!   while it runs is owed one more delivery when it ends
@@ -151,17 +153,25 @@ pub struct Target {
     pub hook: EventWebhook,
     /// The row's granted scopes, split — what the cursor is computed over.
     pub scopes: Vec<String>,
+    /// The `sub` the principal's own tokens carry for this account
+    /// ([`grant_subject`]) — the notification's `sub`.
+    pub sub: String,
 }
 
 /// Which of `account`'s webhooks a change on `scope` reaches: the rows that
-/// declare one and whose granted scopes admit the frame
-/// ([`fauna_scope::event_reaches`]), on an account with authority whose
-/// external-apps switch is ON — the push's own filter, read at delivery.
+/// declare one, whose client still holds a live grant family
+/// ([`CacheDb::list_event_webhooks`]) and whose granted scopes admit the frame
+/// ([`fauna_scope::event_reaches`]), on an account with authority, not
+/// superseded, whose external-apps switch is ON — the push's own filter and
+/// the admission's own standing, read at delivery. A row whose tokens could
+/// carry no subject now (an ATProto-family grant on an account with no active
+/// ATProto identity) is skipped: the nest never names the account to a
+/// principal by an identifier its tokens did not carry.
 ///
 /// # Errors
 /// A DB read failing.
 pub async fn targets(db: &CacheDb, account: &[u8; 32], scope: &str) -> anyhow::Result<Vec<Target>> {
-    let reached: Vec<Target> = db
+    let reached: Vec<(EventWebhook, Vec<String>)> = db
         .list_event_webhooks(account)
         .await?
         .into_iter()
@@ -171,21 +181,37 @@ pub async fn targets(db: &CacheDb, account: &[u8; 32], scope: &str) -> anyhow::R
                 .split_whitespace()
                 .map(str::to_string)
                 .collect();
-            fauna_scope::event_reaches(&scopes, scope).then_some(Target { hook, scopes })
+            fauna_scope::event_reaches(&scopes, scope).then_some((hook, scopes))
         })
         .collect();
     if reached.is_empty() {
-        return Ok(reached);
+        return Ok(Vec::new());
     }
     // The account half, once, only when a row is reached at all.
     match db.actor_authority(&account[..]).await? {
         Some(authority) if !authority.is_revoked_at(crate::db::now_epoch_secs()) => {}
         _ => return Ok(Vec::new()),
     }
+    // Supersession is a stored decision, not a flag on the account row — the
+    // admission's own read (`principal_session::account_standing`).
+    if db.succession_for(&account[..]).await?.is_some() {
+        return Ok(Vec::new());
+    }
     if !db.get_atproto_external_apps_enabled(account).await? {
         return Ok(Vec::new());
     }
-    Ok(reached)
+    let login_did = db
+        .get_atproto_identity(account)
+        .await?
+        .filter(|r| r.status == "active")
+        .and_then(|r| r.did);
+    Ok(reached
+        .into_iter()
+        .filter_map(|(hook, scopes)| {
+            let sub = grant_subject(&scopes, login_did.as_deref(), account)?;
+            Some(Target { hook, scopes, sub })
+        })
+        .collect())
 }
 
 /// What a delivery needs of the nest, cloned off the put path so the task
@@ -267,19 +293,11 @@ async fn notification(nest: &Nest, account: &[u8; 32], target: &Target) -> anyho
         crate::oauth_issuer_key::active_signer(&conn, &seed)
     })
     .await??;
-    let login_did = nest
-        .db
-        .get_atproto_identity(account)
-        .await?
-        .filter(|r| r.status == "active")
-        .and_then(|r| r.did);
-    let sub = grant_subject(&target.scopes, login_did.as_deref(), account)
-        .unwrap_or_else(|| hex::encode(account));
     let cursor = cursor_for(&nest.db, account, &target.scopes).await?;
     let claims = EventClaims::scope_changed(
         nest.issuer.clone(),
         target.hook.client_id.clone(),
-        sub,
+        target.sub.clone(),
         cursor,
         crate::db::now_epoch_secs(),
     )?;

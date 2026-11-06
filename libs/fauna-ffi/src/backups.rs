@@ -48,6 +48,21 @@ pub fn snapshot_integrity_text(integrity: RowIntegrity) -> Option<LocalizedText>
     fauna_backups_machine::snapshot_integrity_text(integrity)
 }
 
+/// `fauna_backups_machine::snapshot_restore_result_text` → the
+/// `snapshot-restore-result` line for a finished whole-snapshot restore:
+/// "done" when `unverified` is empty, otherwise the partial line naming the
+/// files not written (`docs/goal/ui/backups.md` § Whole-snapshot restore →
+/// *Outcome*). `size` is the shell's own byte-size rendering.
+#[uniffi::export]
+pub fn snapshot_restore_result_text(
+    files_restored: u64,
+    size: String,
+    path: String,
+    unverified: Vec<String>,
+) -> LocalizedText {
+    fauna_backups_machine::snapshot_restore_result_text(files_restored, &size, &path, &unverified)
+}
+
 /// Build a [`BackupsMachine`] for the Backups page's **snapshot half** over
 /// `nest`'s authenticated WS-RPC connection. `observer` ticks on every snapshot
 /// change. The machine owns the folder + snapshot reads (`refresh` /
@@ -135,6 +150,15 @@ mod tests {
             fauna_backups_machine::snapshot_state_text(&state, Some("in 3 days"))
         );
         assert_eq!(snapshot_state_text(SnapshotState::Active, None), None);
+    }
+
+    #[test]
+    fn snapshot_restore_result_text_mirrors_the_shared_machine() {
+        let unverified = vec!["x/y".to_string()];
+        assert_eq!(
+            snapshot_restore_result_text(2, "1 KB".into(), "/r".into(), unverified.clone()),
+            fauna_backups_machine::snapshot_restore_result_text(2, "1 KB", "/r", &unverified)
+        );
     }
 
     #[test]

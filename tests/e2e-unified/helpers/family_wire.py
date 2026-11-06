@@ -7,7 +7,7 @@ test still goes through the app UI (e2e-conventions.md convention 8); these are
 the doors that put the accounts and the policy document in place around it.
 
 An *identity* here is ``{"signing_key": SigningKey, "actor_id_hex": str}`` —
-the shape ``submit_invite_request`` and ``admit_adult_directly`` return.
+the shape ``submit_invite_request`` and ``helpers.admin_wire.admit_adult`` return.
 """
 
 from __future__ import annotations
@@ -71,7 +71,7 @@ def submit_invite_request(nest_url: str, handle: str, message: str = "let me in"
     `fauna.protocol.rate_limited` here. Pacing the calls is not the fix (that is
     the deleted five-second retry loop above all over again -- convention 14, and
     naming it here in code would itself trip the sleep ratchet); REDUCING THE
-    COUNT is. So: every non-ward account comes from `admit_adult_directly`
+    COUNT is. So: every non-ward account comes from `helpers.admin_wire.admit_adult`
     (0 submits), and the read/policy tests share ONE ward through
     `family_pair` (1 submit for the module). Only these callers pay:
 
@@ -89,7 +89,7 @@ def submit_invite_request(nest_url: str, handle: str, message: str = "let me in"
 
     Nine in total, against a budget of ten. **Adding a submit here is a budget
     decision**: count the module's total before you add one, and prefer
-    `family_pair` (free) or `admit_adult_directly` (free).
+    `family_pair` (free) or `helpers.admin_wire.admit_adult` (free).
 
     ⚠ The count above is PER APP LEG, not per invocation: every caller here
     except `_shared_family` (module-scoped, built once) rides `admin_app`/
@@ -116,58 +116,6 @@ def submit_invite_request(nest_url: str, handle: str, message: str = "let me in"
                 "signature": sig,
             },
         )
-    return {"signing_key": sk, "actor_id_hex": actor_hex}
-
-
-def admit_adult_directly(nest_instance, handle: str) -> dict:
-    """Mint an ordinary (unsupervised, non-guardian) account at a cost of ZERO
-    anonymous submits.
-
-    `fauna.admin.users.create` is the **third** account-creation path
-    (`public-mode.md` § Registration & Identity — the ceremony, the admin claim,
-    or an admin admitting a user directly), and it is *admin*-authenticated, so
-    it never touches the anonymous `invite_request.submit` budget
-    `submit_invite_request` documents. Every account this module needs that is
-    not a ward is an ordinary adult — the guardians, and the transfer
-    handshake's proposed guardians — so all of them come from here.
-
-    ⚠ It cannot mint a WARD. `fauna.admin.users.create` passes
-    `guardian: None` to `create_user_with_handle`, and family-safety.md
-    § The guardianship link sets supervision **at admission** through an invite
-    code or a request approval only ("v1 does not convert an existing full
-    account into a supervised one"). So a supervised account still has to walk
-    `admit_ward`'s throttled path — see that helper.
-
-    `label=handle` below matches what the nest itself writes, not a picker
-    workaround anymore. The admin guardian pickers are now HANDLE (else
-    full-actor-hex) pickers everywhere (admin.md § 2 → *What identifies a user
-    in an admin picker*, ratified 2026-08-30, all 7 arms landed by
-    2026-09-09 — `apps/fauna-tui/src/admin/users.rs::guardian_picker` →
-    `super::picker_option`, and its linux/android/apple/web/windows twins), NOT
-    label pickers, so `register_user`'s label no longer decides picker
-    distinctness (the 2026-08-30 "picker painted `e2e-test` five times over"
-    label collision can't reproduce today — each caller here already passes
-    its own distinct `handle`). `label=handle` stays because
-    `create_user_with_handle` (`bins/fauna-nest/src/db/admin.rs:1272`) always
-    defaults a handle-registered user's `label` to its `handle` — this just
-    restores that production shape.
-
-    Fixture setup, not the action under test (e2e point 8): the direct-admission
-    UI path is itself the mutation under test in `test_admin_users_admit.py`,
-    which is this shortcut's point-8 citation.
-    """
-    from common.auth import register_user
-
-    sk = SigningKey.generate()
-    actor_hex = bytes(sk.verify_key).hex()
-    register_user(
-        nest_instance["port"],
-        actor_hex,
-        base_url=nest_instance["url"],
-        admin_signing_key=nest_instance["admin"]["signing_key"],
-        handle=handle,
-        label=handle,
-    )
     return {"signing_key": sk, "actor_id_hex": actor_hex}
 
 
@@ -236,10 +184,6 @@ DEFAULT_WARD_POLICY = {
     "federation_contact": True,
     "feed_sources": "allow",
     "content_policy": {
-        "nsfw": "inherit",
-        "spam": "inherit",
-        "phishing": "inherit",
-        "commercial": "inherit",
         # The guardian's rule document (nest-rules.md § The shared rule editor
         # (b)): absent would leave the last test's rules standing; an EMPTY
         # document is how a write clears it. `version` is the grammar version

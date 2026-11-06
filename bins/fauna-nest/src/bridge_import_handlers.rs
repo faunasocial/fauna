@@ -45,8 +45,8 @@ use crate::bridge_routing_handlers::{
 };
 use crate::db::bridge_routing::{InboundMailFields, RecipientSealKey};
 use crate::db::mail_import::{
-    CreateImportSessionOutcome, DiscardImportSessionOutcome, ImportFold, ImportSessionRow,
-    ImportState, import_counter_to_sql,
+    CreateImportSessionOutcome, DiscardImportSessionOutcome, ImportFold, ImportMailboxLimit,
+    ImportSessionRow, ImportState, QuotaHoldFull, import_counter_to_sql,
 };
 use crate::email_handlers::invalid_params;
 use crate::rpc_router::{RpcKindMeta, RpcRouterBuilder};
@@ -56,6 +56,19 @@ use fauna_mls::wrapped_blob::SealedRecordBytes;
 // crate that owns the wire contract, so this handler and the client's
 // `BatchPacker` enforce one number rather than two that happen to agree.
 use fauna_protocol::bridge_routing::{MAX_BATCH_BYTES, MAX_BATCH_MESSAGES};
+
+/// A failed progress fold: a quota hold that would outgrow its bound
+/// (`QuotaHoldFull`) or a row that would track a mailbox past its bounds
+/// (`ImportMailboxLimit`) is the caller's error, anything else is the nest's.
+fn progress_error(err: anyhow::Error) -> fauna_protocol::RpcError {
+    if let Some(full) = err.downcast_ref::<QuotaHoldFull>() {
+        return invalid_params(&full.to_string());
+    }
+    if let Some(limit) = err.downcast_ref::<ImportMailboxLimit>() {
+        return invalid_params(&limit.to_string());
+    }
+    internal(err)
+}
 
 fn row_to_info(row: ImportSessionRow) -> ImportSessionInfo {
     ImportSessionInfo {
@@ -291,6 +304,7 @@ async fn import_one(
         let mlkem_ek = Some(seal_key.mlkem_ek.as_slice());
         (
             SealedRecordBytes::verify(seal_recipient_blob(
+                fauna_mls::wrapped_blob::RecordKind::Mail,
                 body.as_ref(),
                 pubkey,
                 mlkem_ek,
@@ -298,6 +312,7 @@ async fn import_one(
             )?)
             .map_err(internal)?,
             SealedRecordBytes::verify(seal_recipient_blob(
+                fauna_mls::wrapped_blob::RecordKind::Mail,
                 &index_hint,
                 pubkey,
                 mlkem_ek,
@@ -538,7 +553,7 @@ async fn run_import(
                 revised_total.take(),
             )
             .await
-            .map_err(internal)?
+            .map_err(progress_error)?
         {
             Some(row) => row,
             None => return Err(fold_refused(state, actor, session_id).await),
@@ -766,7 +781,7 @@ fn record_import_outcomes_handler() -> crate::rpc_router::RpcHandler {
                     None,
                 )
                 .await
-                .map_err(internal)?
+                .map_err(progress_error)?
             {
                 Some(row) => row,
                 None => return Err(fold_refused(&state, &actor_id, &req.session_id).await),
@@ -1499,6 +1514,72 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(row.cursors.get("INBOX"), Some(&(13, 9)), "the hold lifted");
+    }
+
+    /// Both nest paths that fold progress (`import_message`'s per-message
+    /// fold and `record_import_outcomes_handler`) map a store error through
+    /// `progress_error`: every bound the row keeps is the caller's error,
+    /// answered `invalid_params`, and anything else stays the nest's.
+    #[test]
+    fn every_progress_bound_answers_invalid_params() {
+        use crate::db::mail_import::ImportMailboxLimit::*;
+        for err in [
+            anyhow::Error::new(QuotaHoldFull),
+            anyhow::Error::new(TooManyMailboxes),
+            anyhow::Error::new(NameTooLong),
+            anyhow::Error::new(TooManyQuotaHolds),
+        ] {
+            let rpc = progress_error(err);
+            assert_eq!(rpc.code, "fauna.email.invalid_params");
+        }
+        let rpc = progress_error(anyhow::anyhow!("disk on fire"));
+        assert!(!rpc.code.ends_with("invalid_params"), "{}", rpc.code);
+    }
+
+    ///  End to end on `record_import_outcomes`: a session whose row
+    /// already tracks the most mailboxes it may refuses a fresh one with
+    /// `invalid_params`, and its counters do not move.
+    #[tokio::test]
+    async fn outcomes_into_one_mailbox_too_many_answer_invalid_params() {
+        use crate::db::mail_import::MAX_IMPORT_SESSION_MAILBOXES;
+        use fauna_protocol::bridge_routing::ClientImportOutcome;
+        let state = fixture_state().await;
+        let sid = start_session(&state, "gmail:imap.gmail.com:alice").await;
+        for i in 0..MAX_IMPORT_SESSION_MAILBOXES {
+            state
+                .db
+                .record_import_progress(
+                    &USER,
+                    &sid,
+                    &format!("m{i}"),
+                    9,
+                    &[(1, ImportFold::Skipped)],
+                    None,
+                )
+                .await
+                .unwrap()
+                .unwrap();
+        }
+        let err = record_outcomes(
+            &state,
+            &sid,
+            vec![ClientImportOutcome {
+                uid: 1,
+                kind: ClientImportOutcomeKind::TooLarge { size: 1 },
+                extra: Default::default(),
+            }],
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.code, "fauna.email.invalid_params");
+        let row = state
+            .db
+            .get_import_session(&USER, &sid)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.skipped_count, MAX_IMPORT_SESSION_MAILBOXES as u64);
+        assert!(!row.cursors.contains_key("INBOX"));
     }
 
     /// Like a sent message, a recorded outcome needs a running session, and an

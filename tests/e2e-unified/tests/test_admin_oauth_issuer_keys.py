@@ -47,7 +47,6 @@ import time
 import pytest
 
 from clients.ws_rpc_admin_client import WsRpcAdminClient
-from helpers.app_surface import app_name, skip_unbuilt
 from helpers.indexed_rows import row_present
 from i18n.strings import S
 
@@ -61,8 +60,6 @@ pytestmark = [
     pytest.mark.ios,
     pytest.mark.windows,
 ]
-
-_BUILT_APPS = ("tui", "linux", "web", "android", "macos", "ios", "windows")
 
 # Named budgets (generous ceilings; deadline polls pay only the real delay).
 _PAGE_BUDGET_S = 30.0     # admin-nest page render + the key-set read after nav
@@ -105,15 +102,6 @@ def test_the_admin_walks_the_three_sign_in_key_controls_through_the_app(
     """read → ordinary rotate → forced (cancel, then confirm) → secret ×2 → the
     rendered set joins the nest's own."""
     app = admin_app
-    if app_name(app.driver) not in _BUILT_APPS:
-        skip_unbuilt(
-            app.driver,
-            surface="admin-nest-oauth-section",
-            detail="the outside-app sign-in key controls (authorization-server.md "
-            "§ The issuer → Two rotation arms) are built on all 7 apps "
-            "(tui, linux, web, android, macOS, iOS, windows)",
-            tracked="authorization-server.md § The issuer → Two rotation arms",
-        )
 
     app.admin.navigate_nest()
     _poll(

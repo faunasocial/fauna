@@ -60,6 +60,12 @@ final class SyncAgentHealthModel {
     /// so the rows keep their last-known park.
     var onLocationsTick: (@Sendable ([FfiAgentLocation]) async -> Void)?
 
+    /// `FaunaMacApp` wires this to `LocationsModel.refreshSetConflicts` — a
+    /// group set's review list, watched on this SAME tick: the fold records a
+    /// row inside the agent, so no gesture of this device produces it
+    /// (`group-set.md` § Build design — the group set, decision 9).
+    var onSetConflictsTick: (@Sendable () async -> Void)?
+
     private static let pollIntervalSeconds: UInt64 = 10
 
     init() {
@@ -139,5 +145,7 @@ final class SyncAgentHealthModel {
         if let locations = try? await channel.listLocations() {
             await onLocationsTick?(locations)
         }
+
+        await onSetConflictsTick?()
     }
 }

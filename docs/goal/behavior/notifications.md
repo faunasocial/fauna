@@ -196,6 +196,8 @@ notifier starts from), and a knock toast carries one notification id per app,
 never one per sender, so a flood of fresh keys replaces one toast instead of
 stacking.
 
+**The sender arg — named by the app, not the nest (ruled 2026-10-29).** A fauna-native row's `{sender}` (`notifications.row_knock`, `notifications.row_like`) is filled by the nest with the 8-hex prefix of the row's `sender_id`: the nest cannot know the viewer's nickname for them, which [`value-formatting.md`](value-formatting.md) § Peer display label puts first. So the app replaces it — `fauna_client_notifications::notification_text_naming(&NotifItem, name_sender)`, where `name_sender` is `fauna_conversations::ContactsCache::known_peer_label` (the one `peer_display_label` chain over the viewer's nickname and the contact roster's handle). Only a `source = "fauna"` row's arg that still equals the prefix is replaced, and only when the viewer knows the person; a stranger's knock keeps the prefix, and a bridged row's sender (the nest's own answer, a display name) always stands. The arg passes the same plain-line reduction as every other. The nest sending the handle instead was rejected: it would still lose the nickname, and it would be a second resolver beside the one chain.
+
 **The nest cannot mint a row without a key.** `insert_notification` takes the
 body and the fallback together (`NotificationText { body, summary }`), so
 "a new producer composed an English sentence and forgot the key" does not
@@ -531,6 +533,26 @@ count via `fauna.notifications.count`. How long a row lives: § Retention.
 
 ## Implementation status today
 
+- **The sender arg (§ Localized body → *The sender arg*) — shared Rust, both
+  faces, tui, web, linux and android built 2026-10-29.**
+  `notification_text_naming` and `ContactsCache::known_peer_label` are in, with
+  unit pins, and so are the faces over the overlay projection: UniFFI
+  `notification_text_naming_for(item, FfiContactOverlays)` and wasm
+  `notificationTextNaming(row, WasmContactOverlays)`. tui, web and linux paint
+  the Notifications row through them (web re-reads on `contactsRevision`),
+  witnessed by `test_contacts_accept_opens_conversation.py`; android's row calls
+  the UniFFI face keyed on the overlay epoch, with no run yet (its witness needs
+  the host emulator). **macos and ios built 2026-10-29:** the shared FaunaKit
+  `NotificationsVM` holds the `FfiContactOverlays` it is configured with, the
+  row is mapped through `notification_text_naming_for`, and both pages reload on
+  `ConversationsVM.overlayRevision`; witnessed by
+  `test_contacts_accept_opens_conversation.py`. **windows built 2026-10-30:**
+  `NotificationsViewModel` reads each page through
+  `ContactOverlayNames.Open().NotificationText`, and the page reloads on
+  `ContactOverlayNames.Moved`; witnessed on Windows by the same test
+  (`test_accepting_a_contact_request_lets_you_start_the_conversation[windows]`
+  passed 2026-10-30).
+
 - **`tip` (§ The notification type) — nest + shared Rust + tui built
   2026-10-11.** Both zap-receipt ingresses ring the post's author through
   `nostr::zap_ingest::notify_tip`; the shared router opens the post; tui paints
@@ -540,7 +562,8 @@ count via `fauna.notifications.count`. How long a row lives: § Retention.
 
 - **Security-notice deadlines — built on every app.** tui, linux and the UniFFI apps (via `value-format`) render `execute_after` / `lands_at` as local time inside the shared `notification_text`; the web SPA, where `local-clock` is off on the wasm leg, rewrites those two numeric args with the browser's own `Date` in `notificationDeadlines.ts` (non-numeric values pass through).
 
-- **Muted words (§ Muted words) — shared Rust + tui built 2026-10-17.** The
+- **Muted words (§ Muted words) — shared Rust + tui built 2026-10-17; all
+  seven apps built 2026-10-23.** The
   two predicates (`fauna_client_notifications::{notification_muted,
   notification_push_muted}`) and both ids are in; tui collapses a row behind
   `notification-muted` with its reveal, witnessed by
@@ -564,12 +587,16 @@ count via `fauna.notifications.count`. How long a row lives: § Retention.
   the one copy the conversation collapse reads too; loaded as the knock pump
   arms), the knock toast asks `knockPushMutedFor` first, and apple raises no
   toast over `PushEvent::Notification`; the FaunaKit feed and conversation
-  collapse paint the shared pair. **Not built:** windows paints
-  every row in full, its knock toast fires unasked, and its feed and
-  conversation collapse still read the four old keys
-  (`feed.post_muted_placeholder` / `post_muted_reveal`,
-  `conversations.detail.muted_word` / `muted_reveal`), which are deleted with
-  the last of them.
+  collapse paint the shared pair. **windows built 2026-10-23, the last of the
+  seven:** the notifications page collapses over `NotificationMutedFor` against
+  the process-held list (`MutedKeywordsCache`, the one copy its conversation
+  collapse reads; the reveal set sits beside the messages' and drops with the
+  actor), the knock toast asks `KnockPushMutedFor` first
+  (`NotificationService.ShowKnockNotification`, never on the `KnockReceived`
+  raise the contacts roster also reads), and windows raises no toast over
+  `PushEvent::Notification`, so the knock toast is its only rule-6 leg; its feed
+  and conversation collapse paint the shared pair, and the four per-surface
+  keys they replaced are gone from the catalog.
 - **Built:** the full wire surface (`fauna.notifications.{list, mark_read,
   count}` — handlers + kind registry; HTTP twins deleted), the shared typed
   client (`libs/fauna-client-notifications`), wasm passthroughs, and a
@@ -619,8 +646,13 @@ count via `fauna.notifications.count`. How long a row lives: § Retention.
   predicate crosses the wasm/UniFFI boundary as the row-shaped
   `notification_retained` (`notificationRetained`, `notification_retained_for`).
   The web and linux marks ride the same witness; android is compile-proved (no
-  e2e venue). **Not built:** the same UI on windows, macos and ios (the
-  `FfiNotificationsClient` methods and the Go binding they need have landed).
+  e2e venue). **Built 2026-10-22 (macos, ios):** the same two ids through the
+  one shared FaunaKit seam (`NotificationsVM.{dismiss, clearAll, isRetained}`,
+  the `NotificationDismissButton` leaf on a collapsed row too); both marks ride
+  the witness. **Built 2026-10-28 (windows):** the same two ids over the
+  generated C# binding (`Notifications().{Dismiss, Clear}`,
+  `NotificationRetainedFor`), the dismiss on a collapsed row too; its mark rides
+  the first witness test.
 - **App-global unread count (§ Architectural rules, rule 4) — macOS + iOS
   joined 2026-09-24.** Until then apple wrote `notificationsUnreadCount` only
   from the Notifications page's own load, so a push landing while the user sat
@@ -736,10 +768,11 @@ count via `fauna.notifications.count`. How long a row lives: § Retention.
   the only sanitizer), and `AppNotificationBuilder.AddText` escapes toast XML
   itself, so the windows seat passes the plain line through unescaped;
   `KnockToastBuilderTests` witnesses both that escaping and the one shared
-  tag. **Not built (macOS + iOS, found 2026-10-15):** the one id per app —
-  `postKnockNotification` still names each request `knock-<senderId>`, so a
-  flood of fresh keys stacks one banner per key there (the text itself is
-  already the shared plain line). **Built
+  tag. **Built 2026-10-23 (macOS + iOS):** the one id per app —
+  `NotificationManager.knockRequest(for:)` posts every knock under the single
+  identifier `knock`, the sender riding in `userInfo[knockSenderIdKey]`, so a
+  flood of fresh keys replaces one banner (witness
+  `knockToastsFromDifferentSendersShareOneRequestIdentifier`). **Built
   2026-10-15 (shared Rust, linux):** every row and toast arg and the verbatim
   summary take `sanitize_plain_line` in the shared decision (witnesses
   `a_remote_sender_arg_is_plain_capped_text_on_row_and_toast`,

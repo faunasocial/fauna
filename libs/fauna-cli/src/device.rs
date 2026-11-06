@@ -34,17 +34,6 @@ pub const HOLDER_X25519_PARAM: &str = "fauna_holder_x25519";
 /// (`conversations-oracle.md` § The custodian and the door).
 pub const PRINCIPAL_ID_FIELD: &str = "fauna_principal_id";
 
-/// The cli's client identity until the organisation's Client ID Metadata
-/// Document is published (`apps/cli.md` § Open decisions 1): the loopback
-/// development client, whose document is synthesized from this very string,
-/// declaring exactly the catalog's arms.
-pub fn development_client_id(scope: &str) -> String {
-    let encoded: String = url::form_urlencoded::byte_serialize(scope.as_bytes())
-        .collect::<String>()
-        .replace('+', "%20");
-    format!("http://localhost?scope={encoded}")
-}
-
 fn b64u(bytes: &[u8]) -> String {
     B64.encode(bytes)
 }
@@ -485,14 +474,6 @@ mod tests {
         let holder = HolderKey::generate();
         let back = HolderKey::from_secret_b64(&holder.to_secret_b64()).unwrap();
         assert_eq!(holder.public_b64(), back.public_b64());
-    }
-
-    #[test]
-    fn the_development_client_declares_the_scope_in_its_own_id() {
-        assert_eq!(
-            development_client_id("fauna:feed:read fauna:identity:op:post.author"),
-            "http://localhost?scope=fauna%3Afeed%3Aread%20fauna%3Aidentity%3Aop%3Apost.author"
-        );
     }
 
     #[test]

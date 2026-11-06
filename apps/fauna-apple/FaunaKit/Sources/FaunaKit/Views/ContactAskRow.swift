@@ -34,3 +34,24 @@ public struct ContactAskRow: View {
         }
     }
 }
+
+/// The knock row's "waiting for your guardian's approval" mark
+/// (`knock-guardian-pending`, `family-safety.md` § App surface) — painted on every
+/// incoming knock while the supervised account's policy has contact approval on,
+/// because the guardian decides it, not the ward. One view for the macOS and iOS
+/// knock rows; the verdict is ``ContactsVM/knocksAwaitGuardian``, never decided here.
+public struct KnockGuardianPendingLabel: View {
+    let visible: Bool
+
+    public init(visible: Bool) {
+        self.visible = visible
+    }
+
+    public var body: some View {
+        if visible {
+            automationText(Ids.knockGuardianPending, L.contacts.knockGuardianPending)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+        }
+    }
+}

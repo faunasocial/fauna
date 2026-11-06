@@ -1,0 +1,211 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Page
+    x:Class="FaunaApp.Views.AdminMailReportsPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:local="using:FaunaApp.Views"
+    xmlns:loc="using:FaunaApp.Markup"
+    xmlns:vm="using:FaunaApp.Core.ViewModels"
+    xmlns:controls="using:FaunaApp.Controls"
+    Loaded="Page_Loaded"
+    xmlns:ids="using:FaunaApp.UiIds">
+
+    <!--
+      Admin page: DMARC aggregate-report summary (admin-mail-reports,
+      dmarc-reporting.md § Admin pane summary surface). A dumb renderer of the
+      shared DmarcReportsMachine (libs/fauna-client-mail-settings, exposed over
+      UniFFI by libs/fauna-ffi/src/mail_admin.rs build_dmarc_reports_machine)
+      through AdminMailReportsViewModel (FaunaApp.Core). Before the first read
+      answers only the heading, filters and refresh paint; once loaded the summary
+      (totals + alignment + dispositions), the top-source / top-sender lists and
+      the report rows paint. The two filters are native ComboBoxes built in code
+      (the option's automation Name is its raw value, the Content its label — the
+      FlaUI bridge selects and reads a ComboBoxItem by Name). Prior art:
+      AdminAliasesPage (machine over the shared client + indexed list) and the
+      tui reference apps/fauna-tui/src/admin/mail_reports.rs.
+    -->
+    <ScrollViewer Padding="16">
+        <StackPanel Spacing="16" MaxWidth="760" HorizontalAlignment="Left">
+
+            <controls:CopyableInfoBar x:Name="ErrorBar"
+                     Severity="Error" IsOpen="False" IsClosable="True" />
+
+            <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.PageHeading}"
+                       Style="{StaticResource TitleTextBlockStyle}"
+                       Text="{loc:Localize Key=admin/mail_reports_page/title}" />
+            <TextBlock Opacity="0.7" TextWrapping="Wrap"
+                       Text="{loc:Localize Key=admin/mail_reports_page/description}" />
+
+            <ProgressRing x:Name="LoadProgress" IsActive="False"
+                          Visibility="Collapsed" HorizontalAlignment="Left" />
+
+            <TextBlock x:Name="ActionError"
+                       Foreground="{ThemeResource SystemFillColorCriticalBrush}"
+                       TextWrapping="Wrap" Visibility="Collapsed" />
+            <!-- Hidden mirrors keep the app-wide IDs present for infra (state-protocol read). -->
+            <TextBlock x:Name="ErrorTextMirror"
+                       AutomationProperties.AutomationId="{x:Bind ids:Ids.ErrorMessage}"
+                       AutomationProperties.Name=" " Text=" " FontSize="1" Height="1" Visibility="Collapsed" />
+            <TextBlock x:Name="WarningTextMirror"
+                       AutomationProperties.AutomationId="{x:Bind ids:Ids.WarningMessage}"
+                       AutomationProperties.Name=" " Text=" " FontSize="1" Height="1" Visibility="Collapsed" />
+
+            <!-- Filters: window, domain, refresh. Always painted. -->
+            <StackPanel Orientation="Horizontal" Spacing="12">
+                <ComboBox x:Name="WindowSelect"
+                          AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminMailReportsWindowSelect}"
+                          Header="{loc:Localize Key=admin/mail_reports_page/window_label}"
+                          MinWidth="160" SelectionChanged="WindowSelect_SelectionChanged" />
+                <ComboBox x:Name="DomainSelect"
+                          AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminMailReportsDomainSelect}"
+                          Header="{loc:Localize Key=admin/mail_reports_page/domain_label}"
+                          MinWidth="200" SelectionChanged="DomainSelect_SelectionChanged" />
+                <Button x:Name="RefreshButton" VerticalAlignment="Bottom"
+                        AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminMailReportsRefreshButton}"
+                        Click="Refresh_Click"
+                        Content="{loc:Localize Key=admin/mail_reports_page/refresh}" />
+            </StackPanel>
+
+            <!-- Window totals (summary container needs a Name: a bare container is
+                 pruned from the UIA tree). Painted only once a read has answered. -->
+            <StackPanel x:Name="SummaryPanel" Spacing="4" Visibility="Collapsed"
+                        AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminMailReportsSummary}"
+                        AutomationProperties.Name="{loc:Localize Key=admin/mail_reports_page/summary_title}">
+                <TextBlock Style="{StaticResource SubtitleTextBlockStyle}"
+                           Text="{loc:Localize Key=admin/mail_reports_page/summary_title}" />
+                <TextBlock x:Name="MessagesText" TextWrapping="Wrap"
+                           AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminMailReportsMessages}" />
+                <TextBlock x:Name="AlignmentText" TextWrapping="Wrap"
+                           AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminMailReportsAlignment}" />
+                <TextBlock x:Name="DispositionsText" TextWrapping="Wrap"
+                           AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminMailReportsDispositions}" />
+            </StackPanel>
+
+            <TextBlock x:Name="TruncatedText" Opacity="0.7" TextWrapping="Wrap" Visibility="Collapsed"
+                       AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminMailReportsTruncated}"
+                       Text="{loc:Localize Key=admin/mail_reports_page/truncated}" />
+            <TextBlock x:Name="EmptyText" Opacity="0.5" TextWrapping="Wrap" Visibility="Collapsed"
+                       AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminMailReportsEmpty}"
+                       Text="{loc:Localize Key=admin/mail_reports_page/empty}" />
+
+            <!-- Top sources / senders / reports: painted once loaded. Non-virtualizing
+                 StackPanel item panels so FlaUI counts every row; each row carries a
+                 non-empty AutomationProperties.Name so the row peer resolves. -->
+            <StackPanel x:Name="ListsPanel" Spacing="16" Visibility="Collapsed">
+
+                <StackPanel Spacing="4">
+                    <TextBlock Style="{StaticResource SubtitleTextBlockStyle}"
+                               Text="{loc:Localize Key=admin/mail_reports_page/sources_title}" />
+                    <ItemsControl x:Name="SourcesList"
+                                  AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminMailReportsSource}"
+                                  AutomationProperties.Name="{loc:Localize Key=admin/mail_reports_page/sources_title}">
+                        <ItemsControl.ItemsPanel>
+                            <ItemsPanelTemplate><StackPanel Spacing="2" /></ItemsPanelTemplate>
+                        </ItemsControl.ItemsPanel>
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate x:DataType="vm:MailReportsCountRowVm">
+                                <Grid ColumnSpacing="12" AutomationProperties.Name="{x:Bind Value}">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock Grid.Column="0" Text="{x:Bind Value}"
+                                               AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminMailReportsSourceIp}"
+                                               FontFamily="Consolas" IsTextSelectionEnabled="True" />
+                                    <TextBlock Grid.Column="1" Text="{x:Bind CountText}" Opacity="0.8"
+                                               AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminMailReportsSourceCount}" />
+                                </Grid>
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                </StackPanel>
+
+                <StackPanel Spacing="4">
+                    <TextBlock Style="{StaticResource SubtitleTextBlockStyle}"
+                               Text="{loc:Localize Key=admin/mail_reports_page/senders_title}" />
+                    <ItemsControl x:Name="SendersList"
+                                  AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminMailReportsSender}"
+                                  AutomationProperties.Name="{loc:Localize Key=admin/mail_reports_page/senders_title}">
+                        <ItemsControl.ItemsPanel>
+                            <ItemsPanelTemplate><StackPanel Spacing="2" /></ItemsPanelTemplate>
+                        </ItemsControl.ItemsPanel>
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate x:DataType="vm:MailReportsCountRowVm">
+                                <Grid ColumnSpacing="12" AutomationProperties.Name="{x:Bind Value}">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock Grid.Column="0" Text="{x:Bind Value}"
+                                               AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminMailReportsSenderDomain}"
+                                               IsTextSelectionEnabled="True" />
+                                    <TextBlock Grid.Column="1" Text="{x:Bind CountText}" Opacity="0.8"
+                                               AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminMailReportsSenderCount}" />
+                                </Grid>
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                </StackPanel>
+
+                <StackPanel Spacing="4">
+                    <TextBlock Style="{StaticResource SubtitleTextBlockStyle}"
+                               Text="{loc:Localize Key=admin/mail_reports_page/reports_title}" />
+                    <ItemsControl x:Name="ReportsList"
+                                  AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminMailReportsReport}"
+                                  AutomationProperties.Name="{loc:Localize Key=admin/mail_reports_page/reports_title}">
+                        <ItemsControl.ItemsPanel>
+                            <ItemsPanelTemplate><StackPanel Spacing="4" /></ItemsPanelTemplate>
+                        </ItemsControl.ItemsPanel>
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate x:DataType="vm:MailReportRowVm">
+                                <Grid Padding="8,10" ColumnSpacing="12" RowSpacing="2"
+                                      BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                                      BorderThickness="0,0,0,1"
+                                      AutomationProperties.Name="{x:Bind Submitter}">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <Grid.RowDefinitions>
+                                        <RowDefinition Height="Auto" />
+                                        <RowDefinition Height="Auto" />
+                                        <RowDefinition Height="Auto" />
+                                    </Grid.RowDefinitions>
+                                    <StackPanel Grid.Row="0" Grid.Column="0" Orientation="Horizontal" Spacing="12">
+                                        <TextBlock Text="{x:Bind Submitter}" FontWeight="SemiBold"
+                                                   AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminMailReportsReportSubmitter}"
+                                                   IsTextSelectionEnabled="True" />
+                                        <TextBlock Text="{x:Bind OurDomain}" Opacity="0.8"
+                                                   AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminMailReportsReportDomain}" />
+                                    </StackPanel>
+                                    <TextBlock Grid.Row="1" Grid.Column="0" Text="{x:Bind Period}" Opacity="0.8"
+                                               AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminMailReportsReportPeriod}" />
+                                    <StackPanel Grid.Row="2" Grid.Column="0" Orientation="Horizontal" Spacing="12">
+                                        <TextBlock Text="{x:Bind Messages}" Opacity="0.8"
+                                                   AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminMailReportsReportMessages}" />
+                                        <TextBlock Text="{x:Bind Pass}" Opacity="0.8"
+                                                   AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminMailReportsReportPass}" />
+                                    </StackPanel>
+                                    <Button Grid.Row="0" Grid.RowSpan="3" Grid.Column="1" VerticalAlignment="Center"
+                                            AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminMailReportsReportViewButton}"
+                                            Loaded="ViewReportButton_Loaded"
+                                            Click="ViewReport_Click" />
+                                </Grid>
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                </StackPanel>
+            </StackPanel>
+
+            <!-- The opened report's XML; present only while a report is open. -->
+            <StackPanel x:Name="RawPanel" Spacing="4" Visibility="Collapsed">
+                <TextBlock Style="{StaticResource SubtitleTextBlockStyle}"
+                           Text="{loc:Localize Key=admin/mail_reports_page/raw_title}" />
+                <TextBlock x:Name="RawText" FontFamily="Consolas" FontSize="12"
+                           TextWrapping="Wrap" IsTextSelectionEnabled="True"
+                           AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminMailReportsRaw}" />
+            </StackPanel>
+
+        </StackPanel>
+    </ScrollViewer>
+</Page>

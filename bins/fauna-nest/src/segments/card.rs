@@ -309,8 +309,14 @@ mod tests {
     }
 
     fn seal(body: &[u8], pubkey: &[u8; 32]) -> Vec<u8> {
-        crate::bridge_routing_handlers::seal_recipient_blob(body, pubkey, None, "body")
-            .expect("seal body")
+        crate::bridge_routing_handlers::seal_recipient_blob(
+            fauna_mls::wrapped_blob::RecordKind::Card,
+            body,
+            pubkey,
+            None,
+            "body",
+        )
+        .expect("seal body")
     }
 
     /// The stock hint a seeded row carries — pinned here so a test can

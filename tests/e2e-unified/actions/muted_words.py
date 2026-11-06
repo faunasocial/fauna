@@ -189,6 +189,22 @@ class MutedWordsActions:
         stored list minus that term)."""
         self.driver.click("muted-word-remove-button", scope=f"muted-word-item[{index}]")
 
+    #: How long `remove_all` keeps removing before it fails.
+    REMOVE_ALL_BUDGET_S = 60
+
+    def remove_all(self, budget_s: float = REMOVE_ALL_BUDGET_S) -> None:
+        """Remove every term, bounded (e2e-conventions.md convention 9): a
+        removal the app never applies fails here naming the count left, instead
+        of spinning a cleanup loop past the per-test timeout, which fires once."""
+        deadline = time.monotonic() + budget_s
+        while (left := self.row_count()) > 0:
+            if time.monotonic() >= deadline:
+                raise AssertionError(
+                    f"{left} muted word(s) still listed after {budget_s:.0f}s of removing: "
+                    f"{self.driver.diagnose('error-message')}"
+                )
+            self.remove(0)
+
     # ── the level picker (docs/goal/ui/settings.md § Muted words — the level
     # picker): option values `hide` | `show-less`, the level's own spelling ──
     def level(self, index: int = 0) -> str:

@@ -19,7 +19,8 @@
 //!   by class, and a custodian bearer whose grant is the explicit-list form is
 //!   refused at admission (the recovery material is of the account);
 //! - **the refusal is opaque**: a wrong kit at the custodian, and a kit for
-//!   an actor this nest never heard of, read the same `not_registered`;
+//!   an actor this nest never heard of, read the same `not_registered` — and
+//!   no sooner than the one non-resident floor, the custodied success too;
 //! - **the copy follows the chain**: after the owner REPLACES the kit at its
 //!   living nest and the pump passes once, the old kit no longer opens the
 //!   custodied blob and the new one does; and a pass against an unreachable
@@ -385,6 +386,46 @@ async fn a_wrong_kit_cannot_tell_a_custodied_owner_from_an_unknown_actor() {
         "a custodied owner and an unknown actor must refuse identically"
     );
     assert!(custodied.contains("NotRegistered"), "{custodied}");
+}
+
+/// The refusal is opaque in TIME too (ruling 3, its timing half): every
+/// non-resident answer — a custodied owner's refusal, an unknown actor's, the
+/// custodied success — is held to the one floor, so the custodied arm's
+/// pair-store open is not read off the clock. A lower bound only: the floor
+/// is a parked timer, so the assertion cannot flake on a loaded box.
+#[tokio::test]
+async fn every_non_resident_answer_is_held_to_the_one_floor() {
+    use fauna_nest::recovery_handlers::ESCROW_NON_RESIDENT_FLOOR as FLOOR;
+    let rig = rig(CustodyScopeSet::Account).await;
+    rig.pass().await;
+
+    let anon = AnonymousNestClient::connect(&rig.host_base).await.unwrap();
+    let client = RecoveryClient::new(anon);
+    let junk = [0u8; 64];
+    for (arm, actor) in [
+        ("custodied", owner().actor_id()),
+        ("unknown", ActorKeypair::from_secret([0x42; 32]).actor_id()),
+    ] {
+        let challenge = client.escrow_challenge(&actor).await.unwrap();
+        let started = std::time::Instant::now();
+        let refused = client.escrow_fetch(&actor, &challenge.nonce, &junk).await;
+        let took = started.elapsed();
+        assert!(refused.is_err(), "{arm}: a junk signature opens nothing");
+        assert!(
+            took >= FLOOR,
+            "{arm} refusal answered in {took:?}, under the floor"
+        );
+    }
+
+    // The served arm is held too — the kit holder's success is no faster.
+    let started = std::time::Instant::now();
+    restore_at(&rig.host_base, &rig.kit, owner().actor_id().0)
+        .await
+        .expect("the kit restores at the custodian");
+    assert!(
+        started.elapsed() >= FLOOR,
+        "the custodied success skipped the floor"
+    );
 }
 
 /// `escrow.pull` is the custodian's alone — and only under the `Account` form.

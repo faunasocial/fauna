@@ -182,22 +182,69 @@ impl CacheDb {
     /// same event (removed ⇒ decrement). The stable key is
     /// [`fauna_core::engagement::compute_toggle_event_id`].
     pub async fn delete_engagement_event(&self, event_id: &[u8]) -> Result<bool> {
+        self.delete_engagement_event_where(event_id, None).await
+    }
+
+    /// [`Self::delete_engagement_event`], but only when the row's `event_data`
+    /// names `carrier` — the post-carried like's reversal (`docs/goal/ui/feed.md`
+    /// § Layout & flow → *Reaction posts count and paint*, ruling 1): deleting
+    /// an `Upvote` post removes the actor's like row only when THAT post carries
+    /// it, so a door like (`event_data` NULL) or another `Upvote` post's row by
+    /// the same actor survives. Read and delete run under the one lock.
+    pub async fn delete_engagement_event_carried_by(
+        &self,
+        event_id: &[u8],
+        carrier: &[u8],
+    ) -> Result<bool> {
+        self.delete_engagement_event_where(event_id, Some(carrier))
+            .await
+    }
+
+    /// The `event_data` of an engagement event — `None` when no such event
+    /// exists, `Some(None)` when it exists with a NULL `event_data` (a door
+    /// like), `Some(Some(bytes))` when it names a carrier (an `Upvote` post's
+    /// content id).
+    pub async fn get_engagement_event_data(
+        &self,
+        event_id: &[u8],
+    ) -> Result<Option<Option<Vec<u8>>>> {
+        let event_id = event_id.to_vec();
+        let conn = self.conn.lock().await;
+        conn.query_row(
+            "SELECT event_data FROM engagement_events WHERE event_id = ?1",
+            rusqlite::params![event_id],
+            |r| r.get::<_, Option<Vec<u8>>>(0),
+        )
+        .optional()
+        .context("get engagement event data")
+    }
+
+    async fn delete_engagement_event_where(
+        &self,
+        event_id: &[u8],
+        carrier: Option<&[u8]>,
+    ) -> Result<bool> {
         let event_id = event_id.to_vec();
         let conn = self.conn.lock().await;
         // Capture the target content before the DELETE so the trend recompute
         // below can re-score it (a removed act — an `unlike` — lowers, or
         // withdraws, the post's `trending` row). No such event → nothing to do.
-        let Some(content_id) = conn
+        let Some((content_id, event_data)) = conn
             .query_row(
-                "SELECT content_id FROM engagement_events WHERE event_id = ?1",
+                "SELECT content_id, event_data FROM engagement_events WHERE event_id = ?1",
                 rusqlite::params![event_id],
-                |r| r.get::<_, Vec<u8>>(0),
+                |r| Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, Option<Vec<u8>>>(1)?)),
             )
             .optional()
             .context("look up content for trend recompute")?
         else {
             return Ok(false);
         };
+        if let Some(carrier) = carrier
+            && event_data.as_deref() != Some(carrier)
+        {
+            return Ok(false);
+        }
         let rows = conn
             .execute(
                 "DELETE FROM engagement_events WHERE event_id = ?1",

@@ -96,6 +96,7 @@ from .helpers import (
     enable_atproto_bridge,
     find_free_ports,
     get_repo_root,
+    nest_served_leaf,
     register_primary_domain,
     remove_container,
     remove_data_dir,
@@ -124,6 +125,15 @@ pytestmark = [
 # so pebble's HTTP-01 validation reaches the nest's :8080 challenge listener.
 DOMAIN = "nest.test"
 MX_SNI = f"mail.{DOMAIN}"
+
+
+def _nest_leaf(nest, sni: str):
+    """The leaf the NEST presents for `sni`. A host-side handshake under `mail.*`
+    reaches the SNI router's mail bridge (not serving here → EOF), never the nest's
+    resolver, so a bridge-routed name is read from inside the nest's namespace."""
+    if sni.startswith(("mail.", "relay.", "pds.")):
+        return nest_served_leaf(nest["name"], sni)
+    return served_leaf("127.0.0.1", nest["port"], sni)
 TLSA_NAME = f"_25._tcp.mail.{DOMAIN}"
 CLAIM_CODE = "ACME44"
 
@@ -344,7 +354,7 @@ def test_real_acme_issuance_flips_floor_to_trusted(acme_stack):
         assert len(rows) == 1, f"one floor-MX TLSA on the floor, got {rows}"
         rdata = rows[0]["expected"]
         assert rdata.startswith("3 1 1 "), f"DANE-EE/SPKI/SHA-256 record, got {rdata!r}"
-        served = served_leaf(host, port, MX_SNI)
+        served = _nest_leaf(nest, MX_SNI)
         assert spki_sha256_hex(served) == rdata.split()[-1].lower(), (
             "the floor-MX TLSA must pin the SPKI of the leaf the image actually "
             "serves for the MX while on the floor"
@@ -449,12 +459,12 @@ def _await_pebble_leaf(nest, sni: str = DOMAIN, *, budget: float = 180, also=Non
     host, port = "127.0.0.1", nest["port"]
 
     def _ready():
-        leaf = served_leaf(host, port, sni)
+        leaf = _nest_leaf(nest, sni)
         ok = _leaf_is_pebble(leaf) and (also is None or also(leaf))
         return leaf if ok else None
 
     def _diagnose():
-        leaf = served_leaf(host, port, sni)
+        leaf = _nest_leaf(nest, sni)
         return (
             f"never served {what} for {sni}: last issuer="
             f"{leaf.issuer.rfc4514_string()!r} sans={_sans(leaf)!r}\n"

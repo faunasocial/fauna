@@ -36,7 +36,7 @@
   } from '#lib/wasm';
   import { resolveLocalized } from '#lib/i18n/localized';
   import { mailHealthCheckStateLabel, secretRotationText } from '#lib/wasm';
-  import { mailHealthHeartbeatText, mailHealthStatusText } from '#lib/value-format';
+  import { localDate, mailHealthHeartbeatText, mailHealthStatusText } from '#lib/value-format';
   import { onMount } from 'svelte';
   import MessageBanner from '#lib/components/MessageBanner.svelte';
   import { t } from '#lib/i18n/strings';
@@ -118,6 +118,7 @@
     ri_seconds: number;
     aggregate_retention_days: number;
     forensic_retention_days: number;
+    outbound_aggregate_enabled: boolean;
   }
   // The Outlook import's admin-supplied Microsoft registration
   // (`set_microsoft_registration`, read back off `fauna.setup.status`).
@@ -274,6 +275,7 @@
   let dmarcFoMode = $state('');
   let dmarcAggregateRetention = $state('');
   let dmarcForensicRetention = $state('');
+  let dmarcOutboundAggregate = $state(true);
   let dmarcFoOptions = $state<ReachPolicyOption[]>([]);
   // Microsoft registration for the Outlook import
   let msClientId = $state('');
@@ -378,6 +380,7 @@
     dmarcFoMode = dm.fo_mode;
     dmarcAggregateRetention = String(dm.aggregate_retention_days);
     dmarcForensicRetention = String(dm.forensic_retention_days);
+    dmarcOutboundAggregate = dm.outbound_aggregate_enabled;
     const ms = snap.microsoft_registration;
     msClientId = ms.client_id;
     msTenant = ms.tenant;
@@ -609,6 +612,7 @@
       fo_mode: dmarcFoMode,
       aggregate_retention_days: parseU32(dmarcAggregateRetention, base.aggregate_retention_days),
       forensic_retention_days: parseU32(dmarcForensicRetention, base.forensic_retention_days),
+      outbound_aggregate_enabled: dmarcOutboundAggregate,
     };
   }
 
@@ -663,14 +667,6 @@
       /* the snapshot carries the error */
     }
     applySnapshot();
-  }
-
-  // The local `YYYY-MM-DD` date of an epoch-ms instant (the web twin of
-  // `fauna_core::format::format_unix_local_date_ms`, which needs the OS tz
-  // database wasm lacks).
-  function localDate(ms: number): string {
-    const d = new Date(ms);
-    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
   }
 
   // The `admin-mail-spam-baseline-state` text: published / none, then the
@@ -1169,6 +1165,10 @@
   {#if forensicRetentionWarns}
     <p class="muted small">{t.admin.mail_page.dmarc_forensic_retention_warning}</p>
   {/if}
+  <label class="switch-row">
+    <span class="label-text">{t.admin.mail_page.dmarc_outbound_aggregate_label}</span>
+    <input type="checkbox" data-testid={IDS.ADMIN_MAIL_DMARC_OUTBOUND_AGGREGATE_TOGGLE} bind:checked={dmarcOutboundAggregate} />
+  </label>
 
   <button class="btn primary" data-testid={IDS.ADMIN_MAIL_DMARC_SAVE_BUTTON} disabled={busy || !snap} onclick={handleSaveDmarc}>
     {t.admin.mail_page.dmarc_save}

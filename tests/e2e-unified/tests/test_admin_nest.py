@@ -284,50 +284,6 @@ def test_region_section_warns_when_the_authority_has_gone_quiet(admin_app, nest_
                 time.sleep(0.3)
 
 
-@pytest.fixture
-def stoppable_nest(request, nest_mode, tmp_path_factory):
-    """A dedicated nest this test may stop mid-journey (``nest["stop"]()``), so
-    the app is left holding a page whose nest no longer answers. Never the
-    session nest — every later test rides that one. Stopping a nest the harness
-    itself started is the harness's own teardown, run early (process safety
-    concerns OTHER sessions' nests)."""
-    from conftest import _start_dedicated_nest
-
-    nest, cleanup = _start_dedicated_nest(request, nest_mode, tmp_path_factory, "stoppable")
-    stopped = []
-
-    def stop():
-        if not stopped:
-            stopped.append(True)
-            cleanup()
-
-    nest["stop"] = stop
-    try:
-        yield nest
-    finally:
-        stop()
-
-
-@pytest.fixture
-def stoppable_spa_url(static_dir, stoppable_nest):
-    """Function-scoped SPA proxy → ``stoppable_nest``. Mirrors ``crowded_spa_url``."""
-    from conftest import _serve_spa_proxy
-
-    url, server = _serve_spa_proxy(static_dir, stoppable_nest["url"])
-    yield url
-    server.shutdown()
-
-
-@pytest.fixture
-def stoppable_admin_app(request, app, stoppable_nest):
-    """``admin_app``, pointed at ``stoppable_nest`` (`_login_admin_as`)."""
-    from conftest import _login_admin_as
-
-    _login_admin_as(app, request, stoppable_nest,
-                    spa_url_fixture="stoppable_spa_url", fixture_name="stoppable_admin_app")
-    yield app
-
-
 _ROTATE_ARM = "admin-nest-seed-rotate-button"
 _ROTATE_CONFIRM = "admin-nest-seed-rotate-confirm-button"
 _ROTATE_REASON = "admin-nest-seed-rotate-roster-reason"

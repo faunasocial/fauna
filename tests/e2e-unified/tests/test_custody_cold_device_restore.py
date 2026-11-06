@@ -65,7 +65,7 @@ carried, opened with the identity secret — between its state-plane walk and
 its content walk, so the restored notice states no sealed count. The
 measurement ruling (6) owes, per ROW (``sealed_rows``, also recorded as the
 test property): BEFORE the gesture keyed (2026-10-16), "Restored 5 of your
-account's records. 6 came back sealed …"; AFTER, ``0``.
+account's records. 6 came back still encrypted …"; AFTER, ``0``.
 
 The content row the lost fleet sealed is alice's custody of bob's nest itself:
 the Nests page folds it from the custody-ceremony records and the grant log,
@@ -272,7 +272,6 @@ def test_a_cold_device_restores_its_account_state_from_a_custodian_nest(
     bob_app = rig["bob_app"]
     home, custodian = rig["home"], rig["custodian"]
     fleet_app.custody.require_supported()
-    fleet_app.nest_trust.require_duration_and_blessing_supported()
     alice_app.nest_trust.require_custody_restore_supported()
     alice_secret = bytes(alice["signing_key"])
 
@@ -378,7 +377,7 @@ def test_a_cold_device_restores_its_account_state_from_a_custodian_nest(
     )
     applied = int(re.search(r"\d+", restored).group(0))
     assert applied >= 1, restored
-    sealed = re.search(r"(\d+) came back sealed", restored)
+    sealed = re.search(r"(\d+) came back still encrypted", restored)
     sealed_rows = int(sealed.group(1)) if sealed else 0
     record_property("sealed_rows", sealed_rows)
     assert sealed_rows == 0, (

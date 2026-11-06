@@ -101,7 +101,10 @@ use fauna_protocol::{RpcErrorClass, RpcRequester};
 
 use crate::grant_log::{self, is_bounded_mail_grant};
 use crate::rpc::CapabilitiesClient;
-use crate::{mint_bounded_mail_grant, mint_bounded_mail_labeler_grant, mint_grant};
+use crate::{
+    DerivePayloadError, MintGrantError, mint_bounded_mail_grant, mint_bounded_mail_labeler_grant,
+    mint_grant,
+};
 
 /// What [`remint_capability_grants`] found. Mirrors the other aftermath legs'
 /// outcome discipline: the arms that mean "no write happened" are distinct,
@@ -265,18 +268,39 @@ fn scope_includes_label_write(scope: &[GrantEventScope]) -> bool {
 /// The event scope mapped to the blob's `ScopeTuple`s for a generic
 /// (non-bounded) re-mint. The event's `tier` passes through (a post-tier grant
 /// genuinely carries one) and so does a factor folded into `kind`
-/// (`GrantEventScope::factor` — the blob's own qualifier, unfolded); `set` is
-/// always `None` — folder grants are not ledger-recorded (module docs) so no
-/// event scope ever names a set.
+/// (`GrantEventScope::factor` — the blob's own qualifier, unfolded). `set` is
+/// `None` but for a `deposit` tuple, whose folder the twin folds into `kind`
+/// as `folder:<id>` (`fauna_core::grant_event::deposit_folder_token`): that
+/// token is rebuilt into the tuple's `set` and the kind left empty, so the
+/// re-mint names the same folder and writer (`folder-deposit.md` § The
+/// depositor signs, the owner's device verifies). Content-read folder grants
+/// are not ledger-recorded (module docs).
 fn event_scope_to_tuples(scope: &[GrantEventScope]) -> Vec<ScopeTuple> {
     scope
         .iter()
-        .map(|s| ScopeTuple {
-            class: s.class.clone(),
-            kind: s.base_kind().map(str::to_string),
-            tier: s.tier.clone(),
-            set: None,
-            factor: s.factor().map(str::to_string),
+        .map(|s| {
+            let deposit_folder = (s.class == ScopeTuple::CLASS_DEPOSIT)
+                .then(|| {
+                    s.base_kind()
+                        .and_then(fauna_core::grant_event::parse_deposit_folder_token)
+                })
+                .flatten();
+            match deposit_folder {
+                Some(folder) => ScopeTuple {
+                    class: s.class.clone(),
+                    kind: None,
+                    tier: s.tier.clone(),
+                    set: Some(folder.to_string()),
+                    factor: s.factor().map(str::to_string),
+                },
+                None => ScopeTuple {
+                    class: s.class.clone(),
+                    kind: s.base_kind().map(str::to_string),
+                    tier: s.tier.clone(),
+                    set: None,
+                    factor: s.factor().map(str::to_string),
+                },
+            }
         })
         .collect()
 }
@@ -515,6 +539,17 @@ where
             };
             let blob = match blob {
                 Ok(b) => b,
+                // A predecessor-era grant over a reserved tier's key (the
+                // free `followers` or hidden `only-me` tier, minted by the
+                // one-tap trust offer before 2026-10-23) is RETIRED, not
+                // owed: no device can ever derive it again (`ui/nests.md`
+                // § Trust facet — grants → *Mint* → *Which tiers*), so owing
+                // it would hold the pass "still owed" for ever. The old grant
+                // is revoked with the rest and nothing replaces it, which is
+                // the ruling's intent for a grant it would never have minted.
+                Err(MintGrantError::DerivePayload(DerivePayloadError::ReservedTier(_))) => {
+                    continue;
+                }
                 // A payload this device cannot derive (mail not enabled here,
                 // a tier key held elsewhere). Owed, retries where the
                 // material is.
@@ -621,7 +656,17 @@ where
     // about the ceremony's revoke-all, not a narrowing instruction. A failure
     // here is safe: the replacements are live AND recorded; only this
     // retirement bookkeeping re-runs at the next store-ready.
+    //
+    // The marks are carried from the ledger as it reads AT the retirement,
+    // never from `published` (read before the deposits): until the old id's
+    // revoke lands, the Nests page renders the OLD row, raised, so a Keep the
+    // owner presses meanwhile lands on the old id — and carrying the stale
+    // `Open` would re-ask on the replacement a question already answered.
+    // A Keep whose write lands while the retirement's own write is parked is
+    // in what that write answers, so one re-carry from it closes that window
+    // too (the mark arm's join keeps the most restrictive verdict).
     if !retire.is_empty() {
+        let at_retirement = ledger.load().await.map_err(GrantRemintError::Save)?;
         let mut retirement = SuccessionLedger::events_replica(owner, Vec::new());
         for h in &retire {
             let _ = grant_log::record_revoke(
@@ -632,16 +677,29 @@ where
                 now,
             );
             retirement.unattested_grant_marks.extend(carried_marks(
-                published.ledger(),
+                &at_retirement,
                 &h.old_grant_id,
                 h.new_id,
                 h.predecessor,
             ));
         }
-        ledger
+        let stored = ledger
             .merge(retirement)
             .await
             .map_err(GrantRemintError::Save)?;
+        let late: Vec<GrantUnattestedMark> = retire
+            .iter()
+            .flat_map(|h| carried_marks(&stored, &h.old_grant_id, h.new_id, h.predecessor))
+            .filter(|m| !stored.unattested_grant_marks.contains(m))
+            .collect();
+        if !late.is_empty() {
+            let mut recarry = SuccessionLedger::events_replica(owner, Vec::new());
+            recarry.unattested_grant_marks = late;
+            ledger
+                .merge(recarry)
+                .await
+                .map_err(GrantRemintError::Save)?;
+        }
     }
     Ok(GrantRemintOutcome::Reminted { reminted, owed })
 }

@@ -185,6 +185,8 @@ fn setup_status_handler() -> RpcHandler {
                 dns_configured: s.dns_configured,
                 tls_active: s.tls_active,
                 email_enabled: s.email_enabled,
+                caldav_enabled: s.caldav_enabled,
+                carddav_enabled: s.carddav_enabled,
                 admin_exists: s.admin_exists,
                 claimed: s.claimed,
                 node_mode: s.node_mode.as_str().to_string(),

@@ -91,7 +91,7 @@ fn set_provider_base_urls_installs_and_clears_the_launch_side_dial_override() {
     //
     // The mirror above is only half a seam. A native app that rebuilds its
     // wizard mints a **fresh** `OnboardingMachine` — linux does exactly this on
-    // every `driver.reset()` (`apps/fauna-linux/src/main.rs`'s "reset" arm →
+    // every `driver.reset()` (`apps/fauna-linux/src/lib.rs`'s "reset" arm →
     // `views::onboarding::build_onboarding_window` → `machine_glue::make_machine`
     // → `OnboardingMachine::new`, whose map starts empty). The harness installs
     // the map ONCE per fixture, so after such a reset the pre-identity half went

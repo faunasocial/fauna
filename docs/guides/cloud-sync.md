@@ -143,9 +143,7 @@ has shared with you appears as a Fauna location too once you have accepted
 it, named with whoever shared it — "Trip photos (alice)" — and its row in
 Settings → Folders carries the same switch, which only hides or shows it on
 this device. If it was shared with you to read only, you can browse and open
-its files but Finder and Files won't let you change them. Right-clicking a file in the Fauna
-location offers **Share** and **Version history**, which open the Fauna app
-on the matching page — the same menu vocabulary Windows Explorer gets.
+its files but Finder and Files won't let you change them. Right-clicking a file in the Fauna location offers **Version history**, and on a file in a public Fauna location, or on the location itself, **Share** too; both open the Fauna app on the matching page — the same menu vocabulary Windows Explorer gets.
 
 On Android, the folders this device receives changes in appear under **Fauna** in the system file browser
 and in any app's file picker. Files show up with their names and sizes and
@@ -176,7 +174,7 @@ folder "serve over WebDAV" (off by default, per folder), and then:
   read *and write* the files;
 - **Windows Explorer** can browse read-only for now (native write needs file
   locking, which is on the list);
-- anything that can speak WebDAV — scanners, backup tools, media players — gets a doorway to exactly the folders you flagged, and nothing else. Un-flag a folder and access is cryptographically revoked, not just password-walled.
+- anything that can speak WebDAV — scanners, backup tools, media players — gets a doorway to exactly the folders you flagged, and to no other folder. Un-flag a folder and access is cryptographically revoked, not just password-walled. The password a tool signs in with is a mail credential, though: it also reads and sends your mail whenever mail is on, and syncs your calendar and contacts. So give each tool its own, and when you retire one, disconnect it alone under Settings → **Connected apps**.
 
 Flagging a folder that already holds files makes those files reachable too: the app you flip the switch in re-locks the folder's existing files to its WebDAV key before it finishes, even on a phone or in the browser, with no computer syncing the folder.
 

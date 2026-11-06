@@ -67,6 +67,17 @@ public final class OnboardingVM {
         // is read from the device's store, `box-recovery.md` § The plane-era
         // recovery floor) at the sandbox-shared container on iOS; `nil` on macOS.
         machine.setStoreContainerDir(storeContainerDir: AccountStateDir.storeContainerDir)
+        #if os(macOS)
+        // A desktop app keeps a door key where SSH keys live: a door run writes
+        // it to `~/.ssh` with a `Host` entry (`installers/vps.md` § The SSH door
+        // → *The key*), as tui and linux do. The macOS app is not sandboxed
+        // (Developer-ID, no `app-sandbox` entitlement), so `~/.ssh` is the real
+        // one. iOS has no `~/.ssh`: the key waits in the machine for the
+        // save-key button (`ProvisioningSshDoorSection`).
+        machine.setSshDoorKeyDir(
+            dir: FileManager.default.homeDirectoryForCurrentUser
+                .appendingPathComponent(".ssh").path)
+        #endif
     }
 
     // ── Observer ────────────────────────────────────────────────────────────
@@ -112,7 +123,14 @@ public final class OnboardingVM {
     /// hook) and after the unreadable-index start-over. Synchronous, before the
     /// wizard mounts: the newest erase's statement replaces whatever was up,
     /// and `nil` (a clean erase) closes the view.
+    ///
+    /// It also re-roots the machine at `identity_choice` (`settings.md`, the
+    /// `sign-out-button` row): a wizard still at `.done` from the sign-in that
+    /// opened the erased session re-runs its exit when the signed-out root
+    /// mounts it (each root's `doneExit` is view state, back to `.unknown`), and
+    /// that handoff re-persists the identity just erased and relaunches into it.
     public func takeSignOutResidue(from session: SessionState) {
+        machine.reset()
         signOutResidue = session.signOutResidue
         session.signOutResidue = nil
     }
@@ -198,9 +216,25 @@ public final class OnboardingVM {
         _ = _observerTick
         return machine.isLoading()
     }
+    /// The nest's rules for the joining pages (`onboarding-nest-rules`): the
+    /// machine's verified pre-sign-in read, `nil` until it lands — read off
+    /// `_observerTick` so the paint follows the wizard's change callback.
+    public var joiningNestRules: NestRulesSummary? {
+        _ = _observerTick
+        return machine.joiningNestRules(lang: RegionStore.uiLang)
+    }
     public var nestUrl: String {
         _ = _observerTick
         return machine.nestUrl()
+    }
+    /// The provisioning page's snapshot, read off `_observerTick` so the page
+    /// repaints on every change callback. A page reading `machine.provisioningSnapshot()`
+    /// directly tracks nothing: once the run ends with a `finalError` the
+    /// `finalError ?? errorMessage` short-circuit skips the only tracked read,
+    /// and a Retry then never repaints.
+    public var provisioningSnapshot: ProvisioningSnapshot {
+        _ = _observerTick
+        return machine.provisioningSnapshot()
     }
 
     // ── "Almost ready" (awaiting-manual-DNS) surface ────────────────────────
@@ -336,15 +370,19 @@ public final class OnboardingVM {
     /// for the pending-invite submit return. The rule lives in shared Rust, never in an
     /// app-side `if !append` (web once shipped the half-account that guard's omission
     /// makes).
-    private func persistConfirmedSecret(_ secret: String, append: Bool, context: String) {
+    ///
+    /// Returns whether the write held; on `false` the machine is already back on the
+    /// confirm screen with the error, so a caller must not paint another message over it.
+    @discardableResult
+    private func persistConfirmedSecret(_ secret: String, append: Bool, context: String) -> Bool {
         do {
             _ = try FaunaAccounts.registry(keychain: keychain).confirmIdentity(
                 secretHex: secret, append: append)
+            return true
         } catch {
             logMessage(level: .error, target: "fauna.onboarding", message: "[OnboardingVM] persist_confirmed_identity (\(context)) failed: \(error)")
-            machine.identityCommitFailed(
-                message: L.onboarding.sessionError.persistSuccessor(
-                    message: DisplayError.message(error) ?? "\(error)"))
+            machine.identityCommitFailed(message: L.onboarding.sessionError.persistIdentity)
+            return false
         }
     }
 
@@ -425,7 +463,11 @@ public final class OnboardingVM {
             return
         case .restored, .restoredPredecessorsLost:
             if let secret = machine.effectiveSecret() {
-                persistConfirmedSecret(secret, append: append, context: "restored")
+                // A refused save already put the error on the confirm screen
+                // (`identityCommitFailed`); the outcome line must not paint over it.
+                if !persistConfirmedSecret(secret, append: append, context: "restored") {
+                    return
+                }
             }
         default:
             break
@@ -433,6 +475,27 @@ public final class OnboardingVM {
         if let message = recoveryEntryOutcomeMessage(outcome: outcome) {
             machine.setErrorMessage(message: renderLocalizedText(message))
         }
+    }
+
+    /// `sessions-lockout-button` on `emergency_lockout_entry` — the seed-signed
+    /// lock over one anonymous connection (`devices.md` § The signed-out door).
+    /// The typed account rides on the machine's one account field, ALWAYS
+    /// (empty included), exactly as `recovery_entry` forwards it; the word is
+    /// checked by the machine. Persists nothing. The shared table's sentence
+    /// lands on `error-message` — for a refusal on this step, for `locked` on
+    /// `identity_choice`, where the machine has already returned the wizard;
+    /// only the unlock time is the client's (the shared `formatUnixLocal`).
+    public func submitEmergencyLockout(secret: String, account: String, confirmWord: String) async {
+        machine.setCurrentHandle(h: account.trimmingCharacters(in: .whitespacesAndNewlines))
+        let outcome = await machine.submitEmergencyLockout(secretInput: secret, confirmWord: confirmWord)
+        let unlockTime: String
+        if case .locked(let until) = outcome {
+            unlockTime = formatUnixLocal(secs: until)
+        } else {
+            unlockTime = ""
+        }
+        machine.setErrorMessage(
+            message: renderLocalizedText(emergencyLockoutOutcomeMessage(outcome: outcome, unlockTime: unlockTime)))
     }
 
     // ── Invite-request persistence wrappers ─────────────────────────────────
@@ -650,7 +713,8 @@ public final class OnboardingVM {
 
     /// `nest_recovery`'s Back action: came-from-identity routes back to
     /// `handle_entry` (Q2-A); came-from-launch is the surviving-device
-    /// `launch-recover-button` entry (macOS only — iOS has no launch-retry surface).
+    /// `launch-recover-button` entry (both apple targets; iOS shows `launch_retry` only
+    /// for its gating case — a launch that entered no session).
     /// Both arms are the machine's own transition table — this wrapper exists
     /// only so the two views call one symbol, mirroring `provisioningBack()`.
     public func recoveryBack() {
@@ -702,25 +766,23 @@ public final class OnboardingVM {
     }
 
     /// The `recover-selfhosted-command` line for the selected box, resolved
-    /// live against the reachable nest (mirrors linux's C2 `fetch_selfhosted_command`
-    /// → `client::load_selfhosted_recovery_command`). `nil` while unresolved (no
-    /// nest URL, no selection, or the fetch fails) — the view keeps showing the
-    /// pending placeholder with copy disabled: an unresolved (or wrong-box)
-    /// command must never reach the admin's clipboard (box-recovery.md §
-    /// Mechanism notes — Self-hosted command).
+    /// through the pre-login `recoverSelfhostedCommandPreLogin` FFI over the
+    /// shared `selfhosted_command`: the device's own store is always read, joined with
+    /// the nest when a URL is saved and answers — never either-or, so a dead (or
+    /// unset) saved nest still yields the line. `nil` while unresolved (no
+    /// selection, or no seed anywhere) — the view keeps showing the pending
+    /// placeholder with copy disabled: an unresolved (or wrong-box) command must
+    /// never reach the admin's clipboard (box-recovery.md § Mechanism notes —
+    /// Self-hosted command).
     public func resolveSelfhostedCommand() async -> String? {
         guard let secretHex = machine.effectiveSecret(),
               let nestActorId = machine.recoverySelectedNestId()
         else { return nil }
         let nestUrl = machine.nestUrl()
-        guard !nestUrl.isEmpty else { return nil }
-        let ownerSecret = hex_to_data(secretHex)
-        guard let client = try? FfiNestClient(nestUrl: nestUrl, secret: ownerSecret) else { return nil }
-        defer { Task { await client.disconnect() } }
         do {
-            try await client.connect()
-            return try await FaunaFFISwift.recoverSelfhostedCommand(
-                nest: client, ownerSecret: ownerSecret, nestActorId: nestActorId,
+            return try await FaunaFFISwift.recoverSelfhostedCommandPreLogin(
+                ownerSecret: hex_to_data(secretHex), nestActorId: nestActorId,
+                nestUrl: nestUrl.isEmpty ? nil : nestUrl,
                 storeContainerDir: AccountStateDir.storeContainerDir)
         } catch {
             logMessage(level: .warn, target: "fauna.recovery",
@@ -841,14 +903,12 @@ public final class OnboardingVM {
         guard !nodeUrl.isEmpty else { return .unknown }
         clearPendingInviteSlot()
         // Claim terminal (gap CR-1, `architecture/nest/common.md` § Client-state
-        // recoverability). A re-claim after a factory reset has landed, so the
-        // pre-dispatch slot is spent. Leaving it set would pin every future launch to
-        // the pre-filled claim surface for a box the admin has already re-claimed —
-        // that row is checked before all the others. Addressed by the active account,
-        // the way the launch persistence reads it. A no-op on the ordinary
-        // first-onboarding path (no reset was pending). Mirrors windows' and linux's
-        // `clear_pending_factory_reset_slot`.
-        FaunaAccounts.launchPersistence(keychain: keychain).deletePendingFactoryReset()
+        // recoverability): the pending-factory-reset slot is spent inside the shared
+        // `persistLoggedIn` below, by actor id, as on linux, web and android. A
+        // skipped helper (append mode — clearing here would spend the LIVE account's
+        // slot) or a failed one deliberately leaves the slot set: the claim was never
+        // recorded on this device, so resuming the pre-filled claim surface at the
+        // next launch is the recoverable state.
         // The deferred-DNS path's ONE claim terminal for the awaiting slot: an admin who
         // chose "Set up later" for DNS, then reached `LoggedIn` via the post-claim
         // NatModeChoice step or the trust offer. The awaiting-manual-DNS slot outranks
@@ -919,6 +979,9 @@ public final class OnboardingVM {
         sessionState.nodeUrl = nodeUrl
         sessionState.deviceId = deviceId
         sessionState.handle = machine.currentHandle()
+        // The wizard's handle may be a full address; the registry domain arrives
+        // with the launch glue's material (`SessionState.displayHandle`).
+        sessionState.domain = nil
         // ⚠ NO `isAuthenticated = true` here. This hand-off is SYNCHRONOUS and runs
         // one async hop before the launch actually mounts the authenticated shell
         // (`onLaunchAuthenticated` → `runLaunch()` → `completeAuthenticatedLaunch`),

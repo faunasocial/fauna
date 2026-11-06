@@ -51,8 +51,10 @@ import {
   type ReportLedgerRow,
   type ReportQueueRow,
   type BlockedRow,
+  type ContentPolicyValue,
 } from './wasm';
 import { guardSingletonBuild } from './singleton-build';
+import { ClientSupersededError, supersededWaiterNext } from './client-supersede';
 import { portIsStale, resetActorScopedState } from './actorScope';
 import { nodeUrl, storedNestUrl, getAuthToken } from './api';
 import { mailExportSavePort } from './mail-export-save';
@@ -76,6 +78,8 @@ import type {
   WasmMailAliasesMachine,
   WasmMailSpamMachine,
   WasmMailExportMachine,
+  WasmArchiveImportMachine,
+  WasmArchiveLinks,
   WasmMailImportMachine,
   WasmMailListsMachine,
   WasmMailListMembersMachine,
@@ -640,8 +644,14 @@ async function getClient(secretHex: string): Promise<WsRpcClient> {
   const mine = clientPromise;
   const built = await mine;
   // Superseded while awaiting (identity/nest changed again): the retired
-  // instance must not become the live singleton — defer to the current build.
-  if (clientPromise !== mine) return getClient(secretHex);
+  // instance must not become the live singleton. Defer to the current build
+  // when it serves this actor; a waiter for an actor the singleton has moved
+  // past fails instead — re-entering would take the slot back and start the
+  // two-actor ping-pong `client-supersede.ts` describes.
+  if (clientPromise !== mine) {
+    if (supersededWaiterNext(actorId, clientActorId) === 'rejoin') return getClient(secretHex);
+    throw new ClientSupersededError(actorId, clientActorId);
+  }
   client = built;
   return client;
 }
@@ -1792,12 +1802,14 @@ export function profileHeaderRead(
 /** The edit form's base load: the caller's OWN stored profile bytes, read
  *  through the shared read-prove-record, so a succession link the base needs
  *  is recorded in this browser's registry before the form can save
- *  (profile.md § After an identity succession → the linkless bullet). `null`
- *  is a never-published profile (first publish); rejects only when the read
- *  itself fails. */
-export async function loadProfileEditBase(secretHex: string): Promise<Uint8Array | null> {
-  // The face also hands back the owner's last identity-signed row
-  // (`last_direct_body`); web does not thread it into its form yet.
+ *  (profile.md § After an identity succession → the linkless bullet), with the
+ *  owner's last identity-signed row (`lastDirectBody`, `null` when none) the
+ *  own-form projection and the builders take (profile.md § Where logic lives →
+ *  *Edit surface*). `null` is a never-published profile (first publish);
+ *  rejects only when the read itself fails. */
+export async function loadProfileEditBase(
+  secretHex: string,
+): Promise<{ body: Uint8Array; lastDirectBody: Uint8Array | null } | null> {
   const base = await call(
     secretHex,
     (c) =>
@@ -1805,7 +1817,7 @@ export async function loadProfileEditBase(secretHex: string): Promise<Uint8Array
         { body: Uint8Array; last_direct_body: Uint8Array | null } | null
       >,
   );
-  return base?.body ?? null;
+  return base ? { body: base.body, lastDirectBody: base.last_direct_body ?? null } : null;
 }
 
 /** `fauna.profile.set` — publish/replace the caller's own profile. `body` is
@@ -3176,6 +3188,57 @@ export function mailExportMachine(secretHex: string, handle: string): Promise<Wa
 // (`mailbox-migration.md` § Implementation status today).
 export function mailImportMachine(secretHex: string): Promise<WasmMailImportMachine> {
   return call(secretHex, (c) => Promise.resolve(c.mailImportMachine()));
+}
+
+// User-facing `archive-import` page — the shared `ArchiveImportMachine` over the
+// browser plane (`archive-import.md` § The wizard and its machine), built over
+// this session's socket and the tab's custody. `deviceIdHex` stamps the archive
+// folder's change records. Throws on a malformed secret or device id.
+export function archiveImportMachine(
+  secretHex: string,
+  deviceIdHex: string,
+): Promise<WasmArchiveImportMachine> {
+  return call(secretHex, (c) => Promise.resolve(c.archiveImportMachine(secretHex, deviceIdHex)));
+}
+
+// The imported archives' read seams (`archive-import.md` § What each category
+// becomes): the `Archive` rail's threads on the conversations manager and the
+// folded comments on the feed manager, each registered through the shared door
+// every app calls — no archive reader is built here. Same arguments as
+// `archiveImportMachine`; the managers re-read with `refreshArchiveThreads` /
+// `refreshArchiveComments`.
+export function registerArchiveThreads(
+  secretHex: string,
+  manager: WasmConversationsManager,
+  deviceIdHex: string,
+): Promise<void> {
+  return call(secretHex, (c) =>
+    Promise.resolve(c.registerArchiveThreads(manager, secretHex, deviceIdHex)),
+  );
+}
+
+// Phase two's link module (`archive-import.md` § Linking and merging, ruling
+// 8), built over the same seam and registered as the manager's FaunaMls
+// backend's archive-signal sink. Once per manager build; `#lib/archive-links`
+// drives and paints it.
+export function registerArchiveLinks(
+  secretHex: string,
+  manager: WasmConversationsManager,
+  deviceIdHex: string,
+): Promise<WasmArchiveLinks> {
+  return call(secretHex, (c) =>
+    Promise.resolve(c.registerArchiveLinks(manager, secretHex, deviceIdHex)),
+  );
+}
+
+export function registerArchiveComments(
+  secretHex: string,
+  manager: WasmFeedManager,
+  deviceIdHex: string,
+): Promise<void> {
+  return call(secretHex, (c) =>
+    Promise.resolve(c.registerArchiveComments(manager, secretHex, deviceIdHex)),
+  );
 }
 
 // User-facing `task-delegation` page — a person sees which participant runs each
@@ -4826,8 +4889,33 @@ export interface ReseedResult {
 export function backupPullBackFromDestination(
   secretHex: string,
   destinationId: string,
+  acceptance?: string,
 ): Promise<ReseedResult> {
-  return call(secretHex, (c) => c.backupPullBackFromDestination(secretHex, destinationId));
+  return call(secretHex, (c) =>
+    c.backupPullBackFromDestination(secretHex, destinationId, acceptance),
+  );
+}
+
+/** The pull-back's preflight — the wasm twin of the ffi `FfiPullBackPreflight`.
+ *  `stopped` set: the preflight failed, no confirm opens. Otherwise `lines` are
+ *  the confirm body's lines (each resolved with `resolveLocalizedNested`) and
+ *  `acceptance` is handed back verbatim to `backupPullBackFromDestination`. */
+export interface PullBackPreflight {
+  stopped: string | null;
+  lines: LocalizedText[];
+  acceptance: string;
+}
+
+/**
+ * What this device can and cannot vouch for in a nest-kind destination's copy —
+ * the press on `backup-destination-reseed-button`, before its confirm opens
+ * (`ui/backups.md` § Restore after losing the nest). Writes nothing anywhere.
+ */
+export function backupPullBackPreflight(
+  secretHex: string,
+  destinationId: string,
+): Promise<PullBackPreflight> {
+  return call(secretHex, (c) => c.backupPullBackPreflight(secretHex, destinationId));
 }
 
 /**
@@ -5241,11 +5329,6 @@ export function subscriptionsMineList(secretHex: string): Promise<SubscriptionMi
   return call(secretHex, (c) => c.subscriptionsMineList() as Promise<SubscriptionMine[]>);
 }
 
-/** Drop this user's subscription to `authorIdHex` (`unsubscribe`; encrypted mode queues). */
-export function subscriptionsUnsubscribe(secretHex: string, authorIdHex: string): Promise<void> {
-  return call(secretHex, (c) => c.subscriptionsUnsubscribe(authorIdHex) as Promise<void>);
-}
-
 // ── OTHER profile (subscriber browse): offers + subscribe + status ──
 //
 // The Tiers tab when viewing another actor's profile (profile.md § Layout & flow
@@ -5297,6 +5380,52 @@ export function subscriptionsSubscribePublishingEk(
         authorIdHex,
         tier,
       ) as Promise<SubscriptionSubscribeOutcome>,
+  );
+}
+
+/**
+ * The follow gesture across nests (`federated-follow.md` § Decision 2): the
+ * web twin of `fauna-ffi`'s `subscriptions_subscribe_across_nests`.
+ * `homeNestUrl` is the page's actor-home slot — `null` is today's local
+ * follow (`subscriptionsSubscribePublishingEk`), a home the subscribe
+ * carrying that home and the subscriber's own signed follow intent. Same
+ * reply as `subscriptionsSubscribePublishingEk`.
+ */
+export function subscriptionsSubscribeAcrossNests(
+  secretHex: string,
+  authorIdHex: string,
+  tier: string,
+  homeNestUrl: string | null,
+): Promise<SubscriptionSubscribeOutcome> {
+  return call(
+    secretHex,
+    (c) =>
+      c.subscriptionsSubscribeAcrossNests(
+        secretHex,
+        authorIdHex,
+        tier,
+        homeNestUrl ?? undefined,
+      ) as Promise<SubscriptionSubscribeOutcome>,
+  );
+}
+
+/** The leave twin of `subscriptionsSubscribeAcrossNests`; `tier` is the tier
+ *  being left, `homeNestUrl` the `mine.list` row's `home_nest_url`. */
+export function subscriptionsUnsubscribeAcrossNests(
+  secretHex: string,
+  authorIdHex: string,
+  tier: string,
+  homeNestUrl: string | null,
+): Promise<void> {
+  return call(
+    secretHex,
+    (c) =>
+      c.subscriptionsUnsubscribeAcrossNests(
+        secretHex,
+        authorIdHex,
+        tier,
+        homeNestUrl ?? undefined,
+      ) as Promise<void>,
   );
 }
 
@@ -5356,15 +5485,10 @@ export interface ReachPolicy {
   unknown_sender_mail: string;
   federation_contact: boolean;
   feed_sources: string;
-  /** v1.x content pillar — a per-category guardian floor (`inherit | collapse |
-   *  block` wire values); absent means the all-inherit unsupervised-equivalent
-   *  default (`family-safety.md` § Content policy). */
-  content_policy?: {
-    nsfw: string;
-    spam: string;
-    phishing: string;
-    commercial: string;
-  };
+  /** v1.x content pillar — the guardian's rule document; absent means the
+   *  no-rules unsupervised-equivalent default (`family-safety.md` § Content
+   *  policy). */
+  content_policy?: ContentPolicyValue;
   /** v1.x Guardian Notify — category+count doorbell; absent/false is off. */
   content_notify?: boolean;
   /** v1.x screen-time pillar (`family-safety.md` § Screen time) — the usage

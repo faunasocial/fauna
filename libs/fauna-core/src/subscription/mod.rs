@@ -90,6 +90,23 @@ pub const ROOM_POST_TIER: &str = "room";
 /// because nothing about it is keyed to a subscription.
 pub const ROOM_POST_TIER_RANK: u32 = 0;
 
+/// True iff `name` is one of the three reserved system tiers — a tier no
+/// author creates and nobody pays for: the free [`FOLLOWERS_TIER`], the hidden
+/// [`OWNER_ONLY_TIER`] and the constant [`ROOM_POST_TIER`]. Every other tier
+/// name is an author's own, paid tier (`tiers.create` refuses `rank < 1` and
+/// the reserved names — `monetization.md` § The unifying model).
+///
+/// The one predicate behind "may this tier's period key leave the owner's
+/// apps as a capability-grant payload?" — the nest's web-serve holder exists
+/// to serve **paid** web-published posts (`monetization.md` § Pillar 2), so a
+/// reserved tier's key is never a grant option and never derives
+/// (`ui/nests.md` § Trust facet — grants → *Mint* → *Which tiers*, ruled
+/// 2026-10-23). Shared so the apps' mint catalog and the mint itself cannot
+/// drift on which names are reserved.
+pub fn is_reserved_tier(name: &str) -> bool {
+    matches!(name, FOLLOWERS_TIER | OWNER_ONLY_TIER | ROOM_POST_TIER)
+}
+
 /// True iff `url` is safe to hand to the OS/browser's default opener as a
 /// tier's or unlock-offer's `payment_url` — i.e. it starts with `https://`.
 ///
@@ -135,6 +152,19 @@ mod tests {
         assert!(!is_safe_payment_url("data:text/html,<script>1</script>"));
         assert!(!is_safe_payment_url(""));
         assert!(!is_safe_payment_url("checkout.example.com"));
+    }
+
+    #[test]
+    fn the_reserved_tiers_are_exactly_the_three_system_names() {
+        assert!(is_reserved_tier(FOLLOWERS_TIER));
+        assert!(is_reserved_tier(OWNER_ONLY_TIER));
+        assert!(is_reserved_tier(ROOM_POST_TIER));
+        // An author's own tier, a designated single-post tier and a near miss
+        // are all paid tiers as far as the grant plane is concerned.
+        assert!(!is_reserved_tier("gold"));
+        assert!(!is_reserved_tier("post-unlock-0123abcd"));
+        assert!(!is_reserved_tier("Followers"));
+        assert!(!is_reserved_tier(""));
     }
 
     #[test]

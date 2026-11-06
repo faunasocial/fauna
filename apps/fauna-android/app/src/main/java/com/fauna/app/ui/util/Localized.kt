@@ -179,16 +179,18 @@ fun custodyHeldBytesText(
     return "$line — $badge"
 }
 
+/** Name scan used only by [formatNamed] to order positional args; the fill itself is shared Rust. */
 private val NAMED_TOKEN = Regex("""\{(\w+)}""")
 
 /**
  * Substitute each `{name}` token in [template] with `args[name]`, leaving any
  * token without a matching arg intact (so a missing arg surfaces diagnostically
- * rather than rendering blank). Order-independent — mirrors shared Rust
- * `LocalizedText::resolve` and windows `Strings.Resolve`.
+ * rather than rendering blank). One pass, so an arg holding `{other}` is never
+ * expanded. Delegates to the shared Rust fill over UniFFI — the same call apple
+ * and windows make — so no app carries its own placeholder scanner.
  */
 private fun substituteNamed(template: String, args: Map<String, String>): String =
-    NAMED_TOKEN.replace(template) { m -> args[m.groupValues[1]] ?: m.value }
+    com.fauna.ffi.fillPlaceholders(template, args)
 
 /**
  * Map [args] positionally onto the distinct `{name}` tokens of [template] in

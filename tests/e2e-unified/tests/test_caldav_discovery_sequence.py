@@ -41,6 +41,7 @@ pytestmark = [
     pytest.mark.linux,
     pytest.mark.windows,  # unified 2026-06-25 — the shared enable_mail_plain preamble
     pytest.mark.macos,  # unified 2026-07-13 — same preamble, proven on macos once the
+    pytest.mark.android,  # the same shared enable_mail_plain preamble, android-marked
     pytest.mark.ios,  # apple dedicated-nest mint was fixed; ios verified 2026-07-13
     # (shared FaunaKit — the same mail-settings surface) (see test_addressbook).
     # is proven on windows; the discovery walk itself is driver-agnostic HTTP (requests).

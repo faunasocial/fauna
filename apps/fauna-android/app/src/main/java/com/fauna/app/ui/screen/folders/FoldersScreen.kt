@@ -31,6 +31,7 @@ import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.navigation.NavController
+import com.fauna.app.core.AppMessages
 import com.fauna.app.R
 import com.fauna.app.ui.util.resolveLocalized
 import com.fauna.app.ui.components.TokenSelect
@@ -55,6 +56,7 @@ import uniffi.fauna_core.LocalizedText
 import uniffi.fauna_devices_machine.ConflictSummary
 import uniffi.fauna_devices_machine.DevicesSnapshot
 import uniffi.fauna_devices_machine.FolderSummary
+import uniffi.fauna_devices_machine.FollowedFolderSummary
 import uniffi.fauna_folders_machine.FolderWizardSnapshot
 import uniffi.fauna_folders_machine.FolderWizardStep
 import uniffi.fauna_folders_machine.MemberAccessOption
@@ -94,6 +96,7 @@ fun FoldersScreen(
     val snapshot by vm.snapshot.collectAsState()
     val folderActors by vm.folderActors.collectAsState()
     val folderDeviceActivity by vm.folderDeviceActivity.collectAsState()
+    val folderPlaces by vm.folderPlaces.collectAsState()
     val folderDestinationPlaces by vm.folderDestinationPlaces.collectAsState()
     val sharingError by vm.sharingError.collectAsState()
     val canServeWebdav by vm.canServeWebdav.collectAsState()
@@ -144,15 +147,11 @@ fun FoldersScreen(
     val pageError = snapshot?.error
     val wizardError = snapshot?.wizard?.review?.error
     val errorText = localized(pageError) ?: localized(wizardError)
-    LaunchedEffect(errorText) {
-        if (errorText != null) appMessages.showError(errorText)
-    }
+    FollowOnBanner(errorText, appMessages)
     // Cross-user share/remove failures (plain strings the FFI raises, prefixed by
     // the VM) flow to the same banner — the owner-side Sharing surface has no
     // dedicated error element (folders.md § Sharing).
-    LaunchedEffect(sharingError) {
-        sharingError?.let { appMessages.showError(it) }
-    }
+    FollowOnBanner(sharingError, appMessages)
     // Why a ceremony act stopped short. Held on the app-scoped host rather
     // than the VM, since the act may finish after the page that started it.
     LaunchedEffect(offlineShareError) {
@@ -184,6 +183,7 @@ fun FoldersScreen(
             snapshot = snapshot,
             folderActors = folderActors,
             folderDeviceActivity = folderDeviceActivity,
+            folderPlaces = folderPlaces,
             folderDestinationPlaces = folderDestinationPlaces,
             canServeWebdav = canServeWebdav,
             ownTiers = ownTiers,
@@ -192,6 +192,12 @@ fun FoldersScreen(
             folderLeaseStatuses = snapshot?.folders.orEmpty()
                 .mapNotNull { f -> vm.folderLeaseStatus(f)?.let { f.name to it } }
                 .toMap(),
+            // Public folders this seat cannot verify (shared predicate, FFI) —
+            // injected as plain data like the lease statuses.
+            unverifiedPublicFolders = snapshot?.folders.orEmpty()
+                .filter { vm.folderIsPublicUnverified(it) }
+                .map { it.name }
+                .toSet(),
             defaultConflictPolicy = defaultConflictPolicy,
             pendingShares = pendingShares,
             onDemand = onDemand,
@@ -226,14 +232,17 @@ fun FoldersScreen(
                 onUseOtherVersion = vm::useOtherVersion,
                 onLoadMembers = vm::loadFolderActors,
                 onFolderExpandedChanged = vm::setFolderExpanded,
+                onSetFolderPlace = vm::setFolderPlace,
                 onAttachDestination = vm::attachFolderDestination,
                 onDetachDestination = vm::detachFolderDestination,
                 onShareSet = vm::shareFolder,
                 onRemoveMember = vm::removeFolderMember,
                 onSetMemberAccess = vm::setFolderMemberAccess,
+                onSetWebsiteEnabled = vm::setFolderWebsiteEnabled,
                 onServeWebdav = vm::serveSetFolder,
                 onSetConflictPolicy = vm::setFolderConflictPolicy,
                 onSetResidency = vm::setFolderResidency,
+                onSetAudience = vm::setFolderAudience,
                 onSetExclusiveEditing = vm::setFolderExclusiveEditing,
                 onPaywallSet = vm::paywallSetFolder,
                 onSetDefaultConflictPolicy = vm::setDefaultConflictPolicy,
@@ -249,6 +258,8 @@ fun FoldersScreen(
                 onCancelOfflineShare = vm::cancelOfflineSharePanel,
                 onAcceptGroupShare = vm::consentToGroupShare,
                 onDeclineGroupShare = vm::declineGroupShare,
+                onFollowFolder = vm::followFolder,
+                onUnfollowFolder = vm::unfollowFolder,
             ),
             wizardActions = WizardActions(
                 onSetName = vm::wizardSetName,
@@ -321,6 +332,18 @@ data class FoldersActions(
      * re-fetch (`DevicesVM.setFolderExpanded`).
      */
     val onFolderExpandedChanged: (name: String, folderId: Long, expanded: Boolean) -> Unit = { _, _, _ -> },
+    /**
+     * Write one seat's WHOLE flag triple on an owned set (`folder-place-originates` /
+     * `-accepts` / `-applies-deletes`; `fauna.folders.places.set`, OfflineSafe so
+     * ungated). The VM repaints from a roster re-read.
+     */
+    val onSetFolderPlace: (
+        name: String,
+        deviceId: String,
+        originates: Boolean,
+        accepts: Boolean,
+        appliesDeletes: Boolean,
+    ) -> Unit = { _, _, _, _, _ -> },
     // ── Destination places — backup-destinations.md § Ordinary-folder coverage ──
     /**
      * Attach `folderId` to `destinationId` (`folder-destination-attach-select` +
@@ -364,6 +387,14 @@ data class FoldersActions(
      */
     val onSetResidency: (name: String, residency: String) -> Unit = { _, _ -> },
     /**
+     * Set a folder's audience (`folder-audience-select`, owner rows). `"public"` is
+     * confirm-gated by the row itself (`folder-audience-public-confirm`) before this
+     * is ever called; the nest validates the transition.
+     */
+    val onSetAudience: (name: String, audience: String) -> Unit = { _, _ -> },
+    /** Flip a folder's website flag (`folder-website-toggle`, owner rows; compiled out of the kids build). */
+    val onSetWebsiteEnabled: (name: String, enabled: Boolean) -> Unit = { _, _ -> },
+    /**
      * Turn a folder's exclusive editing on or off (`folder-exclusive-editing-toggle`,
      * owner row only; `ui/folders.md` § Exclusive editing). Non-optimistic — the
      * switch paints `FolderSummary.exclusiveEditing` after the machine's refresh.
@@ -403,6 +434,16 @@ data class FoldersActions(
     val onAcceptGroupShare: (scopeId: ByteArray) -> Unit = {},
     /** The consent card's decline (group arm) — terminal. */
     val onDeclineGroupShare: (scopeId: ByteArray) -> Unit = {},
+    // ── Following a public folder — ui/folders.md § Following a public folder ──
+    /**
+     * `folder-follow-confirm` — the owner as typed (handle, `handle@domain` or bare
+     * hex; the shared recipe classifies it) + the folder's plaintext name.
+     * `onResult(true)` closes the form; `false` keeps the input beside the error.
+     */
+    val onFollowFolder: (owner: String, folderName: String, onResult: (Boolean) -> Unit) -> Unit =
+        { _, _, cb -> cb(true) },
+    /** `folder-unfollow-button` — by the follow's pinned `(home_nest_url, folder_id)`. */
+    val onUnfollowFolder: (homeNestUrl: String, folderId: Long) -> Unit = { _, _ -> },
 )
 
 /**
@@ -458,6 +499,9 @@ fun FoldersContent(
     // ordinary sync per-DEVICE change signal, distinct from folderActors
     // above (cross-USER sharing). Same "injected so Content stays FFI-free" shape.
     folderDeviceActivity: Map<String, List<FfiFolderDevice>> = emptyMap(),
+    // The post-create device-place roster (`folder-place-row`), keyed by set name —
+    // already projected by the shared `place_rows` rule, painted as given.
+    folderPlaces: Map<String, List<com.fauna.ffi.FfiFolderMember>> = emptyMap(),
     // Per-folder destination places (backup-destinations.md § Ordinary-folder
     // coverage), keyed by set name — which of the owner's enrolled backup
     // destinations are attached to this ordinary folder. Same "injected so
@@ -479,6 +523,9 @@ fun FoldersContent(
     // from the shared `devicesFolderLeaseStatus`. Never probed: asking takes the
     // lease.
     folderLeaseStatuses: Map<String, LocalizedText> = emptyMap(),
+    // Names of owner folders that are public but whose audience attestation this
+    // seat cannot verify (paints `folder-audience-unattested` + the reconfirm button).
+    unverifiedPublicFolders: Set<String> = emptySet(),
     // The persisted default-conflict-policy preference for new sets
     // (sync-default-conflict-policy-select's current value); null renders as "auto".
     defaultConflictPolicy: String? = null,
@@ -607,6 +654,7 @@ fun FoldersContent(
                         actions,
                         members = folderActors[folder.name].orEmpty(),
                         deviceActivity = folderDeviceActivity[folder.name].orEmpty(),
+                        devicePlaces = folderPlaces[folder.name].orEmpty(),
                         destinationPlaces = folderDestinationPlaces[folder.name].orEmpty(),
                         canServeWebdav = canServeWebdav,
                         ownTiers = ownTiers,
@@ -615,6 +663,8 @@ fun FoldersContent(
                         nestPlaceReseed = nestPlaceReseed,
                         onDemand = onDemandRow,
                         leaseStatus = folderLeaseStatuses[folder.name],
+                        audienceUnverified = folder.name in unverifiedPublicFolders,
+                        websiteAddressEnabled = snapshot?.websiteAddressEnabled,
                     )
                 }
             }
@@ -622,6 +672,11 @@ fun FoldersContent(
             // a ceremony-born set IS a set (p2p.md § Offline share initiation).
             if (BuildConfig.P2P_SHARE) groupScopes.forEach { scope -> GroupScopeRow(scope) }
         }
+
+        // ── Folders you follow (always offered — the button is how a user gets
+        // their first follow) ────────────────────────────────────────────────
+        HorizontalDivider()
+        FollowedFoldersSection(snapshot?.followed.orEmpty(), actions)
 
         // ── Sync defaults (page-level, below the per-set list) ──────────────
         // Today one control: the global default conflict policy for NEW folders
@@ -652,6 +707,22 @@ fun FoldersContent(
  * caption; a resolved row with nothing to re-point at (candidate-free (mark-only)
  * resolve) renders neither.
  */
+/**
+ * Paint [text] on the shell's banner, and take it off again when it retires, so
+ * a page or row-read error leaves once its cause does. Only [text]'s own words
+ * are taken off: anything else on the banner since is somebody else's.
+ */
+@Composable
+internal fun FollowOnBanner(text: String?, messages: AppMessages) {
+    var painted by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(text) {
+        val previous = painted
+        painted = text
+        if (text != null) messages.showError(text)
+        else if (previous != null && messages.error.value == previous) messages.clearError()
+    }
+}
+
 @Composable
 private fun ConflictCard(conflict: ConflictSummary, badgeLabel: LocalizedText?, actions: FoldersActions) {
     Card(modifier = Modifier.fillMaxWidth()) {
@@ -696,6 +767,7 @@ private fun FolderRow(
     actions: FoldersActions,
     members: List<FfiFolderActorMember>,
     deviceActivity: List<FfiFolderDevice>,
+    devicePlaces: List<com.fauna.ffi.FfiFolderMember> = emptyList(),
     destinationPlaces: List<com.fauna.ffi.FfiFolderDestinationPlace>,
     canServeWebdav: Boolean,
     ownTiers: List<String>,
@@ -704,6 +776,8 @@ private fun FolderRow(
     nestPlaceReseed: (NestPlaceForm?, NestPlaceForm, NestPlaceForm) -> NestPlaceForm?,
     onDemand: OnDemandRow? = null,
     leaseStatus: LocalizedText? = null,
+    audienceUnverified: Boolean = false,
+    websiteAddressEnabled: Boolean? = null,
 ) {
     var expanded by remember(folder.name) { mutableStateOf(false) }
     var include by remember(folder.name) {
@@ -721,6 +795,9 @@ private fun FolderRow(
     // select off `folder.residency` itself, so no "put the control back" step is
     // needed on cancel — nothing was ever committed.
     var showResidencyConfirmDialog by remember(folder.name) { mutableStateOf(false) }
+    // The armed declassify dialog (`folder-audience-public-confirm`): picking Public
+    // arms it, answering it is the one place `→public` is committed.
+    var showAudienceConfirmDialog by remember(folder.name) { mutableStateOf(false) }
 
     // Eager-load the "Shared with" roster for a shared set (mls_group_id present) so
     // the `folder-shared-badge` count shows even while the row is collapsed — the
@@ -783,6 +860,59 @@ private fun FolderRow(
             // (The per-set scan-frequency editor that used to sit here retired
             // with phase 5 of the folders re-model: the cadence is a constant,
             // not a choice — file-sync.md § Config, the phase-5 block.)
+
+            // Per-folder audience (`folder-audience-select`, folders.md § Target
+            // re-model). Picking Public arms the declassify dialog and commits only
+            // on `folder-audience-public-confirm`; every other pick commits on change.
+            AudienceSelect(
+                folder = folder,
+                unverified = audienceUnverified && !showAudienceConfirmDialog,
+                onReconfirm = { showAudienceConfirmDialog = true },
+                onSelect = { audience ->
+                    if (audience == "public") {
+                        showAudienceConfirmDialog = true
+                    } else {
+                        actions.onSetAudience(folder.name, audience)
+                    }
+                },
+            )
+
+            // Website serving (`folder-website-toggle` + `folder-website-hint`) on
+            // every owner row. "Web publishing" is excised from the kids build
+            // (`account-age-band.md`), so the whole control is compiled out there.
+            // It stays ENABLED on a folder that is neither public nor paywalled —
+            // inert, and the hint says so — so a site can be prepared first. The
+            // hint is the shared tri-state (`websiteServeHint`), never re-derived.
+            if (!BuildConfig.KIDS) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text(
+                            stringResource(R.string.devices_serve_website),
+                            style = MaterialTheme.typography.bodyMedium,
+                        )
+                        Text(
+                            text = localized(
+                                com.fauna.ffi.websiteServeHint(
+                                    com.fauna.ffi.normalizeAudience(folder.audience, folder.mlsGroupId != null),
+                                    folder.webPaywallTier != null,
+                                    websiteAddressEnabled,
+                                ),
+                            ) ?: "",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.testTag(Ids.FOLDER_WEBSITE_HINT),
+                        )
+                    }
+                    Switch(
+                        checked = folder.websiteEnabled,
+                        onCheckedChange = { actions.onSetWebsiteEnabled(folder.name, it) },
+                        modifier = Modifier.testTag(Ids.FOLDER_WEBSITE_TOGGLE),
+                    )
+                }
+            }
 
             // Per-set conflict policy (`folder-conflict-policy-select`) on every
             // owner row — a folder has no type (`ui/folders.md` § Conflicts); the
@@ -988,6 +1118,10 @@ private fun FolderRow(
                 HorizontalDivider()
                 DeviceActivitySection(deviceActivity)
 
+                // ── Post-create device-place editor (folder-place-row) ───────
+                HorizontalDivider()
+                FolderPlacesSection(folder.name, devicePlaces, actions)
+
                 // ── Cross-user "Shared with" section (owner side) ────────────
                 HorizontalDivider()
                 SharedWithSection(folder, memberActors, actions)
@@ -1011,6 +1145,42 @@ private fun FolderRow(
             },
             dismissButton = {
                 TextButton(onClick = { showDeleteDialog = false }) {
+                    Text(stringResource(R.string.common_cancel))
+                }
+            },
+        )
+    }
+
+    // The declassify dialog: both consequences stated (names/paths become public;
+    // going private again protects only what is added afterwards). Nothing was
+    // written on the arming pick, so a dismiss only closes the dialog.
+    if (showAudienceConfirmDialog) {
+        AlertDialog(
+            onDismissRequest = { showAudienceConfirmDialog = false },
+            title = { Text(stringResource(R.string.devices_declassify_title)) },
+            text = {
+                Column {
+                    Text(
+                        stringResource(R.string.devices_declassify_body),
+                        modifier = Modifier.testTag(Ids.FOLDER_AUDIENCE_PUBLIC_NAMES_WARNING),
+                    )
+                    Text(
+                        stringResource(R.string.devices_declassify_irreversible),
+                        modifier = Modifier.testTag(Ids.FOLDER_AUDIENCE_PUBLIC_RESEAL_WARNING),
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        showAudienceConfirmDialog = false
+                        actions.onSetAudience(folder.name, "public")
+                    },
+                    modifier = Modifier.testTag(Ids.FOLDER_AUDIENCE_PUBLIC_CONFIRM),
+                ) { Text(stringResource(R.string.devices_declassify_confirm)) }
+            },
+            dismissButton = {
+                TextButton(onClick = { showAudienceConfirmDialog = false }) {
                     Text(stringResource(R.string.common_cancel))
                 }
             },
@@ -1273,6 +1443,82 @@ private fun DeviceActivitySection(devices: List<FfiFolderDevice>) {
 }
 
 /**
+ * The **post-create device-place editor** under an expanded owner-side `folder-row`:
+ * one `folder-place-row` per enrolled device, each carrying the three flag checkboxes
+ * `folder-place-originates` / `-accepts` / `-applies-deletes` (folders re-model
+ * phase 2; lifted from apple's `FolderPlacesSection`).
+ *
+ * Nothing is derived here: the roster arrives already projected through the shared
+ * `place_rows` rule at the FFI boundary, and is never filtered or re-sorted — roster
+ * order IS the e2e address (seat `j` is `folder-place-row[j]`). The labels are the
+ * wizard's own (`devices_wizard_place_*`) so a flag reads identically wherever it is
+ * edited. Not gated: `fauna.folders.places.set` is OfflineSafe.
+ */
+@Composable
+private fun FolderPlacesSection(
+    folderName: String,
+    places: List<com.fauna.ffi.FfiFolderMember>,
+    actions: FoldersActions,
+) {
+    Text(
+        stringResource(R.string.devices_folder_places_title),
+        style = MaterialTheme.typography.labelLarge,
+    )
+    if (places.isEmpty()) {
+        Text(
+            stringResource(R.string.devices_no_devices_enrolled),
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        return
+    }
+    places.forEach { place ->
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .testTag(Ids.FOLDER_PLACE_ROW),
+        ) {
+            Text(place.label, style = MaterialTheme.typography.bodyMedium)
+            FolderPlaceFlag.entries.forEach { box ->
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Checkbox(
+                        checked = box.read(place),
+                        onCheckedChange = { on ->
+                            // The WHOLE triple, so the two untouched boxes are never
+                            // dropped on the way to the wire.
+                            val (o, a, d) = box.with(place, on)
+                            actions.onSetFolderPlace(folderName, place.deviceId, o, a, d)
+                        },
+                        modifier = Modifier.testTag(box.testId),
+                    )
+                    Text(stringResource(box.labelRes), modifier = Modifier.weight(1f))
+                }
+            }
+        }
+    }
+}
+
+/** Which flag of a projected place row a checkbox paints (meanings live in `PlaceFlags`). */
+private enum class FolderPlaceFlag(val testId: String, val labelRes: Int) {
+    ORIGINATES(Ids.FOLDER_PLACE_ORIGINATES, R.string.devices_wizard_place_originates),
+    ACCEPTS(Ids.FOLDER_PLACE_ACCEPTS, R.string.devices_wizard_place_accepts),
+    APPLIES_DELETES(Ids.FOLDER_PLACE_APPLIES_DELETES, R.string.devices_wizard_place_applies_deletes),
+    ;
+
+    fun read(p: com.fauna.ffi.FfiFolderMember): Boolean = when (this) {
+        ORIGINATES -> p.originates
+        ACCEPTS -> p.accepts
+        APPLIES_DELETES -> p.appliesDeletes
+    }
+
+    fun with(p: com.fauna.ffi.FfiFolderMember, on: Boolean): Triple<Boolean, Boolean, Boolean> = when (this) {
+        ORIGINATES -> Triple(on, p.accepts, p.appliesDeletes)
+        ACCEPTS -> Triple(p.originates, on, p.appliesDeletes)
+        APPLIES_DELETES -> Triple(p.originates, p.accepts, on)
+    }
+}
+
+/**
  * Per-folder "Destination places" section on an expanded owner `folder-row`
  * (`folder-destination-row`/-detach-button/-attach-select/-attach-button —
  * `docs/goal/behavior/backup-destinations.md` § Ordinary-folder coverage).
@@ -1304,7 +1550,10 @@ private fun DestinationPlacesSection(
         Row(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(8.dp),
-            modifier = Modifier.fillMaxWidth().testTag(Ids.FOLDER_DESTINATION_ROW),
+            // mergeDescendants: the bridge's getText reads the row as one text (the
+            // destination's label); the detach button is clickable, so it stays its
+            // own node and reachable by scope.
+            modifier = Modifier.fillMaxWidth().semantics(mergeDescendants = true) {}.testTag(Ids.FOLDER_DESTINATION_ROW),
         ) {
             Text(
                 place.label,
@@ -1321,7 +1570,6 @@ private fun DestinationPlacesSection(
     if (attached.isNotEmpty()) DisabledControlReasonText(detachGate.reason)
 
     if (attachable.isNotEmpty()) {
-        var expanded by remember { mutableStateOf(false) }
         // Keyed on `attachable` (structural equality): the moment a mutation
         // shrinks/reorders the attachable set, the stale selection is dropped
         // and this re-seeds to the fresh list's first entry — the same "drop
@@ -1337,30 +1585,14 @@ private fun DestinationPlacesSection(
             horizontalArrangement = Arrangement.spacedBy(8.dp),
             modifier = Modifier.fillMaxWidth(),
         ) {
-            ExposedDropdownMenuBox(
-                expanded = expanded,
-                onExpandedChange = { expanded = !expanded },
+            // Token-round-tripping: the driver selects by `destinationId`, the human sees the label.
+            TokenSelect(
+                testTagValue = Ids.FOLDER_DESTINATION_ATTACH_SELECT,
+                selected = selected.destinationId,
+                options = attachable.map { it.destinationId to it.label },
+                onSelect = { id -> attachable.firstOrNull { it.destinationId == id }?.let { selected = it } },
                 modifier = Modifier.weight(1f),
-            ) {
-                OutlinedTextField(
-                    value = selected.label,
-                    onValueChange = {},
-                    readOnly = true,
-                    trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded) },
-                    modifier = Modifier.fillMaxWidth().menuAnchor().testTag(Ids.FOLDER_DESTINATION_ATTACH_SELECT),
-                )
-                ExposedDropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
-                    attachable.forEach { place ->
-                        DropdownMenuItem(
-                            text = { Text(place.label) },
-                            onClick = {
-                                selected = place
-                                expanded = false
-                            },
-                        )
-                    }
-                }
-            }
+            )
             Button(
                 onClick = { onAttach(selected.destinationId) },
                 enabled = attachGate.enabled,
@@ -2015,6 +2247,70 @@ private fun ConflictPolicySelect(
 }
 
 /**
+ * The per-folder audience picker (`folder-audience-select` + `folder-audience-hint`,
+ * owner rows). Options and hint come from the shared `audienceOptions` /
+ * `audienceHint` catalog, fed the NORMALIZED audience so an unparseable column can
+ * never paint as public. A non-selectable option (Shared on a bound, non-public
+ * folder) is the rendering of the current state: shown, disabled, never a
+ * destination. `onSelect` receives the raw picked value; `"public"` is the caller's
+ * cue to arm the declassify dialog rather than commit.
+ */
+@Composable
+internal fun AudienceSelect(
+    folder: FolderSummary,
+    onSelect: (String) -> Unit,
+    unverified: Boolean = false,
+    onReconfirm: () -> Unit = {},
+) {
+    val bound = folder.mlsGroupId != null
+    val current = com.fauna.ffi.normalizeAudience(folder.audience, bound)
+    // `account-age-band.md` excises "web publishing" from the kids build: a public
+    // audience IS publication (the files become URLs), so Public is not offered
+    // there (an already-public folder keeps showing what it is).
+    val options = remember(bound, current) {
+        com.fauna.ffi.audienceOptions(bound, current)
+            .filter { !(BuildConfig.KIDS && it.value == "public" && current != "public") }
+    }
+    Column {
+        Text(
+            text = stringResource(R.string.devices_folder_audience),
+            style = MaterialTheme.typography.labelMedium,
+        )
+        // A `TokenSelect`: the driver picks and reads back the wire value
+        // (`private`/`shared`/`public`), the human sees the localized label.
+        TokenSelect(
+            testTagValue = Ids.FOLDER_AUDIENCE_SELECT,
+            selected = current,
+            options = options.map { it.value to (localized(it.label) ?: it.label.key) },
+            onSelect = { if (it != current) onSelect(it) },
+            modifier = Modifier.fillMaxWidth(),
+            selectable = { token -> options.firstOrNull { it.value == token }?.selectable ?: false },
+        )
+        Text(
+            text = localized(com.fauna.ffi.audienceHint(bound, current)) ?: "",
+            style = MaterialTheme.typography.bodySmall,
+            modifier = Modifier.testTag(Ids.FOLDER_AUDIENCE_HINT),
+        )
+        // Re-confirm door for a public folder this seat cannot verify (folders.md
+        // § Audience and website serving). The verdict is the shared predicate; the
+        // button only ARMS the declassify confirm, the one place the flip commits.
+        if (unverified) {
+            Text(
+                text = stringResource(R.string.devices_folder_audience_unattested),
+                style = MaterialTheme.typography.bodySmall,
+                modifier = Modifier.testTag(Ids.FOLDER_AUDIENCE_UNATTESTED),
+            )
+            TextButton(
+                onClick = onReconfirm,
+                modifier = Modifier.testTag(Ids.FOLDER_AUDIENCE_RECONFIRM_BUTTON),
+            ) {
+                Text(stringResource(R.string.devices_folder_audience_reconfirm))
+            }
+        }
+    }
+}
+
+/**
  * The nest place's content residency (`folder-nest-residency-select`, EVERY
  * row) — folders re-model phase 5, file-sync.md § Content residency. Applies
  * ON CHANGE like [ConflictPolicySelect], never staged like [NestPlaceSection]'s
@@ -2611,6 +2907,138 @@ fun PhotoBackupSection(vm: PhotoBackupVM = hiltViewModel()) {
             },
         ),
     )
+}
+
+// ── Following a public folder — ui/folders.md § Following a public folder ────
+
+/**
+ * The **"Folders you follow"** section — the follow gesture plus the followed rows;
+ * the android twin of apple's `FollowedFoldersSection` and linux's
+ * `build_followed_section`. Three shapes the trickle-down keeps:
+ *
+ * 1. **Always offered**, even with no follows — the button is how a user gets
+ *    their first one.
+ * 2. **A followed folder is a row in its OWN list, never a `folder-row`** — no
+ *    roster, binding or seat, so nothing to expand.
+ * 3. **The owner half reuses `recipient-picker-input`** — no second picker; the
+ *    typed text goes to the shared recipe unresolved.
+ */
+@Composable
+private fun FollowedFoldersSection(followed: List<FollowedFolderSummary>, actions: FoldersActions) {
+    var formOpen by remember { mutableStateOf(false) }
+    var ownerInput by remember { mutableStateOf("") }
+    var nameInput by remember { mutableStateOf("") }
+    var following by remember { mutableStateOf(false) }
+
+    fun closeForm() {
+        formOpen = false
+        ownerInput = ""
+        nameInput = ""
+    }
+
+    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+        SectionHeader(
+            stringResource(R.string.devices_followed_folders_section),
+            modifier = Modifier.weight(1f),
+        )
+        FilledTonalButton(
+            onClick = { formOpen = true },
+            modifier = Modifier.testTag(Ids.FOLDER_FOLLOW_BUTTON),
+        ) { Text(stringResource(R.string.devices_follow_public_folder)) }
+    }
+    EmptyHint(stringResource(R.string.devices_follow_public_folder_hint))
+
+    if (formOpen) {
+        val canSubmit = !following && ownerInput.isNotBlank() && nameInput.isNotBlank()
+        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            OutlinedTextField(
+                value = ownerInput,
+                onValueChange = { ownerInput = it },
+                placeholder = { Text(stringResource(R.string.conversations_unified_recipient_picker_placeholder)) },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth().testTag(Ids.RECIPIENT_PICKER_INPUT),
+            )
+            OutlinedTextField(
+                value = nameInput,
+                onValueChange = { nameInput = it },
+                label = { Text(stringResource(R.string.devices_follow_folder_name)) },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth().testTag(Ids.FOLDER_FOLLOW_NAME_INPUT),
+            )
+            // Says the name is public rather than implying the app can search for
+            // it: the plane answers one folded not-found for absent, private and
+            // misspelled alike.
+            EmptyHint(stringResource(R.string.devices_follow_folder_name_hint))
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(
+                    onClick = {
+                        following = true
+                        actions.onFollowFolder(ownerInput, nameInput) { ok ->
+                            following = false
+                            // Close only on success: a not-found keeps what the user
+                            // typed beside the error, to correct rather than retype.
+                            if (ok) closeForm()
+                        }
+                    },
+                    enabled = canSubmit,
+                    modifier = Modifier.testTag(Ids.FOLDER_FOLLOW_CONFIRM),
+                ) { Text(stringResource(R.string.devices_follow_confirm)) }
+                TextButton(onClick = { closeForm() }) { Text(stringResource(R.string.common_cancel)) }
+            }
+        }
+    }
+
+    followed.forEach { follow -> FollowedFolderRow(follow, actions) }
+}
+
+/**
+ * One `folder-followed-item` — name + *By ‹owner›* (the shared precomputed
+ * `ownerDisplay`, never re-derived) + the *Public* badge + `folder-followed-status`
+ * + `folder-unfollow-button`. Read-only by construction. `available == false` is
+ * the revoke (audience flipped back, or the folder deleted): the row stays, loud,
+ * until the user removes it — a re-flip resumes it under the same `folder_id`.
+ */
+@Composable
+private fun FollowedFolderRow(follow: FollowedFolderSummary, actions: FoldersActions) {
+    // mergeDescendants: the bridge's getText reads the row as one text (name, owner, status).
+    Column(modifier = Modifier.fillMaxWidth().semantics(mergeDescendants = true) {}.testTag(Ids.FOLDER_FOLLOWED_ITEM)) {
+        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+            Column(Modifier.weight(1f)) {
+                Text(follow.displayName, style = MaterialTheme.typography.bodyMedium)
+                Text(
+                    stringResourceFmt(R.string.devices_followed_owner, follow.ownerDisplay),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        stringResource(R.string.devices_followed_public_badge),
+                        style = MaterialTheme.typography.labelSmall,
+                    )
+                    Text(
+                        stringResource(
+                            if (follow.available) R.string.devices_followed_status_following
+                            else R.string.devices_followed_status_unavailable,
+                        ),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = if (follow.available) MaterialTheme.colorScheme.onSurfaceVariant
+                        else MaterialTheme.colorScheme.error,
+                        // Its own merge root: a plain Text would fold into the row's merged
+                        // node and leave `folder-followed-status` unreachable by scope.
+                        modifier = Modifier.semantics(mergeDescendants = true) {}.testTag(Ids.FOLDER_FOLLOWED_STATUS),
+                    )
+                }
+            }
+            TextButton(
+                onClick = { actions.onUnfollowFolder(follow.homeNestUrl, follow.folderId) },
+                modifier = Modifier.testTag(Ids.FOLDER_UNFOLLOW_BUTTON),
+            ) { Text(stringResource(R.string.devices_unfollow_folder)) }
+        }
+        if (!follow.available) {
+            // Names BOTH causes — the follower cannot tell them apart.
+            EmptyHint(stringResource(R.string.devices_followed_unavailable_hint))
+        }
+    }
 }
 
 // ── Shared bits ──────────────────────────────────────────────────────────────

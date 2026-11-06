@@ -144,6 +144,66 @@ where
     .await
 }
 
+/// [`put_share_endpoints`]'s deletion: a stamped tombstone at the row of
+/// (`channel`, `member`) — the share pass's sweep of a departed member's
+/// cached endpoint (`p2p.md` § Cross-user shared-set transfer → *A departed
+/// member's cached endpoint*, ruling 2; the kind's registration names it: "a
+/// leave or evict removes the row by stamped tombstone"). Writes only over a
+/// LIVE row and answers whether it did, so a repeated sweep is a no-op. The
+/// roster reading that licenses it is the caller's.
+pub async fn tombstone_share_endpoints<B, R>(
+    store: &fauna_account_store::store::AccountStore<B>,
+    fleet: &AccountStatePlane<'_, B, R>,
+    device_id: [u8; 32],
+    channel: &[u8; 32],
+    member: &[u8; 32],
+) -> Result<bool>
+where
+    B: StoreBackend,
+    R: RpcRequester + Clone,
+{
+    let kind = fauna_protocol::merge_policy::KIND_SHARE_ENDPOINTS;
+    let key = fauna_core::share_endpoints::share_entry_key(channel, member);
+    match store.state(kind, &key).await? {
+        Some(entry) if !entry.tombstone => {}
+        _ => return Ok(false),
+    }
+    crate::account_state_plane::tombstone_lww_row_local(fleet, kind, &key, device_id).await?;
+    Ok(true)
+}
+
+/// [`tombstone_share_endpoints`] for a whole set: a stamped tombstone over
+/// every LIVE `fauna.state.share-endpoints` row of `channel` — the positive
+/// local event of a set this replica itself left or was removed from
+/// (`p2p.md` § Cross-user shared-set transfer → *A departed member's cached
+/// endpoint*, ruling 2's last sentence). Such a set is outside every pass's
+/// read, so no sweep reaches its rows; the caller that dropped the binding
+/// issues this. Answers how many rows it tombstoned, so a repeat writes
+/// nothing; rows of other sets are untouched.
+pub async fn tombstone_share_endpoints_of_set<B, R>(
+    store: &fauna_account_store::store::AccountStore<B>,
+    fleet: &AccountStatePlane<'_, B, R>,
+    device_id: [u8; 32],
+    channel: &[u8; 32],
+) -> Result<usize>
+where
+    B: StoreBackend,
+    R: RpcRequester + Clone,
+{
+    let kind = fauna_protocol::merge_policy::KIND_SHARE_ENDPOINTS;
+    let prefix = format!("{}:", fauna_core::hex32::encode(channel));
+    let mut moved = 0;
+    for entry in store.states_of_kind(kind).await? {
+        if entry.tombstone || !entry.key.starts_with(&prefix) {
+            continue;
+        }
+        crate::account_state_plane::tombstone_lww_row_local(fleet, kind, &entry.key, device_id)
+            .await?;
+        moved += 1;
+    }
+    Ok(moved)
+}
+
 /// Write the custodian-side `fauna.state.custodies-held` entry for one held
 /// custody — the custodian's own account plane (this runtime IS the
 /// custodian's), keyed by the grant id.

@@ -344,6 +344,7 @@
           <input
             type="checkbox"
             data-testid={IDS.MAIL_EXPORT_SCOPE_STRIP_HEADERS_TOGGLE}
+            data-state={snap.strip_headers ? 'on' : 'off'}
             checked={snap.strip_headers}
             disabled={busy}
             onchange={(e) => dispatch({ SetStripHeaders: { on: (e.currentTarget as HTMLInputElement).checked } })}
@@ -392,7 +393,7 @@
           {#each snap.mailbox_progress as mp (mp.name)}
             <div class="progress-item" data-testid={IDS.MAIL_EXPORT_MAILBOX_PROGRESS_LIST_ITEM}>
               <span data-testid={IDS.MAIL_EXPORT_MAILBOX_PROGRESS_LIST_ITEM_NAME}>{mp.name}</span>
-              <span class="muted small" data-testid={IDS.MAIL_EXPORT_MAILBOX_PROGRESS_LIST_ITEM_PROGRESS}>{mp.exported} / {mp.total}</span>
+              <span class="muted small" data-testid={IDS.MAIL_EXPORT_MAILBOX_PROGRESS_LIST_ITEM_PROGRESS}>{mp.exported}/{mp.total}</span>
             </div>
           {/each}
         </div>
@@ -406,9 +407,9 @@
             <!-- A failed export is a record: Dismiss is its one control. -->
             <button class="btn danger" data-testid={IDS.MAIL_EXPORT_DISCARD_BUTTON} onclick={() => dispatch('Discard')} disabled={busy}>{t.mail_export.dismiss_failed_button}</button>
           {:else}
-            <button class="btn" data-testid={IDS.MAIL_EXPORT_PAUSE_BUTTON} onclick={() => dispatch('Pause')} disabled={busy}>{t.mail_export.pause_button}</button>
-            <button class="btn" data-testid={IDS.MAIL_EXPORT_RESUME_BUTTON} onclick={() => dispatch('Resume')} disabled={busy}>{t.mail_export.resume_button}</button>
-            <button class="btn danger" class:armed={cancelArmed} data-testid={IDS.MAIL_EXPORT_CANCEL_BUTTON} onclick={onCancel} disabled={busy}>
+            <button class="btn" data-testid={IDS.MAIL_EXPORT_PAUSE_BUTTON} onclick={() => dispatch('Pause')}>{t.mail_export.pause_button}</button>
+            <button class="btn" data-testid={IDS.MAIL_EXPORT_RESUME_BUTTON} onclick={() => dispatch('Resume')}>{t.mail_export.resume_button}</button>
+            <button class="btn danger" class:armed={cancelArmed} data-testid={IDS.MAIL_EXPORT_CANCEL_BUTTON} onclick={onCancel}>
               {cancelArmed ? t.common.confirm_q : t.mail_export.cancel_button}
             </button>
           {/if}

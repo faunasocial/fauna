@@ -33,6 +33,21 @@ internal static class ScrollPolicy
     public const double SweepStepMin = 5.0;
     public const double SweepStepMax = 25.0;
 
+    /// <summary>How long one sweep step waits for the container to reach its target
+    /// before reading on anyway. The reads it polls with cost about a millisecond, and a
+    /// healthy page lands on the first of them, so this is a ceiling a settled app never
+    /// pays.</summary>
+    public const int SweepSettleMs = 1000;
+
+    /// <summary>Whether the container's position has reached a step's target.</summary>
+    public static bool Landed(double achieved, double target) => Math.Abs(achieved - target) < 0.5;
+
+    /// <summary>Whether the container is at the bottom of its range. Only the position
+    /// itself says so: a position that did not change since the last step is also what a
+    /// scroll that has not landed yet looks like, and on a loaded box reading it that way
+    /// ended the sweep two steps in, every time.</summary>
+    public static bool ReachedBottom(double achieved) => achieved >= 99.5;
+
     /// <summary>The <c>SetScrollPercent</c> targets a sweep visits, given the container's
     /// own <c>VerticalViewSize</c> (%). Always ends at exactly 100 regardless of whether
     /// <c>step</c> divides it evenly — the loop's bound is "the last target reached 100",

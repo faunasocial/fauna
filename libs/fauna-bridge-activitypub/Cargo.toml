@@ -15,7 +15,6 @@ base64.workspace = true
 sha2.workspace = true
 rsa.workspace = true
 url = "2"
-reqwest.workspace = true
 tracing.workspace = true
 anyhow.workspace = true
 rand.workspace = true

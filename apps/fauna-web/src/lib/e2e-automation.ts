@@ -15,6 +15,7 @@ import { identity, inbox, sent, knocks, contacts, connectionStatus } from '#lib/
 import { feedSnapshot, feedReloads, type FeedReloads } from '#lib/feed';
 import { devicesRefreshes } from '#lib/devices-session';
 import { paintedSessionTokenIds } from '#lib/sessions-painted';
+import { viewedProfile } from '#lib/profile-viewed';
 import { messageBanners, type FiredBanner } from '#lib/message-banner';
 import { resetActorScopedState } from '#lib/actorScope';
 import { installRpcTestHooks } from '#lib/rpc';
@@ -26,6 +27,7 @@ import { accountsClearNestBinding, accountsTabSessionMaterial } from '#lib/accou
 import { clearTabPin } from '#lib/tabPin';
 import {
   ensureWasm,
+  recoveryBoxesLocal,
   enableDnsFakeProviderForTest,
   setDnsRecheckSecsForTest,
   enableFakePlcDirectoryForTestCore,
@@ -43,6 +45,7 @@ import {
 } from '#lib/conversations';
 import { installCommandHook } from '#lib/e2e-commands';
 import { registerBackupAuditCommands } from '#lib/backup-audit-e2e';
+import { registerArchiveImportCommands } from '#lib/archive-import-e2e';
 import { registerBackupCustodianCommands } from '#lib/backup-custodian-e2e';
 import { registerAtprotoDelegationCommands } from '#lib/atproto-delegation-e2e';
 import { registerTrustClockCommands } from '#lib/trust-clock-e2e';
@@ -55,6 +58,7 @@ import { registerIdentityCommands } from '#lib/identity-e2e';
 import { registerMailCaldavCommands } from '#lib/mail-caldav-e2e';
 import { registerFocusWalkCommands } from '#lib/focus-walk-e2e';
 import { registerLoudSurfaceCommands } from '#lib/loud-surface-e2e';
+import { registerCertAutoRenewCommands } from '#lib/cert-auto-renew-e2e';
 import { resetPostAuthEscalation } from '#lib/post-auth-escalation';
 import {
   registerBarrierCommands,
@@ -73,6 +77,7 @@ import {
   convReceiveCycles,
   convReceiveExit,
   convReceiveNow,
+  mlsBoundChannels,
   mlsFoldedCommits,
   setConvPollSecs,
   setConvPushSuppressed,
@@ -152,6 +157,15 @@ export function installAutomationSurface(): void {
     .__fauna_wardRuleDocumentRules = wardRuleDocumentRules;
   (window as unknown as { __fauna_nestRulesChangedNotice?: () => string | null })
     .__fauna_nestRulesChangedNotice = nestRulesChangedNoticeText;
+  // This tab's own account store as the pre-login recovery surfaces read it: the
+  // barrier `test_box_recovery_two_nest.py` waits on before a box dies, and the
+  // twin of the native custody leg's log line, which a bounded console ring
+  // could not hold. Box ids and domains only; the seed stays in Rust.
+  (window as unknown as { __fauna_recoveryBoxesLocalForTest?: (secretHex: string) => Promise<unknown[]> })
+    .__fauna_recoveryBoxesLocalForTest = async (secretHex: string) => {
+      await ensureWasm();
+      return recoveryBoxesLocal(secretHex);
+    };
   // Flip the wasm fake DNS provider on so the onboarding-launch-glue /
   // managed-publish e2e can verify+publish a `fake-dns-ok:<zone>` credential
   // offline (no real registrar reachable from the sandbox). Mirrors native's
@@ -301,6 +315,7 @@ export function installAutomationSurface(): void {
   //     fake clock, never the mint clock).
   registerConversationsCommands();
   registerBackupAuditCommands();
+  registerArchiveImportCommands();
   //   * backup custodian: `backup_enroll_custodian_for_test` → the shared
   //     custodian enrol run as ANOTHER device of this owner, since enrolment is
   //     that device's act and declared absent on web; what the Backups page then
@@ -343,6 +358,10 @@ export function installAutomationSurface(): void {
   //     `connection_reports` / `painted_errors` counters the connection-gap
   //     journeys read. See `#lib/loud-surface-e2e`.
   registerLoudSurfaceCommands();
+  //   * certificates: `auto_renew_wake` (+ `window.__fauna_autoRenewWakeForTest`)
+  //     → ends the certificate auto-renew tick's six-hour wait; the pass is the
+  //     production one. See `#lib/cert-auto-renew-e2e`.
+  registerCertAutoRenewCommands();
   installCommandHook();
   // The barrier probe's observable + its one-test clear point. Read and cleared
   // by the harness-side `web-bridge/agent.js`, which is where web assembles the
@@ -379,6 +398,12 @@ export function installAutomationSurface(): void {
   (
     window as unknown as { __fauna_mlsFoldedCommits?: () => Record<string, number> }
   ).__fauna_mlsFoldedCommits = mlsFoldedCommits;
+  // Every chat channel bound to a thread — the restore witness a Welcome-only
+  // (unlisted) 1:1 still satisfies (`fauna_e2e_agent::MLS_BOUND_CHANNELS_KEY`).
+  // Same harness-side assembly as the counts above.
+  (
+    window as unknown as { __fauna_mlsBoundChannels?: () => string[] }
+  ).__fauna_mlsBoundChannels = mlsBoundChannels;
   // The receive loop's cycle counters + its run-one-now poke
   // (`fauna_e2e_agent::{CONV_RECEIVE_CYCLES_KEY,CONV_RECEIVE_NOW}`). Web mirrors
   // the arms of the native loop on its own rail, so it mirrors these too: the
@@ -416,6 +441,11 @@ export function installAutomationSurface(): void {
   (
     window as unknown as { __fauna_sessionTokenIds?: typeof paintedSessionTokenIds }
   ).__fauna_sessionTokenIds = paintedSessionTokenIds;
+  // The profile page's viewed actor and actor-home slot — the `data.profile`
+  // state key (`#lib/profile-viewed`); null while no Profile page is mounted.
+  (
+    window as unknown as { __fauna_viewedProfile?: typeof viewedProfile }
+  ).__fauna_viewedProfile = viewedProfile;
   // One post's link previews with their states (`{url, state}`, in body order) —
   // `data.feed.posts[].link_previews`, the shared `RenderDocument::link_previews`
   // projection (render-model.md § D4). A card is absent while a preview is still

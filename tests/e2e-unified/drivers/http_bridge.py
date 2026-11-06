@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import datetime
 import json
 import os
+import re
 import shutil
 import signal
 import sys
@@ -11,6 +13,7 @@ import traceback
 import urllib.error
 import urllib.parse
 import urllib.request
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from .base import PlatformDriver
@@ -28,6 +31,13 @@ SCREENSHOT_DIR = Path(__file__).parent.parent / "screenshots"
 # ever be complete. Resolved at call time (`timeout=None` → this), so tests can
 # monkeypatch it.
 BRIDGE_RPC_TIMEOUT_S = 120.0
+
+#: The line that opens every UI-thread stall verdict an app op's failure carries
+#: (`e2e-conventions.md` convention 11 — `flaui-bridge/StallWatch.cs::StallVerdict.Header`
+#: on windows, `libs/fauna-e2e-agent/src/stall.rs` on the apps whose agent beats a
+#: heartbeat). A read that answers for an element never swallows a failure that
+#: carries it: a held UI thread is not an absent or a disabled element.
+UI_THREAD_STALL_HEADER = "UI-THREAD STALL"
 
 # After an RPC socket timeout, how long /health gets to answer cleanly before
 # we settle for the weaker listener-level evidence. A timeout means the server
@@ -94,6 +104,15 @@ BRIDGE_ACK_BUDGET_S = 60.0
 # (conftest's apple render preflight) — rather than left to burn its slot.
 BRIDGE_PEGGED_STREAK_ABORT = 3
 
+# The ceiling on one `reset()` — the ack AND the settle. A desktop app's reset is
+# sign-out-shaped: it awaits the sync agent's un-provision receipt before its
+# erase, and the shared provisioner asks again while the agent answers that its
+# account-store mount is still coming down (`fauna-client-sync`'s
+# `UNPROVISION_ROUNDS`, four asks of at most 4 s each). So a reset whose agent is
+# finishing a pass against an unreachable nest legitimately outlives 10 s; a
+# healthy one still returns in well under a second.
+RESET_TIMEOUT_S = 30.0
+
 
 class BridgeDead(Exception):
     """Raised when the bridge process has died and can't be reached."""
@@ -122,6 +141,252 @@ class SelectOptionNotOffered(RuntimeError):
     a test can assert *this* refusal specifically, and so the traceback names the
     contract instead of reading as a transport fault.
     """
+
+
+#: Under this share of a core over the window, an alive, unfaulted app did not
+#: get its CPU — which says nothing yet about whether it asked for it (convention
+#: 6's launch-timeout rider, its `STARVED` bullet).
+LAUNCH_STARVED_CORE_SHARE = 0.25
+
+#: Under the share above, `STARVED` needs the app to have WAITED for a CPU — been
+#: runnable and not running — at least this share of the window: a launch that
+#: blocks on a lock or a socket spends as little CPU as a starved one, because it
+#: asks for none, and is the app's own (the rider's `STALLED` bullet). The wait is
+#: the direct reading of "asked and not given": the kernel's run-queue wait where
+#: it keeps one (`schedstat` on linux and the device), the thread table sampled
+#: where it does not (windows).
+LAUNCH_STARVED_WAIT_SHARE = 0.25
+
+#: The verdict line's ceiling. The live-reason line keeps 197 characters of
+#: `TimeoutError: <this line>` (conftest._print_live_reason), and a `[e2e] ERROR`
+#: at setup is read from that line alone, so the whole of it has to fit there.
+LAUNCH_VERDICT_MAX_CHARS = 197 - len("TimeoutError: ")
+
+#: How many of the record's lines a report carries, of each of its two sources.
+LAUNCH_RECORD_TAIL_LINES = 40
+
+#: What makes a line of the app's record a fault while the process still stands.
+_LAUNCH_FATAL_RE = re.compile(r"\[fauna\] FATAL|panicked at|0xC0000409")
+#: `drain_pipes`' stream tag, then a `fauna.log` line's timestamp and level.
+_DRAIN_TAG_RE = re.compile(r"^\[(?:err|out)\]\s*")
+_LOG_LINE_HEAD_RE = re.compile(r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z)\s+[A-Z]+\s+")
+
+
+@dataclass
+class LaunchWitnesses:
+    """What the launching process holds about a launch that timed out (convention
+    6's launch-timeout rider): a driver gathers them, `launch_timeout_report` judges.
+
+    Every instant is epoch seconds on the harness's clock. A witness that could not
+    be read is None beside a string saying why, so an absence is stated, never
+    defaulted to either suspect."""
+
+    budget_s: float
+    #: (c) the timeline: +0 is the launch's post or spawn.
+    posted_at: float
+    deadline_at: float
+    process_started_at: float | None = None
+    #: (a) the process: alive, exited, or None with why; and what it was given.
+    alive: bool | None = None
+    process_unread: str = ""
+    exit_phrase: str = ""
+    cpu_s: float | None = None
+    cpu_wall_s: float | None = None
+    cpu_unread: str = ""
+    #: ... and whether it asked for more: the share of the window it spent waiting
+    #: for a CPU (`LAUNCH_STARVED_WAIT_SHARE`), with how the driver read it.
+    cpu_wait_share: float | None = None
+    cpu_wait_basis: str = ""
+    cpu_wait_unread: str = ""
+    #: (b) the app's own record: the launch's log lines, and what the driver has to
+    #: say around them (`record_text`, when it has a better rendering than a tail);
+    #: the inherited stderr, narrowed to this launch.
+    log_lines: list[str] = field(default_factory=list)
+    record_text: str = ""
+    stderr_lines: list[str] = field(default_factory=list)
+    #: (d) the machine: a `helpers.launch_load.MachineWindow`.
+    machine: object | None = None
+    #: Whatever else this driver holds about this launch.
+    notes: list[str] = field(default_factory=list)
+
+
+def _bare_log_line(line: str) -> str:
+    """A captured line without its stream tag, timestamp and level."""
+    return _LOG_LINE_HEAD_RE.sub("", _DRAIN_TAG_RE.sub("", line.strip()))
+
+
+def _log_line_at(line: str) -> float | None:
+    """The epoch second a `fauna.log` line is stamped, or None for any other line."""
+    head = _LOG_LINE_HEAD_RE.match(_DRAIN_TAG_RE.sub("", line.strip()))
+    return datetime.datetime.fromisoformat(head[1]).timestamp() if head else None
+
+
+def _launch_fatal_line(w: LaunchWitnesses) -> str:
+    """The first fatal in the app's record, bare, or "". The bridge's own narration
+    shares the stderr stream and is not the app's record."""
+    for line in (*w.stderr_lines, *w.log_lines):
+        if "[bridge]" not in line and _LAUNCH_FATAL_RE.search(line):
+            return _bare_log_line(line)
+    return ""
+
+
+def _reading(value: float | None, spec: str = ".1f") -> str:
+    return "?" if value is None else format(value, spec)
+
+
+def _stalled_tail(w: LaunchWitnesses) -> str:
+    if not w.log_lines:
+        return "no log line"
+    at = _log_line_at(w.log_lines[-1])
+    offset = "?" if at is None else f"{at - w.posted_at:.0f}"
+    return f'last line "{_bare_log_line(w.log_lines[-1])}" at +{offset} s'
+
+
+def _wait_pct(w: LaunchWitnesses) -> str:
+    return f"{w.cpu_wait_share * 100:.0f} %"
+
+
+def _launch_verdict(w: LaunchWitnesses) -> str:
+    """The rider's first line. FAULTED outranks a witness that could not be read,
+    because a fatal is positive evidence and an absence is none; `steal_host` is
+    printed and never decides. Under the quarter-core line the app's own CPU WAIT
+    decides between STARVED (it asked and was not given) and STALLED (it asked for
+    none); over it the wait is not needed and its absence is no UNKNOWN."""
+    fatal = _launch_fatal_line(w)
+    m = w.machine
+    if w.alive is False:
+        verdict = f"FAULTED — {w.exit_phrase or fatal or 'the app exited'}"
+    elif fatal:
+        verdict = f"FAULTED — {fatal}"
+    elif w.alive is None:
+        verdict = f"UNKNOWN — the process: {w.process_unread or 'no reading'}"
+    elif w.cpu_s is None or not w.cpu_wall_s:
+        verdict = f"UNKNOWN — the process's CPU time: {w.cpu_unread or 'no reading'}"
+    elif m is None or m.unread:
+        verdict = f"UNKNOWN — the agent ledger: {m.unread if m else 'no reading'}"
+    elif w.cpu_s / w.cpu_wall_s >= LAUNCH_STARVED_CORE_SHARE:
+        waited = f", waited for a CPU {_wait_pct(w)} of {w.cpu_wall_s:.0f} s" if w.cpu_wait_share is not None else ""
+        verdict = f"STALLED, NOT STARVED — ran {w.cpu_s:.1f} core-s{waited}; {_stalled_tail(w)}"
+    elif w.cpu_wait_share is None:
+        verdict = f"UNKNOWN — the process's CPU wait: {w.cpu_wait_unread or 'no reading'}"
+    elif w.cpu_wait_share >= LAUNCH_STARVED_WAIT_SHARE:
+        verdict = (
+            f"STARVED — the app ran {w.cpu_s:.1f} core-s in {w.cpu_wall_s:.0f} s and "
+            f"waited for a CPU {_wait_pct(w)} of them; "
+            f"fence {_reading(m.fence_cpus, 'd')} of {_reading(m.lane_k, 'd')}, "
+            f"priv {_reading(m.priv_pct, '.0f')} %, phantom {_reading(m.phantom)}, "
+            f"steal_host {_reading(m.steal_host)}"
+        )
+    else:
+        verdict = (
+            f"STALLED, NOT STARVED — ran {w.cpu_s:.1f} core-s, waited for a CPU "
+            f"{_wait_pct(w)} of {w.cpu_wall_s:.0f} s; {_stalled_tail(w)}"
+        )
+    line = " ".join(f"launch timeout ({w.budget_s:.0f} s): {verdict}".split())
+    if len(line) > LAUNCH_VERDICT_MAX_CHARS:
+        line = line[: LAUNCH_VERDICT_MAX_CHARS - 1] + "…"
+    return line
+
+
+def _process_witness(w: LaunchWitnesses) -> str:
+    if w.alive is None:
+        return f"(a) the process: UNKNOWN — {w.process_unread or 'no reading'}"
+    state = "ALIVE" if w.alive else f"EXITED — {w.exit_phrase or 'no exit code recorded'}"
+    if w.cpu_s is None or not w.cpu_wall_s:
+        return f"(a) the process: {state}; CPU time unread: {w.cpu_unread or 'no reading'}"
+    if w.cpu_wait_share is None:
+        waited = f"CPU wait unread: {w.cpu_wait_unread or 'no reading'}"
+    else:
+        basis = f" ({w.cpu_wait_basis})" if w.cpu_wait_basis else ""
+        waited = f"waited for a CPU {_wait_pct(w)} of the window{basis}"
+    return (
+        f"(a) the process: {state}; ran {w.cpu_s:.1f} core-s over {w.cpu_wall_s:.1f} s "
+        f"of wall ({w.cpu_s / w.cpu_wall_s:.2f} of a core); {waited}"
+    )
+
+
+def _record_witness(w: LaunchWitnesses) -> list[str]:
+    lines = [
+        f"(b) the app's record: {len(w.log_lines)} log line(s) since the launch"
+        if w.log_lines
+        else "(b) the app's record: no line of its own since the launch"
+    ]
+    if w.record_text:
+        lines.append(w.record_text)
+    else:
+        lines += [f"  {ln}" for ln in w.log_lines[-LAUNCH_RECORD_TAIL_LINES:]]
+    if w.stderr_lines:
+        lines.append("  --- inherited stderr since the launch ---")
+        lines += [f"  {ln}" for ln in w.stderr_lines[-LAUNCH_RECORD_TAIL_LINES:]]
+    return lines
+
+
+def _timeline_witness(w: LaunchWitnesses) -> str:
+    def plus(at: float) -> str:
+        return f"+{at - w.posted_at:.1f} s"
+
+    marks = [f"launch {plus(w.posted_at)}"]
+    if w.process_started_at is not None:
+        marks.append(f"process started {plus(w.process_started_at)}")
+    first = _log_line_at(w.log_lines[0]) if w.log_lines else None
+    marks.append("no first log line" if first is None else f"first log line {plus(first)}")
+    marks.append(f"deadline {plus(w.deadline_at)}")
+    return f"(c) the timeline: {' · '.join(marks)}"
+
+
+def _machine_witness(w: LaunchWitnesses) -> list[str]:
+    m = w.machine
+    if m is None or m.unread:
+        return [f"(d) the machine: UNREAD — {m.unread if m else 'no reading'}"]
+    if m.fence_cpus is None:
+        fence = "no fence up"
+    else:
+        width = (
+            f"{m.fence_cpus}"
+            if m.fence_cpus == m.fence_cpus_max
+            else f"{m.fence_cpus}-{m.fence_cpus_max}"
+        )
+        fence = f"fence {width} CPUs of the machine's {_reading(m.fence_of, 'd')}"
+    host = (
+        f"the host: {m.host_unread}"
+        if m.host_unread
+        else f"the host: host_cores {_reading(m.host_cores)}, steal_host {_reading(m.steal_host)}"
+    )
+    return [
+        f"(d) the machine over {m.ticks} tick(s): {fence}, lane k {_reading(m.lane_k, 'd')}; "
+        f"priv {_reading(m.priv_pct, '.0f')} %, phantom {_reading(m.phantom)}, "
+        f"busy {_reading(m.busy)}, outside {_reading(m.outside)}",
+        f"    {host}",
+    ]
+
+
+def launch_timeout_report(w: LaunchWitnesses) -> str:
+    """The verdict as the FIRST line, then the four witnesses.
+
+    The one builder of convention 6's launch-timeout rider: every driver's gate, the
+    first launch and the relaunch alike, raises or prints through it with the driver
+    supplying the witnesses, so the grammar cannot drift per app. Never raises: it
+    runs inside a ``raise``, so an exception here would replace the real failure with
+    its own."""
+    try:
+        lines = [_launch_verdict(w)]
+    except Exception as exc:  # noqa: BLE001 - must never mask the real failure
+        budget = getattr(w, "budget_s", "?")
+        return (
+            f"launch timeout ({budget} s): UNKNOWN — the report could not be built: "
+            f"{type(exc).__name__}: {exc}"
+        )
+    try:
+        lines += [
+            _process_witness(w),
+            *_record_witness(w),
+            _timeline_witness(w),
+            *_machine_witness(w),
+            *[note for note in w.notes if note],
+        ]
+    except Exception as exc:  # noqa: BLE001 - the verdict still stands without them
+        lines.append(f"(the witnesses could not be printed: {type(exc).__name__}: {exc})")
+    return "\n".join(lines)
 
 
 class HttpBridgeDriver(PlatformDriver):
@@ -821,6 +1086,23 @@ class HttpBridgeDriver(PlatformDriver):
         os.makedirs(os.path.dirname(dst), exist_ok=True)
         shutil.copytree(src, dst)
 
+    @staticmethod
+    def _actor_of_secret(secret_hex) -> str | None:
+        """The actor a session's signing seed names, for a session patch that
+        carries no `actor_id` (the admin logins). Measured 2026-10-31: without it
+        no admin slot was ever restored, so each relaunch stranded the admin's
+        machine as a live fleet member and the next sign-in minted another; 40
+        of those drew wrap cells from every healer for every generation and met
+        the 4096-entry cap in a 41-minute slice of the suite."""
+        if not isinstance(secret_hex, str):
+            return None
+        try:
+            from nacl.signing import SigningKey
+
+            return bytes(SigningKey(bytes.fromhex(secret_hex)).verify_key).hex()
+        except ValueError:
+            return None
+
     def _restore_principal_slot(self, session: dict) -> None:
         """Before a session patch signs an actor in, restore that actor's
         harvested slot into this launch's store.
@@ -839,7 +1121,7 @@ class HttpBridgeDriver(PlatformDriver):
             self, "_principal_slot_carry_live", False
         ):
             return
-        actor = session.get("actor_id")
+        actor = session.get("actor_id") or self._actor_of_secret(session.get("secret_hex"))
         if not isinstance(actor, str) or not actor:
             return
         actor = actor.lower()
@@ -936,12 +1218,24 @@ class HttpBridgeDriver(PlatformDriver):
     #: reset the `app` fixture runs between tests, at its default budget.
     RETIRE_SIGN_OUT_S = 10.0
 
+    def _relaunch_pinned(self) -> bool:
+        """True while a `preserve_state_across_relaunch()` pin keeps this
+        machine's store for its next relaunch.
+
+        The pin's two consumers — `_discards_machine_at_teardown` and
+        `hard_reload`'s pinned contract — read it only through here, because
+        drivers keep it in different places: `_preserve_pinned_keys` here and
+        on android, `_preserved_cred_dir` on the apple drivers
+        (`InProcessAgentDriver` overrides). A consumer that read one place
+        only missed the others' pins: an apple teardown between a pin and its
+        relaunch signed the pinned actor out, so the relaunch found no
+        credentials and nothing to replay."""
+        return bool(getattr(self, "_preserve_pinned_keys", None))
+
     def _discards_machine_at_teardown(self) -> bool:
         """True when this driver's teardown throws its machine away: the store
         is the driver's own (the carry is live) and no relaunch pin keeps it."""
-        return bool(getattr(self, "_principal_slot_carry_live", False)) and not getattr(
-            self, "_preserve_pinned_keys", None
-        )
+        return bool(getattr(self, "_principal_slot_carry_live", False)) and not self._relaunch_pinned()
 
     def _current_slots(self) -> dict[str, dict] | None:
         """This launch's per-actor slots (`_read_principal_slots`). A driver
@@ -1030,6 +1324,62 @@ class HttpBridgeDriver(PlatformDriver):
             print(f"[e2e] discarded machine: removed {actor[:12]}…'s still-granted row {row[:12]}…")
         except Exception as exc:  # noqa: BLE001 — a teardown never fails a test
             print(f"[e2e] discarded machine: could not remove {actor[:12]}…'s row ({exc})")
+
+    def recover_from_wedged_reset(self) -> bool:
+        """`recover()` for the app that could not answer a `reset()`, finishing
+        the sign-out that reset owed (convention 10, *A discarded driver retires
+        its machine*). The relaunch signs nothing out and the fresh launch's
+        reset has nothing to sign out, so without this every shared actor the
+        wedged launch held keeps its grant, its idle walk mark counting at the
+        fleet scope's retention gate. The nest half alone would not do: a member
+        whose row is merely deleted stays a fleet member and draws wrap cells
+        from every healer, so the machine signs back in on its carried slot and
+        signs out through the app, which writes its `Removed` row."""
+        from helpers.shared_identity import is_shared_actor
+
+        held = (self._current_slots() or {}) if self._discards_machine_at_teardown() else {}
+        if not self.recover():
+            return False
+        for actor, slot in held.items():
+            if is_shared_actor(actor):
+                self._finish_wedged_sign_out(actor, slot)
+        return True
+
+    def _finish_wedged_sign_out(self, actor: str, slot: dict) -> None:
+        """Sign ``actor`` back in on the carried slot and out through the app.
+        Never fails the recovery: a nest-side removal of whatever grant is left
+        follows, and what could not be done is printed for the sweep."""
+        from helpers.enrollment import latched_row_in
+        from helpers.shared_identity import shared_actor_session
+        from helpers.waiting import account_pump_role, wait_until
+
+        session = shared_actor_session(actor)
+        row = latched_row_in(slot, actor)
+        if session is not None and row is not None:
+            url, seed = session
+            try:
+                self.set_state(
+                    {
+                        "session": {
+                            "authenticated": True,
+                            "node_url": url,
+                            "secret_hex": seed.hex(),
+                            "actor_id": actor,
+                            "device_id": row,
+                        }
+                    }
+                )
+                wait_until(
+                    lambda: (account_pump_role(self) or (False, False))[0],
+                    self.RETIRE_SIGN_OUT_S * 6,
+                    diagnose=lambda: f"no account runtime for {actor[:12]}…",
+                )
+                self.reset(timeout=self.RETIRE_SIGN_OUT_S)
+            except Exception as exc:  # noqa: BLE001 — the nest half follows
+                print(f"[e2e] wedged reset: sign-out failed ({type(exc).__name__}: {exc})")
+        self._remove_row_still_granted(actor, slot)
+        self.__dict__.get("_principal_slot_vault", {}).pop(actor, None)
+        self.__dict__.get("_replica_vault", {}).pop(actor, None)
 
     # ── The install-device-secret carry (convention 10, ruled 2026-09-20) ───
     #
@@ -1210,6 +1560,7 @@ class HttpBridgeDriver(PlatformDriver):
         proc = getattr(self, "_app_proc", None)
         if proc is None:
             super().kill_uncleanly()  # the NotImplementedError with the contract
+        self._read_exit_before_close("kill_uncleanly()")
         try:
             os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
         except (ProcessLookupError, PermissionError, OSError):
@@ -1264,7 +1615,7 @@ class HttpBridgeDriver(PlatformDriver):
         session = getattr(self, "_last_session", None)
         if session is None:
             return
-        if getattr(self, "_preserve_pinned_keys", None):
+        if self._relaunch_pinned():
             want = session.get("actor_id")
             deadline = time.monotonic() + self.AUTO_RELOGIN_CEILING_S
             while time.monotonic() < deadline:
@@ -1272,12 +1623,20 @@ class HttpBridgeDriver(PlatformDriver):
                     if self.get_state("session.authenticated") and (
                         want is None or self.get_state("session.actor_id") == want
                     ):
+                        # Which path ran is a diagnosis input: a restart that
+                        # comes back as a different device reads differently
+                        # after an auto-restore than after a replay.
+                        print("[e2e] hard_reload: pinned store auto-restored the session")
                         return
                 except (LookupError, RuntimeError, OSError):
                     pass  # a still-booting bridge answers when it answers
                 time.sleep(0.5)
             # No auto-login inside the ceiling: the pinned store did not carry
             # the credentials after all — fall through to the replay.
+            print(
+                f"[e2e] hard_reload: no auto-restore inside "
+                f"{self.AUTO_RELOGIN_CEILING_S:.0f} s — replaying the login"
+            )
         # Re-establish the authenticated session and land on the feed, mirroring
         # logged_in_app's initial injection so the app reconnects + restores.
         self.set_state({"session": session, "nav": {"stack": [{"view": "feed"}]}})
@@ -1446,6 +1805,24 @@ class HttpBridgeDriver(PlatformDriver):
             if resp.get("frame") and resp.get("viewport") else None
         )
 
+    def scroll_to_bottom_fraction(self, element_id: str, fraction: float, *,
+                                  index: int = 0, scope: str | None = None) -> float:
+        """POST /element/scroll-to-bottom-fraction (`base.py` owns the
+        contract). A bridge that does not serve the route answers 404 for an
+        unknown path; that surfaces as the bridge's own error text, never as a
+        fabricated fraction."""
+        body: dict = {"id": element_id, "index": index, "fraction": float(fraction)}
+        wire = self._scope_wire(scope)
+        if wire:
+            body["scope"] = wire
+        resp = self._post("/element/scroll-to-bottom-fraction", body)
+        if not resp.get("found", False):
+            raise LookupError(
+                f"scroll_to_bottom_fraction({element_id!r}[{index}]): "
+                f"{resp.get('error', 'not found')}"
+            )
+        return float(resp["fraction"])
+
     #: Post-scroll geometry of the most recent `scroll_to`, when the bridge
     #: reports it (apple's in-process agent does).
     _last_scroll_geometry: tuple[str, str] | None = None
@@ -1535,6 +1912,18 @@ class HttpBridgeDriver(PlatformDriver):
         machine — the half of `teardown()` a relaunch also runs."""
         raise NotImplementedError("Subclasses must implement _stop_app()")
 
+    def _read_exit_before_close(self, close: str) -> None:
+        """Convention 6's close rider: record the app's death if it had already died
+        of a crash before ``close`` (a teardown, `quit_app()`, `kill_uncleanly()`,
+        the relaunch in `recover()`) — read before the close, never after
+        (`docs/goal/architecture/e2e-self-diagnosing-failures.md` § The convention).
+
+        A no-op here, for a driver whose leg is not built yet; linux, tui and
+        macOS read their local child (`drivers/local_launch.py::read_exit_before_close`),
+        iOS and macOS's Launch Services launch the pid they hold
+        (`read_gone_pid_before_close`), windows its bridge's tracked handle,
+        android the device's logcat. Never raises."""
+
     def quit_app(self) -> None:
         """The user quits the app and leaves the machine as it is — the first
         half of `hard_reload()`, with the reopen left for later.
@@ -1545,6 +1934,7 @@ class HttpBridgeDriver(PlatformDriver):
         (`preserve_state_across_relaunch()`), or the reopened app is a fresh
         device rather than the one that quit. Never `teardown()` for this: that
         discards the machine and signs its actors out."""
+        self._read_exit_before_close("quit_app()")
         self._stop_app()
 
     def find_element(self, element_id: str, index: int = 0, *, scope: str | None = None):
@@ -1593,12 +1983,12 @@ class HttpBridgeDriver(PlatformDriver):
         """Choose `value` in the picker `element_id`.
 
         Refused when the app never painted `value` as an option — see
-        `SelectOptionNotOffered`. Every app refuses; only *how* differs, because
-        the four that drive a real widget (linux's `StringObject` model lookup,
-        web's Playwright `select_option`, windows' `ComboBoxItem` scan, android's
-        `By.text`) cannot actuate an option they can't find, while a
-        value-writeback registry (tui, apple) has to check membership explicitly
-        and answers 409.
+        `SelectOptionNotOffered`. Every app refuses. A value-writeback registry
+        (tui, apple) has to check membership explicitly; the bridges that drive a
+        real widget (linux's `StringObject` model lookup, the web bridge's option
+        read, windows' `ComboBoxItem` scan) cannot actuate an option they can't
+        find. Each of those answers 409 for it, raised here as
+        `SelectOptionNotOffered`.
         """
         body: dict = {"id": element_id, "value": value, "index": index}
         wire = self._scope_wire(scope)
@@ -1649,6 +2039,12 @@ class HttpBridgeDriver(PlatformDriver):
         venue), but the asymmetry is a
         property of this except-False on ANY bridge: never mark a test for an
         app on the strength of a disabled-assert alone.
+
+        The one failure it never swallows is a UI-thread stall verdict
+        (:data:`UI_THREAD_STALL_HEADER`): a held UI thread read as "not enabled"
+        would pass an ``assert is_disabled(...)`` on a wedged app, and the
+        bridge lets that failure through precisely so the verdict reaches the
+        test (convention 11).
         """
         params = {"id": element_id}
         scope_wire = self._scope_wire(scope)
@@ -1656,6 +2052,10 @@ class HttpBridgeDriver(PlatformDriver):
             params["scope"] = json.dumps(scope_wire)
         try:
             return bool(self._get("/element/enabled", params=params).get("enabled", False))
+        except RuntimeError as failed:
+            if UI_THREAD_STALL_HEADER in str(failed):
+                raise
+            return False
         except Exception:
             return False
 
@@ -1970,7 +2370,7 @@ class HttpBridgeDriver(PlatformDriver):
             wait_for: optional predicate (callable taking state dict, returning bool).
                       If provided, polls until the predicate is satisfied or timeout.
                       Native apps have async state serialization (50-150ms stale window),
-                      so polling is needed after UI actions. Web overrides this to skip polling.
+                      so polling is needed after UI actions. Web overrides this and polls too.
             timeout: seconds to wait for the predicate (only used when wait_for is set).
         """
         if wait_for is not None:
@@ -2117,7 +2517,7 @@ class HttpBridgeDriver(PlatformDriver):
         import json
         self.call_machine_method("set_provider_base_urls", json.dumps(urls))
 
-    def reset(self, timeout: float = 10.0) -> None:
+    def reset(self, timeout: float = RESET_TIMEOUT_S) -> None:
         """Reset the app to factory state (clear stores, return to onboarding).
 
         Waits for the app to both acknowledge the command AND settle into

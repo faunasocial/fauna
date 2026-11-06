@@ -45,6 +45,10 @@ pub struct RestoreHandles {
     /// Stringified ids of the snapshots currently in the picker, indexed
     /// 1:1 with the dropdown model. The selected id is the match target.
     pub snapshot_ids: Rc<RefCell<Vec<String>>>,
+    /// Each picker row's index into `RESTORE_KINDS` (`None` for a kind with no
+    /// checkbox), parallel to `snapshot_ids`; an unticked kind disarms the
+    /// confirm button.
+    pub snapshot_kinds: Rc<RefCell<Vec<Option<usize>>>>,
     /// Per-snapshot divergence rows for the modal.
     pub divergence: DivergenceStore,
     /// `restore-progress` — the three-state restore report (idle / running /
@@ -73,8 +77,14 @@ pub fn build_restore_section(client: &Rc<FaunaClient>) -> (gtk::Box, RestoreHand
         .build();
 
     // -- Local restore action ------------------------------------------------
-    let (action_box, snapshot_select, snapshot_ids, progress, warning) =
-        build_local_restore_action(client);
+    let LocalRestoreAction {
+        card: action_box,
+        snapshot_select,
+        snapshot_ids,
+        snapshot_kinds,
+        progress,
+        warning,
+    } = build_local_restore_action(client);
     outer.append(&action_box);
 
     // -- Restore history (collapsible) ---------------------------------------
@@ -109,6 +119,7 @@ pub fn build_restore_section(client: &Rc<FaunaClient>) -> (gtk::Box, RestoreHand
         history_list,
         snapshot_select,
         snapshot_ids,
+        snapshot_kinds,
         divergence: Rc::new(RefCell::new(HashMap::new())),
         progress,
         warning,
@@ -117,17 +128,19 @@ pub fn build_restore_section(client: &Rc<FaunaClient>) -> (gtk::Box, RestoreHand
     (outer, handles)
 }
 
+/// The widgets and shared state the local-restore action card hands back.
+struct LocalRestoreAction {
+    card: gtk::Box,
+    snapshot_select: gtk::DropDown,
+    snapshot_ids: Rc<RefCell<Vec<String>>>,
+    snapshot_kinds: Rc<RefCell<Vec<Option<usize>>>>,
+    progress: gtk::Label,
+    warning: gtk::Label,
+}
+
 /// Build the local-restore action card: snapshot picker + per-kind
 /// checkboxes + the re-type friction bar + progress label.
-fn build_local_restore_action(
-    client: &Rc<FaunaClient>,
-) -> (
-    gtk::Box,
-    gtk::DropDown,
-    Rc<RefCell<Vec<String>>>,
-    gtk::Label,
-    gtk::Label,
-) {
+fn build_local_restore_action(client: &Rc<FaunaClient>) -> LocalRestoreAction {
     let group = adw::PreferencesGroup::builder()
         .title(s::RESTORE_LOCAL_TITLE)
         .build();
@@ -151,15 +164,20 @@ fn build_local_restore_action(
         .build();
     set_test_id(&kinds_box, ids::RESTORE_KINDS_CHECKBOXES);
 
-    let mail_check = gtk::CheckButton::with_label(s::RESTORE_KINDS_MAIL);
-    mail_check.set_active(true);
-    set_test_id(&mail_check, ids::RESTORE_KIND_CHECKBOX);
-    kinds_box.append(&mail_check);
-
-    let calendar_check = gtk::CheckButton::with_label(s::RESTORE_KINDS_CALENDAR);
-    calendar_check.set_active(true);
-    set_test_id(&calendar_check, ids::RESTORE_KIND_CHECKBOX);
-    kinds_box.append(&calendar_check);
+    // The five restore kinds, all ticked by default, in the shared
+    // `RESTORE_KINDS` order.
+    let kind_checks: Rc<Vec<gtk::CheckButton>> = Rc::new(
+        fauna_client_snapshots::RESTORE_KINDS
+            .iter()
+            .map(|(_, label)| {
+                let check = gtk::CheckButton::with_label(label);
+                check.set_active(true);
+                set_test_id(&check, ids::RESTORE_KIND_CHECKBOX);
+                kinds_box.append(&check);
+                check
+            })
+            .collect(),
+    );
 
     card.append(&kinds_box);
 
@@ -209,23 +227,38 @@ fn build_local_restore_action(
 
     // Stringified snapshot ids, parallel to the dropdown model.
     let snapshot_ids: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
+    let snapshot_kinds: Rc<RefCell<Vec<Option<usize>>>> = Rc::new(RefCell::new(Vec::new()));
 
     // -- Friction-bar enable logic -------------------------------------------
     // The button is sensitive iff the typed text exactly equals the
-    // SELECTED snapshot's id.
+    // SELECTED snapshot's id and that snapshot's kind is ticked.
     let recompute_enabled = {
         let confirm_input = confirm_input.clone();
         let confirm_button = confirm_button.clone();
         let snapshot_select = snapshot_select.clone();
         let snapshot_ids = Rc::clone(&snapshot_ids);
+        let snapshot_kinds = Rc::clone(&snapshot_kinds);
+        let kind_checks = Rc::clone(&kind_checks);
         move || {
             let typed = confirm_input.text().to_string();
             let selected = snapshot_select.selected() as usize;
             let ids = snapshot_ids.borrow();
             let matches = ids.get(selected).map(|id| *id == typed).unwrap_or(false);
-            confirm_button.set_sensitive(matches && !typed.is_empty());
+            let ticked = snapshot_kinds
+                .borrow()
+                .get(selected)
+                .copied()
+                .flatten()
+                .and_then(|i| kind_checks.get(i))
+                .is_none_or(|check| check.is_active());
+            confirm_button.set_sensitive(matches && !typed.is_empty() && ticked);
         }
     };
+
+    for check in kind_checks.iter() {
+        let recompute = recompute_enabled.clone();
+        check.connect_toggled(move |_| recompute());
+    }
 
     {
         let recompute = recompute_enabled.clone();
@@ -260,7 +293,14 @@ fn build_local_restore_action(
         });
     }
 
-    (outer, snapshot_select, snapshot_ids, progress, warning)
+    LocalRestoreAction {
+        card: outer,
+        snapshot_select,
+        snapshot_ids,
+        snapshot_kinds,
+        progress,
+        warning,
+    }
 }
 
 /// Populate the local-snapshot picker from `fauna.filesync.snapshot.list`.
@@ -270,8 +310,15 @@ pub fn populate_snapshot_select(handles: &RestoreHandles, snapshots: &[SnapshotS
     let labels: Vec<String> = snapshots
         .iter()
         .map(|r| {
-            fauna_client_snapshots::snapshot_restore_option_label(r.message_kind.as_deref(), r.id)
+            fauna_client_snapshots::snapshot_restore_kind_option_label(
+                r.message_kind.as_deref(),
+                r.id,
+            )
         })
+        .collect();
+    let kinds: Vec<Option<usize>> = snapshots
+        .iter()
+        .map(|r| fauna_client_snapshots::restore_kind_index(r.message_kind.as_deref()))
         .collect();
     let label_refs: Vec<&str> = labels.iter().map(String::as_str).collect();
 
@@ -283,6 +330,7 @@ pub fn populate_snapshot_select(handles: &RestoreHandles, snapshots: &[SnapshotS
     // The closing notify covers a model swap that leaves the selection where
     // it was, which fires no notify at all.
     *handles.snapshot_ids.borrow_mut() = ids;
+    *handles.snapshot_kinds.borrow_mut() = kinds;
     handles.snapshot_select.set_model(Some(&model));
     if !snapshots.is_empty() {
         handles.snapshot_select.set_selected(0);

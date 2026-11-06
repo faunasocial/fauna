@@ -60,7 +60,6 @@ test-helpers = ["network"]
 
 [dependencies]
 # Always (WASM-safe)
-aes-gcm.workspace = true
 argon2.workspace = true
 chacha20poly1305.workspace = true
 rand.workspace = true
@@ -114,9 +113,6 @@ similar = { workspace = true }
 thiserror.workspace = true
 tracing.workspace = true
 
-# WASM-only (optional)
-js-sys = { workspace = true, optional = true }
-
 # UniFFI (optional) — only when `feature = "uniffi"` is requested by a
 # consumer such as fauna-onboarding-machine (via fauna-ffi).
 uniffi = { workspace = true, optional = true }
@@ -149,6 +145,7 @@ gloo-net = { version = "0.6", default-features = false, features = ["http"], opt
 # (`fauna-account-store`, `fauna-client-accounts`, `fauna-wasm`); this only
 # makes them direct here so the one Web Locks primitive lives in the lowest
 # crate its three legs share.
+js-sys = { workspace = true, optional = true }
 wasm-bindgen = { workspace = true, optional = true }
 wasm-bindgen-futures = { version = "0.4", optional = true }
 

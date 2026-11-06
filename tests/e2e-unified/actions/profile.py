@@ -36,33 +36,6 @@ class ProfileActions:
         self.driver.set_state({"nav": {"stack": [{"view": "profile"}]}})
         self.driver.wait_for("profile-view", timeout=10.0)
 
-    def require_avatar_banner_upload_supported(self) -> None:
-        """Skip unless this app builds avatar/banner image upload (e2e
-        convention 7 — the platform check lives in the action layer, not the
-        test body).
-
-        tui-first (lead app); web, linux, android, macos, ios and windows
-        (landed 2026-08-02, the last of the 7 apps) all have it now —
-        android e2e stays host-emulator-gated like every other android
-        journey, so this gate has no remaining apps to skip."""
-        if not (
-            self.driver.is_tui()
-            or self.driver.is_web()
-            or self.driver.is_linux()
-            or self.driver.is_android()
-            or self.driver.is_macos()
-            or self.driver.is_ios()
-            or self.driver.is_windows()
-        ):
-            from helpers.app_surface import skip_unbuilt
-
-            skip_unbuilt(
-                self.driver,
-                surface="avatar/banner image upload",
-                detail="all 7 apps have it",
-                tracked="n/a",
-            )
-
     def require_other_profile_offers_browse_supported(self) -> None:
         """Skip unless this app renders the OTHER-profile offers-browse
         surface (e2e convention 7 — the platform check lives in the action
@@ -73,58 +46,11 @@ class ProfileActions:
         slice 2, shared offers_list/status_get + offer_status) lifted it
         (same ui.yaml IDs — each app's contact row resolves by the hex
         actor_id); android lifts after (per-app NEXTs)."""
-        if not (
-            self.driver.is_linux()
-            or self.driver.is_web()
-            or self.driver.is_windows()
-            or self.driver.is_macos()
-            or self.driver.is_ios()
-            or self.driver.is_tui()
-        ):
-            from helpers.app_surface import skip_unbuilt
+        from helpers.app_surface import require_surface
 
-            skip_unbuilt(
-                self.driver,
-                surface="the OTHER-profile offers-browse surface",
-                detail="6 of 7 apps have it; android lifts after",
-                tracked="per-app NEXTs",
-            )
-
-    def require_remote_profile_read_supported(self) -> None:
-        """Skip unless this app builds the remote profile read — the edit
-        form's ``profile-edit-audience-toggle`` and the OTHER header's relay
-        through the carried home (``profile.md`` § Where logic lives → *The
-        remote read*). tui leads, android and linux have followed; the other four
-        follow in the batched trickle-down, so this is parity debt
-        (``skip_unbuilt``)."""
-        if not (self.driver.is_tui() or self.driver.is_android() or self.driver.is_linux()):
-            from helpers.app_surface import skip_unbuilt
-
-            skip_unbuilt(
-                self.driver,
-                surface="the remote profile read (profile-edit-audience-toggle + the header relay)",
-                detail="the audience toggle and the OTHER header's fall-through to fauna.profile.get_remote",
-                tracked="profile.md § Implementation status today; the batched per-app trickle-down",
-            )
+        require_surface(self.driver, "profile-offers-browse")
 
     # --- header pictures (``profile-avatar`` / ``profile-banner``) ---
-
-    def require_header_pictures_supported(self) -> None:
-        """Skip unless this app paints the stored avatar and banner in the
-        Profile header (``profile.md`` § Layout & flow, the ``user-header``
-        component; IDs user-approved 2026-10-20). tui leads; linux, web and
-        android have followed; windows, macos and ios follow in the batched
-        trickle-down, so this is parity debt (``skip_unbuilt``)."""
-        d = self.driver
-        if not (d.is_tui() or d.is_linux() or d.is_web() or d.is_android()):
-            from helpers.app_surface import skip_unbuilt
-
-            skip_unbuilt(
-                self.driver,
-                surface="the Profile header's stored pictures (profile-avatar / profile-banner)",
-                detail="tui, linux, web and android have it; windows, macos and ios follow",
-                tracked="profile.md § Implementation status today; the batched per-app trickle-down",
-            )
 
     def picture_state(self, element_id: str) -> str:
         """``absent`` / ``empty`` / ``painted`` for a header picture.
@@ -342,24 +268,6 @@ class ProfileActions:
     # ``FeedActions``, whose reads assume the feed page (and its state-read
     # fallback on the apple apps).
 
-    # The apps that paint the Posts tab's content (`profile.md` § Implementation
-    # status today): tui led; linux, web and android followed.
-    _POSTS_TAB_APPS = frozenset({"tui", "linux", "web", "android"})
-
-    def require_posts_tab_supported(self) -> None:
-        """Skip unless this app paints the Posts tab's content (e2e convention
-        7). tui leads (`profile.md` § Implementation status today); the other
-        apps follow in the batched trickle-down."""
-        from helpers.app_surface import app_name, skip_unbuilt
-
-        if app_name(self.driver) not in self._POSTS_TAB_APPS:
-            skip_unbuilt(
-                self.driver,
-                surface="profile-posts-section (the profile's Posts tab)",
-                detail="tui, linux, web and android paint it; macos, ios and windows follow",
-                tracked="docs/goal/ui/profile.md § Implementation status today",
-            )
-
     def open_posts_tab(self) -> None:
         """Activate ``profile-posts-tab`` — every activation reads the author's
         posts afresh — and wait for its section."""
@@ -575,27 +483,9 @@ class ProfileActions:
         through the same shared `ProfileNavTarget` UniFFI door — 2026-09-06,
         the last of the seven apps). Every app now honours the actor_id.
         """
-        if not (
-            self.driver.is_linux()
-            or self.driver.is_android()
-            or self.driver.is_tui()
-            or self.driver.is_web()
-            or self.driver.is_macos()
-            or self.driver.is_ios()
-            or self.driver.is_windows()
-        ):
-            from helpers.app_surface import skip_unbuilt
+        from helpers.app_surface import require_surface
 
-            skip_unbuilt(
-                self.driver,
-                surface="nav-stack actor_id (state-protocol profile nav)",
-                detail=(
-                    "the app's nav patch reads only the stack entry's `view`, so "
-                    "`navigate_to_actor` opens the SELF profile instead of the "
-                    "named actor"
-                ),
-                tracked="",
-            )
+        require_surface(self.driver, "nav-stack-actor-id")
 
     def navigate_to_actor(self, actor_id: str, home_nest_url: str | None = None) -> None:
         """Open another actor's profile via the nav-stack ``actor_id`` (the
@@ -732,30 +622,6 @@ class ProfileActions:
 
     # --- request contact (the knock from a profile) ---
 
-    def require_request_contact_supported(self) -> None:
-        """Skip unless this app renders ``profile-request-contact-button`` —
-        convention 7. tui is the lead app (2026-09-25); macOS + iOS (the shared
-        FaunaKit ``ProfileView``), linux and web followed 2026-09-26, windows
-        with the rest of the batch; the remaining apps send the same knock only
-        from the Contacts page so far (profile.md § Implementation status
-        today)."""
-        if not (
-            self.driver.is_tui()
-            or self.driver.is_macos()
-            or self.driver.is_ios()
-            or self.driver.is_linux()
-            or self.driver.is_web()
-            or self.driver.is_windows()
-        ):
-            from helpers.app_surface import skip_unbuilt
-
-            skip_unbuilt(
-                self.driver,
-                surface="profile-request-contact-button",
-                detail="the knock is sent only from the Contacts page on this app",
-                tracked="profile.md § Implementation status today",
-            )
-
     def request_contact(self) -> None:
         """Tap ``profile-request-contact-button`` — send the knock to the viewed
         actor (label → "Request sent" once the nest accepts it)."""
@@ -794,27 +660,9 @@ class ProfileActions:
         answers for any non-special name). android e2e stays
         host-emulator-gated like every other android journey, so this gate has
         no remaining apps to skip."""
-        if not (
-            self.driver.is_tui()
-            or self.driver.is_linux()
-            or self.driver.is_web()
-            or self.driver.is_macos()
-            or self.driver.is_ios()
-            or self.driver.is_windows()
-            or self.driver.is_android()
-        ):
-            from helpers.app_surface import skip_unbuilt
+        from helpers.app_surface import require_surface
 
-            skip_unbuilt(
-                self.driver,
-                surface="profile-actor-id-copy-btn's `copied` attribute",
-                detail=(
-                    "the button copies, but only tui, linux, web, macos, ios, "
-                    "windows and android report the value it wrote, so a test "
-                    "cannot assert what reached the clipboard"
-                ),
-                tracked="profile.md § User actions; the cross-app lift",
-            )
+        require_surface(self.driver, "profile-actor-id-copy-btn-copied")
 
     def copy_actor_id(self, timeout: float = 15.0) -> str:
         """Click ``profile-actor-id-copy-btn`` and return the actor id it put on

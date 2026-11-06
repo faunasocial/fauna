@@ -64,6 +64,8 @@ pub mod session;
 pub mod test_fixtures;
 pub mod throttle;
 pub mod transport;
+#[cfg(feature = "imap-client-tunnel")]
+pub mod tunnel;
 
 pub use batch::{BatchPacker, ImportUnit};
 #[cfg(feature = "imap-client-native")]
@@ -82,6 +84,11 @@ pub use session::{
 };
 pub use throttle::{FetchThrottle, ThrottleDecision};
 pub use transport::{ImapClock, ImapTransport, TlsMode};
+#[cfg(feature = "imap-client-tunnel")]
+pub use tunnel::{
+    TunnelDialer, TunnelError, TunnelOAuthHttp, TunnelPipe, TunnelTlsTransport, open_tunnel,
+    tunnel_client_config,
+};
 
 /// § Batching: the per-call ceilings, re-exported from the crate that owns the
 /// `fauna.bridges.import_message_batch` wire contract so the client and the

@@ -65,6 +65,18 @@ def stitch_agent_log(app_text: str, agent_text: str) -> str:
     )
 
 
+def _split_agent_log(text: str) -> tuple[str, str]:
+    """:func:`stitch_agent_log` undone: ``(app_text, agent_text)``, the agent's
+    part empty when the text carries no :data:`AGENT_LOG_BANNER`."""
+    joined = f"\n{AGENT_LOG_BANNER}\n"
+    if joined in text:
+        app, agent = text.split(joined, 1)
+        return app, agent
+    if text.startswith(f"{AGENT_LOG_BANNER}\n"):
+        return "", text[len(AGENT_LOG_BANNER) + 1:]
+    return text, ""
+
+
 class PlatformDriver(ABC):
     """Abstract base for all platform-specific UI automation drivers.
 
@@ -195,6 +207,30 @@ class PlatformDriver(ABC):
         """
         return "unknown"
 
+    def app_log_mark(self) -> object:
+        """A place in the app's log for :meth:`app_log_since` to read on from.
+
+        Opaque to the caller: a character offset into each section here, a
+        line count on web's evicting ring, where a character offset stops
+        naming a place.
+
+        Per section because a driver with a detached agent (windows, and tui
+        on windows) returns the app's log, :data:`AGENT_LOG_BANNER`, then the
+        agent's own file (:func:`stitch_agent_log`). The app's new lines land
+        BEFORE the agent's section, so one offset into the joined text starts
+        the next read inside the agent's part and never sees them
+        (`tests/test_app_log_mark_stitched.py`)."""
+        app, agent = _split_agent_log(self.app_stderr_text())
+        return (len(app), len(agent))
+
+    def app_log_since(self, mark: object) -> str:
+        """What the app logged after :meth:`app_log_mark` returned ``mark`` —
+        the app's new lines, then the detached agent's under the banner when
+        it wrote any."""
+        app_mark, agent_mark = mark
+        app, agent = _split_agent_log(self.app_stderr_text())
+        return stitch_agent_log(app[app_mark:], agent[agent_mark:])
+
     def kill_uncleanly(self) -> None:
         """SIGKILL the driver's OWN spawned app child — no SIGTERM, no cleanup
         handlers, no graceful teardown — simulating a client crash / power loss
@@ -260,8 +296,8 @@ class PlatformDriver(ABC):
 
         Concrete with a NotImplementedError default (the `kill_uncleanly` pattern):
         implemented by every driver whose durable store the harness can both SEED
-        and PRESERVE across a relaunch — the linux File backend and the
-        macOS/iOS/Windows keychain files. A driver that `supports_unclean_kill()`
+        and PRESERVE across a relaunch — the linux/tui/windows File backend and
+        the macOS/iOS keychain files. A driver that `supports_unclean_kill()`
         MUST implement it rather than let journey 6 skip: a silent skip on a
         killable driver hides the very CR-2 gap the journey exists to prove
         (testing.md § point 11)."""
@@ -382,6 +418,33 @@ class PlatformDriver(ABC):
         not scrolling.
         """
         raise NotImplementedError(f"{type(self).__name__} does not implement scroll_to()")
+
+    def scroll_to_bottom_fraction(self, element_id: str, fraction: float, *,
+                                  index: int = 0, scope: str | None = None) -> float:
+        """Targeted scroll to the BOTTOM EDGE at a MEASURED fraction: place the
+        (indexed, scoped) element so that ``fraction`` (0-1) of its own height
+        shows above its scroll container's bottom edge, driving the client's
+        REAL scroll position (the engagement-cue observer samples that same
+        position), and return the visible fraction actually reached.
+
+        The sibling of `scroll_to()` (centre, whole element) and the
+        generalisation of windows' `scroll_to_visible_fraction` (a measured
+        AT-LEAST fraction reached by a sweep): this one leaves the element
+        partly under the bottom edge — a card a reader has scrolled half out of
+        view. The reached fraction can exceed ``fraction`` when the list cannot
+        scroll that far (too little content above the element), so the caller
+        asserts on the returned value, never on its request. Raises
+        `LookupError` on an absent element, as `scroll_to` does
+        (`e2e-conventions.md` § Driver primitives → *Placing an element at a
+        measured fraction*).
+
+        Concrete with a NotImplementedError default (the `scroll_to` pattern):
+        bridges serving POST /element/scroll-to-bottom-fraction get the
+        HttpBridgeDriver implementation.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not implement scroll_to_bottom_fraction()"
+        )
 
     def is_visible_scrolled(self, element_id: str, index: int = 0, *,
                             scope: str | None = None) -> bool:
@@ -580,9 +643,17 @@ class PlatformDriver(ABC):
             ios, windows, linux — whose ``position`` is the live GTK media
             stream's timestamp, or its whole length once it has ended). A video
             played to its end reads its length, never 0 again, as a
-            ``<video>``'s ``currentTime`` does. A sealed video has no URL on windows or linux — its
-            opened bytes play from memory — so its ``source`` is
-            ``sealed:<hash>``.
+            ``<video>``'s ``currentTime`` does. A streamed video's ``source``
+            is the nest-relative path the reader was opened on. A video played
+            from bytes the app holds has no URL, so its ``source`` names its
+            arm and hash: ``sealed:<hash>`` for a sealed item,
+            ``home:<hash>`` for a plain clip of a post homed on another nest
+            (the shared ``held_video_source`` spelling — `render-model.md`
+            § D6c → *Inline playback*); web's ``currentSrc`` for both is its
+            own ``blob:<origin>/<uuid>`` object URL, carrying neither. android
+            holds the same value but publishes only ``state`` (its
+            ``stateDescription``), and tui publishes neither ``position`` nor
+            ``source``.
           * ``"href"`` (``admin-mail-health-delist-link``) — the URL a link
             element opens (or, on tui, copies), since the apps render a link
             as a button whose text carries only its label. tui publishes it

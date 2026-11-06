@@ -43,28 +43,28 @@ pub struct Layout {
     pub threads: Vec<ThreadFiles>,
 }
 
-fn file_name(name: &str) -> &str {
+pub(crate) fn file_name(name: &str) -> &str {
     name.rsplit('/').next().unwrap_or(name)
 }
 
-fn parent(name: &str) -> Option<&str> {
+pub(crate) fn parent(name: &str) -> Option<&str> {
     let mut it = name.rsplit('/');
     it.next()?;
     it.next()
 }
 
-fn grandparent(name: &str) -> Option<&str> {
+pub(crate) fn grandparent(name: &str) -> Option<&str> {
     let mut it = name.rsplit('/');
     it.next()?;
     it.next()?;
     it.next()
 }
 
-fn has_segment(name: &str, segment: &str) -> bool {
+pub(crate) fn has_segment(name: &str, segment: &str) -> bool {
     name.split('/').any(|s| s == segment)
 }
 
-fn extension(name: &str) -> &str {
+pub(crate) fn extension(name: &str) -> &str {
     file_name(name).rsplit('.').next().unwrap_or("")
 }
 
@@ -76,7 +76,7 @@ pub fn is_signature(lower: &str) -> bool {
         || (parent(lower) == Some("posts") && file_name(lower).starts_with("your_posts"))
 }
 
-fn is_message_file(file: &str) -> bool {
+pub(crate) fn is_message_file(file: &str) -> bool {
     file.strip_prefix("message_")
         .and_then(|rest| rest.strip_suffix(".json"))
         .is_some_and(|digits| !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()))
@@ -100,7 +100,7 @@ pub fn natural_key(name: &str) -> (String, u64) {
     (stem[..digits_start].to_string(), number)
 }
 
-fn sort_natural(list: &mut [String]) {
+pub(crate) fn sort_natural(list: &mut [String]) {
     list.sort_by_cached_key(|n| natural_key(n));
 }
 
@@ -162,17 +162,7 @@ pub fn locate(dir: &ZipDirectory) -> Layout {
         } else if file == "your_group_membership_activity.json" && parent == Some("groups") {
             layout.groups.push(owned);
         } else if has_segment(&lower, "messages") && is_message_file(file) {
-            let dir_name = name[..name.rfind('/').unwrap_or(0)].to_string();
-            match thread_at.get(&dir_name) {
-                Some(&i) => layout.threads[i].files.push(owned),
-                None => {
-                    thread_at.insert(dir_name.clone(), layout.threads.len());
-                    layout.threads.push(ThreadFiles {
-                        dir: dir_name,
-                        files: vec![owned],
-                    });
-                }
-            }
+            file_thread_member(&mut layout.threads, &mut thread_at, owned);
         }
     }
     for list in [
@@ -188,11 +178,51 @@ pub fn locate(dir: &ZipDirectory) -> Layout {
     ] {
         sort_natural(list);
     }
-    layout.threads.sort_by(|a, b| a.dir.cmp(&b.dir));
-    for thread in &mut layout.threads {
+    sort_threads(&mut layout.threads);
+    layout
+}
+
+/// Files one `message_N.json` member under its thread directory — the O(1)
+/// grouping `locate` describes, shared with the Instagram layout (its direct
+/// messages are Messenger thread files too). `thread_at` maps a directory to
+/// its index in `threads`.
+pub(crate) fn file_thread_member(
+    threads: &mut Vec<ThreadFiles>,
+    thread_at: &mut std::collections::HashMap<String, usize>,
+    member: String,
+) {
+    let dir_name = member[..member.rfind('/').unwrap_or(0)].to_string();
+    match thread_at.get(&dir_name) {
+        Some(&i) => threads[i].files.push(member),
+        None => {
+            thread_at.insert(dir_name.clone(), threads.len());
+            threads.push(ThreadFiles {
+                dir: dir_name,
+                files: vec![member],
+            });
+        }
+    }
+}
+
+/// Threads by directory, each thread's files in natural order.
+pub(crate) fn sort_threads(threads: &mut [ThreadFiles]) {
+    threads.sort_by(|a, b| a.dir.cmp(&b.dir));
+    for thread in threads {
         sort_natural(&mut thread.files);
     }
-    layout
+}
+
+/// Bytes of every media-extension member — sized from the directory, never
+/// read (§ Parser contract rule 3).
+pub(crate) fn media_bytes(dir: &ZipDirectory) -> u64 {
+    dir.entries()
+        .iter()
+        .filter(|e| {
+            let ext = extension(&e.name).to_ascii_lowercase();
+            MEDIA_EXTENSIONS.contains(&ext.as_str())
+        })
+        .map(|e| e.size)
+        .sum()
 }
 
 impl Layout {
@@ -240,13 +270,6 @@ impl Layout {
 
     /// Bytes of every media-extension member — sized from the directory.
     pub fn media_bytes(&self, dir: &ZipDirectory) -> u64 {
-        dir.entries()
-            .iter()
-            .filter(|e| {
-                let ext = extension(&e.name).to_ascii_lowercase();
-                MEDIA_EXTENSIONS.contains(&ext.as_str())
-            })
-            .map(|e| e.size)
-            .sum()
+        media_bytes(dir)
     }
 }

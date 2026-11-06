@@ -38,6 +38,13 @@ public final class ConversationsVM {
     /// (`ingestWelcome` / `pollConversations` / `pollMail`) and test helpers.
     public private(set) var session: ConversationsSession?
 
+    /// Whether a real session's rails are registered on `manager` — set by
+    /// `activate`, and NOT cleared by `deactivate`: dropping the session ends its
+    /// loops but leaves its FaunaMls + SMTP backends in the manager's rail slots
+    /// (`clearForIdentityChange` preserves registered rails by design). Read only
+    /// by `restoreMockBackendsForTest`.
+    private var holdsRealRails = false
+
     private let observerBox: ConversationsObserverBox
 
     /// The running-app new-message OS banner (`conversations` outcome 11), ticked
@@ -116,6 +123,7 @@ public final class ConversationsVM {
     /// (`reserved-folders.md` § Drafts Sync); `nil` leaves persistence off.
     public func activate(session: ConversationsSession, draftsSync: FfiDraftsSync? = nil) {
         self.session = session
+        holdsRealRails = true
         // Adopt this session's draft autosync. A re-login within one process
         // rebuilds the connection + manager and re-runs `activate`, so cancel any
         // prior session's pending autosave before swapping in the new handle.
@@ -135,6 +143,9 @@ public final class ConversationsVM {
         // `App.xaml.cs` `StartReceiveLoop()` call (`docs/goal/ui/conversations.md`
         // § Receiving into the conversations view). Shared by macOS + iOS.
         Task { await session.startReceiveLoop() }
+        // The `Archive` rail's first read (its source is registered by the
+        // factory); the page re-reads on each visit.
+        Task { await refreshArchiveThreads() }
         // Restore the owner's persisted drafts (and lift the autosave gate).
         // No-op when no `draftsSync` was passed (E2E / mock mode).
         restoreDraftsOnLaunch()
@@ -201,7 +212,8 @@ public final class ConversationsVM {
     /// the failure handling stays exactly where it was.
     public func rebuild(
         api: APIClient, selfAddress: String, selfSecretHex: String,
-        deviceIdHex: String, predecessorBackupKeys: [Data]
+        deviceIdHex: String, predecessorBackupKeys: [Data],
+        archiveLinks: ArchiveLinksStore
     ) async throws {
         deactivate()
         let session = try await api.conversationsSession(
@@ -210,7 +222,43 @@ public final class ConversationsVM {
         )
         let drafts = try? await api.draftsSync(rail: "conversations")
         activate(session: session, draftsSync: drafts)
+        // The session built the account's archive links (its archive-signal
+        // sink): drive them from here, the one login seam every caller shares
+        // (`archive-import.md` § Linking and merging, ruling 8). Required, so
+        // no call site can forget it.
+        archiveLinks.start(api: api)
     }
+
+    #if DEBUG
+    /// Put the deterministic mock backends `init` installs back on `manager`, for
+    /// an e2e session patch that keeps them (the `real_conversations` gate
+    /// closed) arriving after this process ran a REAL session.
+    ///
+    /// The one way that happens is a launch the app makes itself: a pinned-store
+    /// relaunch signs in on the production path, which builds the real session
+    /// unconditionally and registers its rails over the mocks. Every later patch
+    /// login in that process then logs "keeping the deterministic mock
+    /// conversation backends" while the manager holds the real ones — and the
+    /// real FaunaMls rail refuses `conversations_inject_inbound` with
+    /// `NotSupported`, so each later inject test in the run red in an order a
+    /// solo run never reproduces (`test_family.py`'s pinned-relaunch test, then
+    /// any inject).
+    ///
+    /// Retire first, so the real engine's role lock over `mls_state.db` is
+    /// released rather than leaked behind a replaced slot; the mocks then take
+    /// every rail slot. A no-op when no real session ever activated, so a mock
+    /// manager's state (its keyed threads, a mock group) survives a same-actor
+    /// re-login untouched. Called synchronously from each shell's
+    /// `applySessionPatch`, before the patch is acknowledged — never from the
+    /// detached login `Task`, which an inject sent right after the ack would race.
+    public func restoreMockBackendsForTest() {
+        guard holdsRealRails else { return }
+        deactivate()
+        manager.retireConversationsEngine()
+        manager.installMockBackendsForTest()
+        holdsRealRails = false
+    }
+    #endif
 
     /// Attach this session's conversation-drafts autosync to the **current**
     /// manager, **without** adopting a session manager (contrast `activate`, which
@@ -255,11 +303,10 @@ public final class ConversationsVM {
             _ = backupAuditObserve(statePath: FaunaClient.backupAuditStatePath, lastActivityMs: newest)
         }
         // The home-screen widget's number (apps/common.md § Home-screen widget):
-        // this list's own unread total, from the same snapshot every render reads —
-        // linux's `sum_unread` → launcher badge, once per snapshot tick. The
-        // publisher writes only when the total changed.
-        WidgetUnreadPublisher.shared.publish(
-            unread: WidgetUnreadPublisher.total(of: manager.snapshot().threads))
+        // the account's unread total over EVERY thread — the shared unfiltered
+        // `unreadTotal()`, never the search-narrowed snapshot — once per snapshot
+        // tick. The publisher writes only when the total changed.
+        WidgetUnreadPublisher.shared.publish(unread: Int(manager.unreadTotal()))
         // The new-message OS banner's diff tick (`conversations` outcome 11). Last,
         // and with its own snapshot read: the tick's start barrier must be bumped
         // strictly before the snapshot it diffs, which is what makes the witness's
@@ -319,8 +366,8 @@ public final class ConversationsVM {
     /// (`apps/ios.md` § Home-screen widget). Best-effort: no session yet is a no-op,
     /// and a failed rail leaves the count as it was.
     ///
-    /// Returns the list's unread total once the pass is over — the number the
-    /// widget now shows, read off the same snapshot the observer publishes — or
+    /// Returns the account's unread total once the pass is over — the number the
+    /// widget now shows, the same unfiltered `unreadTotal()` the observer publishes — or
     /// `nil` when there was no session to poll, so the pass's caller can tell a
     /// pass that reached the rails from one that ran nothing.
     @discardableResult
@@ -334,7 +381,25 @@ public final class ConversationsVM {
             logMessage(level: .info, target: "fauna.widget",
                        message: "background mail poll failed: \(error)")
         }
-        return WidgetUnreadPublisher.total(of: manager.snapshot().threads)
+        return Int(manager.unreadTotal())
+    }
+
+    /// Re-read the imported archives' message threads onto the `Archive` rail
+    /// (`archive-import.md` § What each category becomes): the source is
+    /// registered by the shared conversations factory, so this only asks the
+    /// session to read it again — at login and on every visit to the page, so
+    /// an import finished since login lists without a re-login (tui's
+    /// `App::set_page`, linux's `refresh_archive_threads`). Best-effort: no
+    /// session is a no-op, and a failed read keeps what the last one listed.
+    /// The kids app has no archive import, so nothing to list.
+    public func refreshArchiveThreads() async {
+#if !FAUNA_KIDS
+        guard let session else { return }
+        do { try await FaunaFFISwift.refreshArchiveThreads(session: session) } catch {
+            logMessage(level: .info, target: "fauna.conversations",
+                       message: "archive threads: \(error)")
+        }
+#endif
     }
 
     // ── Draft persistence triggers ─────────────────────────────────────────────
@@ -468,6 +533,10 @@ public final class ConversationsVM {
     /// concurrency, W5.6 (account-data-plane.md § Workstreams)): a STANDING condition set at the engine-construction
     /// site, never by a page producer, so it must outrank the truths
     /// below rather than being masked by an unrelated gesture clearing them.
+    /// Then `manager.engineStateNeedsNewerApp()` — the sixth truth: this build
+    /// is too old for the per-account MLS store a newer build wrote
+    /// (`MlsError::SchemaIncompatible`, armed where the engine is built);
+    /// standing, no gesture clears it, the store is never written.
     /// Then `manager.receiveStopped()` — the receive loop died by panic
     /// (`ConversationsManager::receive_stopped`, standing exactly like the
     /// served-elsewhere refusal until a newer loop over the same manager
@@ -490,6 +559,7 @@ public final class ConversationsVM {
     public var pageError: String {
         _ = _observerTick
         if manager.engineServedElsewhere() { return L.conversations.errors.servedElsewhere }
+        if manager.engineStateNeedsNewerApp() { return L.conversations.errors.stateNeedsNewerApp }
         if manager.receiveStopped() { return L.conversations.errors.receiveStopped }
         let snap = manager.snapshot()
         if let pageError = snap.error { return renderLocalizedText(pageError) }
@@ -708,6 +778,14 @@ public final class ConversationsVM {
     /// never a format parse of the raw text — so Enter resolves first, then
     /// accepts (the views do `await resolveRecipient(); acceptCurrentRecipientChip()`).
     @discardableResult public func acceptCurrentRecipientChip() -> Bool { manager.acceptCurrentRecipientChip() }
+    /// `recipient-picker-suggestion[i]` — the active picker's `index`th suggestion,
+    /// through the Enter path (spell, probe, commit; `conversations.md` § Recipient
+    /// suggestions). Returns whether a chip was pushed.
+    @discardableResult public func acceptSuggestion(_ index: Int) async -> Bool {
+        await manager.acceptSuggestion(index: UInt32(index))
+    }
+    /// `recipient-picker-chip[i]`'s × on the active picker.
+    public func removeRecipientChip(_ index: Int) { manager.removeRecipientChip(index: UInt32(index)) }
     /// The shared manager's async recipient probe on whichever picker is active.
     /// Typing owes it: the sync input write parks the picker on `.resolving`, and
     /// only this call moves it to a terminal state (`conversations.md` § Errors &
@@ -720,6 +798,11 @@ public final class ConversationsVM {
     /// the manager itself refreshes after every send.
     public func refreshListSend(_ id: ThreadId?) async { await manager.refreshListSend(id: id) }
     public func refreshMessageScanResults(_ id: ThreadId) async { await manager.refreshMessageScanResults(id: id) }
+    public func refreshDeliveredAliases(_ id: ThreadId) async { await manager.refreshDeliveredAliases(id: id) }
+    /// The queue row each of the author's own withheld messages matches
+    /// (`MessageSnapshot.withheld`, `dm-message-withheld-badge`; `takedown-and-block.md`
+    /// § Legal takedown → *App render*).
+    public func refreshWithheldMessages(_ id: ThreadId) async { await manager.refreshWithheldMessages(id: id) }
 
     // ── Membership / rename ─────────────────────────────────────────────────
     /// On a `FaunaMls` 1:1 this forks a new `MlsGroup` thread and returns its

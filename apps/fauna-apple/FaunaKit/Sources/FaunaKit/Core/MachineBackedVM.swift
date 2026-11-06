@@ -18,8 +18,11 @@ protocol MachineSnapshotWithError {
 /// `dispatch(action:)`, and a pull `snapshot()`. Each generated `XxxMachineProtocol`
 /// already declares exactly this shape; conforming the generated `open class`
 /// retroactively (below) just names it once instead of once per `MachineBackedVM`
-/// conformer.
-protocol MachineBacked: AnyObject {
+/// conformer. `Sendable` (every generated machine is `@unchecked Sendable`)
+/// keeps each conformance nonisolated: `MachineBackedVM` is `@MainActor`, and
+/// Swift 6.4 otherwise reads its `Machine: MachineBacked` as possibly isolated,
+/// which the nonisolated async `hydrate()`/`dispatch(action:)` calls cannot take.
+protocol MachineBacked: AnyObject, Sendable {
     associatedtype Act
     associatedtype Snap: MachineSnapshotWithError
     func hydrate() async throws
@@ -154,6 +157,9 @@ extension MailPolicySnapshot: MachineSnapshotWithWorkStatus {
 // `dispatch()`s genuinely diverge (thrown-vs-snapshot error precedence /
 // the no-clobber guard, per the doc above) and stay hand-rolled, calling
 // `machine.dispatch(action:)` directly rather than `dispatchToMachine(_:)`.
+extension DmarcReportsSnapshot: MachineSnapshotWithWorkStatus {
+    var isWorking: Bool { status == .loading }
+}
 extension MailSettingsSnapshot: MachineSnapshotWithError {}
 extension BridgeApprovalSnapshot: MachineSnapshotWithError {}
 
@@ -166,5 +172,6 @@ extension LinkedNestsMachine: MachineBacked {}
 extension CaldavPolicyMachine: MachineBacked {}
 extension CarddavPolicyMachine: MachineBacked {}
 extension WebdavPolicyMachine: MachineBacked {}
+extension DmarcReportsMachine: MachineBacked {}
 extension MailSettingsMachine: MachineBacked {}
 extension BridgeApprovalMachine: MachineBacked {}

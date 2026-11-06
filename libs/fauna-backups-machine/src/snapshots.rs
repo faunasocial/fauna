@@ -239,6 +239,41 @@ pub fn snapshot_integrity_text(integrity: RowIntegrity) -> Option<LocalizedText>
     }
 }
 
+/// The `snapshot-restore-result` line for a finished whole-snapshot walk: how
+/// many files were written and where, and — when any failed to fetch, open or
+/// verify — which, by their redacted paths, with everything else said to be
+/// written. A partial result is a result, never an error line
+/// (`ui/backups.md` § Whole-snapshot restore → *Outcome*).
+///
+/// `size` is the app's own rendering of the bytes written (byte-size formatting
+/// stays per-app, as [`snapshot_state_text`]'s deadline does); this function owns
+/// the rule — which key, and the `unverified` list's wording. Shared by tui,
+/// linux and the FFI apps, replacing the per-app `restore_result_line` copies.
+pub fn snapshot_restore_result_text(
+    files_restored: u64,
+    size: &str,
+    path: &str,
+    unverified: &[String],
+) -> LocalizedText {
+    let files = files_restored.to_string();
+    if unverified.is_empty() {
+        LocalizedText::key_args(
+            "backups.snapshot_restore_done",
+            [("files", files.as_str()), ("size", size), ("path", path)],
+        )
+    } else {
+        LocalizedText::key_args(
+            "backups.snapshot_restore_partial",
+            [
+                ("files", files),
+                ("path", path.to_string()),
+                ("failed", unverified.len().to_string()),
+                ("paths", unverified.join(", ")),
+            ],
+        )
+    }
+}
+
 /// One file inside an opened snapshot (`snapshot-detail-files`'s rows).
 ///
 /// Transcribes `fauna_protocol::filesync::SnapshotFileEntry`. The `path` is what
@@ -500,6 +535,27 @@ mod tests {
         assert_eq!(
             SnapshotState::SoftDeleted { purge_after: None }.deadline(),
             None
+        );
+    }
+
+    #[test]
+    fn restore_result_text_is_done_when_nothing_failed_and_partial_otherwise() {
+        let done = snapshot_restore_result_text(3, "1.2 MB", "/srv/r", &[]);
+        assert_eq!(done.key, "backups.snapshot_restore_done");
+        assert_eq!(done.args["files"], "3");
+        assert_eq!(done.args["size"], "1.2 MB");
+        assert_eq!(done.args["path"], "/srv/r");
+
+        let unverified = vec!["a/b.txt".to_string(), "c.bin".to_string()];
+        let partial = snapshot_restore_result_text(5, "9 MB", "/srv/r", &unverified);
+        assert_eq!(partial.key, "backups.snapshot_restore_partial");
+        assert_eq!(partial.args["files"], "5");
+        assert_eq!(partial.args["path"], "/srv/r");
+        assert_eq!(partial.args["failed"], "2");
+        assert_eq!(partial.args["paths"], "a/b.txt, c.bin");
+        assert!(
+            !partial.args.contains_key("size"),
+            "the partial line names no size"
         );
     }
 

@@ -940,6 +940,106 @@ mod tests {
         );
     }
 
+    /// **Compaction carries `report_hash` onto each survivor's mirror row.**
+    /// The floor is authoritative for the report-hash (report-sharing.md §
+    /// Content identity); the `segment_records.report_hash` column is the
+    /// hot-path lookup by message id. A compaction that re-INSERTed survivors
+    /// without it would make `report_hash_for_message` answer `None` and drop
+    /// the copy from report aggregation — an anti-abuse signal silently lost.
+    /// A survivor whose floor hash is empty stays NULL, as the append path
+    /// writes it.
+    #[tokio::test]
+    async fn compaction_carries_report_hash_onto_survivor_mirror_rows() {
+        let (_tmp, state) = build_state();
+        let actor = [0x45u8; 32];
+        let received_at = 1_712_000_000_000i64;
+
+        // Seg 1: three records — two with distinct report-hashes, one without.
+        let hashes: [Vec<u8>; 3] = [vec![0xA1; 32], vec![0xA2; 32], Vec::new()];
+        let mut rids = Vec::new();
+        for (i, h) in hashes.iter().enumerate() {
+            let outcome = crate::segments::mail::append_record(
+                &state.mail_segments,
+                &state.db,
+                &actor,
+                &fauna_mls::wrapped_blob::SealedRecordBytes::carried_at_rest_unchecked(
+                    format!("sealed-body-rh-{i}").into_bytes(),
+                ),
+                &fauna_mls::wrapped_blob::SealedRecordBytes::carried_at_rest_unchecked(
+                    b"sealed-hint".to_vec(),
+                ),
+                crate::segments::test_helpers::floor_with_report_hash(received_at, h.clone()),
+            )
+            .await
+            .expect("append_record");
+            rids.push(outcome.cid.digest());
+        }
+        state
+            .mail_segments
+            .finalize_open(&actor)
+            .await
+            .expect("flush");
+
+        // Add a fourth, tombstoned record so the manual pass rewrites the segment.
+        let extra = append_n(&state, &actor, 9, 1, received_at).await;
+        state
+            .mail_segments
+            .finalize_open(&actor)
+            .await
+            .expect("flush");
+        let seg = {
+            let conn = state.db.conn().await;
+            conn.query_row(
+                "SELECT segment_id FROM segment_records WHERE record_cid = ?1",
+                rusqlite::params![&fauna_cbor::Cid::from_digest_dag_cbor(extra[0]).as_bytes()[..]],
+                |r| r.get::<_, i64>(0),
+            )
+            .expect("segment of extra record") as u32
+        };
+        state
+            .db
+            .segment_records_mark_tombstoned(
+                &actor,
+                "mail",
+                seg,
+                &fauna_cbor::Cid::from_digest_dag_cbor(extra[0]),
+            )
+            .await
+            .expect("tombstone");
+
+        let worker = CompactionWorker::for_manual(state.clone());
+        let report = worker
+            .run_once(
+                CompactScope {
+                    kind: Some("mail".into()),
+                    scope_id: Some(actor),
+                },
+                CompactionTrigger::Manual,
+            )
+            .await
+            .expect("run_once");
+        assert_eq!(report.errors, 0);
+        assert!(report.segments_rewritten >= 1, "the bucket was rewritten");
+
+        // Survivors with a floor hash keep it, readable through the lookup.
+        for (rid, h) in rids.iter().zip(hashes.iter()) {
+            let got = state
+                .db
+                .report_hash_for_message(rid)
+                .await
+                .expect("report_hash_for_message");
+            if h.is_empty() {
+                assert_eq!(got, None, "an empty floor hash stays NULL");
+            } else {
+                assert_eq!(
+                    got.map(|g| g.to_vec()),
+                    Some(h.clone()),
+                    "a compacted survivor keeps its report_hash"
+                );
+            }
+        }
+    }
+
     // ---- S6.8b + S6.8c: calendar reclaim ---------------------------------
 
     /// A timestamp comfortably older than the orphan reaper's age watermark
@@ -948,9 +1048,14 @@ mod tests {
 
     fn cal_sealed(plaintext: &[u8]) -> fauna_mls::wrapped_blob::SealedRecordBytes {
         let (_sec, pubkey) = fauna_mls::wrapped_blob::derive_recipient_hpke_keypair(&[0x5Eu8; 32]);
-        let bytes =
-            crate::bridge_routing_handlers::seal_recipient_blob(plaintext, &pubkey, None, "body")
-                .expect("seal");
+        let bytes = crate::bridge_routing_handlers::seal_recipient_blob(
+            fauna_mls::wrapped_blob::RecordKind::Mail,
+            plaintext,
+            &pubkey,
+            None,
+            "body",
+        )
+        .expect("seal");
         fauna_mls::wrapped_blob::SealedRecordBytes::verify(bytes).expect("verifies")
     }
 

@@ -270,6 +270,15 @@ _E2E_ENV_LITERAL = re.compile(r'"(FAUNA_E2E_[A-Z0-9_]*)"')
 #: it, and a twin would put the literal it carries back into the artifact.
 _DOOR_DEBUG_ONLY_MEMBERS = {
     "agentPortName": "the spawn side composes an environment rather than reading one",
+    "faultAtLaunch": (
+        "its only reader is TestAgentBootstrap.faultAtLaunchIfAsked, inside the "
+        "`#if DEBUG` of that file, and both app call sites are `#if DEBUG` too"
+    ),
+    "faultAtReset": (
+        "its only reader is TestAgentBootstrap.faultAtResetIfAsked, inside the "
+        "`#if DEBUG` of that file, called only from the DEBUG-only TestAgent and "
+        "InProcessAutomationServer"
+    ),
 }
 
 

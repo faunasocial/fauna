@@ -64,13 +64,14 @@
                  width (NavigationView pane ~280px leaves ~360px of content): a single
                  7-element toolbar row pushed file-upload + upload-button OFF-SCREEN
                  (IsOffscreen ⇒ e2e is_visible=False; 2026-06-30 slice-6 fix).
-                 Row A: view-toggle | sort | filter.  Row B: file-upload | Browse | upload-button. -->
+                 Row A: view-toggle | sort | sort-direction | filter.  Row B: file-upload | Browse | upload-button. -->
 
             <!-- Row A: view controls -->
             <Grid ColumnSpacing="8">
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="Auto" />   <!-- media-view-toggle -->
                     <ColumnDefinition Width="120" />    <!-- media-sort-select -->
+                    <ColumnDefinition Width="110" />    <!-- media-sort-direction -->
                     <ColumnDefinition Width="150" />    <!-- media-folder-filter -->
                     <ColumnDefinition Width="*" />      <!-- spacer -->
                 </Grid.ColumnDefinitions>
@@ -88,10 +89,17 @@
                           SelectionChanged="SortCombo_SelectionChanged"
                           HorizontalAlignment="Stretch" />
 
+                <!-- media-sort-direction: ascending (default) / descending -->
+                <ComboBox Grid.Column="2"
+                          x:Name="SortDirectionCombo"
+                          AutomationProperties.AutomationId="{x:Bind ids:Ids.MediaSortDirection}"
+                          SelectionChanged="SortDirectionCombo_SelectionChanged"
+                          HorizontalAlignment="Stretch" />
+
                 <!-- media-folder-filter: "All media" (cross-set default) + one per set
                      that has media. Backed by the shared MediaMachine.SetFilter
                      (null = all-media; media.md § O-4). -->
-                <ComboBox Grid.Column="2"
+                <ComboBox Grid.Column="3"
                           x:Name="FilterCombo"
                           AutomationProperties.AutomationId="{x:Bind ids:Ids.MediaFolderFilter}"
                           SelectionChanged="FilterCombo_SelectionChanged"
@@ -337,18 +345,6 @@
         <controls:CopyableInfoBar x:Name="ErrorBar"
                                   IsOpen="False" Severity="Error"
                                   Grid.RowSpan="2" VerticalAlignment="Bottom" />
-
-        <!-- Image Lightbox Dialog -->
-        <ContentDialog
-            x:Name="ImageLightboxDialog"
-            AutomationProperties.AutomationId="{x:Bind ids:Ids.ImageLightbox}"
-            FullSizeDesired="True">
-            <ScrollViewer ZoomMode="Enabled" MinZoomFactor="0.5" MaxZoomFactor="5"
-                          HorizontalScrollBarVisibility="Auto"
-                          VerticalScrollBarVisibility="Auto">
-                <Image x:Name="LightboxImage" Stretch="Uniform" MaxHeight="800" MaxWidth="1200" />
-            </ScrollViewer>
-        </ContentDialog>
 
         <!-- ══ media-item-detail: per-item detail surface hosting file-version-history ══
              media.md § Element IDs (approved 2026-07-09) — opened by a media-item

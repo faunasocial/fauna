@@ -40,9 +40,10 @@ use std::sync::Arc;
 use adw::prelude::*;
 
 use fauna_client_connected_apps::{
-    BlockedAppRow, ConnectedAppRow, ConnectedAppsMachine, ConnectedAppsObserver,
-    ConnectedAppsSnapshot, ConsentCardRow,
+    BlockedAppRow, ConnectedAppRow, ConnectedAppsGesture as Gesture, ConnectedAppsMachine,
+    ConnectedAppsObserver, ConnectedAppsSnapshot, ConsentCardRow,
     compose::{LINE_SEPARATOR, request_card_lines, request_install_text, roster_row_text},
+    observer::NullObserver,
 };
 use fauna_client_mail_settings::resolve_mua_username;
 use fauna_core::localized::LocalizedText;
@@ -55,52 +56,6 @@ use crate::testid::{set_test_attr, set_test_attr_text, set_test_id, set_test_tex
 
 /// The rail label + `add_titled` title (settings_shell.rs).
 pub const TITLE: &str = t::TITLE;
-
-/// This page repaints from a fresh `snapshot()` after every awaited gesture,
-/// so the machine's own change callback has nothing to do.
-struct NoopObserver;
-
-impl ConnectedAppsObserver for NoopObserver {
-    fn on_changed(&self) {}
-}
-
-/// One gesture on the page, carried across the spawn.
-#[derive(Clone)]
-enum Gesture {
-    Refresh,
-    SubmitCode(String),
-    Resolve {
-        consent_id_hex: String,
-        approved: bool,
-    },
-    Block(String),
-    Unblock(String),
-    Revoke(String),
-    /// Set the account's external-apps switch to the carried value
-    /// (`atproto-external-apps-enable`).
-    SetExternalApps(bool),
-    /// The same-device handoff's open — a visit's read when a `fauna://consent`
-    /// route brought the user here (`crate::routes`).
-    OpenHandoff(String),
-}
-
-impl Gesture {
-    async fn run(self, machine: &ConnectedAppsMachine) {
-        match self {
-            Self::Refresh => machine.refresh().await,
-            Self::SubmitCode(code) => machine.submit_code(code).await,
-            Self::Resolve {
-                consent_id_hex,
-                approved,
-            } => machine.resolve_request(consent_id_hex, approved).await,
-            Self::Block(consent_id_hex) => machine.block_request(consent_id_hex).await,
-            Self::Unblock(client_id) => machine.unblock(client_id).await,
-            Self::Revoke(key) => machine.revoke(key).await,
-            Self::SetExternalApps(enabled) => machine.set_external_apps_enabled(enabled).await,
-            Self::OpenHandoff(request_uri) => machine.open_handoff(request_uri).await,
-        }
-    }
-}
 
 /// Widget handles the render + event closures need.
 struct Widgets {
@@ -366,7 +321,7 @@ fn ensure_machine(ctx: &Rc<Ctx>) -> Option<Arc<ConnectedAppsMachine>> {
         // The session's mail machine is built by the Mail & Calendar page;
         // its app passwords are rows of this roster.
         let client = crate::settings::get_client()?;
-        let observer: Arc<dyn ConnectedAppsObserver> = Arc::new(NoopObserver);
+        let observer: Arc<dyn ConnectedAppsObserver> = Arc::new(NullObserver);
         let machine = fauna_client_connected_apps::build_connected_apps_machine(
             client.nest_rpc().clone(),
             observer,
@@ -811,6 +766,10 @@ fn append_install_section(card: &gtk::Box, consent: &ConsentCardRow) {
     let heading = leaf(ids::CONNECTED_APPS_REQUEST_INSTALL, &one(&section.heading));
     heading.add_css_class("heading");
     card.append(&heading);
+    // The admin framing line: untagged (no ui.yaml id), `None` on a bind card.
+    if let Some(framing) = &section.framing {
+        card.append(&text_label(&one(framing)));
+    }
     let form = leaf(
         ids::CONNECTED_APPS_REQUEST_INSTALL_FORM,
         &one(&section.form),
@@ -996,6 +955,50 @@ mod tests {
         assert_eq!(lines.last().map(String::as_str), Some(holder));
         let plain = consent_card_lines(&card(None)).join("\n");
         assert!(!plain.contains(holder) && !plain.contains(writer));
+    }
+
+    fn label_texts(root: &gtk::Widget, out: &mut Vec<String>) {
+        if let Some(label) = root.downcast_ref::<gtk::Label>() {
+            out.push(label.text().to_string());
+        }
+        let mut child = root.first_child();
+        while let Some(c) = child {
+            label_texts(&c, out);
+            child = c.next_sibling();
+        }
+    }
+
+    /// An admin's install card paints the shared framing line under the
+    /// heading; a user's bind card paints none.
+    #[test]
+    fn the_install_framing_line_paints_on_an_install_card_only() {
+        use fauna_atproto_settings_machine::ConsentInstallRow;
+        let framing = crate::i18n::strings::lookup("connected_apps.install_framing").unwrap();
+        let painted = |bind: bool| {
+            let mut consent = card(None);
+            consent.install = Some(ConsentInstallRow {
+                execution_form: "wasm".into(),
+                requested_kinds: vec![],
+                settings: vec![],
+                publisher_domain: "plugins.example".into(),
+                publisher_key: None,
+                module_digest: "sha256:abc".into(),
+                hosts: vec![],
+                ingress_paths: vec![],
+                development: false,
+                bind,
+            });
+            crate::testid::run_on_gtk_thread(move || {
+                let _ = adw::init();
+                let holder = gtk::Box::new(gtk::Orientation::Vertical, 0);
+                append_install_section(&holder, &consent);
+                let mut texts = Vec::new();
+                label_texts(holder.upcast_ref(), &mut texts);
+                texts.iter().any(|t| t == framing)
+            })
+        };
+        assert!(painted(false), "install card must paint the framing line");
+        assert!(!painted(true), "bind card must not paint it");
     }
 
     /// The page exposes every static (page-level) ui.yaml ID with no registered

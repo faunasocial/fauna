@@ -78,10 +78,14 @@ public struct NewThreadComposeForm: View {
                         // A committed chip may address one of the account's own
                         // lists: re-derive the list-send texts (tui's
                         // `Op::AcceptRecipientChip` / `Op::AcceptSuggestion`).
-                        onAcceptSuggestion: { addr in
-                            vm.acceptNewThreadChip(addr)
-                            Task { await vm.refreshListSend(nil) }
-                        }
+                        onAcceptSuggestion: { i in
+                            Task {
+                                if await vm.acceptSuggestion(i) {
+                                    await vm.refreshListSend(nil)
+                                }
+                            }
+                        },
+                        onRemoveChip: { vm.removeRecipientChip($0) }
                     )
                 }
 

@@ -171,6 +171,32 @@ internal static class ConversationsCommands
             new uniffi.fauna_core.LocalizedText(key, new Dictionary<string, string> { ["message"] = message }));
     }
 
+    /// <summary>
+    /// <c>conversations_mark_receive_stopped</c> — stand up the dead receive rail
+    /// (<c>ConversationsManager::mark_receive_stopped_for_test</c>) so the page's
+    /// <c>receive_stopped</c> notice reaches <c>error-message</c> (conversations.md
+    /// § Errors &amp; edge cases). Answers <c>"pending"</c> while the session's real
+    /// receive loop has not yet claimed its generation (a death marked inside that
+    /// window is retired by the claim), leaving the manager untouched so the driver
+    /// asks again; <c>"marked"</c> once the dead rail stands. Twin of tui's
+    /// <c>mark_receive_stopped</c>.
+    /// </summary>
+    public static string MarkReceiveStopped()
+    {
+        var manager = ConversationsManagerHost.Instance;
+        if (!manager.ReceiveLoopBegunForTest()) return "pending";
+        manager.MarkReceiveStoppedForTest();
+        return "marked";
+    }
+
+    /// <summary>
+    /// <c>conversations_begin_receive_loop</c> — claim a fresh receive-loop
+    /// generation over the same manager (<c>begin_receive_loop_for_test</c>), which
+    /// retires an earlier loop's death. Twin of tui's <c>begin_receive_loop</c>.
+    /// </summary>
+    public static void BeginReceiveLoop()
+        => ConversationsManagerHost.Instance.BeginReceiveLoopForTest();
+
     // ── real-wire (FaunaMls) e2e commands ─────────────────────────
     //
     // The native twins of linux `conv_backend::{request_e2e_activation,
@@ -216,6 +242,11 @@ internal static class ConversationsCommands
         var body = GetString(command, "body") ?? "";
         var m = ConversationsManagerHost.Instance;
 
+        // A NEW conversation with exactly `recipient`: discard any stashed
+        // new-thread draft first — StartNewConversation keeps one by design, so
+        // an earlier test's seeded chip would otherwise ride into this send (tui's
+        // e2e_resolve_send_new has the full reason).
+        m.CancelNewConversation();
         m.StartNewConversation();
         m.SetNewThreadRecipientInput(recipient);
         m.ResolveRecipient().GetAwaiter().GetResult();

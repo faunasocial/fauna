@@ -59,7 +59,7 @@ import time
 
 import pytest
 
-from helpers.app_surface import app_name, skip_unbuilt
+from helpers.app_surface import require_surface
 from helpers.mail_wire import _connect_smtp_starttls
 from helpers.waiting import wait_until
 from helpers.mail_aliases import add_exact_alias
@@ -207,20 +207,9 @@ def test_received_mail_is_found_by_search_via_the_local_index(
     # `SearchNav::Mail` can never reach web in production; iOS has the paint
     # too, but a single-seat run can never seed its OWN local index —
     # `CLIENT_BUILDS_INDEX` is `false` there — so this test can never even
-    # reach step 5 on iOS regardless of the paint; grade iOS on a real
-    # simulator instead, per `app_surface.py`'s phone-seat declared-absence).
-    if app_name(app.driver) not in ("tui", "linux", "macos", "windows"):
-        skip_unbuilt(
-            app.conversations.driver,
-            surface="the `selected` attribute on dm-message-timestamp",
-            detail=(
-                "SearchNav::Mail's message-selection half is built on tui (lead "
-                "app, 2026-08-10) and linux (2026-08-15); the shared state is "
-                "already in ConversationsManager, so an app that registers its "
-                "local search arm owes only the paint"
-            ),
-            tracked="conversations.md § The selected message; the per-app trickle-down NEXTs",
-        )
+    # reach step 5 on iOS regardless of the paint; its leg is the two-seat
+    # `test_search_local_index_phone.py`).
+    require_surface(app.conversations.driver, "dm-message-timestamp-selected")
 
     selected = app.conversations.selected_message_index()
     assert selected is not None, (

@@ -45,4 +45,23 @@ public sealed record ProfileDisplay(
 /// </summary>
 public sealed record ProfileGetResult(
     ProfileDisplay Display,
-    byte[] RawBody);
+    byte[] RawBody,
+    byte[]? LastDirectBody = null,
+    bool AudienceEveryone = false,
+    ProfilePictures? Pictures = null);
+
+/// <summary>
+/// The header's two stored pictures as the profile names them (profile.md § Where
+/// logic lives → <i>The remote read</i> → <i>Bytes direct, as for a relayed post</i>):
+/// the content hashes (<c>ProfileDisplay::avatar_hash_hex</c> / <c>banner_hash_hex</c>,
+/// null = the profile names none) and the nest that served the profile —
+/// <see cref="RelayedFrom"/> is the home a relayed read came from (null = this nest
+/// served it) and <see cref="HomeNestActorId"/> the identity this nest dial-proved for
+/// that home, which the post-blob plane pins against (never the profile's own
+/// <c>nests[0].nest_id</c>).
+/// </summary>
+public sealed record ProfilePictures(
+    string? AvatarHashHex,
+    string? BannerHashHex,
+    string? RelayedFrom = null,
+    string? HomeNestActorId = null);

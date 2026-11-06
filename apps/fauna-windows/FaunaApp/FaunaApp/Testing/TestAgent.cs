@@ -594,7 +594,7 @@ public class TestAgent
     /// twin of <see cref="CommandLong"/>. <c>serve_enable_folder</c>'s
     /// <c>create</c> field is the first caller: default <c>true</c>, matching
     /// linux's <c>cmd.payload.get("create")...unwrap_or(true)</c>
-    /// (<c>apps/fauna-linux/src/main.rs</c>).</summary>
+    /// (<c>apps/fauna-linux/src/lib.rs</c>).</summary>
     private static bool CommandBool(Dictionary<string, object?> command, string key, bool fallback) =>
         command.TryGetValue(key, out var v)
             ? v switch
@@ -696,8 +696,27 @@ public class TestAgent
                         }
                     }
 
+                    // The `vps`/`doh` base-URL overrides also feed the nest_retire
+                    // page, which opens on surfaces with no onboarding machine to hold
+                    // them (the launch retry surface, a live session) — record them
+                    // where the page reads them, whether or not a machine takes the
+                    // call below. With no machine up the call is then fully served —
+                    // an ack, not a drop (linux's `remember_e2e_provider_base_urls`).
+                    if (method == "set_provider_base_urls")
+                    {
+                        Views.Onboarding.NestRetirePage.RememberE2eProviderBaseUrls(jsonArg);
+                        if (vm is null) return null;
+                    }
+
+                    // The shared machine's machine-free bridge names
+                    // (`call_machine_free_method`): each ignores the machine, so a
+                    // throwaway one serves them on a surface with no wizard up. The
+                    // two rotation names plant and read a chain-accepted pin
+                    // (test_nest_identity_fork.py).
                     var isFreeDispatchName =
-                        method is "set_nest_identity_pin_for_test" or "nest_identity_pin_for_test";
+                        method is "set_nest_identity_pin_for_test" or "nest_identity_pin_for_test"
+                            or "set_nest_identity_pin_rotation_accepted_for_test"
+                            or "nest_identity_pin_rotation_seq_for_test";
                     if (vm is null && !isFreeDispatchName)
                     {
                         // testing.md § Cross-app e2e conventions, convention 11: a
@@ -813,10 +832,10 @@ public class TestAgent
                             {
                                 // vm is null and isFreeDispatchName is true (the only
                                 // way past the early-return above) — a throwaway,
-                                // disposed-right-after machine dispatches
-                                // set_nest_identity_pin_for_test / nest_identity_pin_for_test
-                                // identically to a real one: both ignore `self` entirely
-                                // (machine.rs:6842's doc comment).
+                                // disposed-right-after machine dispatches the
+                                // machine-free pin names identically to a real one:
+                                // each ignores `self` entirely (the shared
+                                // `call_machine_free_method`).
                                 using var throwaway = new uniffi.fauna_onboarding_machine.OnboardingMachine(
                                     new NoOpOnboardingObserver());
                                 resultJson = await throwaway.CallMachineMethodAsync(method, jsonArg);
@@ -922,7 +941,7 @@ public class TestAgent
                 // test_a_hosted_custodian_pulls_checks_in_and_the_owners_row_reports_it).
                 // Runs ONE custodian pull pass on the sync agent's hosted replica and
                 // returns what it did, as App.MachineMethodResult — the windows twin
-                // of linux's (apps/fauna-linux/src/main.rs) and tui's
+                // of linux's (apps/fauna-linux/src/lib.rs) and tui's
                 // (apps/fauna-tui/src/automation.rs) `custodian_pull_run_now` arms.
                 // Payload: {now_offset_secs} (convention 14's fake clock, same
                 // spelling as backup_audit_run_now above). Genuinely async:
@@ -1012,8 +1031,7 @@ public class TestAgent
                     }
                     catch (Exception ex)
                     {
-                        System.Diagnostics.Debug.WriteLine(
-                            $"[TestAgent] conversations_create_mls_group threw: {ex.GetType().Name}: {ex.Message}");
+                        ReportCommandFailure(action, $"{ex.GetType().Name}: {ex.Message}");
                     }
                 }
                 return () => Task.CompletedTask;
@@ -1029,8 +1047,7 @@ public class TestAgent
                     }
                     catch (Exception ex)
                     {
-                        System.Diagnostics.Debug.WriteLine(
-                            $"[TestAgent] conversations_inject_send_failure threw: {ex.GetType().Name}: {ex.Message}");
+                        ReportCommandFailure(action, $"{ex.GetType().Name}: {ex.Message}");
                     }
                 }
                 // Empty postAction forces a UI-thread sync before ready=true: the
@@ -1050,11 +1067,39 @@ public class TestAgent
                     }
                     catch (Exception ex)
                     {
-                        System.Diagnostics.Debug.WriteLine(
-                            $"[TestAgent] conversations_inject_page_error threw: {ex.GetType().Name}: {ex.Message}");
+                        ReportCommandFailure(action, $"{ex.GetType().Name}: {ex.Message}");
                     }
                 }
                 // Same FIFO-ordering rationale as conversations_inject_send_failure.
+                return () => Task.CompletedTask;
+            case "conversations_mark_receive_stopped":
+                // Stand up the dead receive rail (mark_receive_stopped_for_test); answers
+                // "pending" until the session's real receive loop has claimed its
+                // generation, "marked" once the rail stands. A thrown exception is a
+                // LOUD refusal (convention 11). See actions/conversations.py::
+                // mark_receive_stopped_for_test.
+                FaunaApp.App.MachineMethodResult = null;
+                try
+                {
+                    FaunaApp.App.MachineMethodResult = JsonSerializer.SerializeToElement(
+                        FaunaApp.Conversations.ConversationsCommands.MarkReceiveStopped());
+                }
+                catch (Exception ex)
+                {
+                    ReportCommandFailure(action, $"{ex.GetType().Name}: {ex.Message}");
+                }
+                return () => Task.CompletedTask;
+            case "conversations_begin_receive_loop":
+                // Claim a fresh receive-loop generation (begin_receive_loop_for_test),
+                // retiring an earlier loop's death. Same refusal shape as above.
+                try
+                {
+                    FaunaApp.Conversations.ConversationsCommands.BeginReceiveLoop();
+                }
+                catch (Exception ex)
+                {
+                    ReportCommandFailure(action, $"{ex.GetType().Name}: {ex.Message}");
+                }
                 return () => Task.CompletedTask;
             case "conversations_enable_real_faunamls":
                 // No-op probe: the real wire-backed manager is registered at login
@@ -1068,8 +1113,7 @@ public class TestAgent
                     }
                     catch (Exception ex)
                     {
-                        System.Diagnostics.Debug.WriteLine(
-                            $"[TestAgent] conversations_enable_real_faunamls threw: {ex.GetType().Name}: {ex.Message}");
+                        ReportCommandFailure(action, $"{ex.GetType().Name}: {ex.Message}");
                     }
                 }
                 return () => Task.CompletedTask;
@@ -1143,6 +1187,15 @@ public class TestAgent
                 // No runtime yet (pre-auth) is a legitimate quiet no-op,
                 // honoured inside the callee.
                 FaunaApp.App.AccountPumpNowForTest();
+                return () => Task.CompletedTask;
+            case "custody_owner_resend_now":
+                // The custody OWNER's send-again poke (devices outcome 15:
+                // `fauna_e2e_agent::CUSTODY_OWNER_RESEND_NOW`), windows' twin of
+                // tui/linux/android/apple's arm: every ceremony this owner granted is
+                // posted once more. Fire-and-forget like `account_pump_now` directly
+                // above — the barrier is the HOST's `custody_ceremony_ingest` in its
+                // state payload, not this ack; pre-auth is a quiet no-op.
+                FaunaApp.App.CustodyOwnerResendNowForTest();
                 return () => Task.CompletedTask;
             case "device_set_state":
                 // The fleet-removal convergence reader (fleet-scope-reclamation.md
@@ -1234,6 +1287,31 @@ public class TestAgent
                         }
                     };
                 }
+            case "escrow_wrap_coordinates":
+                // The recovery-kit let-go journey's staging read
+                // (fleet-scope-reclamation.md § Fleet-scope reclamation, clause
+                // (3)(j)): this device's own `fauna.state.escrow-wrap` rows with the
+                // blinded item key the nest knows each by, stashed as
+                // App.MachineMethodResult — the windows twin of tui's, linux's,
+                // android's and apple's arms, in `read_marker_state`'s shape above:
+                // ANY non-null answer means "the reader is built", no connected
+                // client a quiet not-found REPORT. No payload.
+                return async () =>
+                {
+                    try
+                    {
+                        var coordsJson = await FaunaApp.App.EscrowWrapCoordinatesForTest()
+                            ?? "{\"found\":false}";
+                        using var coordsDoc = JsonDocument.Parse(coordsJson);
+                        FaunaApp.App.MachineMethodResult = coordsDoc.RootElement.Clone();
+                    }
+                    catch (Exception ex)
+                    {
+                        FaunaApp.App.MachineMethodResult = null;
+                        var msg = $"[TestAgent] escrow_wrap_coordinates threw: {ex.GetType().Name}: {ex.Message}";
+                        StampAgentFailure(msg);
+                    }
+                };
             case "open_route":
                 // The `fauna://` route's e2e seam (windows.md § Shell Extension → The
                 // Share hand-off, step 4): feeds a URI to the same door the argv leg
@@ -1408,7 +1486,7 @@ public class TestAgent
             case "sync_remove_location":
                 // Bind (or unbind) a local folder to a nest folder over the REAL
                 // control channel — the windows leg of linux's identically-named
-                // commands (`apps/fauna-linux/src/main.rs`). Unlike the
+                // commands (`apps/fauna-linux/src/lib.rs`). Unlike the
                 // `sync_inject_locations` render fixture above, this drives the agent
                 // that actually hosts engines, which is what makes a real-agent
                 // "the engine is serving" assertion (`data.sync.running`) reachable
@@ -1526,6 +1604,30 @@ public class TestAgent
                         "no authenticated session, so no sweep loop to wake");
                 }
                 return null;
+            case "launch_refresh_token":
+                // Contract: `fauna_e2e_agent::LAUNCH_REFRESH_TOKEN` — force the held
+                // session bearer's refresh NOW through the production refresh path
+                // (drop it, re-mint over the silent challenge), keeping the
+                // predecessor id in the own set and live nest-side. Returned as the
+                // post-action, so the ack lands after the outcome and the next
+                // `launch_token` read already carries the new id.
+                return async () =>
+                {
+                    try
+                    {
+                        if (!await FaunaApp.App.RefreshHeldBearerForTestAsync())
+                        {
+                            // Convention 11: a refresh that did not run must not ack.
+                            StampAgentFailure(
+                                "[TestAgent] launch_refresh_token: no connected client, so no bearer to refresh");
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        StampAgentFailure(
+                            $"[TestAgent] launch_refresh_token threw: {ex.GetType().Name}: {ex.Message}");
+                    }
+                };
             case "reconnect_backoff":
                 // Contract: `fauna_e2e_agent::RECONNECT_BACKOFF` — pace this
                 // session's reconnect retries (never the `Unreachable` threshold), or
@@ -1627,8 +1729,7 @@ public class TestAgent
                     }
                     catch (Exception ex)
                     {
-                        System.Diagnostics.Debug.WriteLine(
-                            $"[TestAgent] feed_inject_posts threw: {ex.GetType().Name}: {ex.Message}");
+                        ReportCommandFailure(action, $"{ex.GetType().Name}: {ex.Message}");
                     }
                 }
                 // Empty postAction forces a UI-thread pass before ready=true: the
@@ -1651,8 +1752,7 @@ public class TestAgent
                     }
                     catch (Exception ex)
                     {
-                        System.Diagnostics.Debug.WriteLine(
-                            $"[TestAgent] feed_inject_error threw: {ex.GetType().Name}: {ex.Message}");
+                        ReportCommandFailure(action, $"{ex.GetType().Name}: {ex.Message}");
                     }
                 }
                 // Same empty postAction rationale as feed_inject_posts above: the
@@ -1672,6 +1772,26 @@ public class TestAgent
                     return null;
                 }
                 return () => Task.CompletedTask;
+            case "archive_import_pause_after":
+            case "archive_import_hold_after":
+                // The archive import's causal anchors (testing.md convention 14): arm the
+                // machine's one-shot pause — or hold, the pause/cancel journey's twin —
+                // after N settled records, so the journey stops a run at a known point
+                // instead of racing a wall clock. Armed BEFORE Start by contract. A
+                // missing page or machine is a LOUD failure on error-message (convention
+                // 11), the tui command's shape: a silently unarmed anchor would surface as
+                // an unexplained assertion several steps downstream. `{records: u64}`.
+                {
+                    var vm = FaunaApp.Views.ArchiveImportPage.CurrentForTest;
+                    if (vm is null)
+                    {
+                        StampAgentFailure(
+                            $"[TestAgent] {action}: no archive-import machine (the page is not mounted, or the glue refused)");
+                        return null;
+                    }
+                    vm.ArmTestAnchor(action == "archive_import_hold_after", (ulong)CommandLong(command, "records"));
+                    return () => Task.CompletedTask;
+                }
             case "atproto_delegation_advance_clock":
                 // Move the delegation row's RENDER clock (never the mint clock —
                 // authorize always mints against the real wall clock), so
@@ -1913,6 +2033,77 @@ public class TestAgent
                             + $"{ex.GetType().Name}: {ex.Message}");
                     }
                 };
+            case "feed_cue_verdict_for_test":
+                // Read the live engagement-cue engine's verdict for one item, and
+                // whether it has hydrated from the nest yet — how a second seat
+                // witnesses that it starts from the rollup the first collected.
+                // `{content_id}` → `{hydrated, verdict}` on machine_method_result,
+                // the JSON the shared FFI face serializes; no manager yet
+                // (pre-auth, or before the Feed page first built one) reads as not
+                // hydrated, as tui's and linux's arms answer. Twin of their arms.
+                // See `fauna_feed::FeedManager::cue_verdict_for_test`.
+                {
+                    var contentId = command.TryGetValue("content_id", out var cidEl)
+                        && cidEl is JsonElement cid && cid.ValueKind == JsonValueKind.String
+                        ? cid.GetString() ?? string.Empty
+                        : string.Empty;
+                    var verdictJson = FaunaApp.Core.FeedManagerHost.Current?.CueVerdictForTest(contentId)
+                        ?? "{\"hydrated\":false,\"verdict\":null}";
+                    using var verdictDoc = JsonDocument.Parse(verdictJson);
+                    FaunaApp.App.MachineMethodResult = verdictDoc.RootElement.Clone();
+                    return null;
+                }
+            case "feed_cue_clock_freeze":
+            case "feed_cue_clock_thaw":
+            case "feed_cue_clock_advance":
+            case "feed_cue_probe":
+            case "feed_cue_scroll_by":
+                // The engagement-cue test clock (convention 14): freeze, advance and
+                // thaw the auth's capture tracker, read its probe, and step the post
+                // list's real scroll — see FaunaApp.Feed.FeedCueClockCommands. A
+                // post-action: the list's geometry is UI-thread state, and the ack
+                // (ready=true) must wait for the step's sample and its records.
+                // A refusal answers {error} on the result slot, linux's shape, and
+                // is stamped loudly too (convention 11).
+                FaunaApp.App.MachineMethodResult = null;
+                return async () =>
+                {
+                    try
+                    {
+                        FaunaApp.App.MachineMethodResult =
+                            await FaunaApp.Feed.FeedCueClockCommands.RunAsync(action, command);
+                    }
+                    catch (Exception ex)
+                    {
+                        FaunaApp.App.MachineMethodResult = JsonSerializer.SerializeToElement(
+                            new Dictionary<string, object?> { ["error"] = ex.Message });
+                        ReportCommandFailure(action, $"{ex.GetType().Name}: {ex.Message}");
+                    }
+                };
+            case "e2e_stall_ui_thread":
+                // Convention 11's forced stall, the windows app's leg
+                // (`e2e-conventions.md` convention 11; test_windows_ui_thread_stall_stack.py):
+                // park the UI thread INSIDE fauna_ffi.dll for `millis`, so a bridge op on
+                // the app stalls on a frame whose name and line the bridge's captured stack
+                // must report. Enqueued, never run here, and no post-action: the ack is this
+                // poll thread's own state push, so the command is acked whatever the UI
+                // thread then does — a post-action would hold the ack for the whole park.
+                {
+                    var millis = CommandLong(command, "millis");
+                    if (millis <= 0 || millis > uint.MaxValue)
+                    {
+                        command.TryGetValue("millis", out var rawMillis);
+                        ReportRefusedCommand(action,
+                            $"needs a positive integer `millis`, got {DescribeCommandField(rawMillis)}");
+                        return null;
+                    }
+                    if (_dispatcherQueue is null
+                        || !_dispatcherQueue.TryEnqueue(() => E2eStallFixture.ParkUiThread((uint)millis)))
+                    {
+                        ReportCommandFailure(action, "the UI thread's dispatcher queue did not take the park");
+                    }
+                    return null;
+                }
             case "focus_move":
                 // Convention 17 layer (c), windows leg
                 // (`docs/goal/architecture/e2e-systematic-ui-walks.md` § The
@@ -2185,7 +2376,7 @@ public class TestAgent
                 // (tests/e2e-unified/tests/test_webdav_read_write_roundtrip.py):
                 // arrange the served-set precondition for the currently
                 // logged-in actor — windows twin of linux's
-                // `serve_enable_folder` (apps/fauna-linux/src/main.rs), wired
+                // `serve_enable_folder` (apps/fauna-linux/src/lib.rs), wired
                 // over the SAME production slice-6b composition the Folders
                 // page's serve toggle drives
                 // (App.WebdavServeEnableFolderForTest ->
@@ -2232,7 +2423,7 @@ public class TestAgent
                 // recipe so a mailbox-less GUI attendee's `NestSchedulingSink`
                 // can materialize a server-side auto-schedule invite. Windows
                 // twin of linux's `enable_caldav_mailbox` case
-                // (apps/fauna-linux/src/main.rs). Writes the outcome into
+                // (apps/fauna-linux/src/lib.rs). Writes the outcome into
                 // App.CaldavMailboxReply; clears any prior reply first so the
                 // driver detects THIS run's completion (same shape as
                 // `serve_enable_folder` above). Payload: {password} — omitted
@@ -2301,6 +2492,34 @@ public class TestAgent
     private sealed class NoOpOnboardingObserver : uniffi.fauna_onboarding_machine.OnboardingObserver
     {
         public void OnChanged() { }
+    }
+
+    /// <summary>The e2e-only plain C export the forced stall parks in
+    /// (<c>libs/fauna-ffi/src/e2e_stall.rs</c>). Not UniFFI, so the generated bindings
+    /// are the same in every flavor; present only in a debug or e2e-flavor
+    /// <c>fauna_ffi.dll</c>, like this whole agent.</summary>
+    private static class E2eStallFixture
+    {
+        [System.Runtime.InteropServices.DllImport(
+            "fauna_ffi",
+            EntryPoint = "fauna_e2e_stall_fixture_parks_ui_thread",
+            CallingConvention = System.Runtime.InteropServices.CallingConvention.Cdecl)]
+        private static extern void Park(uint millis);
+
+        /// <summary>Park, or say why not: a DLL without the export (a flavor that
+        /// compiled it out) must surface on the agent's failure slot (convention 11),
+        /// not as an unhandled throw on the UI thread that takes the app down.</summary>
+        public static void ParkUiThread(uint millis)
+        {
+            try
+            {
+                Park(millis);
+            }
+            catch (Exception ex)
+            {
+                ReportCommandFailure("e2e_stall_ui_thread", $"{ex.GetType().Name}: {ex.Message}");
+            }
+        }
     }
 }
 #endif

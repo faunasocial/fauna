@@ -818,6 +818,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fauna_test_tracing::{captured_lines_for_this_thread, install_capture};
 
     fn step(snap: &ProvisioningSnapshot, kind: ProvisionStep) -> &StepSnapshot {
         &snap.steps[step_index(kind)]
@@ -1089,9 +1090,9 @@ mod tests {
     async fn run_step_marks_succeeded_after_one_attempt() {
         // This test asserts nothing about narration, but it drives `run_step`
         // and so touches the callsites the capturing test reads — see
-        // `install_narration_capture`, whose whole point is that first touch
+        // `fauna_test_tracing::install_capture`, whose whole point is that first touch
         // decides the callsite's fate for the entire process.
-        install_narration_capture();
+        install_capture();
         let state = Mutex::new(ProvisioningSnapshot::idle());
         let cancel = CancelFlag::new();
         let notify = || {};
@@ -1120,8 +1121,8 @@ mod tests {
 
     #[tokio::test]
     async fn run_step_marks_skipped_when_preflight_matches() {
-        // Drives `run_step`; see `install_narration_capture`.
-        install_narration_capture();
+        // Drives `run_step`; see `fauna_test_tracing::install_capture`.
+        install_capture();
         let state = Mutex::new(ProvisioningSnapshot::idle());
         let cancel = CancelFlag::new();
         let result = run_step(
@@ -1148,8 +1149,8 @@ mod tests {
         use std::sync::atomic::{AtomicU32, Ordering};
         // The one sibling that reaches the retry `warn!` callsite, and so the
         // one whose first touch used to cost the capturing test that line —
-        // see `install_narration_capture`.
-        install_narration_capture();
+        // see `fauna_test_tracing::install_capture`.
+        install_capture();
         let state = Mutex::new(ProvisioningSnapshot::idle());
         let cancel = CancelFlag::new();
         let calls = AtomicU32::new(0);
@@ -1193,8 +1194,8 @@ mod tests {
 
     #[tokio::test]
     async fn run_step_terminal_error_fails_immediately() {
-        // Drives `run_step`; see `install_narration_capture`.
-        install_narration_capture();
+        // Drives `run_step`; see `fauna_test_tracing::install_capture`.
+        install_capture();
         let state = Mutex::new(ProvisioningSnapshot::idle());
         let cancel = CancelFlag::new();
         let result = run_step(
@@ -1231,8 +1232,8 @@ mod tests {
 
     #[tokio::test]
     async fn run_step_observes_cancel_at_iteration_boundary() {
-        // Drives `run_step`; see `install_narration_capture`.
-        install_narration_capture();
+        // Drives `run_step`; see `fauna_test_tracing::install_capture`.
+        install_capture();
         let state = Mutex::new(ProvisioningSnapshot::idle());
         let cancel = CancelFlag::new();
         cancel.raise();
@@ -1250,111 +1251,6 @@ mod tests {
         assert!(matches!(result, Err(ProvisionError::Cancelled)));
     }
 
-    /// Every narration line this module captures, tagged with the thread that
-    /// emitted it. Written by [`CaptureLayer`] under the one process-global
-    /// subscriber [`install_narration_capture`] installs; read back per-thread
-    /// by [`captured_lines_for_this_thread`].
-    static CAPTURED: Mutex<Vec<(std::thread::ThreadId, String)>> = Mutex::new(Vec::new());
-
-    /// Minimal capturing `tracing::Layer` — copies each event's `{message}`
-    /// field, level, and target into [`CAPTURED`], tagged with the emitting
-    /// thread.
-    struct CaptureLayer;
-
-    /// Install the narration capture for the whole test binary, once.
-    ///
-    /// ⚠ This is deliberately a **process-global** subscriber, not the
-    /// thread-local `tracing::subscriber::set_default` that stood here before,
-    /// and the difference is load-bearing rather than stylistic. `tracing`
-    /// caches each callsite's interest process-globally on first use, so
-    /// whichever thread reaches a callsite first decides whether that callsite
-    /// is enabled for *everyone*. Six tests in this binary drive `run_step`,
-    /// and five of them install no subscriber; libtest sorts by name, so the
-    /// capturing test wins every callsite when the tests run sequentially — and
-    /// loses them whenever a subscriber-less sibling gets there first, which
-    /// only concurrency allows. What decides it is contention for a core, not
-    /// the thread count: the failure survived re-runs at `--test-threads`
-    /// 2/8/16/32 on an idle box and was written off as not reproducible, yet
-    /// reddened `workspace-test-check` on a loaded one.
-    ///
-    /// Measured with convention 14's contention instrument
-    /// (`taskset -c 0 <bin> --test-threads=8 run_step`, 300 runs each): the
-    /// unfiltered thread-local layer failed 2/300, losing only the `warn!` line;
-    /// adding an `EnvFilter` to it failed 4/300, losing *every* line — the
-    /// gate's own empty-capture signature. A thread-local subscriber cannot fix
-    /// a process-global cache; installing one subscriber for the binary can —
-    /// this shape is 0/600 under that same contention.
-    ///
-    /// The filter is `EnvFilter::new("info")` — the ring's real default, the
-    /// same shape the sibling captures use (`fauna_client_mls_sync::test_tracing`,
-    /// `fauna_client_conversations::test_tracing`,
-    /// `fauna_onboarding_machine::machine`) — so a line captured here is a line
-    /// that reaches the ring in production.
-    fn install_narration_capture() {
-        use tracing_subscriber::prelude::*;
-        static ONCE: std::sync::Once = std::sync::Once::new();
-        ONCE.call_once(|| {
-            let subscriber = tracing_subscriber::registry()
-                .with(tracing_subscriber::EnvFilter::new("info"))
-                .with(CaptureLayer);
-            // Nothing else in this binary sets a global default; if that ever
-            // changes, the capturing test fails with an empty capture rather
-            // than silently asserting against someone else's subscriber.
-            let _ = tracing::subscriber::set_global_default(subscriber);
-        });
-    }
-
-    /// The lines emitted by the calling thread. Sibling tests share the global
-    /// subscriber and emit the very same callsites, so filtering by thread is
-    /// what keeps one test's narration out of another's assertions — an
-    /// existence assert over a shared buffer would otherwise pass on a
-    /// sibling's line even if `run_step` itself had gone silent.
-    fn captured_lines_for_this_thread() -> Vec<String> {
-        let me = std::thread::current().id();
-        CAPTURED
-            .lock()
-            .unwrap()
-            .iter()
-            .filter(|(thread, _)| *thread == me)
-            .map(|(_, line)| line.clone())
-            .collect()
-    }
-
-    #[derive(Default)]
-    struct MessageOnly(String);
-
-    impl tracing::field::Visit for MessageOnly {
-        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
-            if field.name() == "message" {
-                self.0 = format!("{value:?}");
-            }
-        }
-    }
-
-    impl<S> tracing_subscriber::Layer<S> for CaptureLayer
-    where
-        S: tracing::Subscriber,
-    {
-        fn on_event(
-            &self,
-            event: &tracing::Event<'_>,
-            _ctx: tracing_subscriber::layer::Context<'_, S>,
-        ) {
-            let mut visitor = MessageOnly::default();
-            event.record(&mut visitor);
-            let line = format!(
-                "[{}][{}] {}",
-                event.metadata().level(),
-                event.metadata().target(),
-                visitor.0
-            );
-            CAPTURED
-                .lock()
-                .unwrap()
-                .push((std::thread::current().id(), line));
-        }
-    }
-
     /// Regression guard for the live-run freeze this instrumentation exists to
     /// diagnose: a 27-minute captured app log for a real `Online`-step run
     /// contained exactly one line total, because `run_step` — the retry loop
@@ -1367,7 +1263,7 @@ mod tests {
     async fn run_step_narrates_every_attempt_so_a_stalled_dial_is_visible() {
         use std::sync::atomic::{AtomicU32, Ordering};
 
-        install_narration_capture();
+        install_capture();
 
         let state = Mutex::new(ProvisioningSnapshot::idle());
         let cancel = CancelFlag::new();

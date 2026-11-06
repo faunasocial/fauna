@@ -92,6 +92,7 @@ async fn a_parked_engine_refuses_a_record_without_asking_the_nest() {
             None,
             None,
             crate::causal::CausalStamp::unknown(),
+            None,
         ),
     )
     .await

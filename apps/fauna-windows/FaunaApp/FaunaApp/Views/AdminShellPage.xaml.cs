@@ -39,6 +39,7 @@ public sealed partial class AdminShellPage : Page
             [AdminNavigation.Settings] = SubSettings,
             [AdminNavigation.Nest] = SubNest,
             [AdminNavigation.Mail] = SubMail,
+            [AdminNavigation.MailReports] = SubMailReports,
             [AdminNavigation.Calendar] = SubCalendar,
             [AdminNavigation.Contacts] = SubContacts,
             [AdminNavigation.Files] = SubFiles,
@@ -93,6 +94,15 @@ public sealed partial class AdminShellPage : Page
         {
             _clients = clients;
         }
+    }
+
+    /// <summary>Leaving the admin shell — for another tab, or with MainPage on a
+    /// sign-out — ends the sub-page in its inner frame, which otherwise never gets an
+    /// <c>OnNavigatedFrom</c> of its own (<see cref="NestedFrame"/>).</summary>
+    protected override void OnNavigatedFrom(NavigationEventArgs e)
+    {
+        NestedFrame.EndPage(AdminContentFrame, nameof(AdminShellPage));
+        base.OnNavigatedFrom(e);
     }
 
     private void Page_Loaded(object sender, RoutedEventArgs e)
@@ -195,6 +205,7 @@ public sealed partial class AdminShellPage : Page
         AdminNavigation.Settings => typeof(AdminSettingsPage),
         AdminNavigation.Nest => typeof(AdminNestPage),
         AdminNavigation.Mail => typeof(AdminMailPage),
+        AdminNavigation.MailReports => typeof(AdminMailReportsPage),
         AdminNavigation.Calendar => typeof(AdminCalendarPage),
         AdminNavigation.Contacts => typeof(AdminContactsPage),
         AdminNavigation.Files => typeof(AdminFilesPage),

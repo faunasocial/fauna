@@ -225,6 +225,55 @@ async fn setup_status_email_enabled_tracks_mail_enabled_toggle() {
     );
 }
 
+/// `caldav_enabled` / `carddav_enabled` on `fauna.setup.status` are the
+/// deployment's DAV toggles every client reads for the calendar-only credential
+/// (`mail-credentials.md` § Trigger taxonomy, *The calendar-only credential*):
+/// an unset toggle follows mail, an explicit one wins either way — the same
+/// projection `fetch_config` serves the bridge.
+#[tokio::test]
+async fn setup_status_dav_flags_follow_mail_until_set() {
+    async fn dav(r: &RpcRouter, st: Arc<AppState>) -> (bool, bool) {
+        let bytes = dispatch(
+            r,
+            st,
+            "fauna.setup.status",
+            encode(&SetupStatusRequest::default()),
+        )
+        .await
+        .expect("setup.status ok");
+        let reply = decode::<SetupStatusReply>(&bytes).unwrap();
+        (reply.caldav_enabled, reply.carddav_enabled)
+    }
+
+    let r = router();
+    let st = state().await;
+
+    assert_eq!(
+        dav(&r, st.clone()).await,
+        (false, false),
+        "unset + mail off"
+    );
+    st.db.set_mail_enabled(true).await.unwrap();
+    assert_eq!(
+        dav(&r, st.clone()).await,
+        (true, true),
+        "unset follows mail"
+    );
+    st.db.set_carddav_enabled(false).await.unwrap();
+    assert_eq!(
+        dav(&r, st.clone()).await,
+        (true, false),
+        "explicit off wins"
+    );
+    st.db.set_mail_enabled(false).await.unwrap();
+    st.db.set_caldav_enabled(true).await.unwrap();
+    assert_eq!(
+        dav(&r, st.clone()).await,
+        (true, false),
+        "the social-only shape: mail off, CalDAV on"
+    );
+}
+
 /// `mail_subsystem_ok` is the client-visible mail-health signal.
 /// The outage was invisible: a `mail_domains` schema break crash-looped
 /// the mail bridge (no mail ports) while nest still reported `health: ok`. The

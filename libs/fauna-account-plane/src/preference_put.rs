@@ -3,8 +3,9 @@
 //!
 //! Authority: `docs/goal/architecture/config-dissolution.md` § The `__config`
 //! dissolution schedule (the E1 cluster: the four delegable preference kinds
-//! ride the account-state plane, one latest-wins row each at
-//! [`PREFERENCE_KEY`]) and `account-client-lifecycle.md` § The client-side
+//! ride the account-state plane; three are one latest-wins row each at
+//! [`PREFERENCE_KEY`], and `fauna.state.moderation` is one row per muted term
+//! and one per hidden id behind its own door, `crate::moderation_rows`) and `account-client-lifecycle.md` § The client-side
 //! lifecycle (the pump bullet → wake source (4): a write through the handle is
 //! the local row only).
 //!
@@ -22,14 +23,18 @@ use fauna_account_store::{backend::StoreBackend, store::AccountStore};
 use fauna_core::data::Timestamp;
 use fauna_core::encoding::canonical_decode;
 use fauna_protocol::RpcRequester;
-use fauna_protocol::merge_policy::{LwwStamp, PREFERENCE_KEY, RecordKind, records};
+use fauna_protocol::merge_policy::{
+    KIND_MODERATION, LwwStamp, PREFERENCE_KEY, RecordKind, records,
+};
 use serde::de::DeserializeOwned;
 
 use crate::account_state_plane::{AccountStatePlane, ItemId};
 
 /// One admitted preference kind: the plane kind string, and whether a value
-/// decodes as the kind's sub-record. The table is the **whole** preference
-/// cluster — every other kind has its own typed door.
+/// decodes as the kind's sub-record. The table is the preference cluster's
+/// three `self`-keyed singletons — every other kind has its own typed door,
+/// `fauna.state.moderation` included: it is one row per muted term and one
+/// per hidden id (`crate::moderation_rows`).
 struct AdmittedKind {
     kind: &'static str,
     decodes: fn(&[u8]) -> bool,
@@ -42,10 +47,6 @@ fn decodes_as<T: DeserializeOwned>(_kind: &RecordKind<T>, bytes: &[u8]) -> bool 
 }
 
 const ADMITTED: &[AdmittedKind] = &[
-    AdmittedKind {
-        kind: records::MODERATION.name,
-        decodes: |b| decodes_as(&records::MODERATION, b),
-    },
     AdmittedKind {
         kind: records::SYNC_PREFS.name,
         decodes: |b| decodes_as(&records::SYNC_PREFS, b),
@@ -67,9 +68,10 @@ fn admitted(kind: &str) -> Option<&'static AdmittedKind> {
 /// Is `kind` one of the four preference records — the kinds the delegable
 /// publish retries first among its parked rows (`account-replica-posture.md`
 /// § The store device principal, refinement 11 → *A row refused for room is
-/// parked*)?
+/// parked*)? The moderation kind keeps its place in that order though its
+/// rows have their own door.
 pub fn is_preference_kind(kind: &str) -> bool {
-    admitted(kind).is_some()
+    admitted(kind).is_some() || kind == KIND_MODERATION
 }
 
 /// Plane stamps are milliseconds ([`LwwStamp::at_ms`]); [`Timestamp::now`] is
@@ -132,7 +134,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fauna_core::data::ModerationConfig;
+    use fauna_core::data::{ModerationConfig, SyncPrefsConfig};
     use fauna_core::encoding::canonical_encode;
     use fauna_protocol::merge_policy::{
         KIND_DELEGATION, KIND_MODERATION, KIND_PERSONALIZATION, KIND_SYNC_PREFS, MergePolicy,
@@ -142,19 +144,24 @@ mod tests {
     /// This door's assumptions about its kinds are registry facts, not table
     /// hopes: every admitted kind is registered delegable latest-wins (the
     /// stamp [`put_preference_local`] mints is what its merge reads), and the
-    /// table covers exactly the charter's preference cluster.
+    /// table covers the charter's preference cluster but the moderation kind,
+    /// whose rows have their own door — while the parked-row order still
+    /// names all four.
     #[test]
     fn the_admitted_table_matches_the_registry() {
         let kinds: Vec<_> = ADMITTED.iter().map(|k| k.kind).collect();
         assert_eq!(
             kinds,
-            vec![
-                KIND_MODERATION,
-                KIND_SYNC_PREFS,
-                KIND_PERSONALIZATION,
-                KIND_DELEGATION
-            ]
+            vec![KIND_SYNC_PREFS, KIND_PERSONALIZATION, KIND_DELEGATION]
         );
+        for k in [
+            KIND_MODERATION,
+            KIND_SYNC_PREFS,
+            KIND_PERSONALIZATION,
+            KIND_DELEGATION,
+        ] {
+            assert!(is_preference_kind(k), "{k}");
+        }
         for k in kinds {
             assert_eq!(merge_policy(k), Some(MergePolicy::LatestWins), "{k}");
             assert_eq!(
@@ -168,14 +175,22 @@ mod tests {
     /// A value is admitted only as its own kind's sub-record.
     #[test]
     fn a_value_is_admitted_only_as_its_kinds_sub_record() {
-        let moderation = canonical_encode(&ModerationConfig {
-            muted_keywords: vec!["lottery".into()],
-            ..Default::default()
+        let prefs = canonical_encode(&SyncPrefsConfig {
+            default_conflict_policy: Some("auto".into()),
         })
         .unwrap();
-        let k = admitted(KIND_MODERATION).expect("admitted");
-        assert!((k.decodes)(&moderation));
+        let k = admitted(KIND_SYNC_PREFS).expect("admitted");
+        assert!((k.decodes)(&prefs));
         assert!(!(k.decodes)(b"not a record"));
         assert!(admitted("fauna.state.dns").is_none());
+    }
+
+    /// The moderation kind is refused at this door, whole record included:
+    /// its rows are one per muted term and one per hidden id, written through
+    /// `moderation_rows`.
+    #[test]
+    fn the_moderation_kind_is_refused_at_the_preference_door() {
+        assert!(admitted(KIND_MODERATION).is_none());
+        assert!(canonical_encode(&ModerationConfig::default()).is_ok());
     }
 }

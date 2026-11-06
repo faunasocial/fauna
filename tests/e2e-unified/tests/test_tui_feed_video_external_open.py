@@ -48,6 +48,7 @@ import pytest
 
 from conftest import _make_user, _seeded_environment, get_available_apps
 from drivers import create_driver
+from helpers.e2e_session import e2e_login_device_id
 
 pytestmark = [pytest.mark.tier_3, pytest.mark.tui]
 
@@ -58,8 +59,8 @@ CANCEL = "media-external-open-cancel-button"
 
 FIXTURE = Path(__file__).parent.parent.parent / "fixtures" / "tiny-video.mp4"
 
-# The same device id the shared login patch uses (conftest _E2E_LOGIN_DEVICE_ID).
-_DEVICE_ID = "0123456789abcdef" * 4
+# The same device id the shared login patch gives tui.
+_DEVICE_ID = e2e_login_device_id("tui")
 
 
 @pytest.fixture(params=["tui"])

@@ -7,10 +7,10 @@ import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.performClick
 import com.fauna.app.testing.FaunaRobolectricTestRunner
+import com.fauna.app.testing.GuardianRulesFixture
 import com.fauna.app.ui.components.RegionBlockWitness
 import com.fauna.app.ui.components.RegionPlaceholder
 import com.fauna.app.ui.screen.settings.RegionSettingsRows
-import com.fauna.ffi.FfiContentPolicy
 import com.fauna.ffi.FfiDeclaredRegion
 import com.fauna.ffi.FfiRegionPlaceholder
 import com.fauna.ffi.FfiRegionPolicyRow
@@ -26,6 +26,7 @@ import org.junit.rules.TemporaryFolder
 import org.junit.runner.RunWith
 import org.robolectric.annotation.Config
 import social.fauna.generated.Ids
+import uniffi.fauna_conversations.ThreadEncryption
 import uniffi.fauna_core.ContentLabelEntry
 
 /**
@@ -50,8 +51,8 @@ class RegionPlaneHostTest {
 
     @Test
     fun `an unopened plane leaves the family verdict and paints no region placeholder`() {
-        val floor = FfiContentPolicy(nsfw = "block", spam = "inherit", phishing = "inherit", commercial = "inherit")
-        val d = RegionPlaneHost.render(nsfw(), ContentPolicyInputs(contentPolicy = floor), subject)
+        val guardianRules = GuardianRulesFixture.blocking("nsfw")
+        val d = RegionPlaneHost.render(nsfw(), ContentPolicyInputs(contentPolicy = guardianRules), subject)
         assertEquals("block", d.verdict)
         assertNull(d.placeholder)
         assertNull(RegionPlaneHost.view())
@@ -92,6 +93,37 @@ class RegionPlaneHostTest {
         compose.onAllNodesWithTag(Ids.REGION_COLLAPSED_REVEAL_BUTTON).assertCountEquals(0)
         compose.waitForIdle()
         assertEquals(1 to 1, RegionPlaneHost.blockRenderState())
+    }
+
+    @Test
+    fun `a sealed placeholder carries the sealed note after the frame inside the notice`() {
+        val p = FfiRegionPlaceholder(verb = "block", region = "NO", authorityName = "Authority", reason = "Withheld.")
+        compose.setContent {
+            RegionPlaceholder(p, witnessKey = "conversation:x", onReveal = {}, sealedNote = true)
+        }
+        compose.onNodeWithTag(Ids.REGION_BLOCKED_NOTICE).assertTextEquals(
+            "Not shown in NO — blocked under the policy of Authority\n" +
+                "Hidden from you on this device — nothing was removed, detected or reported",
+        )
+    }
+
+    @Test
+    fun `the sealed note follows the shared decision, not the placeholder alone`() {
+        val p = FfiRegionPlaceholder(verb = "block", region = "NO", authorityName = "Authority", reason = "Withheld.")
+        val regionBlock = RegionRenderDecision("block", p)
+        val inputs = ContentPolicyInputs()
+        // End-to-end only: a community or transport-only room's item is not sealed.
+        assertTrue(regionBlock.sealedNote(ThreadEncryption.E2E, inputs, nsfw()))
+        assertEquals(false, regionBlock.sealedNote(ThreadEncryption.NEST_READABLE, inputs, nsfw()))
+        assertEquals(false, regionBlock.sealedNote(ThreadEncryption.TRANSPORT_ONLY, inputs, nsfw()))
+        // No region placeholder, or the viewer's own report hid the item: none.
+        assertEquals(false, RegionRenderDecision("block", null).sealedNote(ThreadEncryption.E2E, inputs, nsfw()))
+        assertEquals(false, RegionRenderDecision("block", p, reported = true).sealedNote(ThreadEncryption.E2E, inputs, nsfw()))
+        // Guardian Notify counting the item withholds "nothing was reported".
+        val guardianRules = GuardianRulesFixture.blocking("nsfw")
+        val counted = ContentPolicyInputs(contentPolicy = guardianRules, contentNotify = true)
+        assertEquals(false, regionBlock.sealedNote(ThreadEncryption.E2E, counted, nsfw()))
+        assertTrue(regionBlock.sealedNote(ThreadEncryption.E2E, ContentPolicyInputs(contentPolicy = guardianRules), nsfw()))
     }
 
     @Test

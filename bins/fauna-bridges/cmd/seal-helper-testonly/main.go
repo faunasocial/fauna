@@ -14,10 +14,10 @@ import (
 // to stdout. Any error goes to stderr and exits non-zero so the Python
 // caller's subprocess.run(check=True) surfaces it.
 //
-// Usage: seal-helper-testonly <seal-tls-cert|seal-submission-token|seal-wrapped-msek|derive-recipient-pubkey|derive-recipient-mlkem-ek|derive-bridge-mlkem-ek|seal-mls-snapshot|seal-mail-record|mint-grant|mint-bounded-grant|mint-spam-model-grant|seal-spam-model|seal-spam-model-copy|publish-labeler>
+// Usage: seal-helper-testonly <seal-tls-cert|seal-submission-token|seal-wrapped-msek|derive-recipient-pubkey|derive-recipient-mlkem-ek|derive-recipient-dav-pubkeys|derive-bridge-mlkem-ek|seal-mls-snapshot|seal-mail-record|mint-grant|mint-bounded-grant|mint-spam-model-grant|seal-spam-model|seal-spam-model-copy|publish-labeler|open-records-with-grant>
 func main() {
 	if len(os.Args) != 2 {
-		fail("usage: seal-helper-testonly <seal-tls-cert|seal-submission-token|seal-wrapped-msek|derive-recipient-pubkey|derive-recipient-mlkem-ek|derive-bridge-mlkem-ek|seal-mls-snapshot|seal-mail-record|mint-grant|mint-bounded-grant|mint-spam-model-grant|seal-spam-model|seal-spam-model-copy|publish-labeler> (JSON on stdin → base64 blob on stdout)")
+		fail("usage: seal-helper-testonly <seal-tls-cert|seal-submission-token|seal-wrapped-msek|derive-recipient-pubkey|derive-recipient-mlkem-ek|derive-recipient-dav-pubkeys|derive-bridge-mlkem-ek|seal-mls-snapshot|seal-mail-record|mint-grant|mint-bounded-grant|mint-spam-model-grant|seal-spam-model|seal-spam-model-copy|publish-labeler|open-records-with-grant> (JSON on stdin → base64 blob on stdout)")
 	}
 	raw, err := io.ReadAll(os.Stdin)
 	if err != nil {
@@ -36,6 +36,8 @@ func main() {
 		blob, err = runDeriveRecipientPubkey(raw)
 	case "derive-recipient-mlkem-ek":
 		blob, err = runDeriveRecipientMlkemEk(raw)
+	case "derive-recipient-dav-pubkeys":
+		blob, err = runDeriveRecipientDavPubkeys(raw)
 	case "derive-bridge-mlkem-ek":
 		blob, err = runDeriveBridgeMlkemEk(raw)
 	case "seal-mls-snapshot":
@@ -56,6 +58,8 @@ func main() {
 		blob, err = runPublishLabeler(raw)
 	case "encode-text-model-artifact":
 		blob, err = runEncodeTextModelArtifact(raw)
+	case "open-records-with-grant":
+		blob, err = runOpenRecordsWithGrant(raw)
 	default:
 		fail("unknown subcommand %q", os.Args[1])
 	}
@@ -356,6 +360,28 @@ func runDeriveRecipientMlkemEk(raw []byte) ([]byte, error) {
 	return deriveRecipientMlkemEk(msek)
 }
 
+// deriveRecipientDavPubkeysParams derives the public halves of the actor's
+// recipient-calendar and recipient-card keypairs from MSEK — the pairs
+// `fauna.bridges.provision_recipient_mls_pubkey` requires beside the mail pair
+// (`owner-key-material.md` § Path B-sibling-5 → *Registration*). Output is
+// `calendar_pubkey(32) ∥ calendar_mlkem_ek(1184) ∥ card_pubkey(32) ∥
+// card_mlkem_ek(1184)` (base64).
+type deriveRecipientDavPubkeysParams struct {
+	MsekB64 string `json:"msek_b64"` // 32-byte Master Secret
+}
+
+func runDeriveRecipientDavPubkeys(raw []byte) ([]byte, error) {
+	var p deriveRecipientDavPubkeysParams
+	if err := json.Unmarshal(raw, &p); err != nil {
+		return nil, fmt.Errorf("parse derive-recipient-dav-pubkeys params: %w", err)
+	}
+	msek, err := decodeB64(p.MsekB64, "msek_b64")
+	if err != nil {
+		return nil, err
+	}
+	return deriveRecipientDavPubkeys(msek)
+}
+
 // deriveBridgeMlkemEkParams derives a bridge service-user's ML-KEM-768 encapsulation
 // key (1184 bytes) from its keyfile Ed25519 seed (PQ-CAP-2) — the holder ek a tier_3
 // harness needs to mint an X-Wing-wrapped grant to that holder. Output is the raw ek
@@ -378,10 +404,13 @@ func runDeriveBridgeMlkemEk(raw []byte) ([]byte, error) {
 
 // sealMailRecordParams seals arbitrary plaintext to a recipient X25519 pubkey —
 // the canonical `MailRecordEnvelope` a sealed event/card/mail body is (see
-// `sealMailRecord`).
+// `sealMailRecord`). Kind selects the envelope kind: "mail" (the default),
+// "calendar" (an event body, sidecar or calendar metadata — what the nest's
+// calendar RPCs accept) or "card" (the address book's).
 type sealMailRecordParams struct {
 	PlaintextB64          string `json:"plaintext_b64"`
 	RecipientX25519PubB64 string `json:"recipient_x25519_pubkey_b64"` // 32 bytes
+	Kind                  string `json:"kind,omitempty"`
 }
 
 func runSealMailRecord(raw []byte) ([]byte, error) {
@@ -397,7 +426,14 @@ func runSealMailRecord(raw []byte) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	return sealMailRecord(plaintext, pubkey)
+	if p.Kind == "" || p.Kind == "mail" {
+		return sealMailRecord(plaintext, pubkey)
+	}
+	kind, err := recordKindOf(p.Kind)
+	if err != nil {
+		return nil, err
+	}
+	return sealRecord(kind, plaintext, pubkey)
 }
 
 // sealSpamModelParams seals a plaintext `fauna_mail::spam::SpamModel` serde_json
@@ -553,6 +589,58 @@ func runEncodeTextModelArtifact(raw []byte) ([]byte, error) {
 		return nil, fmt.Errorf("parse encode-text-model-artifact params: %w", err)
 	}
 	return encodeTextModelArtifact(p.Version, p.Name, p.MoreDocs, p.LessDocs, p.Ngrams)
+}
+
+// openRecordsWithGrantParams is the HOLDER side of a minted grant: unseal the
+// deposited GrantBlob with the holder's X25519 secret (the production drain's
+// `UnsealCapabilityGrant`), then try every key-bearing scope key on every
+// record, each under the record's own kind. Output is JSON (base64 like every
+// mode's output): per record, the scope kinds whose key opened it, and the
+// plaintext the first one recovered.
+type openRecordsWithGrantParams struct {
+	GrantBlobB64          string `json:"grant_blob_b64"`           // canonical GrantBlob, as the nest stores it
+	HolderX25519SecretB64 string `json:"holder_x25519_secret_b64"` // 32-byte holder secret
+	Records               []struct {
+		Kind        string `json:"kind"` // mail | calendar | card — the envelope's own kind
+		EnvelopeB64 string `json:"envelope_b64"`
+	} `json:"records"`
+}
+
+type openedRecord struct {
+	OpenedBy     []string `json:"opened_by"`
+	PlaintextB64 string   `json:"plaintext_b64"`
+}
+
+func runOpenRecordsWithGrant(raw []byte) ([]byte, error) {
+	var p openRecordsWithGrantParams
+	if err := json.Unmarshal(raw, &p); err != nil {
+		return nil, fmt.Errorf("parse open-records-with-grant params: %w", err)
+	}
+	grantBlob, err := decodeB64(p.GrantBlobB64, "grant_blob_b64")
+	if err != nil {
+		return nil, err
+	}
+	secret, err := decodeB64(p.HolderX25519SecretB64, "holder secret")
+	if err != nil {
+		return nil, err
+	}
+	keys, err := unsealGrantKeys(grantBlob, secret)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]openedRecord, 0, len(p.Records))
+	for i, r := range p.Records {
+		kind, err := recordKindOf(r.Kind)
+		if err != nil {
+			return nil, fmt.Errorf("records[%d]: %w", i, err)
+		}
+		envelope, err := decodeB64(r.EnvelopeB64, fmt.Sprintf("records[%d].envelope_b64", i))
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, openRecordWithKeys(keys, kind, envelope))
+	}
+	return json.Marshal(out)
 }
 
 func runSealSubmissionToken(raw []byte) ([]byte, error) {

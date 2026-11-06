@@ -33,6 +33,9 @@ pub enum DepositCommit {
     PartsMismatch,
     /// No staged upload by this token (never begun, or expired).
     Missing,
+    /// The sealed header would carry the owner's parked bytes past the
+    /// limit; the upload stays staged.
+    InboxFull,
 }
 
 /// The sealed bytes the inbox holds for `actor`'s folders — every item's
@@ -115,15 +118,33 @@ impl CacheDb {
 
     /// Open a staged upload for a deposit larger than one message: an inbox
     /// row no list shows until [`Self::commit_folder_deposit_upload`]. Returns
-    /// its id.
+    /// its id, or `None` when `principal_id` already holds `per_principal`
+    /// staged uploads or `folder_id` holds `per_folder` — a staged row parks
+    /// no byte the quota counts, so this count is what bounds them. The counts
+    /// and the insert hold the one connection, so two begins cannot both
+    /// squeeze under a cap.
     pub async fn begin_folder_deposit_upload(
         &self,
         folder_id: i64,
         principal_id: &[u8],
         token: &[u8],
         now: i64,
-    ) -> Result<i64> {
+        per_principal: u32,
+        per_folder: u32,
+    ) -> Result<Option<i64>> {
         let conn = self.conn.lock().await;
+        let (by_principal, in_folder): (i64, i64) = conn
+            .query_row(
+                "SELECT COALESCE(SUM(principal_id = ?1), 0),
+                        COALESCE(SUM(folder_id = ?2), 0)
+                   FROM folder_deposit_inbox WHERE committed = 0",
+                rusqlite::params![principal_id, folder_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .context("count staged folder deposit uploads")?;
+        if by_principal >= i64::from(per_principal) || in_folder >= i64::from(per_folder) {
+            return Ok(None);
+        }
         conn.execute(
             "INSERT INTO folder_deposit_inbox
                  (folder_id, principal_id, sealed, byte_length, received_at,
@@ -132,7 +153,7 @@ impl CacheDb {
             rusqlite::params![folder_id, principal_id, now, token],
         )
         .context("begin folder deposit upload")?;
-        Ok(conn.last_insert_rowid())
+        Ok(Some(conn.last_insert_rowid()))
     }
 
     /// The upload `token` that `principal_id` began in `folder_id`: its row id
@@ -164,6 +185,7 @@ impl CacheDb {
         deposit_id: i64,
         idx: u32,
         sealed: &[u8],
+        plain_len: u64,
         now: i64,
         limit: u64,
     ) -> Result<bool> {
@@ -190,13 +212,14 @@ impl CacheDb {
             return Ok(false);
         }
         tx.execute(
-            "INSERT INTO folder_deposit_parts (deposit_id, idx, sealed, byte_length)
-             VALUES (?1, ?2, ?3, ?4)",
+            "INSERT INTO folder_deposit_parts (deposit_id, idx, sealed, byte_length, plain_length)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
             rusqlite::params![
                 deposit_id,
                 idx,
                 sealed,
                 i64::try_from(sealed.len()).context("part length")?,
+                i64::try_from(plain_len).context("part plaintext length")?,
             ],
         )?;
         tx.execute(
@@ -207,30 +230,48 @@ impl CacheDb {
         Ok(true)
     }
 
+    /// The summed plaintext length of staged upload `deposit_id`'s parts — the
+    /// length its commit's [`fauna_protocol::folders::DepositStatement`] is
+    /// verified over, since the nest cannot open the sealed parts
+    /// (`folder-deposit.md` § The depositor signs, the owner's device
+    /// verifies).
+    pub async fn staged_folder_deposit_plain_length(&self, deposit_id: i64) -> Result<u64> {
+        let conn = self.conn.lock().await;
+        let sum: i64 = conn.query_row(
+            "SELECT COALESCE(SUM(plain_length), 0) FROM folder_deposit_parts WHERE deposit_id = ?1",
+            [deposit_id],
+            |r| r.get(0),
+        )?;
+        u64::try_from(sum).context("staged deposit plaintext length")
+    }
+
     /// Commit upload `deposit_id` with its sealed header envelope when exactly
-    /// the parts `0..parts` are staged: one statement flips it adoptable, so a
-    /// crash leaves it staged or whole. The header's bytes count against no
-    /// limit — it is a name and a count, and its parts were counted on entry.
+    /// the parts `0..parts` are staged and the header keeps the owner's parked
+    /// bytes within `limit`: one statement flips it adoptable, so a crash
+    /// leaves it staged or whole. The header carries the name and the media
+    /// type the principal chose, so its bytes count like a part's, checked on
+    /// the connection the write holds; past the limit the upload stays staged.
     pub async fn commit_folder_deposit_upload(
         &self,
         deposit_id: i64,
         parts: u32,
         sealed_header: &[u8],
         now: i64,
+        limit: u64,
     ) -> Result<DepositCommit> {
         let conn = self.conn.lock().await;
-        let committed: Option<i64> = conn
+        let row: Option<(i64, i64)> = conn
             .query_row(
-                "SELECT committed FROM folder_deposit_inbox WHERE id = ?1",
+                "SELECT committed, folder_id FROM folder_deposit_inbox WHERE id = ?1",
                 [deposit_id],
-                |r| r.get(0),
+                |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .optional()?;
-        match committed {
+        let folder_id = match row {
             None => return Ok(DepositCommit::Missing),
-            Some(c) if c != 0 => return Ok(DepositCommit::AlreadyCommitted),
-            Some(_) => {}
-        }
+            Some((c, _)) if c != 0 => return Ok(DepositCommit::AlreadyCommitted),
+            Some((_, folder_id)) => folder_id,
+        };
         let (count, max): (i64, Option<i64>) = conn.query_row(
             "SELECT COUNT(*), MAX(idx) FROM folder_deposit_parts WHERE deposit_id = ?1",
             [deposit_id],
@@ -240,6 +281,15 @@ impl CacheDb {
         // of `parts` whose largest is `parts - 1` is exactly `0..parts`.
         if parts == 0 || count != i64::from(parts) || max != Some(i64::from(parts) - 1) {
             return Ok(DepositCommit::PartsMismatch);
+        }
+        // A staged row's own `byte_length` is 0, so the header is counted once.
+        if !within_limit(
+            &conn,
+            &folder_owner(&conn, folder_id)?,
+            sealed_header.len(),
+            limit,
+        )? {
+            return Ok(DepositCommit::InboxFull);
         }
         conn.execute(
             "UPDATE folder_deposit_inbox
@@ -476,8 +526,9 @@ mod tests {
     async fn a_staged_upload_lists_only_once_committed_with_exactly_its_parts() {
         let (db, f) = inbox().await;
         let id = db
-            .begin_folder_deposit_upload(f, b"p", b"tok", 1)
+            .begin_folder_deposit_upload(f, b"p", b"tok", 1, 8, 8)
             .await
+            .unwrap()
             .unwrap();
         assert_eq!(
             db.find_folder_deposit_upload(f, b"p", b"tok")
@@ -494,7 +545,7 @@ mod tests {
         );
         for idx in [0, 1] {
             assert!(
-                db.put_folder_deposit_part(id, idx, b"part", 2, u64::MAX)
+                db.put_folder_deposit_part(id, idx, b"part", 0, 2, u64::MAX)
                     .await
                     .unwrap()
             );
@@ -503,19 +554,19 @@ mod tests {
         assert!(db.list_folder_deposits(f).await.unwrap().is_empty());
         assert_eq!(db.get_folder_deposit_part(f, id, 0).await.unwrap(), None);
         assert_eq!(
-            db.commit_folder_deposit_upload(id, 3, b"hdr", 3)
+            db.commit_folder_deposit_upload(id, 3, b"hdr", 3, u64::MAX)
                 .await
                 .unwrap(),
             DepositCommit::PartsMismatch
         );
         assert_eq!(
-            db.commit_folder_deposit_upload(id, 2, b"hdr", 3)
+            db.commit_folder_deposit_upload(id, 2, b"hdr", 3, u64::MAX)
                 .await
                 .unwrap(),
             DepositCommit::Committed
         );
         assert_eq!(
-            db.commit_folder_deposit_upload(id, 2, b"hdr", 4)
+            db.commit_folder_deposit_upload(id, 2, b"hdr", 4, u64::MAX)
                 .await
                 .unwrap(),
             DepositCommit::AlreadyCommitted
@@ -529,12 +580,48 @@ mod tests {
         );
         // A committed item takes no more parts, and retiring takes its parts.
         assert!(
-            !db.put_folder_deposit_part(id, 2, b"late", 5, u64::MAX)
+            !db.put_folder_deposit_part(id, 2, b"late", 0, 5, u64::MAX)
                 .await
                 .unwrap()
         );
         assert!(db.retire_folder_deposit(f, id).await.unwrap());
         assert_eq!(db.get_folder_deposit_part(f, id, 0).await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn a_commit_counts_its_header_and_past_the_limit_stays_staged() {
+        let (db, f) = inbox().await;
+        let id = db
+            .begin_folder_deposit_upload(f, b"p", b"t", 1, 8, 8)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            db.put_folder_deposit_part(id, 0, &[0; 4], 0, 1, 10)
+                .await
+                .unwrap()
+        );
+        // 4 parked + a 7-byte header is 11 > 10: refused, still staged.
+        assert_eq!(
+            db.commit_folder_deposit_upload(id, 1, &[0; 7], 2, 10)
+                .await
+                .unwrap(),
+            DepositCommit::InboxFull
+        );
+        assert!(db.list_folder_deposits(f).await.unwrap().is_empty());
+        // 4 + 6 = 10 fits, and the same upload commits.
+        assert_eq!(
+            db.commit_folder_deposit_upload(id, 1, &[0; 6], 2, 10)
+                .await
+                .unwrap(),
+            DepositCommit::Committed
+        );
+        assert!(
+            db.insert_folder_deposit(f, b"p", &[0; 1], 1, 10)
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[tokio::test]
@@ -547,22 +634,23 @@ mod tests {
                 .is_some()
         );
         let id = db
-            .begin_folder_deposit_upload(f, b"p", b"t", 1)
+            .begin_folder_deposit_upload(f, b"p", b"t", 1, 8, 8)
             .await
+            .unwrap()
             .unwrap();
         assert!(
-            db.put_folder_deposit_part(id, 0, &[0; 4], 1, 10)
+            db.put_folder_deposit_part(id, 0, &[0; 4], 0, 1, 10)
                 .await
                 .unwrap()
         );
         // Re-sending part 0 replaces it: still 8 of 10.
         assert!(
-            db.put_folder_deposit_part(id, 0, &[0; 4], 1, 10)
+            db.put_folder_deposit_part(id, 0, &[0; 4], 0, 1, 10)
                 .await
                 .unwrap()
         );
         assert!(
-            !db.put_folder_deposit_part(id, 1, &[0; 4], 1, 10)
+            !db.put_folder_deposit_part(id, 1, &[0; 4], 0, 1, 10)
                 .await
                 .unwrap()
         );
@@ -584,10 +672,11 @@ mod tests {
     async fn an_idle_staged_upload_expires_and_a_committed_item_never_does() {
         let (db, f) = inbox().await;
         let staged = db
-            .begin_folder_deposit_upload(f, b"p", b"a", 10)
+            .begin_folder_deposit_upload(f, b"p", b"a", 10, 8, 8)
             .await
+            .unwrap()
             .unwrap();
-        db.put_folder_deposit_part(staged, 0, b"x", 10, u64::MAX)
+        db.put_folder_deposit_part(staged, 0, b"x", 0, 10, u64::MAX)
             .await
             .unwrap();
         let kept = db
@@ -617,5 +706,50 @@ mod tests {
                 .unwrap()
                 .is_some()
         );
+    }
+
+    #[tokio::test]
+    async fn staged_uploads_stop_at_the_principal_and_the_folder_caps() {
+        let (db, f) = inbox().await;
+        let other = db.create_folder("other", &[0xA1; 32]).await.unwrap();
+        let begin = |folder: i64, p: &'static [u8], tok: &'static [u8]| {
+            let db = &db;
+            async move {
+                db.begin_folder_deposit_upload(folder, p, tok, 1, 2, 3)
+                    .await
+                    .unwrap()
+            }
+        };
+        // Principal `p` holds two staged uploads: its third is refused, in
+        // this folder or another.
+        assert!(begin(f, b"p", b"a").await.is_some());
+        assert!(begin(other, b"p", b"b").await.is_some());
+        assert_eq!(begin(f, b"p", b"c").await, None);
+        assert_eq!(begin(other, b"p", b"c").await, None);
+        // Folder `f` holds three staged uploads across principals: a fourth
+        // is refused, while another folder still admits one.
+        assert!(begin(f, b"q", b"d").await.is_some());
+        assert!(begin(f, b"r", b"e").await.is_some());
+        assert_eq!(begin(f, b"s", b"f").await, None);
+        assert!(begin(other, b"s", b"f").await.is_some());
+        // A committed item is not staged and counts against neither cap.
+        let (id, _) = db
+            .find_folder_deposit_upload(f, b"p", b"a")
+            .await
+            .unwrap()
+            .unwrap();
+        db.put_folder_deposit_part(id, 0, b"x", 0, 1, u64::MAX)
+            .await
+            .unwrap();
+        assert_eq!(
+            db.commit_folder_deposit_upload(id, 1, b"h", 1, u64::MAX)
+                .await
+                .unwrap(),
+            DepositCommit::Committed
+        );
+        assert!(begin(f, b"p", b"g").await.is_some());
+        // An expired upload gives its place back.
+        assert_eq!(db.expire_staged_folder_deposits(2).await.unwrap(), 5);
+        assert!(begin(f, b"s", b"h").await.is_some());
     }
 }

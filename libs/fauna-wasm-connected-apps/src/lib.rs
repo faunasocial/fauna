@@ -120,6 +120,31 @@ mod bindings {
             serde_json::to_string(&self.inner.snapshot()).unwrap_or_default()
         }
 
+        /// A file version's author line (`file-version-author`) as a
+        /// `LocalizedText` JSON object (`{ key, args }`) the page resolves
+        /// through its own string table — the shared
+        /// `ConnectedAppsMachine::version_author` (`folder-deposit.md`
+        /// ruling 3: "<app> via <owner>" for a version a connected app
+        /// deposited). `depositedBy` is the version's hex writer key, or
+        /// `null`/`undefined` for a version nobody deposited.
+        #[wasm_bindgen(js_name = versionAuthorJson)]
+        pub fn version_author_json(
+            &self,
+            author_display: String,
+            deposited_by: Option<String>,
+        ) -> String {
+            serde_json::to_string(&self.inner.version_author(author_display, deposited_by))
+                .unwrap_or_default()
+        }
+
+        /// Whether naming the depositors `depositedBy` lists (hex writer
+        /// keys) wants a roster read (`refresh`) — the shared
+        /// `ConnectedAppsMachine::depositor_read_wanted`, asked once per key.
+        #[wasm_bindgen(js_name = depositorReadWanted)]
+        pub fn depositor_read_wanted(&self, deposited_by: Vec<String>) -> bool {
+            self.inner.depositor_read_wanted(deposited_by)
+        }
+
         /// A visit's re-read: hydrate this chunk's mail machine, then re-read
         /// the roster, the pending requests and the blocks. The hydrate comes
         /// first because the roster's mail read makes no nest call — it
@@ -332,6 +357,14 @@ mod bindings {
     #[wasm_bindgen(start)]
     fn panic_hook_start() {
         fauna_wasm_panic_hook::install("fauna-wasm-connected-apps");
+    }
+
+    /// Hand this chunk's `tracing` to the SPA's `logMessage`, so a shared crate's
+    /// log line running in this chunk reaches Settings → Logs (see
+    /// [`fauna_wasm_panic_hook::forward_tracing`]; the SPA's `joinChunk` calls it).
+    #[wasm_bindgen(js_name = setLogSink)]
+    pub fn set_log_sink(sink: js_sys::Function) {
+        fauna_wasm_panic_hook::forward_tracing(sink);
     }
 
     /// Test-only: deliberately panics, so an e2e can assert the hook above names

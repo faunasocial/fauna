@@ -540,13 +540,17 @@ held the clearing never runs: the graduation verifies the binding in full and
 [`nest/tls-certificates.md`](nest/tls-certificates.md) § B-IP bridge cert's
 ~4-day rotation — without ever downgrading a pinned host.
 
+**A stale SPKI pin heals by the same never-minting re-bind, in every process kind (ruled and built 2026-11-05).** Rule 3 above promises the re-bind, and the graduate-and-retry arm is where every bearer-carrying dial runs it — but until 2026-11-05 the arm fired only with **no** pin held, so a process that had pinned the nest's old leaf was never healed: a pinned dial refused for a moved SPKI surfaced its error and the next dial met the same leaf, for the life of the process. The nest's served SPKI moves legitimately, so this was not an edge: the floor's first ACME cert (a CA-issued key, not the floor key), a § B-IP bridge cert installed or lapsing, a floor-key rotation — and, until its own fix the same day, the admin-synthesized self-signed cert re-keying on every provisioning call, which is how it was found: the sync agent in the docker mail venue refused every bearer dial for a whole journey with `served cert SPKI does not match the pinned nest identity`, waiting for an interactive app that never re-handshakes on its behalf. The decision, for both process kinds at once, follows from what the two pins are: the **identity** pin is the durable, user-minted trust decision (§ Pin custody rule 2), the **SPKI** pin a per-process cache of the leaf a binding last proved (rule 3) — so moving the cache is never a mint, and the question "may this process accept the new SPKI?" has one answer wherever it is asked: **only if the pinned nest identity signs it over this connection.** (a) In the **interactive app**, the bearer dial's refusal for a moved SPKI arms the same strict graduation the consumer's dial runs (`PinMinting::Never`): the app may mint only on its signed login and claim paths, where a user is behind the decision, never on a failed dial with a bearer in hand. (b) In a **consumer process** — the sync agent, the File Provider extension — the identical arm verifies the new leaf against the identity the app pinned and re-pins the SPKI it signed; its store stays read-only and is never written. Mechanics, one implementation (`fauna_anon_client::tls_dial::dial_ws_trusted_with_graduate_retry`): the pinned verifier records the SPKI the served leaf presented whether it accepted or refused it, and the arm keys on that record, never on an error's text — a dial that failed before any certificate arrived, or met the pinned leaf and failed later, is not a stale pin and runs no graduation; a stale pin runs one anonymous `fauna.auth.nest_handshake`, and the retry goes out only when that left a pin other than the one the refused dial used: the new SPKI the identity signed, or none at all when the served cert graduated WebPKI-valid with no root held (the clearing rule above), in which case the retry is the strict-WebPKI dial. A box whose binding another identity signs leaves the pin untouched, so no retry is sent — the bearer never rides to it, and the one extra connection it sees carries a client nonce and nothing else. **A refused heal is the identity verdict, and it surfaces as one (built 2026-11-05):** when the graduation's refusal classifies as `IdentityChanged` (`classify_identity_changed` — another identity proved, fork evidence, or a pinned nest proving none), the dial fails with it typed (`TrustedDialError::IdentityChanged`, logged once at `error` where it is classified), never with the first dial's TLS error, which the reconnect supervisor read as retryable and redialled for the life of the process. The bearer channel maps it to `NestClientError::NestIdentityChanged`, so the supervisor stops and the app lands it on § Post-auth surfacing's `launch_identity_changed` surface; a caller that brings a stopped connection back on its own — the sync agent's relay seat and control-plane rebuild, an engine's `ensure_connected` — **parks** on it (`NestClient::identity_park`) while the install's pin still names the identity the verdict refused against, dialling nothing, and resumes by itself once the app's re-trust moves the pin. Witnesses, in-process over a real nest router: `bins/fauna-nest/tests/tls_stale_pin_heal.rs` (one nest state served over two leaves behind a switchable forwarder: the same identity's new leaf heals in three connections, another identity's is refused in two with the typed verdict, the identity pin and the SPKI cache untouched) and `tls_stale_pin_consumer_heal.rs` (a supervised client over a read-only store, connected when the served cert moves, comes back Connected under the new SPKI — or, when another identity signs it, stops on `NestIdentityChanged` with no redial at the forwarder and parks an `ensure_connected`); `reach_hint_session_dial.rs`'s stale-hint arm now counts the re-bind's anonymous handshake too.
+
+**The browser's bearer socket is the one bearer-carrying connection no pin reaches (2026-11-01).** A browser hands WASM no certificate, so rule 2 cannot run on web: the SPA's bearer socket is same-origin with the nest and WebPKI-authenticated, and its one off-origin dial — the reach hint's `wss://{ip}` while the account's domain is dark — has a stand-in of its own, owned by [`../behavior/onboarding-provisioning.md`](../behavior/onboarding-provisioning.md) § Reach hint → *The web session's half* → *Trust*.
+
 **No session resumption on a pinned config (ruled 2026-10-08; built the same day).** Rule 2 above says every bearer-carrying connection presents the pinned SPKI, and the reqwest legs read the pin *per handshake* — but a TLS 1.3 session resumed from a cached ticket runs no certificate verifier at all, so with rustls' default client-side session cache "per handshake" silently meant "per *full* handshake": a process holding a ticket from a host's OLD identity could keep resuming to that box on every reqwest leg (the content API, chunk fetch, the ranged reader) for the ticket's lifetime after the user approved a re-pin to a NEW identity (a replaced box — or a compromise the admin answered by replacing it), and a `forget_identity_pin` re-trust would not refuse the un-graduated self-signed host it exists to refuse until the cache aged out. The accept-it reading — the resumed session was itself verified under the pin of its day, and the server proves PSK possession — was weighed and refused: the pin store is this machine's statement of which nest stands behind an authority *now* (*The login's pin*, above), the re-pin is the one user act that changes it, a connection reaching the previous holder after it is exactly the connection the pin exists to refuse, and a ticket lifetime (RFC 8446 allows seven days) is not a window the user approved. Flushing the session store on re-pin was refused too: a second mechanism every pin writer across three crates must remember to call, and it would leave the capturing configs — whose connect paths read the captured SPKI *after* the handshake, which a resumed session never writes — correct only by the accident that each dial builds a fresh config. So the ruling makes the state unrepresentable: **every config `tls_verify::config_with` builds — capturing, SPKI-pinned and dynamically pinned alike — disables client session resumption (`ClientConfig::resumption = Resumption::disabled()`)**, so every connection is a full handshake, the verifier is the only path to a connection, and *per-handshake* means *per connection*. The cost is one cert parse and one signature verification per new TCP connection, behind reqwest's connection pool (TLS 1.3 resumption saves no round trip without early data, which these configs never enable); on a `Connection: close` server the ranged reader pays it per read, beside the TCP and TLS round trips it already pays. Witness: `libs/fauna-client/tests/reqwest_pinned_tls.rs::a_re_pin_bites_on_the_next_request_even_when_the_server_offers_resumption` against the shared fixture with resumption ENABLED (`common::ServerSessions::Resumable`), red first under the default cache; the fixture's default rig stays full-handshake-only so the other trust assertions observe the verifier alone.
 
-**The native-player leg — a native app's media player never dials the nest (ruled 2026-10-08, a design pass; the shared reader BUILT 2026-10-08, windows' adapter 2026-10-09, linux' and android's 2026-10-10, apple's UNBUILT — `## Implementation status today`).** Every leg above is a client the app builds, which is why the policy reaches it: `tls_dial` for a WS, `store_pinned_reqwest_tls` for a reqwest leg, and the three platform HTTP legs through their `NestCertTrust` shims over the shared FFI classifiers. A platform media player handed a URL — windows' `MediaPlayer`, `AVPlayer` on macos + ios, android's framework `MediaPlayer` / `VideoView`, GTK's GStreamer-backed `gtk::Video` on linux — is none of these: it dials through the OS media stack's own HTTP client, which validates against the OS trust store alone. No WebPKI waiver the app decided, no loopback carve-out, no SPKI pin reaches it, so it refuses the always-live self-signed floor ([`nest/tls-certificates.md`](nest/tls-certificates.md) § The two-layer model) that every nest serves before ACME succeeds, that a LAN / `.local` / bare-IP nest serves for good — **and that the same-box install serves on `https://127.0.0.1:3000`** ([`installers/windows.md`](installers/windows.md)): the OS stack knows nothing of the loopback carve-out either, so the failure is not a remote-nest edge case but the windows default. The rule, for every native app: **a nest URL is handed to no OS component — not a media player, not an image loader, not a download manager. The component reads from a byte source the app owns, and that source is fed by the one pinned leg: the shared-Rust ranged reader (`fauna_client::RangedNestReader` over `pinned_http_client`, `Range` GETs only, UniFFI-faced for windows / apple / android and consumed directly on linux).** Where it stands in this section's model: it is a reqwest leg, so it is `store_pinned_reqwest_tls`'s — the pin is armed whenever a feed exists (*The login's pin*, above: the login graduated it), and `fauna_ffi` is statically linked into every native app, so the reader reads the same process-global store the WS handshake wrote. It carries no bearer and needs no session (the blob route is unauthenticated by design, the proxy's playback ticket rides the query — [`render-model.md`](render-model.md) § D6c → *Inline playback* answer (4)), which is also why nothing kept it platform-side the way the bearer-carrying content API legs are: the reader is a pure function of the nest URL and the pin store. What the player is, how the app wraps the reader into each platform's byte-source seam, and the `Sealed` arm (unchanged — whole blob through the app's existing pinned fetch) are [`render-model.md`](render-model.md) § D6c → *Inline playback* answer (1)'s. Three alternatives were rejected, each a fifth hand-rolled trust path of exactly the sync-plane kind the paragraph above records: **installing the floor cert into the OS trust store** — a per-install ceremony the user would perform against a 90-day-rotating key (configuration theatre under [`../principles.md`](../principles.md) § One configuration surface; on ios and android a visible profile install; and a system-wide trust grant for a per-app need); **the platforms' static pin manifests** (`NSPinnedDomains`, android's network-security-config `<pin-set>`, a `HttpBaseProtocolFilter` on windows — which only the HLS / DASH `AdaptiveMediaSource` accepts) — a pin here is graduated at runtime per nest and never known at build time; **a loopback relay the player dials** (`http://127.0.0.1:<port>` → the pinned client) — a listener any co-resident process can read (§ Co-resident process trust boundary), bearer-less by construction, and the sealed arm's plaintext on a socket. Outside this leg: web (the SPA is same-origin with the nest, so the browser's `<video>` already is the pinned peer) and tui (its handoff downloads whole files through the content API — [`apps/tui.md`](apps/tui.md) § External media handoff).
+**The native-player leg — a native app's media player never dials the nest (ruled 2026-10-08, a design pass; the shared reader BUILT 2026-10-08, windows' adapter 2026-10-09, linux' and android's 2026-10-10, apple's 2026-10-22 — `## Implementation status today`).** Every leg above is a client the app builds, which is why the policy reaches it: `tls_dial` for a WS, `store_pinned_reqwest_tls` for a reqwest leg, and the three platform HTTP legs through their `NestCertTrust` shims over the shared FFI classifiers. A platform media player handed a URL — windows' `MediaPlayer`, `AVPlayer` on macos + ios, android's framework `MediaPlayer` / `VideoView`, GTK's GStreamer-backed `gtk::Video` on linux — is none of these: it dials through the OS media stack's own HTTP client, which validates against the OS trust store alone. No WebPKI waiver the app decided, no loopback carve-out, no SPKI pin reaches it, so it refuses the always-live self-signed floor ([`nest/tls-certificates.md`](nest/tls-certificates.md) § The two-layer model) that every nest serves before ACME succeeds, that a LAN / `.local` / bare-IP nest serves for good — **and that the same-box install serves on `https://127.0.0.1:3000`** ([`installers/windows.md`](installers/windows.md)): the OS stack knows nothing of the loopback carve-out either, so the failure is not a remote-nest edge case but the windows default. The rule, for every native app: **a nest URL is handed to no OS component — not a media player, not an image loader, not a download manager. The component reads from a byte source the app owns, and that source is fed by the one pinned leg: the shared-Rust ranged reader (`fauna_client::RangedNestReader` over `pinned_http_client`, `Range` GETs only, UniFFI-faced for windows / apple / android and consumed directly on linux).** Where it stands in this section's model: it is a reqwest leg, so it is `store_pinned_reqwest_tls`'s — the pin is armed whenever a feed exists (*The login's pin*, above: the login graduated it), and `fauna_ffi` is statically linked into every native app, so the reader reads the same process-global store the WS handshake wrote. It carries no bearer and needs no session (the blob route is unauthenticated by design, the proxy's playback ticket rides the query — [`render-model.md`](render-model.md) § D6c → *Inline playback* answer (4)), which is also why nothing kept it platform-side the way the bearer-carrying content API legs are: the reader is a pure function of the nest URL and the pin store. **And it dials only the signed-in nest:** `nest_url` is the string the WS login minted on, so a post homed on another nest — whose bytes this nest never holds — has nothing to stream from here; its plain `Video` is fetched whole through the post-blob plane instead, the home's pin graduated by the plane, ruled and owned by [`feed-read-model.md`](feed-read-model.md) § The read model → *Opening a post the timeline never loaded* → *A post homed on another nest* (the video leg, 2026-10-23). What the player is, how the app wraps the reader into each platform's byte-source seam, and the `Sealed` arm (unchanged — whole blob through the app's existing pinned fetch) are [`render-model.md`](render-model.md) § D6c → *Inline playback* answer (1)'s. Three alternatives were rejected, each a fifth hand-rolled trust path of exactly the sync-plane kind the paragraph above records: **installing the floor cert into the OS trust store** — a per-install ceremony the user would perform against a 90-day-rotating key (configuration theatre under [`../principles.md`](../principles.md) § One configuration surface; on ios and android a visible profile install; and a system-wide trust grant for a per-app need); **the platforms' static pin manifests** (`NSPinnedDomains`, android's network-security-config `<pin-set>`, a `HttpBaseProtocolFilter` on windows — which only the HLS / DASH `AdaptiveMediaSource` accepts) — a pin here is graduated at runtime per nest and never known at build time; **a loopback relay the player dials** (`http://127.0.0.1:<port>` → the pinned client) — a listener any co-resident process can read (§ Co-resident process trust boundary), bearer-less by construction, and the sealed arm's plaintext on a socket. Outside this leg: web (the SPA is same-origin with the nest, so the browser's `<video>` already is the pinned peer) and tui (its handoff downloads whole files through the content API — [`apps/tui.md`](apps/tui.md) § External media handoff).
 
-**The proven identity is remembered per connection (ruled 2026-10-10; built the same day in shared Rust).** Every client decision keyed on "which nest is this" reads the identity the connection is **bound** to and refuses a nest whose own `fauna.nest.info` claim disagrees (`## Implementation status today`, the bound-identity bullet) — a proof of two round trips, the possession proof or pin read plus the cross-check. That proof is a fact about a **connection**, not about a read: it cannot change for the life of a bound connection, and a reconnect — to the same address, to a different box behind it, or by a client bound to another nest — is a new connection that proves afresh. So the one shared resolver (`LinkedNestsMachine::bound_nest_id`, behind every app's `resolve_this_nest_id` / FFI / wasm twin) runs the proof **once per connection** and serves it from the transport's own memo for that connection only (`fauna_protocol::ProvenIdentityMemo`, owned by the native `NestClient` and the wasm `WsRpcClient`, keyed on the live dispatcher's process-unique `connection_id`, which both transports mint per (re)connect). Three rules keep it a memo of a *proof*, never a cache of a *claim*: (1) nothing is remembered until the cross-check passed over this very connection, and a refusal remembers nothing; (2) the resolver takes the live connection's number BEFORE its first round trip and remembers only if that number is still live after the last — a proof that straddled a reconnect is attributed to no connection; (3) a seam with no connection of its own (a port-built web chunk, a test fake) proves on every read as before. **Why now:** every reader — the backups page's reads and writes, the custody leg at both its edges, the ledger aftermath, the DNS cert target — re-proved per call, and the `fauna.nest.info` leg rides the nest's per-actor discovery budget (`anonymous_rate_limit::DISCOVERY_MAX_EVENTS`, 60 events / 60 s on a release nest); a user signing in and enrolling this device as a custodian within the minute was refused `rate_limited` on the enroll itself, and the destination they asked for was never created (measured on tui against a release image, 2026-10-10). The budget stays at 60: raising it would weaken the harvesting bound it exists for, and the lever is the client's volume. Witnesses: `fauna_client_pair::tests::{the_proven_identity_is_remembered_per_connection_and_a_rebind_re_proves, a_proof_that_straddled_a_reconnect_is_not_remembered, a_seam_without_a_memo_proves_on_every_read}` and the memo's own `fauna_protocol::requester::proven_identity_tests`.
+**The proven identity is remembered per connection (ruled 2026-10-10; built the same day in shared Rust).** Every client decision keyed on "which nest is this" reads the identity the connection is **bound** to and refuses a nest whose own `fauna.nest.info` claim disagrees (`## Implementation status today`, the bound-identity bullet) — a proof of two round trips, the possession proof or pin read plus the cross-check. That proof is a fact about a **connection**, not about a read: it cannot change for the life of a bound connection, and a reconnect — to the same address, to a different box behind it, or by a client bound to another nest — is a new connection that proves afresh. So the one shared resolver (`LinkedNestsMachine::bound_nest_id`, behind every app's `resolve_this_nest_id` / FFI / wasm twin) runs the proof **once per connection** and serves it from the transport's own memo for that connection only (`fauna_protocol::ProvenIdentityMemo`, owned by the native `NestClient` and the wasm `WsRpcClient`, keyed on the live dispatcher's process-unique `connection_id`, which both transports mint per (re)connect). Three rules keep it a memo of a *proof*, never a cache of a *claim*: (1) nothing is remembered until the cross-check passed over this very connection, and a refusal remembers nothing; (2) the resolver takes the live connection's number BEFORE its first round trip — waiting first, as any request does, for a connection to be live (`RpcRequester::ready_connection_id`), so a proof a sign-in starts while the socket is still dialling is ticketed on the connection it then runs on — and remembers only if that number is still live after the last — a proof that straddled a reconnect is attributed to no connection; (3) a seam with no connection of its own (a port-built web chunk, a test fake) proves on every read as before. Readers that ask at once on one connection share one proof: the memo's prove gate (`ProvenIdentityMemo::proving`) is held across a proof, and a reader that missed waits for it and re-reads the memo (2026-11-02 — a linux launch was drawing three cross-checks where one was owed, because the custody leg, the Nests page's home row and the backups page each missed while the first proof was in flight); the gate serializes and decides nothing, so rules (1)–(3) are unchanged. The Nests page's home row reads no claim at all: its URL is the seam's own address (`LinkedNestsNest::nest_url`, no round trip), and its id is a remembered proof's when this connection has one, else the binding read itself, so a nest whose claim disagrees still gets its row under the bound id (2026-11-02; witness `fauna_client_pair::tests::the_home_row_reads_no_claim_of_its_own`). **Why now:** every reader — the backups page's reads and writes, the custody leg at both its edges, the ledger aftermath, the DNS cert target — re-proved per call, and the `fauna.nest.info` leg rides the nest's per-actor discovery budget (`anonymous_rate_limit::DISCOVERY_MAX_EVENTS`, 60 events / 60 s on a release nest); a user signing in and enrolling this device as a custodian within the minute was refused `rate_limited` on the enroll itself, and the destination they asked for was never created (measured on tui against a release image, 2026-10-10). The budget stays at 60: raising it would weaken the harvesting bound it exists for, and the lever is the client's volume. Witnesses: `fauna_client_pair::tests::{the_proven_identity_is_remembered_per_connection_and_a_rebind_re_proves, a_proof_that_straddled_a_reconnect_is_not_remembered, a_seam_without_a_memo_proves_on_every_read, concurrent_readers_on_one_connection_share_one_proof}` and the memo's own `fauna_protocol::requester::proven_identity_tests`.
 
-**The nest's self-description is read once per connection (2026-10-11).** The node leg (`domain`, `version`), the feature-limits capability set (`capabilities`) and the sign-in update look (`newest_release`) all fold the one `fauna.nest.info` reply, so the transport remembers it per connection beside the proven identity: `fauna_protocol::NestInfoMemo`, owned by the native `NestClient` and the wasm `WsRpcClient`, keyed on the same `connection_id`, and read only through `fauna_protocol::read_nest_info` — which `StatusClient::nest_info`/`node`, `FeaturesClient::node_capabilities` (behind `rows` and `authored_surface`) and `update_look::look_at_sign_in` call, so every app that reaches those shared readers (directly, over UniFFI or over wasm) draws one read per connection with no app-side memo. The rules are the proof memo's, plus two: concurrent readers on one connection share the first one's round trip (the slot is an async lock held across the read), and an error is never remembered. **Which readers may share it:** a reader whose answer is fixed for a connection's life or is read once per connection anyway — a nest restart or upgrade drops the socket, the one runtime-gated capability (`relay`) gates no feature-limits row, and the sign-in look reads `newest_release` once per sign-in. A reader that needs `newest_release` or `relay` as they are now, mid-connection, reads `fauna.nest.info` itself; so does the identity cross-check, whose proof is its own memo's. Witnesses: `fauna_protocol::nest_info_memo::tests` and the beacon counts in `tests/e2e-unified/tests/test_nest_info_draw.py`.
+**The nest's self-description is read once per connection (2026-10-11).** The node leg (`domain`, `version`), the feature-limits capability set (`capabilities`) and the sign-in update look (`newest_release`) all fold the one `fauna.nest.info` reply, so the transport remembers it per connection beside the proven identity: `fauna_protocol::NestInfoMemo`, owned by the native `NestClient` and the wasm `WsRpcClient`, keyed on the same `connection_id`, and read only through `fauna_protocol::read_nest_info` — which `StatusClient::nest_info`/`node`, `FeaturesClient::node_capabilities` (behind `rows` and `authored_surface`), `AdminClient::dashboard_snapshot` (the admin dashboard's domain card, whose other reads re-run on every arrival), `update_look::look_at_sign_in`, `SubscriptionsClient::nest_supports` and the follow intent's own-nest id (`SubscriptionsClient::follow_intent`), the mail-settings seams' `nest_supports` (the sealed spam-model check, under the seam's transient retry), and the deployment-seed custody's box-domain label (`fauna_client_config::custody_leg::resolve_box_domain`, an admin's custody leg and plane rotation) call, so every app that reaches those shared readers (directly, over UniFFI or over wasm) draws one read per connection with no app-side memo. The rules are the proof memo's, plus two: concurrent readers on one connection share the first one's round trip (the slot is an async lock held across the read), and an error is never remembered. A read issued before the first connect waits for the connection, as its request would, before it takes the ticket (`RpcRequester::ready_connection_id`, on the native `NestClient` and the wasm `WsRpcClient`): a sign-in's pages hydrate while the socket is still dialling, and a gap read ticketed on no connection was remembered for nothing, so every reader after it read again (measured on linux, 2026-11-02). That wait is bounded by `fauna.nest.info`'s own deadline, the one its read would make anyway, and is taken before the memo's slot: with the nest down, readers queued behind one another's waits held a settings landing for one wait per leg and tui's settings sub-page navigation went unacknowledged (2026-11-03); side by side they settle within one, and a reader that found no connection reads without the slot, sharing and remembering nothing. **Which readers may share it:** a reader whose answer is fixed for a connection's life or is read once per connection anyway — a nest restart or upgrade drops the socket, the one runtime-gated capability (`relay`) gates no feature-limits row, and the sign-in look reads `newest_release` once per sign-in. A reader that needs `newest_release` or `relay` as they are now, mid-connection, reads `fauna.nest.info` itself; so does the identity cross-check, whose proof is its own memo's. **Every reader that reads itself, and why:** the identity cross-check (`LinkedNestsMachine::proven_self`, once per connection under the proof memo); the sync engine's peer leg and the share plane's live brake (`peer_leg::fetch_nest_facts`, `share_glue::live_nest_facts` — `relay` and the relay URL as they are now, one read per pump pass, the peer leg on its own connection); the web page's serving domain (`WebClient::serving_domain` — a domain claimed mid-session re-points it with no restart and no push, so it is read on each visit to the page and never at sign-in); the nest-rules re-read past the memo on a `nest_info` push and on reconnect (the push says the memo's reply is stale); and the readers on other connections — a backup destination's identity check (`segment_backup`), CalDAV attendee discovery (anonymous connections to other nests), onboarding's nest-rules identity check. Witnesses: `fauna_protocol::nest_info_memo::tests`, `fauna_client_admin::dashboard::tests::re_entries_on_one_connection_read_nest_info_once`, `fauna_client_subscriptions::tests::capability_checks_and_the_follow_intent_share_one_nest_info_read`, `fauna_client_mail_settings::rpc_glue::tests::nest_supports_reads_once_per_connection_and_still_retries_a_drop`, `fauna_client_config::custody_leg::tests::the_capture_labels_its_domain_off_the_connections_one_nest_info_read` and the beacon counts in `tests/e2e-unified/tests/test_nest_info_draw.py` (a sign-in, a journey, the settings landing's re-loads, the admin dashboard's re-entries, the user pages' re-entries, and one launch down to an expanded folders row — 3 on tui, 2 on linux, pinned at 3, the figure a module of short tests multiplies by about fifteen launches a minute; linux drew 5 there while concurrent identity readers each proved, and 4 while a launch's first reader read before the connection was numbered).
 
 ### Post-auth surfacing — a mid-session identity change blocks, on the same surface (ratified 2026-07-23)
 
@@ -593,7 +597,7 @@ de-facto dead — its connections can no longer graduate — so a soft surface
 over a broken session would be strictly worse, a generic-error mystery
 instead of the honest verdict). Background refreshes stay silent for every
 *other* failure class: transient/network errors remain logged-and-swallowed;
-only the identity verdict escalates.
+only the identity verdict escalates. (One web exception, which is about reaching recovery and not about trust: `behavior/onboarding.md` § App-launch routing, the gating paragraph.)
 
 The plumbing rule that makes the routing implementable: **the typed verdict
 must survive every seam between detection and surface.** The shared error
@@ -667,7 +671,7 @@ state — only a probe that cannot reach the nest keeps that poll going
 `awaiting_manual_dns.rs::recheck_probe_identity_mismatch_is_terminal_not_the_dns_resting_message`,
 `machine_lifecycle.rs::pending_poll_typed_verdicts_end_on_the_terminal_error`).
 
-### Pin custody across processes — one install-scoped store, one interactive minter
+### Pin custody across processes — one install-scoped store, interactive minters only
 
 An app installation can put several **processes** on the wire to the same
 nest: the interactive app, and headless helpers with no user attached — the
@@ -687,14 +691,14 @@ across them follows two rules (ratified 2026-07-22):
    the next one (`installers/macos.md` § Identifier domain, item 5) — with
    the app keeping a **read replica** at the container's `trust/` for the
    sandboxed File Provider extension, which can reach nothing else; the
-   replica is the writer's own file, copied on every persist by the store
+   replica is the writer's own file, copied after every write by the store
    itself (`DiskPinStore::open_in_dir_with_mirror`), so rule 2 is untouched
    and a stale replica fails closed exactly like a missing pin; platforms
    whose processes share a plain config dir — linux, windows — already
    satisfy this with the dir itself). A per-process store is a bug twice over: the helper
    starts empty (it can never authenticate a TOFU-rooted nest the user already
    trusts), and any pin it *did* learn would drift from the app's.
-2. **Only the interactive app mints or removes pins; every other process is a
+2. **Only an interactive app mints or removes pins; every other process is a
    read-only consumer.** First-trust and re-trust are user decisions, made
    where a user is present — the SSH model: an interactive session prompts,
    batch mode (`StrictHostKeyChecking=yes`) refuses unknown hosts. A consumer
@@ -705,6 +709,17 @@ across them follows two rules (ratified 2026-07-22):
    would forfeit the pin-change warning this section promises. Consumer stores
    read the file per lookup (uncached), so a pin the app mints after the
    consumer launched is honored on its next retry without a process relaunch.
+   **An install may have several interactive apps — the desktop app and tui
+   share one install-scoped store on linux, macOS and windows — and every one
+   of them is a minter of that one store (ruled 2026-11-05).** So the store's writes are MERGES, never whole-file
+   overwrites: each mint, removal or rotation acceptance re-reads the file
+   under an advisory exclusive lock on a sibling lock file, applies that one
+   change and writes the result back atomically, and each lookup reads the
+   file afresh. Two minters whose lifetimes overlap then never erase each
+   other's pins (which would hand the next dial a silent first use — the
+   pin-change warning forfeited, a MITM at that dial pinned) nor resurrect a
+   pin the user just forgot (a re-trust silently undone), and a TOFU check
+   sees a pin another minter took.
 
 Mechanism: `NestIdentityPinStore::read_only()` marks a consumer backend
 (`cert_binding::ReadOnlyDiskPinStore`); graduation then takes the strict TOFU
@@ -761,6 +776,31 @@ against a store the app never wrote and failed `PinRequired` forever. (The
 one-time adoption of pins pre-fix tui builds minted into the per-app dir was
 retired 2026-09-24 with the adoption above.)
 
+**An isolated agent reads its app's replica (ruled 2026-11-04).** A test
+launch keeps the sync agent off the box (convention 10,
+[`e2e-launch-isolation.md`](e2e-launch-isolation.md)), and on windows that
+means the agent runs on a `--data-dir` of its own. An agent on a `--data-dir`
+keeps its read-only store at `<data-dir>/trust`, never the box's trust home,
+while the app that spawned it writes its own data dir. So the two never met:
+the agent saw no pin for any self-signed nest its app had trusted and waited
+on `PinRequired` for good. Rule 1 now holds the macOS way. The app's writer
+store keeps a **read replica** of its pin file in the agent's trust dir, the
+same `DiskPinStore::open_in_dir_with_mirror` copy macOS keeps for its File
+Provider extension, refreshed when the store is installed and after every
+write. The agent reads the app's pins and never mints
+(rule 2), and neither process touches the box's trust home. One function
+names that dir, `fauna_client_sync::agent_spawner::agent_trust_dir`: the
+agent's path table uses it, and so does `spawned_agent_pin_replica_dir`, which
+the writers consult (the windows app through `fauna-ffi`'s
+`install_nest_identity_pin_store`, and fauna-tui). It answers `Some` exactly
+when the windows spawner forwards `--data-dir`, under the same `cfg` gate, so
+a production build and every unix target keep the plain store. A unix agent
+takes no `--data-dir` and inherits the launch's relocated home, so there the
+writer and the reader already resolve the same `install_scoped_trust_home`.
+The dir is set by the build and the harness, never by a user or admin.
+Witness: tier_1 `trust::tests::a_pin_the_app_mints_reaches_an_agent_on_a_data_dir`
+in `bins/fauna-sync-agent`.
+
 **The standalone headless daemon was its own install (ratified 2026-08-02;
 the daemon was removed 2026-10-02 — `apps/sync-agent.md` § Headless
 deployment — and this paragraph is kept as the record).**
@@ -798,6 +838,41 @@ reqwest leg now share the WS handshake's pinned SPKI (below). The disk-backed pi
 app (linux / windows / android / macOS / iOS all now build-verified — the
 mac binding regen landed and iOS is additionally live-run-verified against a
 real self-signed dev nest, see below).
+
+- **Several minters of one store merge (§ Pin custody across processes,
+  rule 2) — built 2026-11-05 in shared Rust.** `DiskPinStore`
+  (`libs/fauna-anon-client/src/cert_binding.rs`) writes every change as a
+  read-modify-write of the file under a `File::lock` on
+  `nest_identity_pins.json.lock` and re-reads the file at each lookup, so the
+  desktop app's writer and tui's no longer overwrite each other; no per-app
+  change. A write that fails (an unwritable dir, a full disk) is held
+  in-process and laid over every read of the file, so this process keeps the
+  pin it minted, or the forget it made, for the session, and the next write
+  that lands carries it; each write's temp file is the writer's own (pid and
+  a counter), so writers on the unlocked fallback never share one. Witnesses
+  `cert_binding::tests::two_writers_on_one_store_merge_never_overwrite`,
+  `a_failed_write_keeps_this_process_change_for_the_session`,
+  `a_landed_write_drops_the_held_change_so_a_later_forget_stands` and
+  `concurrent_writers_on_one_store_lose_no_pin` (the last reddens with the
+  lock taken out). Accepted residual: a held change is replayed over the
+  file as it is when it finally lands, so a change another minter's write
+  landed for the same host while it was held is overwritten — a forget then
+  undoes a later re-pin (the next dial is a first use), a pin a later pin
+  (the other process then refuses a mismatch). It needs this process's write
+  to fail while another's on the same file succeeds, a transient full disk
+  being the case found.
+- **The isolated agent's replica (§ Pin custody across processes, *an
+  isolated agent reads its app's replica*) — built 2026-11-04 for windows and
+  tui-on-windows; its e2e witness is owed.** The mechanism is
+  pinned tier_1. The e2e witness is a windows run on a TLS nest whose agent log
+  shows authenticated connects with no `no pin for this host` line
+  (`test_custody_cold_device_restore.py` `[windows]`). **macOS needs no replica and is not split (built
+  2026-11-05):** under `FaunaE2E.isActive`, `NestTrust.installPinStore()` writes
+  `install_scoped_trust_home()` (`<home>/Library/Application Support/Fauna/trust`
+  inside the relocated `HOME`), the same derivation the e2e agent it spawns
+  reads with no `--data-dir`, and keeps no app-group container replica. The
+  FaunaKit unit test pins the dir equality; the e2e witness
+  (`test_nest_identity_pin.py` `[macos]`) is owed.
 
 - **Graduation now covers BOTH legs.** The *bearer-carrying* leg
   (`fauna_anon_client::graduate_handshake` on `fauna-launch-machine` +
@@ -895,10 +970,13 @@ The macOS/iOS binding-regen verification (below) has since landed too.
   The browser residual stands by ruling: a browser fetch is WebPKI only, so a
   self-signed home's post stays teased on web, and no relay through the
   reader's nest cures it. The delivered post's carrier: `follow_delivery::
-  deliver_handler` stores the delivery's verified `origin_nest_id` as
-  `content.origin_nest_id` (schema 155, `CacheDb::put_delivered_post_index_only`),
-  `db::feeds::project_home_nest_urls` projects it beside the URL (never for a
-  discovery stub, which no verified channel delivered), `FeedPostItem.
+  deliver_handler` stores each delivering home's verified `origin_nest_id` in
+  its `follow_delivery_homes` custody row (schema 161,
+  `CacheDb::put_delivered_post_index_only`; the first home's also as
+  `content.origin_nest_id`), `db::feeds::project_home_nest_urls` projects
+  beside the URL the identity of the home the reader's own follow names
+  (`../behavior/federated-follow.md` § Decision 3 owns which home a reader is
+  shown; never for a discovery stub, which no verified channel delivered), `FeedPostItem.
   home_nest_actor_id` carries it and `fauna_feed`'s `map_post` folds it onto
   `PostSummary.home_nest_actor_id`, so the same `blob_home` hands every native
   app's byte legs the delivered post's home with its identity. The room's
@@ -1000,8 +1078,8 @@ The macOS/iOS binding-regen verification (below) has since landed too.
     login, `test_nest_identity_pin_webpki.py` (tui, built 2026-10-13): red
     at its "the login leaves the pin" half with the waiver's
     `binding.is_none()` clause removed, green on current code, with a
-    self-signed control arm green on both (`e2e-automation-surface-gating.md`
-    § Implementation status today records the runs).
+    self-signed control arm green on both (`e2e-gated-seeds.md`
+    § Implementation status today records the runs and every app's join).
   - **The TOFU-mint decision is atomic** (`NestIdentityPinStore::pin_if_absent`,
     fixed 2026-08-17): `check_identity_root`'s `Tofu` arm used to check-then-act
     (`get()` a pin, decide, then a separate `set()`) — a genuine race between two
@@ -1148,7 +1226,7 @@ The macOS/iOS binding-regen verification (below) has since landed too.
         `fauna_onboarding_machine::helpers::nest_host`,
         `parse_node_address` below, `fauna_core::data::url_host` (the
         peer-anchor nest-URL extractor),
-        `fauna_launch_machine::auth::hint_authority_url` (the wasm reach-hint
+        `fauna_core::web::reach_authority_url` behind `ReachDial::over_hint` (the wasm reach-hint
         dial, joined 2026-09-14, which also composes
         `split_host_port` to keep the URL's own port when substituting the
         hint IP), and `fauna_provisioning::probe::split_host_port` (joined
@@ -1262,7 +1340,7 @@ The macOS/iOS binding-regen verification (below) has since landed too.
     e2e run exists until the run venue's harness lands (`testing.md` § Default app and
     nest mode → *Android's run venue*).
   - **The native-player leg — reader BUILT 2026-10-08, windows' adapter BUILT 2026-10-09,
-    linux' and android's BUILT 2026-10-10, apple's UNBUILT (ruled 2026-10-08, § Transport trust → *The native-player
+    linux' and android's BUILT 2026-10-10, apple's BUILT 2026-10-22 (ruled 2026-10-08, § Transport trust → *The native-player
     leg*).** The shared reader exists: `fauna_client::RangedNestReader`
     (`libs/fauna-client/src/ranged_nest_reader.rs` — a `bytes=0-0` probe for `len` /
     `content_type`, then one `Range` GET per `read_at`, over `pinned_http_client`) and its
@@ -1284,22 +1362,29 @@ The macOS/iOS binding-regen verification (below) has since landed too.
     GStreamer's streaming thread. **android reads through the UniFFI face:**
     `InlineVideoPlayback.resolve` opens `FfiRangedNestReader` on `ApiClient.nodeUrl` off
     the main thread, and the framework `MediaPlayer` reads it through
-    `RangedNestDataSource` (`setDataSource(MediaDataSource)`). Still open: apple's `InlineVideoPlayer.start` hands `AVPlayerItem(url:)` the
-    nest URL, so there every public-`Video` stream (and every ticketed `ProxiedVideo`
-    stream, once apple wires its tap) is dialed by the OS media stack, unpinned, and fails
-    against a nest on its self-signed floor, the same-box install included. The `Sealed` arm is unaffected on every app (its bytes ride the pinned
+    `RangedNestDataSource` (`setDataSource(MediaDataSource)`). **macos + ios read through
+    it too (2026-10-22):** `FeedVM.videoPlayback` answers a `Url` arm as
+    `VideoPlaybackMedia.stream` on `APIClient.nodeUrl.absoluteString` (the WS login's
+    string) + the path, and `InlineVideoPlayer.start` plays an `AVURLAsset` on the
+    private `fauna-nest://` scheme whose `AVAssetResourceLoaderDelegate`,
+    `NestAssetResourceLoader` (FaunaKit), opens `FfiRangedNestReader` off the main thread
+    on its first load and answers the content-information request (the UTI of the
+    reader's `video/*` / `audio/*` type, else of the ISO-BMFF brand) and each data
+    request in 256 KiB `read_at` chunks, released with the player; nothing on apple
+    hands the OS media stack a nest URL. The `Sealed` arm is unaffected on every app (its bytes ride the pinned
     fetch). **The e2e:** `test_feed_video_playback.py`'s ordinary legs run on the
     plain-HTTP session nest (`FAUNA_INSECURE_DISABLE_TLS`) and cannot see this, so its
     TLS twin `test_a_video_plays_against_a_self_signed_nest` runs the same journey on
     `self_signed_logged_in_app` (the loopback floor) and `spki_pinned_logged_in_app` (the
-    pin branch) — windows' and linux' legs green; android's owed with its run venue
-    (`InlineVideoPlaybackTest` pins the data source over a fake reader meanwhile); macos +
-    ios declared unbuilt until apple's adapter lands, joining it red first.
+    pin branch) — windows', linux', macos' and ios' legs green (`InlineVideoPlaybackTests`
+    pins apple's loader over a fake reader); android's owed
+    with its run venue (`InlineVideoPlaybackTest` pins the data source over a fake reader
+    meanwhile).
   - A disk-backed identity pin store (`cert_binding::DiskPinStore`) survives
     restarts; the in-memory `MemoryPinStore` is the default until an app
     installs the disk store (`trust::install_pin_store`). **Linux installs it**
     at startup (`apps/fauna-linux/src/client.rs::install_disk_pin_store`, called
-    from `main.rs`'s `connect_startup` before the first authenticated connect)
+    from `lib.rs`'s `connect_startup` before the first authenticated connect)
     rooted at `~/.config/fauna/nest_identity_pins.json` — the XDG config dir its
     MLS / P2P / window-state stores already use, *not* the nest sidecar's
     `service_watcher::resolve_data_dir()` (which is `None` for a pure client, so
@@ -1337,7 +1422,19 @@ The macOS/iOS binding-regen verification (below) has since landed too.
     `bins/fauna-nest/tests/tls_pin_consumer_fallback.rs`; the fallback's
     graduation never minting in a *writable*-store process either
     (`PinMinting::Never`, 2026-09-28) by its twin
-    `tls_bearer_dial_fallback_never_mints.rs`.
+    `tls_bearer_dial_fallback_never_mints.rs`. **The stale-pin heal (built
+    2026-11-05, § Cross-connection binding):** the same arm now
+    fires on a pinned dial refused for a moved served SPKI, in the app and in
+    every consumer, witnessed by `tls_stale_pin_heal.rs` and
+    `tls_stale_pin_consumer_heal.rs`. A heal refused because another identity
+    signed the new leaf carries the typed verdict through the dial seam (built
+    2026-11-05): `TrustedDialError::IdentityChanged` →
+    `NestClientError::NestIdentityChanged`, which stops the supervisor, and
+    `NestClient::identity_park` holds every self-reconnecting caller (the sync
+    agent's relay seat and control-plane rebuild, an engine's
+    `ensure_connected`) while the refused pin is still held — witnessed by
+    `tls_stale_pin_heal.rs` and the supervised twin in
+    `tls_stale_pin_consumer_heal.rs` (no redial at the forwarder).
   - **The desktop background sync agents are read-only consumers too (closed
     2026-07-22 — was the "installs no pin store at all" gap).**
     `bins/fauna-sync-agent` ran on the writable `MemoryPinStore` default, which
@@ -1372,7 +1469,7 @@ The macOS/iOS binding-regen verification (below) has since landed too.
      - **tui** (native Rust): `session::install_disk_pin_store` → the
        install-scoped trust home (`install_scoped_trust_home`, § Pin custody
        across processes rule 1 — never a per-app `fauna-tui/` dir), called once
-       from `main.rs` before `launch::start` runs the silent challenge. Same
+       from `lib.rs` before `launch::start` runs the silent challenge. Same
        shared seam as Linux (`DiskPinStore::open_in_dir` →
        `trust::install_pin_store`, canonical `NEST_IDENTITY_PIN_FILE`), so on
        Linux the two apps read and write the one pin file — the install's, not
@@ -1384,7 +1481,10 @@ The macOS/iOS binding-regen verification (below) has since landed too.
        change across a restart — the pin's whole point — was never caught on tui.
      - **UniFFI apps (windows / macOS / iOS / android):** one shared exported
        Rust fn `fauna_ffi::install_nest_identity_pin_store(data_dir)` (which calls
-       `DiskPinStore::open_in_dir` → `trust::install_pin_store`), called once at
+       `DiskPinStore::open_in_dir_mirrored_to` → `trust::install_pin_store`; the
+       plain store unless a windows test build pins its agent's data dir —
+       § Pin custody across processes, *an isolated agent reads its app's
+       replica*), called once at
        each native startup with that app's config dir — macOS/iOS
        `FaunaKit.NestTrust.installPinStore()` (the app-group `trust/` dir since
        2026-07-22, with the File Provider extension as a read-only co-reader —
@@ -1494,7 +1594,7 @@ The macOS/iOS binding-regen verification (below) has since landed too.
        `DiskPinStore`). **The reach hint keys on the domain, never on the
        dial (built 2026-08-30; supersedes the 2026-08-29 carry-over target).** A
        session that reaches a freshly-provisioned box through its reach hint
-       (`behavior/onboarding.md` § Reach hint — `https://<ip>` on web, the
+       (`behavior/onboarding-provisioning.md` § Reach hint — `https://<ip>` on web, the
        resolve override on native) pins under the **domain**, exactly as a
        domain dial does: natively for free, since `connect_resolving` moves the
        socket address alone and leaves the URL — hence SNI, `Host`, the demanded
@@ -1644,6 +1744,12 @@ The macOS/iOS binding-regen verification (below) has since landed too.
          no such harness exists in this crate today) or a refactor to inject the
          requester the way the native path does. Either is real, follow-on-worthy
          infrastructure work, not a witness — out of scope for this residual.
+         Since 2026-11-02 it takes a `fauna_core::web::ReachDial` (dial URL and
+         pin key, the key the domain by construction, unit-tested natively), so
+         its reach-hint fallback cannot judge a box at the hint's address on the
+         dial URL; the fallback branch itself stays compile-checked only
+         ([`../behavior/onboarding-provisioning.md`](../behavior/onboarding-provisioning.md)
+         § Reach hint → *The web session's half* → *Trust*).
          Cross-referenced inline at both call sites.
 
        **NT-1 hardening (client-nonce fold) — done.** To shrink the residual to the
@@ -1717,6 +1823,13 @@ The macOS/iOS binding-regen verification (below) has since landed too.
        `Offline{transient:true}` — over a raw Rust debug dump. That is fixed; a
        retry CTA on a possible-MITM signal is precisely what this section
        forbids.)*
+       **The fork variant, every app:** when the snapshot's `identity_fork` bit
+       is set (rotation-chain fork evidence from `classify_identity_changed`),
+       each app swaps the re-trust surface for a hard warning naming both heads
+       (`onboarding.launch.identity_fork_warning`) with no trust button and no
+       retry CTA — `IdentityForked` on linux and tui, `NavTarget.IdentityForked`
+       on android, the `isFork` variant of `LaunchIdentityChangedView` on macos
+       and ios, `IsFork` on the windows page, `identity_forked` on web.
        **`android` (2026-07-13): the full uniform surface**, matching web — a
        new `AppLaunchVM.NavTarget.IdentityChanged` arm (`ui/viewmodel/AppLaunchVM.kt`)
        + `LaunchIdentityChangedScreen.kt` render the localized warning
@@ -1930,7 +2043,7 @@ The macOS/iOS binding-regen verification (below) has since landed too.
        produced the verdict and a synthesized phase would render an
        identical surface whose button silently did nothing.
        Per-app detail: **linux** classifies in `client.rs` and tears down via
-       `settings::trigger_nest_identity_changed` (pump, backup, sync-agent
+       `settings::escalate_to_launch` (pump, backup, sync-agent
        capability, windows destroyed, client `shutdown()` — which is what
        drops the bearer). **tui**'s channel is `session::silent_refresh`, the
        body behind its post-auth background refresh — which until 2026-07-30
@@ -1941,9 +2054,12 @@ The macOS/iOS binding-regen verification (below) has since landed too.
        `FfiError.NestIdentityChanged` (`libs/fauna-ffi/src/auth.rs`'s
        `silent_outcome_to_ffi`, the same classification linux/tui's
        `classify_silent_challenge` performs, just surfaced as a Swift error
-       rather than a Rust enum); `performPostAuthSilentSignIn()` (one-shot at
-       authenticated launch, plus the `#if DEBUG` test command's trigger)
-       catches only that case and calls the same `tearDownSessionForSwitch()`
+       rather than a Rust enum); `performPostAuthSilentSignIn()` (the body of
+       the `#if DEBUG` `silent_sign_in` test command — the forced re-check;
+       an authenticated launch dials none since 2026-10-28, reading the
+       session mint's identity instead, its verdict reaching the same door
+       through `FfiNestClient.sessionEndingVerdict()` on the connection
+       observer's `.disconnected`) catches only that case and calls the same `tearDownSessionForSwitch()`
        + `runLaunch()` pair account-switch already uses, so the fresh
        `LaunchMachine` re-challenges the still-poisoned pin and lands on
        `LaunchPhase::IdentityChanged` with a live machine behind the trust
@@ -1981,14 +2097,7 @@ The macOS/iOS binding-regen verification (below) has since landed too.
        binding withdrawn on a host that has a pin) — lifted out of the launch
        machine when the mint became its second consumer, so the mint and both
        launch-machine channels cannot drift apart.
-       **Still open:** per-app glue ×1 — windows — on that variant (or the
-       machine's `TokenRefreshOutcome::IdentityChanged`), drop the bearer and
-       navigate to the existing `launch_identity_changed` surface; linux's,
-       tui's and android's legs are the reference, and the step is now mostly
-       the handler, since both the classifier and the taxonomy are shared.
-       (Web and android are both done — web's leg additionally had to add the
-       possession check its direct `mintBearer` re-mint was skipping, before it could route the
-       verdict at all.) Tracked internally as a cross-app track.
+       **Done on all seven apps** (windows 2026-08-31; web's leg additionally had to add the possession check its direct `mintBearer` re-mint was skipping before it could route the verdict at all).
 
   (The former "residual HTTP surface" gap — the reqwest content API + `POST /register`
   still honouring `FAUNA_INSECURE_TLS` — is **closed**: that leg is now SPKI-pinned

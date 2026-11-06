@@ -31,7 +31,10 @@ import time
 
 import pytest
 
-pytestmark = [pytest.mark.tier_2, pytest.mark.linux]
+# `standalone_only`: `fauna.protocol.echo` is a kind the release image does not
+# serve ("This nest does not support that request"), so a docker nest declares
+# this round trip out rather than failing it.
+pytestmark = [pytest.mark.tier_2, pytest.mark.linux, pytest.mark.standalone_only]
 
 
 def test_linux_ws_rpc_echo_round_trip(logged_in_app):

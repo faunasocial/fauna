@@ -8,6 +8,7 @@ import com.fauna.app.core.ApiClient
 import com.fauna.app.core.HexUtil
 import com.fauna.app.core.ResolveService
 import com.fauna.app.ui.util.firstListingRefusal
+import com.fauna.app.ui.util.loadFailureText
 import com.fauna.app.core.SecureStorage
 import com.fauna.app.p2pshare.GroupShareRows
 import com.fauna.app.p2pshare.OfflinePanel
@@ -17,6 +18,7 @@ import com.fauna.app.provider.OnDemandToggle
 import com.fauna.ffi.FfiFolderActorMember
 import com.fauna.ffi.FfiFolderDevice
 import com.fauna.ffi.FfiPendingShare
+import com.fauna.ffi.FfiRowReadErrors
 import com.fauna.ffi.actorIdFromSecret
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
@@ -25,6 +27,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 import uniffi.fauna_client_capabilities.CustodyFacetView
 import uniffi.fauna_client_capabilities.CustodyHeldRowView
@@ -54,6 +57,13 @@ import javax.inject.Inject
  * together. The stateless `DevicesContent` renders [snapshot]; this VM is the
  * thin wrapper the navigation graph mounts.
  */
+// A folder row's reads, by wire kind: the `FfiRowReadErrors` key and, as on the
+// other apps, the banner's prefix.
+private const val READ_ACTORS = "fauna.folders.members.list_actors"
+private const val READ_ACTIVITY = "fauna.folders.devices"
+private const val READ_DESTINATIONS = "fauna.backup.destination.list"
+private const val READ_PLACES = "fauna.folders.members.list"
+
 @HiltViewModel
 class DevicesVM @Inject constructor(
     private val api: ApiClient,
@@ -111,6 +121,14 @@ class DevicesVM @Inject constructor(
     private val _folderDeviceActivity = MutableStateFlow<Map<String, List<FfiFolderDevice>>>(emptyMap())
     val folderDeviceActivity: StateFlow<Map<String, List<FfiFolderDevice>>> = _folderDeviceActivity
 
+    // ── Device places (the post-create place editor, `folder-place-row`) ──
+    //
+    // The OWN set's enrolled-device roster with each seat's flag triple, keyed by
+    // set name; a separate read living on the VM (not part of DevicesSnapshot), same
+    // shape as folderDeviceActivity. Roster order is the e2e address — never sorted.
+    private val _folderPlaces = MutableStateFlow<Map<String, List<com.fauna.ffi.FfiFolderMember>>>(emptyMap())
+    val folderPlaces: StateFlow<Map<String, List<com.fauna.ffi.FfiFolderMember>>> = _folderPlaces
+
     // ── Destination places (backup-destinations.md § Ordinary-folder coverage) ──
     //
     // Which of the owner's enrolled backup destinations are attached to each
@@ -145,7 +163,12 @@ class DevicesVM @Inject constructor(
     // lives on the VM, not the Composable (every other `*Tick` collector in this
     // app is VM-owned — ApiClient.kt's push-dispatch doc), so the VM needs its own
     // copy of "which rows are expanded" rather than reading Compose state directly.
-    private val _expandedFolders = MutableStateFlow<Set<String>>(emptySet())
+    // Keyed by set name; the value is the folder id the destination read needs.
+    private val _expandedFolders = MutableStateFlow<Map<String, Long>>(emptyMap())
+
+    // What the expanded rows' reads put on the banner (folders.md § Errors & edge
+    // cases): a read's next good answer retires exactly its own text.
+    private val rowReads = FfiRowReadErrors()
 
     // Transient share/remove failure (a plain FFI-raised string, prefixed by the VM);
     // the Screen surfaces it on the page error banner then it clears on next success.
@@ -255,7 +278,7 @@ class DevicesVM @Inject constructor(
         // EventsVM.calendarChangedTick).
         viewModelScope.launch {
             api.folderChangedTick.collect {
-                refresh()
+                resync()
                 // The live-update half of the device-activity feature (file-sync.md
                 // § Implementation status today) — the whole point of the feature,
                 // per the same doc's tui/linux bullets: a client with no push arm
@@ -267,7 +290,10 @@ class DevicesVM @Inject constructor(
                 // blanket shape ApiClient.kt's SyncChanged arm already had, and
                 // CalendarChanged's) — this only narrows WHICH already-expanded
                 // rows re-read on it, not which push fires it.
-                _expandedFolders.value.forEach { loadFolderDeviceActivity(it) }
+                _expandedFolders.value.keys.forEach {
+                    loadFolderDeviceActivity(it)
+                    loadFolderPlaces(it)
+                }
             }
         }
         // Reconnect backstop: a push fired while the socket was down is never
@@ -278,19 +304,19 @@ class DevicesVM @Inject constructor(
         // VM had no reconnect arm before adopting the shared classifier (the
         // same class of gap the seam's own audit found on web's Events page).
         viewModelScope.launch {
-            api.reconnectTick.collect {
-                refresh()
-                _expandedFolders.value.forEach { loadFolderDeviceActivity(it) }
-            }
+            api.reconnectTick.collect { devicesStale() }
+        }
+        viewModelScope.launch {
+            api.devicesStaleTick.collect { devicesStale() }
         }
         // The store-change notice: followed folders and foreign sets ride the
-        // machine's refresh, and the enrollment notice, the custody facet and
+        // machine's resync, and the enrollment notice, the custody facet and
         // the sync-defaults select are store reads ([ApiClient.storeChangedTick]).
         // The custody facet re-FOLDS only: its visit edge drives the ceremony
         // first ([loadCustodyFacet]), and a notice must not become a drive.
         viewModelScope.launch {
             api.storeChangedTick.collect {
-                refresh()
+                resync()
                 loadEnrollmentNotice()
                 foldCustodyFacet()
                 loadDefaultConflictPolicy()
@@ -325,6 +351,26 @@ class DevicesVM @Inject constructor(
     fun refresh() {
         val m = ensureMachine() ?: return
         viewModelScope.launch { m.refresh() }
+        refreshWebdavCapability()
+        refreshOwnTiers()
+    }
+
+    /** [refresh] for a background cause: a gesture's error stays on `error-message`. */
+    /** The `devices` surface: the lists, and every read of the open rows, whose
+     *  good answers retire what they put up while the nest was away. */
+    private fun devicesStale() {
+        resync()
+        _expandedFolders.value.forEach { (name, folderId) ->
+            loadFolderActors(name)
+            loadFolderDeviceActivity(name)
+            loadFolderPlaces(name)
+            loadFolderDestinationPlaces(name, folderId)
+        }
+    }
+
+    private fun resync() {
+        val m = ensureMachine() ?: return
+        viewModelScope.launch { m.resync() }
         refreshWebdavCapability()
         refreshOwnTiers()
     }
@@ -367,6 +413,18 @@ class DevicesVM @Inject constructor(
     fun removeDevice(index: Int) {
         val m = machine ?: return
         viewModelScope.launch { m.removeDevice(index.toUInt()) }
+    }
+
+    /** `device-rename-input`'s prefill: the row's opened name (`devices.md` § Device names). */
+    fun deviceName(deviceId: String): String? = machine?.deviceName(deviceId)
+
+    /**
+     * `device-rename-confirm-button` — the machine seals and sends the name, ignores a blank or
+     * unchanged one, and paints any refusal on `error-message` (`devices.md` § Device names).
+     */
+    fun renameDevice(deviceId: String, label: String) {
+        val m = machine ?: return
+        viewModelScope.launch { m.renameDevice(deviceId, label) }
     }
 
     // ── Members without a matching entry — devices.md § Members without a matching entry ──
@@ -514,6 +572,33 @@ class DevicesVM @Inject constructor(
     }
 
     /**
+     * Set a folder's audience (`folder-audience-select` / `folder-audience-public-confirm`,
+     * owner rows; `ui/folders.md` § Audience and website serving). `→public` is
+     * confirm-gated in the composable; the nest validates the transition and the
+     * machine refreshes on success so the picker repaints the projected audience.
+     */
+    /**
+     * Is [folder] public on the nest's say-so while its audience attestation does
+     * not verify under this seat? The shared predicate (never re-derived here)
+     * behind `folder-audience-unattested` + `folder-audience-reconfirm-button`.
+     */
+    fun folderIsPublicUnverified(folder: FolderSummary): Boolean {
+        val me = actorId ?: return false
+        return com.fauna.ffi.devicesFolderIsPublicUnverified(folder, me)
+    }
+
+    /** Flip a folder's website flag (`folder-website-toggle`); a plain keyless `folders.update`. */
+    fun setFolderWebsiteEnabled(name: String, enabled: Boolean) {
+        val m = machine ?: return
+        viewModelScope.launch { m.setFolderWebsiteEnabled(name, enabled) }
+    }
+
+    fun setFolderAudience(name: String, audience: String) {
+        val m = machine ?: return
+        viewModelScope.launch { m.setFolderAudience(name, audience) }
+    }
+
+    /**
      * Turn a folder's exclusive editing on or off (`folder-exclusive-editing-toggle`,
      * owner row only; `ui/folders.md` § Exclusive editing). **Non-optimistic**: the
      * machine refreshes on success and the toggle repaints `exclusiveEditing` from
@@ -577,13 +662,34 @@ class DevicesVM @Inject constructor(
     // ── Cross-user sharing (owner side) — folders.md § Sharing ─────────────
 
     /**
-     * Load a set's cross-user "Shared with" roster (fauna.folders.members.list_actors).
-     * ANY failure (an owner-only set answers `not_shared`, a transient WS error) maps to
-     * an empty roster for that set — never a page error (parity with apple).
+     * One background read of a folder row. A failure degrades to [fallback], and
+     * on an expanded row says so on the banner as that read's own text; the
+     * read's next good answer retires it. A collapsed row's read stays silent:
+     * nothing would re-run it to retire the text.
+     */
+    private suspend fun <T> rowRead(read: String, set: String, fallback: T, body: suspend () -> T): T =
+        try {
+            body().also {
+                if (rowReads.retire(read, set, _sharingError.value.orEmpty())) _sharingError.value = null
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            if (set in _expandedFolders.value) {
+                val text = "$read: ${e.loadFailureText() ?: e.message ?: e.toString()}"
+                _sharingError.value = text
+                rowReads.put(read, set, text)
+            }
+            fallback
+        }
+
+    /**
+     * Load a set's cross-user "Shared with" roster (fauna.folders.members.list_actors):
+     * an owner-only set answers empty, and a failure degrades as [rowRead] says.
      */
     fun loadFolderActors(name: String) {
         viewModelScope.launch {
-            val members = runCatching { api.folderActorMembers(name) }.getOrDefault(emptyList())
+            val members = rowRead(READ_ACTORS, name, emptyList()) { api.folderActorMembers(name) }
             _folderActors.update { it + (name to members) }
         }
     }
@@ -592,14 +698,43 @@ class DevicesVM @Inject constructor(
 
     /**
      * Read a set's per-device sync-activity list (`fauna.folders.devices` —
-     * `folder-device-activity-item`/-label/-count). ANY failure (a transient WS
-     * error) maps to an empty list for that set — never a page error, same
-     * degrade-to-empty shape as [loadFolderActors].
+     * `folder-device-activity-item`/-label/-count). A failure degrades as
+     * [rowRead] says.
      */
     fun loadFolderDeviceActivity(name: String) {
         viewModelScope.launch {
-            val devices = runCatching { api.folderDevices(name) }.getOrDefault(emptyList())
+            val devices = rowRead(READ_ACTIVITY, name, emptyList()) { api.folderDevices(name) }
             _folderDeviceActivity.update { it + (name to devices) }
+        }
+    }
+
+    /** Read an owned set's device-place roster (`fauna.folders.members.list`). */
+    fun loadFolderPlaces(name: String) {
+        viewModelScope.launch {
+            val places = rowRead(READ_PLACES, name, emptyList()) { api.folderPlaces(name) }
+            _folderPlaces.update { it + (name to places) }
+        }
+    }
+
+    /**
+     * Write one seat's whole flag triple, then repaint from a roster RE-READ —
+     * never an optimistic flip (mirrors apple `DevicesMachineVM.setFolderPlace`).
+     */
+    fun setFolderPlace(
+        name: String,
+        deviceId: String,
+        originates: Boolean,
+        accepts: Boolean,
+        appliesDeletes: Boolean,
+    ) {
+        viewModelScope.launch {
+            try {
+                api.setFolderPlace(name, deviceId, originates, accepts, appliesDeletes)
+                loadFolderPlaces(name)
+            } catch (e: Exception) {
+                _sharingError.value = appContext.getString(R.string.devices_error_set_place)
+                    .replace("{message}", e.message ?: "")
+            }
         }
     }
 
@@ -615,11 +750,14 @@ class DevicesVM @Inject constructor(
      */
     fun setFolderExpanded(name: String, folderId: Long, expanded: Boolean) {
         if (expanded) {
-            _expandedFolders.update { it + name }
+            _expandedFolders.update { it + (name to folderId) }
             loadFolderDeviceActivity(name)
+            loadFolderPlaces(name)
             loadFolderDestinationPlaces(name, folderId)
         } else {
             _expandedFolders.update { it - name }
+            // Nothing will re-run the row's reads to retire what they put up.
+            if (rowReads.retireSet(name, _sharingError.value.orEmpty())) _sharingError.value = null
         }
     }
 
@@ -627,13 +765,12 @@ class DevicesVM @Inject constructor(
 
     /**
      * Read a folder's destination places (`fauna.backup.destination.list` joined
-     * with the sealed config's display names). ANY failure degrades to an empty
-     * list for that set — never a page error, same posture as
-     * [loadFolderDeviceActivity]: an absent section is not a user-facing error.
+     * with the sealed config's display names). A failure degrades as [rowRead]
+     * says.
      */
     fun loadFolderDestinationPlaces(name: String, folderId: Long) {
         viewModelScope.launch {
-            val places = runCatching { api.folderDestinationsList(folderId) }.getOrDefault(emptyList())
+            val places = rowRead(READ_DESTINATIONS, name, emptyList()) { api.folderDestinationsList(folderId) }
             _folderDestinationPlaces.update { it + (name to places) }
         }
     }
@@ -685,7 +822,7 @@ class DevicesVM @Inject constructor(
             _sharingError.value = null
             try {
                 val resolved = resolveService.resolve(recipientInput)
-                api.shareFolder(name, resolved.actorId, access)
+                api.shareFolder(name, resolved.actorId, access, resolved.nestUrl)
                 m.refresh()
                 loadFolderActors(name)
                 onResult(true)
@@ -694,6 +831,51 @@ class DevicesVM @Inject constructor(
                     .replace("{message}", e.message ?: "")
                 onResult(false)
             }
+        }
+    }
+
+    /**
+     * Follow a public folder (`folder-follow-confirm`, `ui/folders.md` § Following a
+     * public folder). The typed owner goes through UNRESOLVED — the shared
+     * `follow_ops` recipe classifies it (hex / handle / `handle@domain`), so this VM
+     * resolves nothing. Re-reads on success so the new `folder-followed-item` paints;
+     * a failure — its text is the shared catalog's, the folded not-found included —
+     * rides [sharingError] onto the page's `error-message`. `onResult(true)` closes
+     * the form; `false` keeps what the user typed beside the error.
+     */
+    fun followFolder(owner: String, folderName: String, onResult: (Boolean) -> Unit) {
+        val m = machine ?: run { onResult(false); return }
+        viewModelScope.launch {
+            _sharingError.value = null
+            try {
+                api.followPublicFolder(owner.trim(), folderName.trim())
+                m.refresh()
+                onResult(true)
+            } catch (e: Exception) {
+                // The shared catalog's line, unwrapped from the generated
+                // `"msg=…"` aggregate — never re-worded here.
+                _sharingError.value = e.loadFailureText() ?: e.toString()
+                onResult(false)
+            }
+        }
+    }
+
+    /**
+     * Unfollow (`folder-unfollow-button`) — by the follow's pinned identity. The
+     * page re-reads REGARDLESS of the outcome: unfollow is idempotent, so the list
+     * is right either way.
+     */
+    fun unfollowFolder(homeNestUrl: String, folderId: Long) {
+        val m = machine ?: return
+        viewModelScope.launch {
+            _sharingError.value = null
+            try {
+                api.unfollowPublicFolder(homeNestUrl, folderId)
+            } catch (e: Exception) {
+                _sharingError.value = appContext.getString(R.string.devices_error_unfollow_failed)
+                    .replace("{message}", e.loadFailureText().orEmpty())
+            }
+            m.refresh()
         }
     }
 
@@ -1181,6 +1363,10 @@ class DevicesVM @Inject constructor(
         // twin (docs/goal/ui/folders.md § Implementation status today): unwired, a
         // cross-nest shared set renders as absent rather than stale.
         api.wireDevicesForeignSets(built)
+        // …and the followed-public-folders source, which fills `snapshot.followed`
+        // (`ui/folders.md` § Following a public folder) — unwired, that list is
+        // always empty.
+        api.wireDevicesFollowedFolders(built)
         // The participation rule's last fallback: the row `device-this-mark-badge`
         // marks is the one the toggle paints and acts on as this device's while the
         // runtime has not yet named its enrolled row (`p2p.md` § Per-device

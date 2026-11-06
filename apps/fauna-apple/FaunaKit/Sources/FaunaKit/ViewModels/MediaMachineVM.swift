@@ -48,6 +48,12 @@ public final class MediaMachineVM {
     /// gestures through the wrappers below.
     public private(set) var machine: MediaMachine?
 
+    /// `true` once `configure`'s first `refresh()` has landed — `machine` is
+    /// published BEFORE that read, so a lookup keyed on `machine != nil` alone
+    /// (the search File-arm `locateFile`, `MediaExplorerContent`) would search
+    /// an empty aggregate, miss, and consume its link for nothing.
+    public private(set) var loaded = false
+
     /// One-time connect/build failure (`api.mediaMachine` threw). Page read /
     /// upload / delete failures live on the machine snapshot's `error` instead;
     /// all three are surfaced through `errorMessage`.
@@ -75,6 +81,11 @@ public final class MediaMachineVM {
     /// moves only after ``reset()`` has dropped the machine.
     private var api: APIClient?
     private var deviceId: String?
+    #if !FAUNA_KIDS
+    /// The connection-bound connected-apps machine the author line is composed
+    /// through (built lazily on the first version list naming a depositor).
+    private var depositorMachine: ConnectedAppsMachine?
+    #endif
 
     public init() {}
 
@@ -92,6 +103,10 @@ public final class MediaMachineVM {
     /// its observer box.
     public func reset() {
         machine = nil
+        #if !FAUNA_KIDS
+        depositorMachine = nil
+        #endif
+        loaded = false
         connectError = nil
         glueError = nil
         api = nil
@@ -185,6 +200,9 @@ public final class MediaMachineVM {
             built.setShareAuthor(secret: secret, nestUrl: api.nodeUrl.absoluteString)
         }
         await refresh()
+        // A `reset()` during the read dropped this machine; leave `loaded` alone.
+        guard machine === built else { return }
+        loaded = true
     }
 
     // ── Observer ───────────────────────────────────────────────────────────
@@ -385,6 +403,55 @@ public final class MediaMachineVM {
     public func fileVersions(folder: String, path: String, includePruned: Bool = false) async throws -> [FileVersionSummary] {
         guard let machine else { return [] }
         return try await machine.fileVersions(folder: folder, path: path, includePruned: includePruned)
+    }
+
+    // ── The deposited version's author line ────────────────────────────────
+
+    /// The `file-version-author` text of one version row, composed by the shared
+    /// `ConnectedAppsMachine::version_author` (`folder-deposit.md` ruling 3):
+    /// "<app> via <owner>" on a version a connected app deposited, the generic
+    /// "a connected app via <owner>" where no roster names the key, the
+    /// recorder alone on an ordinary version. With no machine yet (or in the
+    /// kids build, which compiles the connected-apps plane out) a deposited
+    /// version paints the generic wording and an ordinary one the plain line —
+    /// never a per-app writer-key match.
+    public func versionAuthorText(_ version: FileVersionSummary) -> String {
+        #if !FAUNA_KIDS
+        if let depositorMachine {
+            return renderLocalizedText(depositorMachine.versionAuthor(
+                authorDisplay: version.authorDisplay, depositedBy: version.depositedBy))
+        }
+        #endif
+        if version.depositedBy != nil {
+            return L.media.versionAuthorDepositedUnknown(author: version.authorDisplay)
+        }
+        return L.media.versionAuthor(author: version.authorDisplay)
+    }
+
+    /// Before painting a version list that names depositors: ask the shared
+    /// machine whether naming them wants a roster read (once per key), read it
+    /// when so, and return `true` so the caller repaints. One connection-bound
+    /// machine per VM, so the once-per-key memory holds across detail opens.
+    public func readDepositorRoster(for versions: [FileVersionSummary]) async -> Bool {
+        #if !FAUNA_KIDS
+        let keys = versions.compactMap(\.depositedBy)
+        guard !keys.isEmpty, let api else { return false }
+        let built: ConnectedAppsMachine
+        if let depositorMachine {
+            built = depositorMachine
+        } else {
+            guard let fresh = try? await api.connectedAppsMachineWithoutPush() else { return false }
+            // An account switch mid-build dropped this identity: drop the result.
+            guard self.api === api else { return false }
+            depositorMachine = depositorMachine ?? fresh
+            built = depositorMachine ?? fresh
+        }
+        guard built.depositorReadWanted(depositedBy: keys) else { return false }
+        await built.refresh()
+        return self.api === api
+        #else
+        return false
+        #endif
     }
 
     /// Recover a soft-pruned version (`file-version-undelete-button`,

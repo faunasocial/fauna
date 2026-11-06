@@ -86,6 +86,10 @@ public struct ReportHost: View {
                     .accessibilityIdentifier(Ids.reportIncludeTextCheckbox)
                     .automationActivate(
                         Ids.reportIncludeTextCheckbox,
+                        // The label reads back as its text (the consequence it
+                        // names, what every other app's driver returns); the
+                        // on/off value backs the `checked` read.
+                        text: { renderLocalizedText(view.includeTextLabel) },
                         value: { store.form.includeText ? "on" : "off" }
                     ) { store.form.includeText.toggle() }
             }
@@ -94,6 +98,7 @@ public struct ReportHost: View {
                 .accessibilityIdentifier(Ids.reportBlockAuthorCheckbox)
                 .automationActivate(
                     Ids.reportBlockAuthorCheckbox,
+                    text: { renderLocalizedText(view.blockAuthorLabel) },
                     value: { store.form.blockAuthor ? "on" : "off" }
                 ) { store.form.blockAuthor.toggle() }
 

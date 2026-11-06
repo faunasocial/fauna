@@ -42,7 +42,7 @@ enum SuccessionAftermath {
     /// unnecessary: a re-seal interrupted by a lost connection is finished by the
     /// *next* sign-in, and that sign-in has no ceremony to notice.
     ///
-    /// Fire-and-forget and best-effort, in the shape `refreshMailEpochSchedule`
+    /// Fire-and-forget and best-effort, in the shape `publishSubscriberEncapsKey`
     /// and `runSealBackfill` already use: the account is already the successor's,
     /// and refusing a session over a pass that retries would be strictly worse
     /// than a plane that is briefly still owed.
@@ -100,9 +100,9 @@ enum SuccessionAftermath {
 /// `LocalizedText?` rather than the progress value; this sink renders it
 /// verbatim and never re-derives it.
 final class LoggingAftermathSink: FfiAftermathSink, @unchecked Sendable {
-    // `@unchecked` follows `LaunchdSyncAgentSpawner`'s precedent: both stored
-    // properties are `@Sendable` closures, so there is still nothing for the
-    // FFI's tokio runtime and the app to race over.
+    // `@unchecked` because both stored properties are `@Sendable` closures —
+    // immutable after init — so there is nothing for the FFI's tokio runtime
+    // and the app to race over.
 
     private let onConfigStageSettled: @Sendable () -> Void
     private let onProgress: @Sendable (FfiAftermathLeg, LocalizedText?) -> Void

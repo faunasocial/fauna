@@ -14,6 +14,12 @@ _WORD_RE = re.compile(r"[0-9a-z]+")
 # Mirrors `fauna_conversations::manager::TEST_SEAM_SELF_ADDRESS`.
 SEAM_SELF_ADDRESS = "me@self-nest.test"
 
+# How long `mark_receive_stopped_for_test` waits for the app's real receive loop
+# to claim its generation (tui claims it only after its start-up key-package
+# round trips). Generous and named (convention 14): it bounds a genuinely
+# broken session, never how fast a loaded box gets there.
+RECEIVE_LOOP_BEGIN_BUDGET_S = 120.0
+
 
 def _word_tokens(text: str) -> list[str]:
     """Lowercased alphanumeric runs of *text* — the comparison unit for matching
@@ -147,8 +153,9 @@ class ConversationsActions:
     def resolve_recipient(self, recipient: str) -> str:
         """Open the new-conversation composer, type ``recipient``, and wait for
         the recipient picker to reach a terminal resolve state. Returns the
-        state string (``"resolved"``, ``"not-found"`` or ``"error"`` — the
-        three terminal tokens of ``fauna_conversations::compose::ResolveState``)
+        state string (``"resolved"``, ``"not-found"``, ``"not-reachable"`` or
+        ``"error"`` — the four terminal tokens of
+        ``fauna_conversations::compose::ResolveState``)
         read while the composer is still open.
 
         Unlike ``start_new_conversation``, this does NOT accept a chip or send.
@@ -1185,6 +1192,47 @@ class ConversationsActions:
             "message": message,
         })
 
+    def mark_receive_stopped_for_test(self) -> None:
+        """Stand up the dead receive rail — ``ConversationsManager::receive_stopped``
+        — the state a receive loop that died by panic leaves, so a test can
+        assert the page's ``conversations.errors.receive_stopped`` notice
+        (``docs/goal/ui/conversations.md`` § Errors & edge cases).
+
+        A seam for the stated reason: no product path kills a receive loop on
+        demand. It drives the shared ``mark_receive_stopped_for_test`` (claim a
+        fresh loop generation, mark it stopped), compiled out of release
+        builds (convention 15). tui, linux, web and android honour it (web sets
+        the pump's ``receiveRailStalled`` store directly).
+
+        An app whose session claims its receive-loop generation only after
+        start-up round trips (tui) answers ``"pending"`` until it has — a death
+        marked before that claim is retired by it — so this asks again until
+        the app answers anything else (an app that returns nothing marked at
+        once). A state wait with a generous named ceiling (convention 14).
+        """
+        deadline = time.monotonic() + RECEIVE_LOOP_BEGIN_BUDGET_S
+        while True:
+            result = self.driver.call_command("conversations_mark_receive_stopped", {})
+            if result != "pending":
+                return
+            if time.monotonic() >= deadline:
+                raise AssertionError(
+                    "conversations_mark_receive_stopped: the app's receive loop never "
+                    f"began within {RECEIVE_LOOP_BEGIN_BUDGET_S:.0f}s, so no dead rail "
+                    "could be marked"
+                )
+            time.sleep(0.2)
+
+    def begin_receive_loop_for_test(self) -> None:
+        """Claim a fresh receive-loop generation over the same manager — the one
+        call a starting receive loop makes (``begin_receive_loop``), which
+        retires an earlier loop's death. On tui a new loop starts only with a
+        new session (a fresh manager), so this is the door to the
+        notice-retirement half, and the cleanup that keeps the notice from
+        leaking into the next test on a shared app.
+        """
+        self.driver.call_command("conversations_begin_receive_loop", {})
+
     def inject_and_resolve_thread(
         self,
         rail: str,
@@ -1942,7 +1990,7 @@ class ConversationsActions:
     # Opt the client into the REAL FaunaMls backend and drive its async manager
     # wire-drivers with the API-tier peer's actor_id injected (the
     # resolve_address handle→actor chain stays deferred). The matching bridge
-    # commands live in apps/fauna-linux/src/main.rs; the backend opt-in is in
+    # commands live in apps/fauna-linux/src/lib.rs; the backend opt-in is in
     # conversations/conv_backend.rs (a linux conversations-membership follow-up).
     # block_on'd nest round-trips run on the GTK command thread, so these pass a
     # generous command timeout.
@@ -2524,7 +2572,9 @@ class ConversationsActions:
 
     def _wait_resolve(self, timeout_s: float = 5.0):
         """Wait until recipient-resolve-status is in a terminal state
-        (``resolved``, ``not-found`` or ``error``). ``not-found`` is terminal
+        (``resolved``, ``not-found``, ``not-reachable`` or ``error``;
+        ``not-reachable`` — a home-nest account found but not addressable yet —
+        since 2026-11-02). ``not-found`` is terminal
         since 2026-07-16: the address was probed and no rail claimed it — what a
         far-network shape such as a bare ``did:plc:…`` reads now that no app
         parses a bridged address (``docs/goal/ui/conversations.md`` § Errors &
@@ -2533,7 +2583,7 @@ class ConversationsActions:
         last_state = None
         while time.time() < deadline:
             last_state = self.driver.get_attr("recipient-resolve-status", "state")
-            if last_state in ("resolved", "not-found", "error"):
+            if last_state in ("resolved", "not-found", "not-reachable", "error"):
                 return
             time.sleep(0.05)
         # Self-diagnosing failure (e2e rule 6): the bare "did not reach terminal

@@ -23,6 +23,9 @@ use fauna_protocol::contacts::{
 
 pub use fauna_protocol::contacts;
 
+#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+pub mod knock;
+
 /// Typed connection-management call surface, generic over the WS-RPC transport
 /// (`R: RpcRequester`): native call sites pass `Arc<NestClient>`, the wasm SPA
 /// passes its `WsRpcClient`. Errors propagate as the transport's `R::Error`

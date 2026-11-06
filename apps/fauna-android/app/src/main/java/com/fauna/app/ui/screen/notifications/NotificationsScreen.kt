@@ -27,8 +27,10 @@ import com.fauna.app.R
 import com.fauna.app.core.UrlOpener
 import com.fauna.app.ui.navigation.LocalAppMessages
 import com.fauna.app.ui.util.localized
+import com.fauna.app.ui.viewmodel.ContactOverlaysVM
 import com.fauna.app.ui.viewmodel.NotificationsVM
 import com.fauna.app.ui.viewmodel.SettingsFamilyGateVM
+import com.fauna.ffi.FfiContactOverlays
 import com.fauna.ffi.FfiNotifItem
 import com.fauna.ffi.FfiNotificationDestination
 import com.fauna.ffi.FfiNotificationText
@@ -36,6 +38,7 @@ import com.fauna.ffi.notificationDestinationFor
 import com.fauna.ffi.notificationMutedFor
 import com.fauna.ffi.notificationRetainedFor
 import com.fauna.ffi.notificationTextFor
+import com.fauna.ffi.notificationTextNamingFor
 import java.net.URLEncoder
 import social.fauna.generated.Ids
 import uniffi.fauna_core.MutedKeyword
@@ -46,6 +49,7 @@ fun NotificationsScreen(
     navController: NavController,
     vm: NotificationsVM = hiltViewModel(),
     familyGateVm: SettingsFamilyGateVM = hiltViewModel(),
+    overlaysVm: ContactOverlaysVM = hiltViewModel(),
 ) {
     // The `family-tab` gate Settings reads: a `Family` row is a control only
     // while that entry is reachable (notifications.md § Deep-link destinations).
@@ -56,6 +60,7 @@ fun NotificationsScreen(
     val isLoading by vm.isLoading.collectAsState()
     val error by vm.errorMessage.collectAsState()
     val mutedKeywords by vm.mutedKeywords.collectAsState()
+    val overlayEpoch by overlaysVm.epoch.collectAsState()
     // Session-local reveal of muted-collapsed rows (notifications.md § Muted
     // words rule 3) — the mute itself stays. The conversation's and the feed's
     // `revealedMuted` precedent.
@@ -151,6 +156,8 @@ fun NotificationsScreen(
                                 onReveal = { if (notif.id !in revealedMuted) revealedMuted.add(notif.id) },
                                 onOpen = dest?.let { d -> { openDestination(d, navController, context) } },
                                 onDismiss = { vm.dismiss(notif.id) },
+                                overlays = overlaysVm::overlays,
+                                overlayEpoch = overlayEpoch,
                             )
                             HorizontalDivider()
                         }
@@ -214,6 +221,8 @@ internal fun NotificationListRow(
     onReveal: () -> Unit,
     onOpen: (() -> Unit)?,
     onDismiss: () -> Unit = {},
+    overlays: (() -> FfiContactOverlays)? = null,
+    overlayEpoch: Long = 0L,
 ) {
     val muted = remember(notification, mutedKeywords) {
         notificationMutedFor(notification, mutedKeywords)
@@ -221,7 +230,7 @@ internal fun NotificationListRow(
     if (muted && !revealed) {
         MutedNotificationRow(notification, onReveal, onDismiss)
     } else {
-        NotificationRow(notification, onOpen, onDismiss)
+        NotificationRow(notification, onOpen, onDismiss, overlays, overlayEpoch)
     }
 }
 
@@ -298,6 +307,8 @@ private fun NotificationRow(
     notification: FfiNotifItem,
     onOpen: (() -> Unit)?,
     onDismiss: () -> Unit,
+    overlays: (() -> FfiContactOverlays)?,
+    overlayEpoch: Long,
 ) {
     val (icon, description) = typeToIcon(notification.notifType)
     ListItem(
@@ -311,7 +322,7 @@ private fun NotificationRow(
         },
         headlineContent = {
             Text(
-                notificationRowText(notification),
+                notificationRowText(notification, overlays, overlayEpoch),
                 style = MaterialTheme.typography.bodyMedium,
                 color = if (!notification.isRead) MaterialTheme.colorScheme.onSurface
                 else MaterialTheme.colorScheme.onSurfaceVariant,
@@ -345,13 +356,28 @@ private fun NotificationRow(
  * § Localized body), its localized arm resolved through this app's own string
  * resources. Never `summary` on the row's own say-so: a body key this build
  * lacks must lose to it, and only the shared decision knows which keys exist.
+ * A fauna-native row's sender is named as the viewer calls them
+ * (`notification_text_naming_for` over the overlay projection, § Localized body
+ * → *The sender arg*), so the read is keyed on the projection's epoch; the
+ * screen owns the overlay view-model and hands the row its projection, so a row
+ * with none (a row test) paints the plain shared decision.
  */
 @Composable
-private fun notificationRowText(notification: FfiNotifItem): String =
-    when (val text = remember(notification) { notificationTextFor(notification) }) {
+private fun notificationRowText(
+    notification: FfiNotifItem,
+    overlays: (() -> FfiContactOverlays)?,
+    overlayEpoch: Long,
+): String {
+    return when (
+        val text = remember(notification, overlayEpoch) {
+            if (overlays == null) notificationTextFor(notification)
+            else notificationTextNamingFor(notification, overlays())
+        }
+    ) {
         is FfiNotificationText.Localized -> localized(text.text).orEmpty()
         is FfiNotificationText.Verbatim -> text.text
     }
+}
 
 private fun typeToIcon(type: String): Pair<ImageVector, String> = when (type) {
     "like" -> Icons.Default.Favorite to "Like"

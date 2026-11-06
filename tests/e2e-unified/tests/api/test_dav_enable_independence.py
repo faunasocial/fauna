@@ -44,7 +44,6 @@ nest's own projection with provably zero client intent behind it.
 
 import time
 
-from common import CLAIM_CODE
 from common.auth import port_base_url
 
 from clients.ws_rpc_admin_client import WsRpcAdminClient
@@ -72,7 +71,7 @@ def dav_unclaimed_nest(request, nest_mode, tmp_path_factory):
     cleanup()
 
 
-def _claim_local(port):
+def _claim_local(nest):
     """Claim the nest with a LOCAL (``localhost``) handle and return the admin
     signing key. Mirrors ``test_claim_primary_domain._claim``: fresh Ed25519
     keypair, signature over ``verify_key ‖ timestamp_be_u64``."""
@@ -84,11 +83,12 @@ def _claim_local(port):
 
     sig = sk.sign(claim_admin_signed_message(bytes(sk.verify_key), timestamp)).signature
 
-    with WsRpcAnonClient(port_base_url(port)) as anon:
+    with WsRpcAnonClient(port_base_url(nest["port"])) as anon:
         anon.call(
             "fauna.auth.claim_admin",
             {
-                "claim_code": CLAIM_CODE,
+                # The handle's own code — the image mints one per container.
+                "claim_code": nest["claim_code"],
                 "actor_id": bytes(sk.verify_key).hex(),
                 "signature": sig.hex(),
                 "timestamp": timestamp,
@@ -111,7 +111,7 @@ def _admin(port, sk):
 def test_unset_dav_toggles_follow_mail_and_only_an_explicit_set_witnesses_intent(dav_unclaimed_nest):
     nest = dav_unclaimed_nest
     port = nest["port"]
-    sk = _claim_local(port)
+    sk = _claim_local(nest)
 
     # ── 1. Untouched nest: no client has called set_{mail,caldav}_enabled,
     # so every DAV singleton is unset and MIRRORS mail_enabled. Asserted as
@@ -179,7 +179,7 @@ def test_an_explicit_dav_setting_is_what_the_nest_reports(dav_unclaimed_nest):
     off, then all three switched off with mail on."""
     nest = dav_unclaimed_nest
     port = nest["port"]
-    sk = _claim_local(port)
+    sk = _claim_local(nest)
 
     with _admin(port, sk) as admin:
         admin.call("fauna.bridges.set_mail_enabled", {"enabled": False})

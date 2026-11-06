@@ -109,20 +109,15 @@ pub struct DevicesFoldersHandles {
     pub devices_machine: WiredDevicesMachine,
 }
 
-/// Bridges `DevicesMachine` notifications to the GTK main loop: each `on_changed`
-/// pushes a tick onto an `async-channel` the render loop drains. Mirrors the
-/// wizard / onboarding `GtkObserver` pattern. `on_changed` may fire from a worker
-/// thread (the async gestures run on a `run_on_tokio` runtime), so the
-/// thread-safe `async_channel::Sender` is the hand-off.
-struct GtkDevicesObserver {
-    tx: async_channel::Sender<()>,
-}
-
-impl DevicesObserver for GtkDevicesObserver {
-    fn on_changed(&self) {
-        let _ = self.tx.try_send(());
-    }
-}
+crate::async_helper::snapshot_wake_observer!(
+    /// Bridges `DevicesMachine` notifications to the GTK main loop: each `on_changed`
+    /// pushes a tick onto an `async-channel` the render loop drains. Mirrors the
+    /// wizard / onboarding `GtkObserver` pattern. `on_changed` may fire from a worker
+    /// thread (the async gestures run on a `run_on_tokio` runtime), so the
+    /// thread-safe `async_channel::Sender` is the hand-off.
+    GtkDevicesObserver,
+    DevicesObserver
+);
 
 /// The linux impl of the B3 member-row join-filter seam ([`MlsQuery`]) — the
 /// per-app glue the centralized `DevicesMachine` filter delegates to. `DevicesMachine::refresh` drops
@@ -325,10 +320,10 @@ struct RenderCtx {
     /// is painted onto both so a gesture failure surfaces wherever the user is.
     devices_error_label: gtk::Label,
     folders_error_label: gtk::Label,
-    /// The follow-family failure the Folders label holds beneath
-    /// `snapshot.error` — follow runs outside the machine, so the snapshot
-    /// never carries it ([`folders::FollowErrorSlot`]).
-    follow_error: folders::FollowErrorSlot,
+    /// The gesture failure the Folders label holds beneath `snapshot.error` — a
+    /// follow and a group set's restore run outside the machine, so the
+    /// snapshot never carries them ([`folders::GestureErrorSlot`]).
+    gesture_error: folders::GestureErrorSlot,
     /// Device-local folder↔folder map (the in-process engine's source of truth),
     /// read per-set when rendering each `folder-row`'s nested binding.
     location_map: Rc<RefCell<Vec<LocationBinding>>>,
@@ -677,8 +672,8 @@ pub fn build_devices_and_folders_pages(
     // so they are wired here rather than at build time (the `folder-add-button`
     // idiom). Errors land on the Folders sub-page's own `error-message`, held in
     // its slot so the next snapshot render cannot wipe them.
-    let follow_error = folders::FollowErrorSlot::new(&fshell.error_label);
-    folders::wire_followed_section(&fshell.followed, &machine, fauna_client, &follow_error);
+    let gesture_error = folders::GestureErrorSlot::new(&fshell.error_label);
+    folders::wire_followed_section(&fshell.followed, &machine, fauna_client, &gesture_error);
 
     let custody_view = Rc::clone(&dshell.custody);
     let member_view = Rc::clone(&dshell.members);
@@ -691,7 +686,7 @@ pub fn build_devices_and_folders_pages(
         conflict_list_box: fshell.conflict_list_box,
         devices_error_label: dshell.error_label,
         folders_error_label: fshell.error_label,
-        follow_error: follow_error.clone(),
+        gesture_error: gesture_error.clone(),
         location_map: Rc::clone(&location_map),
         can_serve_webdav: Cell::new(false),
         own_tiers: RefCell::new(Vec::new()),
@@ -743,6 +738,9 @@ pub fn build_devices_and_folders_pages(
                 #[cfg(feature = "p2p-share")]
                 &ctx.group_scopes.borrow(),
             );
+            // The agent's re-reads also carry the group sets' review lists
+            // (`sync_agent::refresh_engine_holds`), so the list repaints here too.
+            render_review_list(&ctx, &snap.conflicts, &machine);
         }));
     }
 
@@ -761,7 +759,7 @@ pub fn build_devices_and_folders_pages(
     }
     // A visit replaces the held follow failure, as it replaces the machine's
     // error through the refresh above.
-    folders_page.connect_map(move |_| follow_error.clear());
+    folders_page.connect_map(move |_| gesture_error.clear());
 
     // The Devices sub-page's page-level reads (the custody facet, and the
     // account store's enrolled row / refusal / keyed set) run on EVERY nav
@@ -1148,6 +1146,31 @@ fn mark_this_device_row(machine: &DevicesMachine, ctx: &RenderCtx) -> Option<Str
 /// [`fauna_devices_machine::this_device_row`] answer `device-this-mark-badge`
 /// reads, without [`mark_this_device_row`]'s machine write (a folder-list
 /// repaint is not a Devices hydrate).
+/// Repaint the Folders page's flat review list: the nest's rows from the
+/// machine's snapshot, then each group set's from the sync agent's last reading
+/// (`conflicts::review_rows`; `group-set.md` § Build design — the group set,
+/// decision 9).
+fn render_review_list(
+    ctx: &RenderCtx,
+    nest: &[fauna_devices_machine::ConflictSummary],
+    machine: &Arc<DevicesMachine>,
+) {
+    let rows = conflicts::review_rows(
+        nest,
+        #[cfg(feature = "p2p-share")]
+        &ctx.group_scopes.borrow(),
+        #[cfg(feature = "p2p-share")]
+        &crate::sync_agent::set_conflicts(),
+    );
+    conflicts::update_conflict_list(
+        &ctx.conflicts_group,
+        &ctx.conflict_list_box,
+        &rows,
+        machine,
+        &ctx.gesture_error,
+    );
+}
+
 fn lease_this_row(ctx: &RenderCtx) -> Option<String> {
     fauna_devices_machine::this_device_row(
         ctx.enrolled_device_row.borrow().as_deref(),
@@ -1192,14 +1215,9 @@ fn render_pages(
     folders::update_followed_list(
         &ctx.followed_list_box,
         &snap.followed,
-        folders::unfollow_handler(machine, &ctx.follow_error),
+        folders::unfollow_handler(machine, &ctx.gesture_error),
     );
-    conflicts::update_conflict_list(
-        &ctx.conflicts_group,
-        &ctx.conflict_list_box,
-        &snap.conflicts,
-        machine,
-    );
+    render_review_list(ctx, &snap.conflicts, machine);
 
     let text = snap.error.as_ref().map(|err| err.resolve(strings::lookup));
     // The Devices label additionally carries the standing enrollment refusal
@@ -1207,7 +1225,7 @@ fn render_pages(
     // the cap still binds; the Folders label paints the gesture error alone.
     let devices_text = devices_error_text(ctx, &snap);
     crate::settings::render_error_label(&ctx.devices_error_label, devices_text.as_deref());
-    let folders_text = text.or_else(|| ctx.follow_error.held());
+    let folders_text = text.or_else(|| ctx.gesture_error.held());
     crate::settings::render_error_label(&ctx.folders_error_label, folders_text.as_deref());
 
     // ── Wizard lifecycle ────────────────────────────────────────────────
@@ -1250,10 +1268,7 @@ mod tests {
 
     use crate::testid::widget_names;
 
-    struct NullObserver;
-    impl DevicesObserver for NullObserver {
-        fn on_changed(&self) {}
-    }
+    use fauna_devices_machine::observer::NullObserver;
 
     /// The page machine actually carries the fleet-removal door
     /// [`build_devices_and_folders_pages`] wires — not only that the shared

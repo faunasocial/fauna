@@ -10,9 +10,9 @@ Fauna is open-source software for social communication — an app for every devi
 
 **User owns data.** Your identity is a cryptographic key pair that you hold. Your posts, profile, social graph, and messages belong to you. If you ever change nests, your key goes with you, and your data comes back from your backup; you can also export everything, or run your own nest. Nothing ties you to any particular infrastructure.
 
-**No privileged actors.** Servers — called Nests — store and forward content, but they are not authorities. Every post is cryptographically signed by its author; every client verifies signatures independently. A Nest cannot forge or alter content, and what it withholds of a single post or message it withholds visibly: a notice stands in the content's place, the author of a post can appeal, and the act is recorded. If a Nest disappears, the network continues. Anyone can run one.
+**No privileged actors.** Servers — called Nests — store and forward content, but they are not authorities. Every post is cryptographically signed by its author; every client verifies signatures independently. A Nest cannot forge or alter content, and what it withholds of a single post or message it withholds visibly: a notice stands in the content's place, the author can appeal, and the act is recorded. If a Nest disappears, the network continues. Anyone can run one.
 
-**Layered moderation.** Moderation is never centralized. Your own filters shape what you see, and you can sort the posts you see according to labelers you subscribe to, which are transparent and opt-in. Inside a group, its owner and admins can delete a member's message for everyone in it, and the deletion shows in its place. Beyond that, exactly three parties can block a single post or message for others: a guardian for a child's account; a nest's admin, by hand under a legal obligation or on a user's report and by the rules it publishes for its nest; and, once built, a region's authority by published rules. Every block of a post or message is visible and names its rule or reason; a block by hand also leaves a permanent record, and an appeal for a post; nothing is removed silently.
+**Layered moderation.** Moderation is never centralized. Your own filters shape what you see, and you can sort the posts you see according to labelers you subscribe to, which are transparent and opt-in. Inside a group, its owner and admins can delete a member's message for everyone in it, and the deletion shows in its place. Beyond that, exactly three parties can block a single post or message for others: a guardian for a child's account; a nest's admin, by hand under a legal obligation or on a user's report and by the rules it publishes for its nest; and, once built, a region's authority by published rules. Every block of a post or message is visible and names its rule or reason; a block by hand also leaves a permanent record and an appeal; nothing is removed silently.
 
 ## How it works
 
@@ -26,7 +26,7 @@ Fauna uses a shared-core architecture. A single Rust library (`fauna-core`) impl
 
 ## Status
 
-Fauna is under active development and not yet ready for general use. The core protocol, Nest server, and clients for web, iOS, macOS, Android, Windows, Linux, and the terminal are implemented and in closed alpha testing. Bridge support for AT Protocol, ActivityPub, Nostr, and email is functional. There is no public release yet; outside Google Play's invitation-only testing, trying it means building from source.
+Fauna is under active development and not yet ready for general use. The core protocol, Nest server, and clients for web, iOS, macOS, Android, Windows, Linux, and the terminal are implemented and in closed alpha testing. Bridge support for AT Protocol, ActivityPub, Nostr, and email is functional. There is no public release yet; outside Google Play's invitation-only testing of the Android app and the pre-release downloads of the Windows, Linux and terminal apps, and apart from the web app (which needs no install at all), trying it means building from source.
 
 ## Building
 

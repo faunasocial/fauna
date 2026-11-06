@@ -77,15 +77,15 @@ impl UpdateChannel {
     /// The channel the page selects while the user has chosen none: the first
     /// in page order whose build is available and usable from an app at
     /// `app_version`, or whose state is unknown — so an unprobed page (an empty
-    /// slice) keeps Stable. Usable: Stable; or a product major of 1 or more; or
+    /// slice) keeps Stable. Usable: Stable; or a product version from 0.2.0 on; or
     /// the build's version equals the app's (`onboarding-provisioning.md` § 5 →
-    /// *The compat line*: while the major is 0 a Test or Dev nest works only
+    /// *The compat line*: below 0.2.0 a Test or Dev nest works only
     /// with apps of exactly its version). A build without a version label
     /// counts as usable. Nothing qualifying → Stable.
     pub fn default_for(availability: &[ChannelAvailability], app_version: &Version) -> Self {
         let usable = |channel: UpdateChannel, version: &Option<String>| {
             channel == Self::Stable
-                || app_version.major >= 1
+                || !Self::same_version_line_applies(app_version)
                 || match version {
                     None => true,
                     Some(v) => Version::parse(v).is_ok_and(|v| v == *app_version),
@@ -109,15 +109,19 @@ impl UpdateChannel {
 
     /// This row's description key given what the registry said of it: the
     /// `_desc_no_build` wording for a channel with no build, else the compat
-    /// line's choice at `major` ([`Self::description_key_for_major`]).
-    pub fn description_key_for(self, major: u64, build: Option<&ChannelBuild>) -> &'static str {
+    /// line's choice at `version` ([`Self::description_key_for_version`]).
+    pub fn description_key_for(
+        self,
+        version: &Version,
+        build: Option<&ChannelBuild>,
+    ) -> &'static str {
         match build {
             Some(ChannelBuild::NoBuild) => match self {
                 Self::Stable => "onboarding.vps_config.update_channel_stable_desc_no_build",
                 Self::Test => "onboarding.vps_config.update_channel_test_desc_no_build",
                 Self::Dev => "onboarding.vps_config.update_channel_dev_desc_no_build",
             },
-            _ => self.description_key_for_major(major),
+            _ => self.description_key_for_version(version),
         }
     }
 }
@@ -172,6 +176,12 @@ mod tests {
     }
 
     #[test]
+    fn from_0_2_0_any_available_build_is_usable() {
+        let t = table([ChannelBuild::NoBuild, avail("0.2.0"), avail("0.2.1")]);
+        assert_eq!(UpdateChannel::default_for(&t, &v("0.2.3")), Test);
+    }
+
+    #[test]
     fn unknown_is_the_status_quo_and_a_present_stable_build_wins() {
         let unknown = table([
             ChannelBuild::Unknown,
@@ -196,20 +206,21 @@ mod tests {
     #[test]
     fn a_channel_with_no_build_says_so_and_the_rest_keep_the_compat_line() {
         let p = "onboarding.vps_config.update_channel_";
+        let v0 = Version::new(0, 1, 5);
         for c in UpdateChannel::ALL {
             assert_eq!(
-                c.description_key_for(0, Some(&ChannelBuild::NoBuild)),
+                c.description_key_for(&v0, Some(&ChannelBuild::NoBuild)),
                 format!("{p}{}_desc_no_build", c.id())
             );
             for build in [None, Some(&ChannelBuild::Unknown), Some(&avail("0.1.5"))] {
                 assert_eq!(
-                    c.description_key_for(0, build),
-                    c.description_key_for_major(0)
+                    c.description_key_for(&v0, build),
+                    c.description_key_for_version(&v0)
                 );
             }
         }
         assert_eq!(
-            Test.description_key_for(1, Some(&avail("1.0.0"))),
+            Test.description_key_for(&Version::new(1, 0, 0), Some(&avail("1.0.0"))),
             format!("{p}test_desc")
         );
     }

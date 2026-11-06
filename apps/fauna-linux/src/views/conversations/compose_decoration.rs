@@ -13,9 +13,42 @@ use gtk::prelude::*;
 /// Char offset (GTK `TextIter` unit) of a byte offset into `text`. `decoration_map` returns
 /// **byte** offsets (Rust `str`), but GTK iters count **chars**, so every range is converted
 /// before it touches the buffer. `byte` must be a char boundary (decoration offsets always
-/// are).
+/// are). The applier uses [`ByteToCharCursor`]; this single-offset form is the reference the
+/// cursor is tested against.
+#[cfg(test)]
 pub fn byte_to_char(text: &str, byte: usize) -> i32 {
     text[..byte].chars().count() as i32
+}
+
+/// Forward-only byte→char converter: remembers the last (byte, char) pair so an ascending run
+/// of offsets (decoration / hide / dim lists are all ascending) costs one pass over the text
+/// instead of a count from the start per offset. A lookup below the previous one restarts from
+/// the head, so correctness never depends on the ordering.
+pub struct ByteToCharCursor<'a> {
+    text: &'a str,
+    byte: usize,
+    chars: usize,
+}
+
+impl<'a> ByteToCharCursor<'a> {
+    pub fn new(text: &'a str) -> Self {
+        Self {
+            text,
+            byte: 0,
+            chars: 0,
+        }
+    }
+
+    /// Char offset of `byte` (a char boundary), as [`byte_to_char`].
+    pub fn char_at(&mut self, byte: usize) -> i32 {
+        if byte < self.byte {
+            self.byte = 0;
+            self.chars = 0;
+        }
+        self.chars += self.text[self.byte..byte].chars().count();
+        self.byte = byte;
+        self.chars as i32
+    }
 }
 
 /// Byte offset of a **char** offset into `text` (the inverse of [`byte_to_char`]) — GTK
@@ -145,10 +178,11 @@ pub fn apply(buffer: &gtk::TextBuffer, markers_shown: bool) {
     }
 
     // Content styles (both modes): bold/italic/code/link/heading/blockquote.
+    let mut cursor = ByteToCharCursor::new(&text);
     for d in &decos {
         if let Some(tag) = style_tag(d.kind) {
-            let si = buffer.iter_at_offset(byte_to_char(&text, d.start));
-            let ei = buffer.iter_at_offset(byte_to_char(&text, d.end));
+            let si = buffer.iter_at_offset(cursor.char_at(d.start));
+            let ei = buffer.iter_at_offset(cursor.char_at(d.end));
             buffer.apply_tag_by_name(tag, &si, &ei);
             if matches!(d.kind, MdDecorationKind::Blockquote) {
                 let mut line_start = si;
@@ -166,9 +200,10 @@ pub fn apply(buffer: &gtk::TextBuffer, markers_shown: bool) {
         // `compose_decoration_plan`, one policy for windows/android/linux (priority #2/#4) — and
         // is applied exactly like the hide-branch's `plan.dim` below.
         let caret_byte = char_to_byte(&text, buffer.cursor_position() as usize);
+        let mut cursor = ByteToCharCursor::new(&text);
         for r in &fauna_core::markdown::compose_show_markers_dim_ranges(&text, caret_byte) {
-            let si = buffer.iter_at_offset(byte_to_char(&text, r.start));
-            let ei = buffer.iter_at_offset(byte_to_char(&text, r.end));
+            let si = buffer.iter_at_offset(cursor.char_at(r.start));
+            let ei = buffer.iter_at_offset(cursor.char_at(r.end));
             buffer.apply_tag_by_name("md-marker", &si, &ei);
         }
         return;
@@ -179,14 +214,16 @@ pub fn apply(buffer: &gtk::TextBuffer, markers_shown: bool) {
     // policy for web + native — `fauna_core::markdown::compose_decoration_plan` (priority #2).
     let caret_byte = char_to_byte(&text, buffer.cursor_position() as usize);
     let plan = fauna_core::markdown::compose_decoration_plan(&text, caret_byte);
+    let mut cursor = ByteToCharCursor::new(&text);
     for r in &plan.hide {
-        let si = buffer.iter_at_offset(byte_to_char(&text, r.start));
-        let ei = buffer.iter_at_offset(byte_to_char(&text, r.end));
+        let si = buffer.iter_at_offset(cursor.char_at(r.start));
+        let ei = buffer.iter_at_offset(cursor.char_at(r.end));
         buffer.apply_tag_by_name("md-hidden", &si, &ei);
     }
+    let mut cursor = ByteToCharCursor::new(&text);
     for r in &plan.dim {
-        let si = buffer.iter_at_offset(byte_to_char(&text, r.start));
-        let ei = buffer.iter_at_offset(byte_to_char(&text, r.end));
+        let si = buffer.iter_at_offset(cursor.char_at(r.start));
+        let ei = buffer.iter_at_offset(cursor.char_at(r.end));
         buffer.apply_tag_by_name("md-marker", &si, &ei);
     }
 }
@@ -211,6 +248,24 @@ mod tests {
         assert_eq!(char_to_byte("café x", 0), 0);
         // round-trips with byte_to_char on a char boundary.
         assert_eq!(byte_to_char("café x", char_to_byte("café x", 4)), 4);
+    }
+
+    #[test]
+    fn cursor_matches_byte_to_char_on_a_large_marker_dense_multibyte_body() {
+        let text = "**café** é_x_ `日本` ".repeat(2000);
+        let boundaries: Vec<usize> = text
+            .char_indices()
+            .map(|(i, _)| i)
+            .chain(std::iter::once(text.len()))
+            .collect();
+        let mut cursor = ByteToCharCursor::new(&text);
+        for (n, &b) in boundaries.iter().enumerate() {
+            assert_eq!(cursor.char_at(b), n as i32);
+        }
+        // Out-of-order lookups restart from the head and stay exact.
+        assert_eq!(cursor.char_at(0), 0);
+        assert_eq!(cursor.char_at(7), byte_to_char(&text, 7));
+        assert_eq!(cursor.char_at(3), byte_to_char(&text, 3));
     }
 
     #[test]

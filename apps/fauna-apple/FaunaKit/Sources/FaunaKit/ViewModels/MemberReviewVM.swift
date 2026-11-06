@@ -12,11 +12,12 @@ public struct MemberReviewRow: Identifiable, Equatable {
     public var id: Data { person }
 }
 
-/// Drives the permanent **Members To Review** Settings sub-page (item (iv) of `succession-aftermath.md` § Propagation's two-surface ruling).
-/// Renders whatever a review sweep left unanswered; unlike the (not-yet-built
-/// on apple) ephemeral kit-side pass this page has **no sweep gate** — it is
+/// Drives both member-review surfaces: the permanent **Members To Review**
+/// Settings sub-page (item (iv) of `succession-aftermath.md`
+/// § Propagation's two-surface ruling), which has **no sweep gate** — it is
 /// reachable, and ordinarily empty, at all times (`docs/goal/ui/settings.md`
-/// § Navigation model). Mirrors tui `settings/member_review.rs::review_rows` /
+/// § Navigation model) — and the ephemeral kit-side pass, whose gates live on
+/// `RecoveryKitVM` and whose rows are this same roster. Mirrors tui `settings/member_review.rs::review_rows` /
 /// android's `MemberReviewVM`; zero shared logic owed here (priority #2) —
 /// every seam is `libs/fauna-ffi/src/member_review.rs`.
 ///
@@ -92,7 +93,16 @@ public final class MemberReviewVM {
     /// fired); a failed read keeps the rows and raises no banner; rows are
     /// replaced only when they differ.
     public func resync() async {
-        guard let api, loaded else { return }
+        guard loaded else { return }
+        await refresh()
+    }
+
+    /// One quiet read: what the ephemeral pass hydrates with. That surface sits
+    /// on a section with its own business while the successor's `__config` may
+    /// still be sealed, so a failed read keeps the rows and raises no banner;
+    /// the roster reload behind the aftermath's raise triggers the next one.
+    public func refresh() async {
+        guard let api else { return }
         guard let reviews = try? await api.memberReviewList() else { return }
         var built: [MemberReviewRow] = []
         built.reserveCapacity(reviews.count)
@@ -104,6 +114,14 @@ public final class MemberReviewVM {
             built.append(MemberReviewRow(person: review.person, text: text))
         }
         if built != rows { rows = built }
+        loaded = true
+    }
+
+    /// Drop the previous account's roster at an identity change.
+    public func reset() {
+        rows = []
+        loaded = false
+        errorMessage = nil
     }
 
     /// Record **Keep** — closes every open item for `person` with no group

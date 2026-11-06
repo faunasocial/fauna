@@ -7,7 +7,9 @@
 
 use std::collections::HashMap;
 
-use fauna_provisioning::update_channel::report::{REPORT_DIR, REPORT_FILE, REPORT_PATH, Report};
+use fauna_provisioning::update_channel::report::{
+    REPORT_DIR, REPORT_FILE, REPORT_MAX_ARCHIVE_BYTES, REPORT_PATH, Report,
+};
 use tokio::time::Instant;
 
 use crate::catalogue::{CheckFailure, Event};
@@ -232,10 +234,10 @@ impl Reporter {
 /// still numbers above the old one while the clock moves forward.
 async fn read_back<E: Engine>(engine: &E, id: &str) -> Report {
     match engine.get_archive(id, REPORT_PATH).await {
-        Ok(archive) => first_file(&archive)
+        Ok(archive) if archive.len() <= REPORT_MAX_ARCHIVE_BYTES => first_file(&archive)
             .and_then(Report::parse)
             .unwrap_or_default(),
-        Err(_) => Report::default(),
+        _ => Report::default(),
     }
 }
 
@@ -315,6 +317,25 @@ mod tests {
             .emit(&engine, "other", Event::SelfUpdateCompleted)
             .await;
         assert_eq!(engine.report("other").unwrap().events.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn an_oversized_archive_reads_back_as_a_fresh_ledger() {
+        let mut old = Report::default();
+        old.push(
+            5,
+            "info",
+            "decision.pinned",
+            "x".repeat(REPORT_MAX_ARCHIVE_BYTES),
+        );
+        let engine = Fake {
+            archives: std::sync::Mutex::new(HashMap::from([(
+                "nest".to_string(),
+                ustar(REPORT_FILE, &old.to_bytes(), 0),
+            )])),
+            ..Default::default()
+        };
+        assert!(read_back(&engine, "nest").await.events.is_empty());
     }
 
     #[test]

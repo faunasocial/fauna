@@ -34,7 +34,8 @@ import time
 from clients.ws_rpc_admin_client import WsRpcAdminClient
 from helpers.budgets import RPC_ROUNDTRIP_S, UI_SCROLL_SWEEP_S, UI_SETTLE_S
 from helpers.mail_wire import _connect_smtp_starttls
-from helpers.mail_aliases import add_exact_alias
+from helpers.mail_aliases import add_test_scoped_exact_alias
+from helpers.waiting import await_serving_enablement_for
 
 # The handle local part the UI-claim flow uses; the handle CARRIES its domain
 # (`alice@<domain>`) and, once mail is enabled, that handle IS the routable mail
@@ -87,10 +88,13 @@ def route_inbound_mail_to_app(app, mail_bridge_mta, nest_instance, test_user, lo
     inbound mail to a key only this app can open; the alias (the member's own
     write, ``helpers.mail_aliases.add_exact_alias``) is what
     ``validate_recipient`` resolves on RCPT TO. Give each test its own
-    ``local_part`` so no two tests contend for one alias."""
+    ``local_part`` so no two tests contend for one alias; the address is the
+    test's own and is deleted at its teardown
+    (``helpers.mail_aliases.add_test_scoped_exact_alias``), so a long run of mail
+    tests on the session-shared user never reaches the per-account alias cap."""
     app.mail_settings.navigate()
     app.mail_settings.ensure_mail_enabled()
-    return add_exact_alias(
+    return add_test_scoped_exact_alias(
         nest_instance["url"], test_user["signing_key"], mail_bridge_mta.domain, local_part
     )
 
@@ -300,7 +304,16 @@ def claim_enable_and_ready(app, nest, *, credential_kind):
     # Dismiss the terminal nat_mode_choice step (confirm-only common case —
     # accepts the pre-selected seed) — this is what exits the wizard to LoggedIn.
     app.onboarding.finish_nat_mode()
-    time.sleep(2.0)  # let the authenticated shell + WS session to this nest settle
+    # The LoggedIn handoff fires the post-claim serving enablement (the derived
+    # mail enable this flow depends on). Wait for its run to COMPLETE before the
+    # session re-assert below, never a settle window (convention 14): windows'
+    # session door rebuilds its nest clients on a re-assert, so one landing
+    # mid-run dropped the enable's in-flight RPCs ("the connection to the nest
+    # was lost") and left mail off — what a fixed 2 s sleep here hid on the apps
+    # whose re-assert keeps the connection.
+    await_serving_enablement_for(
+        app.driver, bytes(admin_sk.verify_key).hex(), what="the UI claim"
+    )
 
     # Nudge the linux app to (re)build the authenticated window WITH the admin
     # shell by re-asserting the same session — the established admin-e2e mechanism

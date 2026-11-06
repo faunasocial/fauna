@@ -39,7 +39,6 @@ from pathlib import Path
 
 import pytest
 
-from helpers.app_surface import app_name, skip_unbuilt
 from helpers.budgets import RPC_ROUNDTRIP_S
 from helpers.labeler_publish import FIXTURES, publish_wasm_labeler
 from helpers.room_seats import (  # noqa: F401 — `room_app`/`room_seats`/`room_seat_pair` are fixtures
@@ -162,16 +161,6 @@ def test_a_member_opens_a_room_post_and_an_outsider_sees_it_locked(
     room_seats, nest_instance, room_app, request
 ):
     owner, member, third = room_seats
-    if app_name(owner.app.driver) not in (
-        "tui", "linux", "web", "macos", "ios", "windows", "android",
-    ):
-        skip_unbuilt(
-            owner.app.driver,
-            surface="the room-restricted post compose option and room-post seam",
-            detail="tui, linux, web, macos, ios, windows and android carry room "
-            "posts; the room family's batched trickle-down is now complete",
-            tracked="ui/feed.md § Implementation status today",
-        )
 
     marker = f"room-body-{uuid.uuid4().hex[:8]}"
     preview = f"A post for the room — {uuid.uuid4().hex[:6]}"
@@ -296,7 +285,6 @@ def test_a_room_post_appears_on_the_authors_profile_for_a_member_and_locked_for_
     the card naming the room by the member's own label; a reader who is not in
     the room finds the same card with the teaser and the reserved-tier lock."""
     owner, member, third = room_seats
-    owner.app.profile.require_posts_tab_supported()
 
     marker = f"room-body-{uuid.uuid4().hex[:8]}"
     preview = f"A room post for the profile — {uuid.uuid4().hex[:6]}"
@@ -405,13 +393,6 @@ def test_a_repost_of_a_room_post_shows_an_outsider_the_teaser_and_the_lock(
     row (`reposted_gated_*`), pinned in shared Rust
     (`a_repost_row_carries_its_targets_gate_and_names_the_room_for_a_member`)."""
     owner, member, third = room_seats
-    if app_name(owner.app.driver) not in ("tui", "linux", "web", "android"):
-        skip_unbuilt(
-            owner.app.driver,
-            surface="the repost card's target badge (`reposted_gated_*`)",
-            detail="tui leads, linux, web and android follow; macos, ios and windows paint it in their trickle-down",
-            tracked="behavior/restricted-posts.md § Implementation status today",
-        )
 
     marker = f"room-body-{uuid.uuid4().hex[:8]}"
     preview = f"A room post to repost — {uuid.uuid4().hex[:6]}"
@@ -437,7 +418,7 @@ def test_a_repost_of_a_room_post_shows_an_outsider_the_teaser_and_the_lock(
         # ── A member reposts the room post, through the repost button. ───────
         at = _read_post(member, preview)
         _wait_badge(member, at, member_names_room, "the member's card naming the room")
-        target = member.app.feed.post_state_by_text(preview)
+        target = member.app.feed.wait_for_post_state_by_text(preview, MESSAGE_BUDGET_S)
         assert target is not None, f"the room post's state row\n{seat_story(member)}"
         target_id = target["post_id"]
         member.app.feed.repost_post(at)
@@ -489,14 +470,6 @@ def _room_photo_journey(room_seats, nest_instance, room_app, request, *, attach_
     """The room-post photo journey both photo witnesses drive; ``attach_first``
     picks the composer order (`FeedActions.create_gated_post`)."""
     owner, member, third = room_seats
-    if app_name(owner.app.driver) != "tui":
-        skip_unbuilt(
-            owner.app.driver,
-            surface="the room post's photo journey",
-            detail="the seal is shared Rust; tui leads the witness, the other "
-            "six follow in their trickle-down",
-            tracked="ui/feed.md § Implementation status today",
-        )
     if not TEST_IMAGE.exists():
         pytest.skip("Test image fixture not found")
 
@@ -562,7 +535,7 @@ def _room_photo_journey(room_seats, nest_instance, room_app, request, *, attach_
         # ── Outside the room: the teaser, locked, naming no picture. ─────────
         at = _read_post(outsider, preview)
         assert outsider.app.feed.gated_badge_text(at) == ROOM_POST_TIER
-        listed = outsider.app.feed.post_state_by_text(preview)
+        listed = outsider.app.feed.wait_for_post_state_by_text(preview, MESSAGE_BUDGET_S)
         assert listed is not None and marker not in listed.get("body", ""), listed
         assert not listed.get("has_media") and not listed.get("media_hash"), (
             f"nothing outside the sealed body names the photo: {listed!r}"
@@ -611,15 +584,6 @@ def test_a_member_removed_from_the_room_keeps_its_earlier_posts_and_loses_the_ro
     (`restricted-posts.md` § Encryption at rest, *the rooms offered* and the
     end-to-end class's history rule)."""
     owner, stayer, leaver = room_seats
-    if app_name(owner.app.driver) != "tui":
-        skip_unbuilt(
-            owner.app.driver,
-            surface="the removed member's room-post journey",
-            detail="the ex-member's composer and kept-base open are shared Rust; "
-            "tui leads the witness, the other six follow in their trickle-down",
-            tracked="ui/feed.md § Implementation status today",
-        )
-
     marker = f"room-body-{uuid.uuid4().hex[:8]}"
     preview = f"Before the removal — {uuid.uuid4().hex[:6]}"
 
@@ -655,13 +619,27 @@ def test_a_member_removed_from_the_room_keeps_its_earlier_posts_and_loses_the_ro
         MESSAGE_BUDGET_S,
         diagnose=lambda: seat_story(owner),
     )
+    chips_before = owner.app.driver.get_texts("thread-member-chip")
     owner.app.conversations.remove_member(index_of(seated, leaver.actor_hex))
+
+    def removal_story() -> str:
+        # A removal that took the wrong member reads as a roster that shrank
+        # with the leaver still on it, so name who was asked for and who went.
+        t = thread_by_id(owner.app, group_id)
+        return (
+            f"leaver={leaver.actor_hex[:12]} at chip {index_of(seated, leaver.actor_hex)}; "
+            f"roster before={[a and a[:12] for a in seated.participant_actor_ids]} "
+            f"chips before={chips_before!r}; "
+            f"roster now={[a and a[:12] for a in t.participant_actor_ids] if t else None}\n"
+            f"error-message={owner.app.error_text()!r}\n{seat_story(owner)}"
+        )
+
     wait_for(
         "the owner's roster dropping the leaver",
         lambda: thread_by_id(owner.app, group_id),
         lambda t: t is not None and leaver.actor_hex not in t.participant_actor_ids,
         MEMBERSHIP_BUDGET_S,
-        diagnose=lambda: f"error-message={owner.app.error_text()!r}\n{seat_story(owner)}",
+        diagnose=removal_story,
     )
 
     # ── The removed seat: the room is no longer offered (outcome 10). ───────
@@ -688,6 +666,9 @@ def test_a_member_removed_from_the_room_keeps_its_earlier_posts_and_loses_the_ro
     assert marker not in leaver.app.feed.post_text(at), "the card shows only the teaser"
 
     # ── …and still opens: written while they were a member (outcome 12). ─────
+    # The kept base is the per-epoch secret the device kept in its provider KV
+    # before the removal advanced its group — on every app alike, the web app
+    # included (ruling 6, where it rests).
     leaver.app.feed.open_post_detail(at)
     leaver.app.driver.wait_for("feed-post-detail-body")
     opened = wait_for(
@@ -737,15 +718,6 @@ def test_a_member_removed_from_the_room_opens_no_room_post_written_after(
     composer dropping the room (outcome 10) is the causal anchor that its
     device has processed the removal before the post is written."""
     owner, _stayer, leaver = room_seats
-    if app_name(owner.app.driver) != "tui":
-        skip_unbuilt(
-            owner.app.driver,
-            surface="the removed member's room-post journey",
-            detail="the seal and open are shared Rust; tui leads the witness, "
-            "the other six follow in their trickle-down",
-            tracked="ui/feed.md § Implementation status today",
-        )
-
     marker = f"room-body-{uuid.uuid4().hex[:8]}"
     preview = f"After the removal — {uuid.uuid4().hex[:6]}"
 
@@ -811,15 +783,6 @@ def test_a_newcomer_to_a_room_that_shares_no_history_opens_no_earlier_room_post(
     is a room post's base. The pre-join post's open is then a settled read
     (`_DETAIL_OPEN_IS_SETTLED`) showing the post's teaser and not its body."""
     owner, member, third = room_seats
-    if app_name(owner.app.driver) != "tui":
-        skip_unbuilt(
-            owner.app.driver,
-            surface="the room newcomer's room-post journey",
-            detail="the seal and open are shared Rust; tui leads the witness, "
-            "the other six follow in their trickle-down",
-            tracked="ui/feed.md § Implementation status today",
-        )
-
     before = f"room-body-{uuid.uuid4().hex[:8]}"
     before_preview = f"Before the join — {uuid.uuid4().hex[:6]}"
     after = f"after the join {uuid.uuid4().hex[:8]}"
@@ -887,13 +850,6 @@ def test_a_rooms_labels_show_on_a_room_posts_card_for_its_members_only(
     (`_DETAIL_OPEN_IS_SETTLED`): the open that would have fetched a member's
     verdicts has already run when the click returns."""
     founder, member = room_seat_pair
-    if app_name(founder.app.driver) == "windows":
-        skip_unbuilt(
-            founder.app.driver,
-            surface="the room post's label journey (Esc out of the post detail)",
-            detail="the label merge is shared Rust; windows follows in its trickle-down",
-            tracked="ui/feed.md § Implementation status today",
-        )
     labeler = publish_wasm_labeler(
         run_seal_helper, nest_instance, FIXTURES / "room_commercial_labeler.wat"
     ).hex()
@@ -940,7 +896,7 @@ def test_a_rooms_labels_show_on_a_room_posts_card_for_its_members_only(
             S.feed.post.gate_room(room=thread_by_id(member.app, member_thread).label),
             "the member's card naming the room",
         )
-        post_id = member.app.feed.post_state_by_text(preview)["post_id"]
+        post_id = member.app.feed.wait_for_post_state_by_text(preview)["post_id"]
         member.app.feed.open_post_detail(at)
         member.app.driver.wait_for("feed-post-detail-body")
         wait_for(
@@ -979,7 +935,7 @@ def test_a_rooms_labels_show_on_a_room_posts_card_for_its_members_only(
         # ── A reader outside the room: the lock, and no label. ──────────────
         at = _read_post(outsider, preview)
         assert outsider.app.feed.gated_badge_text(at) == ROOM_POST_TIER
-        outsider_post = outsider.app.feed.post_state_by_text(preview)["post_id"]
+        outsider_post = outsider.app.feed.wait_for_post_state_by_text(preview)["post_id"]
         body = _open_and_read_detail(outsider, preview)
         assert marker not in body, "the outsider's detail stays the teaser"
         outsider.app.feed.close_post_detail()
@@ -1010,15 +966,6 @@ def test_a_room_post_is_never_a_message_in_the_room_and_reaches_a_member_like_an
     between. The positive half is the member's feed listing the room post the
     way it lists a public post of the owner's, and opening it."""
     owner, member, third = room_seats
-    if app_name(owner.app.driver) != "tui":
-        skip_unbuilt(
-            owner.app.driver,
-            surface="the room post never-a-message journey",
-            detail="the seal and the feed are shared Rust; tui leads the witness, "
-            "the other six follow in their trickle-down",
-            tracked="ui/feed.md § Implementation status today",
-        )
-
     nonce = uuid.uuid4().hex[:8]
     marker = f"room-body-{nonce}"
     preview = f"A post for the room, not the chat — {nonce}"

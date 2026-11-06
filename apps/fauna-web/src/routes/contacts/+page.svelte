@@ -12,16 +12,26 @@
   } from '#lib/api';
   import { parseRecipient } from '#lib/resolve';
   import { goto } from '$app/navigation';
+  import { profileHref } from '#lib/profile-nav';
   import type { Knock, Contact } from '#lib/types';
   import MessageBanner from '#lib/components/MessageBanner.svelte';
   import { t } from '#lib/i18n/strings';
   import { relativeTime } from '#lib/value-format';
-  import { contactStatusLabel, wardAskRules } from '#lib/wasm';
+  import { contactRosterGroupOrder, contactStatusLabel, wardAskRules } from '#lib/wasm';
   import { contactOverlays, contactsRevision } from '#lib/conversations';
   import { carddavListAddressbooks, carddavQueryCardsDecoded, carddavLocateCardByUidHash, onPushEvent, staleSurfacesForPushKind } from '#lib/rpc';
   import { resolveLocalized } from '#lib/i18n/localized';
   import { consumePendingSearchNav } from '#lib/search';
   import { IDS } from '#lib/generated/uiIds';
+  import {
+    archiveLinkViews,
+    archiveLinkPrompt,
+    archiveLinkedLabel,
+    answerArchiveLink,
+    unlinkArchive,
+    refreshArchiveLinkViews,
+  } from '#lib/archive-links';
+  import { archiveRowParts, type ArchiveLinkView } from '#lib/archive-link-rows';
   import { memberReviewRoster } from '#lib/member-reviews';
   import { familyContactRequest } from '#lib/rpc';
   import { hexToBytes } from '#lib/hex';
@@ -246,6 +256,8 @@
       ]);
       localKnocks = k;
       localContacts = c;
+      // The rows' archive-link views, read with the roster (tui's rule).
+      void refreshArchiveLinkViews();
       knocksStore.set(k);
       contactsStore.set(c);
     } catch (e) {
@@ -285,6 +297,24 @@
       await refresh(id.secretHex);
     } catch (e) {
       error = e instanceof Error ? e.message : 'Dismiss failed';
+    }
+  }
+
+  async function handleArchiveAnswer(view: ArchiveLinkView, yes: boolean) {
+    error = '';
+    try {
+      await answerArchiveLink(view, yes);
+    } catch (e) {
+      error = e instanceof Error ? e.message : String(e);
+    }
+  }
+
+  async function handleArchiveUnlink(view: ArchiveLinkView) {
+    error = '';
+    try {
+      await unlinkArchive(view);
+    } catch (e) {
+      error = e instanceof Error ? e.message : String(e);
     }
   }
 
@@ -379,8 +409,9 @@
   }
 
 
-  const statusOrder = ['confirmed', 'accepted', 'pending', 'blocked'];
-
+  // One status group's rows. The groups and their order are
+  // fauna_core::format::contact_roster_group_order's (`contactRosterGroupOrder`,
+  // contacts.md § Where logic lives → Roster status grouping).
   function contactsByStatus(status: string): Contact[] {
     // The private overlay's roster filter (`ContactsCache::matches_filter`):
     // case-insensitive substring over handle/domain/actor-id plus the viewer's
@@ -480,6 +511,11 @@
         <span class="find-handle">{findResult.handle}@{findResult.domain}</span>
       {/if}
       <button
+        data-testid={IDS.CONTACT_ACTOR_ID_OPEN_PROFILE_BUTTON}
+        class="btn small"
+        onclick={() => findResult && goto(profileHref(findResult.actorId, findResult.nestUrl))}
+      >{t.contacts.find_user.open_profile}</button>
+      <button
         data-testid={IDS.CONTACTS_ADD_BUTTON}
         class="btn primary small"
         disabled={sendingKnock || knockAsk.knockSent}
@@ -563,7 +599,7 @@
     {#if localContacts.length === 0}
       <p class="muted">{t.contacts.no_contacts}</p>
     {:else}
-      {@const visibleGroups = statusOrder
+      {@const visibleGroups = contactRosterGroupOrder(localContacts.map((c) => c.status))
         .map((status) => ({ status, group: contactsByStatus(status) }))
         .filter(({ group }) => group.length > 0)}
       {#if visibleGroups.length === 0}
@@ -588,7 +624,7 @@
                   class="contact-open"
                   data-testid={contact.peer_id}
                   title={contact.peer_id}
-                  onclick={() => goto(`/app/profile/${contact.peer_id}`)}
+                  onclick={() => goto(profileHref(contact.peer_id, contact.home_nest_url))}
                 >
                   <span data-testid={IDS.CONTACT_NAME} class="peer-id mono">{rosterNames.get(contact.peer_id)?.label.primary ?? ''}</span>
                 </button>
@@ -622,6 +658,18 @@
                 {#if contact.status === 'accepted'}
                   <button data-testid={IDS.CONTACT_CONFIRM} class="btn small" onclick={() => handleConfirm(contact.peer_id)}>{t.common.confirm}</button>
                 {/if}
+                <!-- Phase two's archive-link prompt (archive-import.md § Linking
+                     and merging, ruling 8): state from the shared
+                     `ArchiveLinkView`, words from the crate's composers. -->
+                {#each archiveRowParts($archiveLinkViews, contact.peer_id).asked as view (view.platform)}
+                  <span data-testid={IDS.CONTACT_ARCHIVE_LINK_PROMPT} class="muted small">{archiveLinkPrompt(view, rosterNames.get(contact.peer_id)?.label.primary ?? '')}</span>
+                  <button data-testid={IDS.CONTACT_ARCHIVE_LINK_YES} class="btn small" onclick={() => handleArchiveAnswer(view, true)}>{t.archive_import.link_yes}</button>
+                  <button data-testid={IDS.CONTACT_ARCHIVE_LINK_NO} class="btn small" onclick={() => handleArchiveAnswer(view, false)}>{t.archive_import.link_no}</button>
+                {/each}
+                {#each archiveRowParts($archiveLinkViews, contact.peer_id).linked as view (view.platform)}
+                  <span data-testid={IDS.CONTACT_ARCHIVE_LINKED} class="muted small">{archiveLinkedLabel(view)}</span>
+                  <button data-testid={IDS.CONTACT_ARCHIVE_UNLINK} class="btn small" onclick={() => handleArchiveUnlink(view)}>{t.archive_import.unlink}</button>
+                {/each}
               </div>
             {/each}
           </div>

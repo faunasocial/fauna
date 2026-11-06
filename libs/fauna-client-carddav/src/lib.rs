@@ -69,38 +69,44 @@ pub use fauna_protocol::dav_identity::{
 pub use fauna_mls::wrapped_blob::dav_body::SealError;
 
 /// Seal `plaintext` (the canonical vCard bytes, or the sealed metadata bytes) to
-/// the actor's own `credential_id="default"` recipient pubkey derived from `msek`
-/// (the `fauna.state.mail` MSEK), producing the `encrypted_body` wire bytes.
-///
-/// This is the EXACT scheme the MDA's CardDAV PUT uses
-/// (`internal/mda/carddav/put.go` → `mailfauna.EncryptToRecipientHybrid`): a
-/// single [`MailRecordEnvelope`](fauna_mls::wrapped_blob::MailRecordEnvelope) (HPKE `DHKEM(X25519,HKDF-SHA256)`, `HKDF-SHA256`,
-/// `ChaCha20-Poly1305`) serialized canonical. Same `msek` yields the same
-/// recipient keypair, so the bytes are interchangeable with MDA-written ones.
-pub use fauna_mls::wrapped_blob::dav_body::seal_dav_body as seal_card_body;
+/// the actor's own recipient-**card** pubkey derived from `msek` (the
+/// `fauna.state.mail` MSEK, through the card root), producing the
+/// `encrypted_body` wire bytes — a `card-record`
+/// [`MailRecordEnvelope`](fauna_mls::wrapped_blob::MailRecordEnvelope) (HPKE
+/// `DHKEM(X25519,HKDF-SHA256)`, `HKDF-SHA256`, `ChaCha20-Poly1305`, AAD
+/// `for_card_record()`) serialized canonical (`owner-key-material.md` § Path
+/// B-sibling-6). The MDA's CardDAV PUT seals the same way through the FFI, so
+/// the bytes are interchangeable with MDA-written ones.
+pub fn seal_card_body(plaintext: &[u8], msek: &[u8; 32]) -> Result<Vec<u8>, SealError> {
+    fauna_mls::wrapped_blob::dav_body::seal_dav_body(DavKind::Card, plaintext, msek)
+}
 
 /// Post-quantum (X-Wing, ML-KEM-768 ∥ X25519) sibling of [`seal_card_body`].
-/// Derives the actor's **own** X-Wing keypair from `msek` and seals the body to
-/// it; the produced [`MailRecordEnvelope`](fauna_mls::wrapped_blob::MailRecordEnvelope) self-describes its suite, so the MDA
-/// and every Fauna app open it through the same suite-dispatching
-/// [`unseal_card_body`]. Selected by the write path iff the actor has published
-/// an ML-KEM ek (`post-quantum.md` § Capability negotiation); otherwise the
-/// classical [`seal_card_body`] runs.
-pub use fauna_mls::wrapped_blob::dav_body::seal_dav_body_xwing as seal_card_body_xwing;
+/// Derives the actor's **own** recipient-card X-Wing keypair from `msek` and
+/// seals the body to it; the produced
+/// [`MailRecordEnvelope`](fauna_mls::wrapped_blob::MailRecordEnvelope)
+/// self-describes its suite, so the MDA and every Fauna app open it through the
+/// same suite-dispatching [`unseal_card_body`].
+pub fn seal_card_body_xwing(plaintext: &[u8], msek: &[u8; 32]) -> Result<Vec<u8>, SealError> {
+    fauna_mls::wrapped_blob::dav_body::seal_dav_body_xwing(DavKind::Card, plaintext, msek)
+}
 
 /// Unseal an `encrypted_body` produced by [`seal_card_body`] **or by the MDA** —
-/// both derive the same recipient keypair from `msek`, so a Fauna app reads
+/// both derive the same recipient-card keypair from `msek`, so a Fauna app reads
 /// MDA-written cards and vice versa. Returns the plaintext vCard bytes. Opens
-/// either suite (classical X25519 or hybrid X-Wing), both derived from the same
-/// MSEK, so cards ride the same post-quantum migration as mail records.
-pub use fauna_mls::wrapped_blob::dav_body::unseal_dav_body as unseal_card_body;
+/// either suite (classical X25519 or hybrid X-Wing); a record of any other kind
+/// is refused.
+pub fn unseal_card_body(encrypted_body: &[u8], msek: &[u8; 32]) -> Result<Vec<u8>, SealError> {
+    fauna_mls::wrapped_blob::dav_body::unseal_dav_body(DavKind::Card, encrypted_body, msek)
+}
 
-/// The actor's own recipient keypair for this crate's sealed bodies (address
+/// The actor's own recipient key ring for this crate's sealed bodies (address
 /// book metadata, card bodies), derived once from `msek` and reused across a
 /// whole batch — [`unseal_addressbook_metadata`] and [`decode_card_entry`]
 /// take one of these instead of a bare `msek`, so `query_cards` renders N rows
-/// with a single keygen instead of N .
-pub use fauna_mls::wrapped_blob::dav_body::DavRecipientKeys;
+/// with a single keygen instead of N . Build it for
+/// [`DavKind::Card`]: a calendar ring refuses every card record.
+pub use fauna_mls::wrapped_blob::dav_body::{DavKind, DavRecipientKeys};
 
 // ── Address-book collection metadata (carddav-server.md § Standard properties) ─
 
@@ -137,7 +143,7 @@ pub fn seal_addressbook_metadata(
     meta: &AddressbookMetadata,
     msek: &[u8; 32],
 ) -> Result<Vec<u8>, SealError> {
-    fauna_mls::wrapped_blob::dav_body::seal_dav_body_typed(meta, msek)
+    fauna_mls::wrapped_blob::dav_body::seal_dav_body_typed(DavKind::Card, meta, msek)
 }
 
 /// Unseal an address book's `encrypted_metadata` (written by a Fauna app or
@@ -830,7 +836,7 @@ impl<R: RpcRequester> CardDavClient<R> {
         // card page below reuse it instead of each paying its own keygen
         //  — and as the whole ring, so a card written before a
         // mail-key rotation is still found.
-        let keys = DavRecipientKeys::from_mseks(msek, prior_mseks);
+        let keys = DavRecipientKeys::from_mseks(DavKind::Card, msek, prior_mseks);
         let books = self
             .list_addressbooks_decoded(
                 ListAddressbooksRequest {
@@ -1207,7 +1213,8 @@ END:VCARD\r\n";
         };
         let sealed = seal_addressbook_metadata(&meta, &MSEK).expect("seal");
         assert_eq!(
-            unseal_addressbook_metadata(&sealed, &DavRecipientKeys::derive(&MSEK)).expect("unseal"),
+            unseal_addressbook_metadata(&sealed, &DavRecipientKeys::derive(DavKind::Card, &MSEK))
+                .expect("unseal"),
             meta
         );
     }
@@ -1215,7 +1222,8 @@ END:VCARD\r\n";
     #[test]
     fn addressbook_metadata_empty_blob_is_default() {
         assert_eq!(
-            unseal_addressbook_metadata(&[], &DavRecipientKeys::derive(&MSEK)).expect("empty"),
+            unseal_addressbook_metadata(&[], &DavRecipientKeys::derive(DavKind::Card, &MSEK))
+                .expect("empty"),
             AddressbookMetadata::default()
         );
     }
@@ -1237,7 +1245,8 @@ END:VCARD\r\n";
     #[test]
     fn decode_card_entry_unseals_and_parses() {
         let entry = sealed_card(SAMPLE_VCARD);
-        let card = decode_card_entry(&entry, &DavRecipientKeys::derive(&MSEK)).expect("decode");
+        let card = decode_card_entry(&entry, &DavRecipientKeys::derive(DavKind::Card, &MSEK))
+            .expect("decode");
         assert_eq!(card.etag, "etag-1");
         assert_eq!(card.modseq, 5);
         assert_eq!(card.vcard, SAMPLE_VCARD);
@@ -1251,7 +1260,7 @@ END:VCARD\r\n";
         let entry = sealed_card(SAMPLE_VCARD);
         let wrong = [3u8; 32];
         assert!(matches!(
-            decode_card_entry(&entry, &DavRecipientKeys::derive(&wrong)),
+            decode_card_entry(&entry, &DavRecipientKeys::derive(DavKind::Card, &wrong)),
             Err(DecodeCardError::Unseal(_))
         ));
     }
@@ -1260,7 +1269,8 @@ END:VCARD\r\n";
     fn decode_card_entry_flags_sidecar_presence() {
         let mut entry = sealed_card(SAMPLE_VCARD);
         entry.encrypted_fauna_ext = Some(vec![0u8; 4]);
-        let card = decode_card_entry(&entry, &DavRecipientKeys::derive(&MSEK)).expect("decode");
+        let card = decode_card_entry(&entry, &DavRecipientKeys::derive(DavKind::Card, &MSEK))
+            .expect("decode");
         assert!(card.has_fauna_ext);
     }
 
@@ -1279,7 +1289,8 @@ END:VCARD\r\n";
             created_at: 1_699_000_000,
         };
         let decoded =
-            decode_addressbook_entry(&entry, &DavRecipientKeys::derive(&MSEK)).expect("decode");
+            decode_addressbook_entry(&entry, &DavRecipientKeys::derive(DavKind::Card, &MSEK))
+                .expect("decode");
         assert_eq!(decoded.metadata.displayname, "Personal");
         assert_eq!(decoded.card_count, 12);
         assert_eq!(decoded.ctag, 3);
@@ -1318,8 +1329,11 @@ END:VCARD\r\n";
 
     #[test]
     fn vcard_row_projects_every_display_field_through_the_shared_formatters() {
-        let card = decode_card_entry(&sealed_card(SAMPLE_VCARD), &DavRecipientKeys::derive(&MSEK))
-            .expect("decode");
+        let card = decode_card_entry(
+            &sealed_card(SAMPLE_VCARD),
+            &DavRecipientKeys::derive(DavKind::Card, &MSEK),
+        )
+        .expect("decode");
         let row = vcard_row(&card);
         assert_eq!(row.id, hex::encode(id(0xC1)));
         assert_eq!(row.formatted_name, "Jane Q. Doe");
@@ -1335,7 +1349,8 @@ END:VCARD\r\n";
     #[test]
     fn vcard_row_bare_card_leaves_every_optional_empty() {
         let entry = sealed_card("BEGIN:VCARD\r\nVERSION:4.0\r\nFN:Bare\r\nEND:VCARD\r\n");
-        let card = decode_card_entry(&entry, &DavRecipientKeys::derive(&MSEK)).expect("decode");
+        let card = decode_card_entry(&entry, &DavRecipientKeys::derive(DavKind::Card, &MSEK))
+            .expect("decode");
         let row = vcard_row(&card);
         assert_eq!(row.formatted_name, "Bare");
         assert!(row.org.is_empty() && row.title.is_empty() && row.note.is_empty());
@@ -1426,7 +1441,7 @@ END:VCARD\r\n";
                 after_card_id: None,
                 limit: 0,
             },
-            &DavRecipientKeys::derive(&MSEK),
+            &DavRecipientKeys::derive(DavKind::Card, &MSEK),
         ))
         .expect("decoded page");
         match page {
@@ -1458,7 +1473,7 @@ END:VCARD\r\n";
                 after_card_id: None,
                 limit: 0,
             },
-            &DavRecipientKeys::derive(&MSEK),
+            &DavRecipientKeys::derive(DavKind::Card, &MSEK),
         ))
         .expect("ok result");
         assert_eq!(page, DecodedCardsPage::AddressbookNotFound);
@@ -1492,7 +1507,7 @@ END:VCARD\r\n";
                 after_card_id: None,
                 limit: 0,
             },
-            &DavRecipientKeys::derive(&MSEK),
+            &DavRecipientKeys::derive(DavKind::Card, &MSEK),
         ))
         .expect_err("an unknown outcome must not read as a page");
         assert!(matches!(err, ReadCardsError::UnknownOutcome), "{err:?}");
@@ -1539,7 +1554,7 @@ END:VCARD\r\n";
         });
         let books = block_on(client.list_addressbooks_decoded(
             ListAddressbooksRequest { actor_id: id(0xAA) },
-            &DavRecipientKeys::derive(&MSEK),
+            &DavRecipientKeys::derive(DavKind::Card, &MSEK),
         ))
         .expect("decoded");
         assert_eq!(books.len(), 1);
@@ -1570,7 +1585,7 @@ END:VCARD\r\n";
                 after_card_id: None,
                 limit: 0,
             },
-            &DavRecipientKeys::derive(&wrong),
+            &DavRecipientKeys::derive(DavKind::Card, &wrong),
         ))
         .expect_err("wrong msek must fail to decode");
         assert!(matches!(
@@ -1602,7 +1617,7 @@ END:VCARD\r\n";
         let wrong = [3u8; 32];
         let err = block_on(client.list_addressbooks_decoded(
             ListAddressbooksRequest { actor_id: id(0xAA) },
-            &DavRecipientKeys::derive(&wrong),
+            &DavRecipientKeys::derive(DavKind::Card, &wrong),
         ))
         .expect_err("wrong msek must fail to decode");
         assert!(matches!(err, ReadAddressbooksError::Decode(_)));

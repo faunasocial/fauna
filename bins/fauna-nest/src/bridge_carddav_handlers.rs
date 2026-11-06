@@ -17,6 +17,7 @@ use std::time::Duration;
 
 use fauna_contacts::segments::CardFloorMetadata;
 use fauna_contacts::segments::placement::CardPlacementRecord;
+use fauna_mls::wrapped_blob::{RecordKind, SealedRecordBytes};
 use fauna_protocol::{
     RpcError,
     bridge_routing::{
@@ -176,11 +177,11 @@ fn provision_addressbook_handler() -> crate::rpc_router::RpcHandler {
                 crate::rpc_errors::require_bytes32("addressbook_id", req.addressbook_id.as_slice())
                     .map_err(malformed)?;
 
-            // Validate: encrypted_metadata must be non-empty (the client must
-            // seal *something* even if just a `{}`-equivalent ciphertext).
-            if req.encrypted_metadata.is_empty() {
-                return Err(malformed("encrypted_metadata must not be empty"));
-            }
+            // The metadata rests sealed to the card key: anything but a
+            // `card-record` envelope is refused before any state is touched
+            // (`owner-key-material.md` § Path B-sibling-6).
+            SealedRecordBytes::verify_of_kind(req.encrypted_metadata.clone(), RecordKind::Card)
+                .map_err(|_| malformed("encrypted_metadata is not a sealed card record"))?;
 
             // Branch on `update_metadata`: false = MKCOL-style insert, true =
             // PROPPATCH-style metadata overwrite. The two paths have disjoint
@@ -188,55 +189,7 @@ fn provision_addressbook_handler() -> crate::rpc_router::RpcHandler {
             // Updated/NotFound), so the same `ProvisionOutcome` enum routes
             // both with no ambiguity.
             let reply = if req.update_metadata {
-                let hms_before = state
-                    .db
-                    .carddav_addressbook_highestmodseq(&target, &book)
-                    .await
-                    .map_err(internal)?;
-                let outcome = state
-                    .db
-                    .update_bridge_carddav_addressbook_metadata(
-                        &target,
-                        &book,
-                        &req.encrypted_metadata,
-                    )
-                    .await
-                    .map_err(internal)?;
-                match outcome {
-                    ProvisionOutcome::Updated => {
-                        // Emit only when bytes actually changed. The DB layer
-                        // signals byte-identical retries by leaving
-                        // highestmodseq unchanged; the placement journal must
-                        // mirror that no-op (twin of the CalDAV PROPPATCH
-                        // gate in `bridge_caldav_handlers.rs`).
-                        let hms_after = state
-                            .db
-                            .carddav_addressbook_highestmodseq(&target, &book)
-                            .await
-                            .map_err(internal)?;
-                        if hms_before != hms_after
-                            && let Some(new_hms) = hms_after
-                        {
-                            let record = CardPlacementRecord::UpdateAddressbookMetadata {
-                                addressbook_id: book,
-                                encrypted_metadata: req.encrypted_metadata.clone(),
-                                modseq: new_hms as u64,
-                            };
-                            state
-                                .card_placement
-                                .append_event(&target, &record)
-                                .await
-                                .map_err(placement_journal_diverged)?;
-                            notify_addressbook_changed(&state, &target, &book);
-                        }
-                        ProvisionAddressbookReply::Updated
-                    }
-                    ProvisionOutcome::NotFound => ProvisionAddressbookReply::NotFound,
-                    other => unreachable!(
-                        "update_bridge_carddav_addressbook_metadata cannot return {:?}",
-                        other,
-                    ),
-                }
+                update_addressbook_metadata(&state, target, book, &req.encrypted_metadata).await?
             } else {
                 let now = now_epoch_secs();
                 let outcome = state
@@ -437,14 +390,20 @@ fn put_card_ciphertext_handler() -> crate::rpc_router::RpcHandler {
             }
             // S6.12: structural seal gate — exact twin of
             // `put_event_ciphertext_handler` (see its comment). Proven at the
-            // wire edge, before any state is touched.
+            // wire edge, before any state is touched; the body and the
+            // sidecar as card records (`owner-key-material.md` § Path
+            // B-sibling-6).
             let sealed_body =
-                fauna_mls::wrapped_blob::SealedRecordBytes::verify(req.encrypted_body.clone())
-                    .map_err(|_| malformed("encrypted_body is not a sealed recipient envelope"))?;
-            let sealed_hint = fauna_mls::wrapped_blob::SealedRecordBytes::verify(
-                req.encrypted_index_hint.clone(),
-            )
-            .map_err(|_| malformed("encrypted_index_hint is not a sealed recipient envelope"))?;
+                SealedRecordBytes::verify_of_kind(req.encrypted_body.clone(), RecordKind::Card)
+                    .map_err(|_| malformed("encrypted_body is not a sealed card record"))?;
+            let sealed_hint =
+                SealedRecordBytes::verify(req.encrypted_index_hint.clone()).map_err(|_| {
+                    malformed("encrypted_index_hint is not a sealed recipient envelope")
+                })?;
+            if let Some(ext) = req.encrypted_fauna_ext.as_ref() {
+                SealedRecordBytes::verify_of_kind(ext.clone(), RecordKind::Card)
+                    .map_err(|_| malformed("encrypted_fauna_ext is not a sealed card record"))?;
+            }
 
             let reply =
                 store_sealed_card(&state, target, book, &req, sealed_body, sealed_hint).await?;
@@ -678,53 +637,13 @@ fn delete_card_handler() -> crate::rpc_router::RpcHandler {
 
             let reply = match outcome {
                 DeleteCarddavCardOutcome::Deleted { card_id, modseq } => {
-                    // Spec § D7 (DeleteCard record shape): `addressbook_id` +
-                    // `uid_hash` + `modseq`. The manifest apply drops the card
-                    // placement and pushes a tombstone unconditionally (so
-                    // WebDAV-Sync REPORT surfaces the deletion even against a
-                    // drifted local manifest). Twin of the CalDAV DeleteEvent
-                    // wiring; commit-then-append. No emit on NotFound /
-                    // PreconditionFailed — neither mutates the DB.
-                    let record = CardPlacementRecord::DeleteCard {
-                        addressbook_id: book,
-                        uid_hash: req
-                            .uid_hash
-                            .as_slice()
-                            .try_into()
-                            .expect("uid_hash validated to length 32 above"),
-                        modseq: modseq as u64,
-                        // v2 (S6.9): the deleted row's content-record id
-                        // (restore rebuilds the `bridge_carddav_expunged` row
-                        // from it) + the delete time that makes the S6.8d2
-                        // retention prune possible.
-                        card_id,
-                        deleted_at: now,
-                    };
-                    state
-                        .card_placement
-                        .append_event(&target, &record)
-                        .await
-                        .map_err(placement_journal_diverged)?;
-                    // S6.8d2 — age out tombstones below the same effective
-                    // retention window the sync serve path enforces (twin of
-                    // the CalDAV delete_event wiring; see it for why the
-                    // prune is unobservable and rides DELETE).
-                    let retention_days = i64::from(
-                        state
-                            .db
-                            .get_imap_policy()
-                            .await
-                            .map_err(internal)?
-                            .effective()
-                            .tombstone_retention_days
-                            .max(7),
-                    );
-                    state
-                        .card_placement
-                        .prune_tombstones(&target, now - retention_days * 86_400)
-                        .await
-                        .map_err(internal)?;
-                    notify_addressbook_changed(&state, &target, &book);
+                    let uid_hash: [u8; 32] = req
+                        .uid_hash
+                        .as_slice()
+                        .try_into()
+                        .expect("uid_hash validated to length 32 above");
+                    journal_card_delete(&state, target, book, uid_hash, card_id, modseq, now)
+                        .await?;
                     DeleteCardReply::Deleted {
                         card_id: card_id.to_vec(),
                         modseq,
@@ -738,6 +657,120 @@ fn delete_card_handler() -> crate::rpc_router::RpcHandler {
             encode_reply(&reply)
         })
     })
+}
+
+/// Overwrite `target`'s address book `book`'s sealed metadata — the PROPPATCH
+/// half of `provision_addressbook`, shared with the pre-split boot pass
+/// (`crate::dav_pre_split`), which blanks a metadata blob no app can open. The
+/// caller has checked the bytes' kind. Twin of the CalDAV
+/// `update_calendar_metadata`.
+pub(crate) async fn update_addressbook_metadata(
+    state: &Arc<AppState>,
+    target: [u8; 32],
+    book: [u8; 32],
+    encrypted_metadata: &[u8],
+) -> Result<ProvisionAddressbookReply, RpcError> {
+    let hms_before = state
+        .db
+        .carddav_addressbook_highestmodseq(&target, &book)
+        .await
+        .map_err(internal)?;
+    let outcome = state
+        .db
+        .update_bridge_carddav_addressbook_metadata(&target, &book, encrypted_metadata)
+        .await
+        .map_err(internal)?;
+    Ok(match outcome {
+        ProvisionOutcome::Updated => {
+            // Emit only when bytes actually changed. The DB layer signals
+            // byte-identical retries by leaving highestmodseq unchanged; the
+            // placement journal must mirror that no-op (twin of the CalDAV
+            // PROPPATCH gate in `bridge_caldav_handlers.rs`).
+            let hms_after = state
+                .db
+                .carddav_addressbook_highestmodseq(&target, &book)
+                .await
+                .map_err(internal)?;
+            if hms_before != hms_after
+                && let Some(new_hms) = hms_after
+            {
+                let record = CardPlacementRecord::UpdateAddressbookMetadata {
+                    addressbook_id: book,
+                    encrypted_metadata: encrypted_metadata.to_vec(),
+                    modseq: new_hms as u64,
+                };
+                state
+                    .card_placement
+                    .append_event(&target, &record)
+                    .await
+                    .map_err(placement_journal_diverged)?;
+                notify_addressbook_changed(state, &target, &book);
+            }
+            ProvisionAddressbookReply::Updated
+        }
+        ProvisionOutcome::NotFound => ProvisionAddressbookReply::NotFound,
+        other => unreachable!(
+            "update_bridge_carddav_addressbook_metadata cannot return {:?}",
+            other,
+        ),
+    })
+}
+
+/// The post-delete half of `delete_card`, shared with the pre-split boot pass
+/// (`crate::dav_pre_split`): journal the `DeleteCard` placement record for a
+/// row [`crate::db::CacheDb::delete_carddav_card_by_uid`] just removed, prune
+/// aged tombstones and wake the address book's subscribers. Twin of the CalDAV
+/// `journal_event_delete`.
+pub(crate) async fn journal_card_delete(
+    state: &Arc<AppState>,
+    target: [u8; 32],
+    book: [u8; 32],
+    uid_hash: [u8; 32],
+    card_id: [u8; 32],
+    modseq: i64,
+    now: i64,
+) -> Result<(), RpcError> {
+    // Spec § D7 (DeleteCard record shape): `addressbook_id` + `uid_hash` +
+    // `modseq`. The manifest apply drops the card placement and pushes a
+    // tombstone unconditionally (so WebDAV-Sync REPORT surfaces the deletion
+    // even against a drifted local manifest). Twin of the CalDAV DeleteEvent
+    // wiring; commit-then-append. No emit on NotFound / PreconditionFailed —
+    // neither mutates the DB.
+    let record = CardPlacementRecord::DeleteCard {
+        addressbook_id: book,
+        uid_hash,
+        modseq: modseq as u64,
+        // v2 (S6.9): the deleted row's content-record id (restore rebuilds the
+        // `bridge_carddav_expunged` row from it) + the delete time that makes
+        // the S6.8d2 retention prune possible.
+        card_id,
+        deleted_at: now,
+    };
+    state
+        .card_placement
+        .append_event(&target, &record)
+        .await
+        .map_err(placement_journal_diverged)?;
+    // S6.8d2 — age out tombstones below the same effective retention window
+    // the sync serve path enforces (twin of the CalDAV delete_event wiring;
+    // see it for why the prune is unobservable and rides DELETE).
+    let retention_days = i64::from(
+        state
+            .db
+            .get_imap_policy()
+            .await
+            .map_err(internal)?
+            .effective()
+            .tombstone_retention_days
+            .max(7),
+    );
+    state
+        .card_placement
+        .prune_tombstones(&target, now - retention_days * 86_400)
+        .await
+        .map_err(internal)?;
+    notify_addressbook_changed(state, &target, &book);
+    Ok(())
 }
 
 // ── delete_addressbook ────────────────────────────────────────────
@@ -1060,7 +1093,7 @@ mod tests {
         approve_bridge(&state.db, &mda, BridgeRole::Mda).await;
         let actor = [20u8; 32];
         let book_id = [30u8; 32];
-        let meta = b"sealed-addressbook-metadata".to_vec();
+        let meta = meta_rec(b"sealed-addressbook-metadata");
 
         let req = ProvisionAddressbookRequest {
             actor_id: actor.to_vec(),
@@ -1091,7 +1124,7 @@ mod tests {
         approve_bridge(&state.db, &mda, BridgeRole::Mda).await;
         let actor = [21u8; 32];
         let book_id = [31u8; 32];
-        let meta = b"same-metadata".to_vec();
+        let meta = meta_rec(b"same-metadata");
 
         let make_payload = || {
             let req = ProvisionAddressbookRequest {
@@ -1137,8 +1170,8 @@ mod tests {
         approve_bridge(&state.db, &mda, BridgeRole::Mda).await;
         let actor = [22u8; 32];
         let book_id = [32u8; 32];
-        let meta_orig = b"original-metadata".to_vec();
-        let meta_new = b"different-metadata".to_vec();
+        let meta_orig = meta_rec(b"original-metadata");
+        let meta_new = meta_rec(b"different-metadata");
 
         let make_payload = |meta: Vec<u8>| {
             let req = ProvisionAddressbookRequest {
@@ -1190,7 +1223,7 @@ mod tests {
         let req = ProvisionAddressbookRequest {
             actor_id: actor.to_vec(),
             addressbook_id: book_id.to_vec(),
-            encrypted_metadata: b"meta-v1".to_vec(),
+            encrypted_metadata: meta_rec(b"meta-v1"),
             ..Default::default()
         };
         let payload = Bytes::from(encode_canonical(&req).unwrap().to_vec());
@@ -1204,7 +1237,7 @@ mod tests {
         let req = ProvisionAddressbookRequest {
             actor_id: actor.to_vec(),
             addressbook_id: book_id.to_vec(),
-            encrypted_metadata: b"meta-v2-resealed".to_vec(),
+            encrypted_metadata: meta_rec(b"meta-v2-resealed"),
             update_metadata: true,
         };
         let payload = Bytes::from(encode_canonical(&req).unwrap().to_vec());
@@ -1220,7 +1253,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].encrypted_metadata, b"meta-v2-resealed");
+        assert_eq!(rows[0].encrypted_metadata, meta_rec(b"meta-v2-resealed"));
     }
 
     #[tokio::test]
@@ -1232,7 +1265,7 @@ mod tests {
         let req = ProvisionAddressbookRequest {
             actor_id: vec![29u8; 32],
             addressbook_id: vec![29u8; 32],
-            encrypted_metadata: b"meta-resealed".to_vec(),
+            encrypted_metadata: meta_rec(b"meta-resealed"),
             update_metadata: true,
         };
         let payload = Bytes::from(encode_canonical(&req).unwrap().to_vec());
@@ -1260,7 +1293,7 @@ mod tests {
         let req = ProvisionAddressbookRequest {
             actor_id: vec![1u8; 32],
             addressbook_id: vec![1u8; 16], // wrong length
-            encrypted_metadata: b"some-metadata".to_vec(),
+            encrypted_metadata: meta_rec(b"some-metadata"),
             ..Default::default()
         };
         let payload = Bytes::from(encode_canonical(&req).unwrap().to_vec());
@@ -1298,7 +1331,7 @@ mod tests {
         let req = ProvisionAddressbookRequest {
             actor_id: vec![1u8; 16], // wrong length
             addressbook_id: vec![1u8; 32],
-            encrypted_metadata: b"some-metadata".to_vec(),
+            encrypted_metadata: meta_rec(b"some-metadata"),
             ..Default::default()
         };
         let payload = Bytes::from(encode_canonical(&req).unwrap().to_vec());
@@ -1324,7 +1357,7 @@ mod tests {
         let req = ProvisionAddressbookRequest {
             actor_id: user_actor.to_vec(),
             addressbook_id: book_id.to_vec(),
-            encrypted_metadata: b"user-sealed-meta".to_vec(),
+            encrypted_metadata: meta_rec(b"user-sealed-meta"),
             ..Default::default()
         };
         let payload = Bytes::from(encode_canonical(&req).unwrap().to_vec());
@@ -1344,7 +1377,7 @@ mod tests {
         let req = ProvisionAddressbookRequest {
             actor_id: vec![1u8; 32],
             addressbook_id: vec![2u8; 32],
-            encrypted_metadata: b"meta".to_vec(),
+            encrypted_metadata: meta_rec(b"meta"),
             ..Default::default()
         };
         let payload = Bytes::from(encode_canonical(&req).unwrap().to_vec());
@@ -1368,7 +1401,7 @@ mod tests {
         let req = ProvisionAddressbookRequest {
             actor_id: vec![1u8; 32], // a DIFFERENT actor
             addressbook_id: vec![2u8; 32],
-            encrypted_metadata: b"meta".to_vec(),
+            encrypted_metadata: meta_rec(b"meta"),
             ..Default::default()
         };
         let payload = Bytes::from(encode_canonical(&req).unwrap().to_vec());
@@ -1389,7 +1422,7 @@ mod tests {
         let req = ProvisionAddressbookRequest {
             actor_id: admin_actor.to_vec(), // SELF
             addressbook_id: [2u8; 32].to_vec(),
-            encrypted_metadata: b"admin-own-meta".to_vec(),
+            encrypted_metadata: meta_rec(b"admin-own-meta"),
             ..Default::default()
         };
         let payload = Bytes::from(encode_canonical(&req).unwrap().to_vec());
@@ -1413,7 +1446,7 @@ mod tests {
         let req = ProvisionAddressbookRequest {
             actor_id: vec![99u8; 32], // a DIFFERENT actor
             addressbook_id: vec![2u8; 32],
-            encrypted_metadata: b"meta".to_vec(),
+            encrypted_metadata: meta_rec(b"meta"),
             ..Default::default()
         };
         let payload = Bytes::from(encode_canonical(&req).unwrap().to_vec());
@@ -1461,8 +1494,8 @@ mod tests {
         let actor = [93u8; 32];
         let book_1 = [101u8; 32];
         let book_2 = [102u8; 32];
-        let meta_1 = b"sealed-meta-book-1".to_vec();
-        let meta_2 = b"sealed-meta-book-2".to_vec();
+        let meta_1 = meta_rec(b"sealed-meta-book-1");
+        let meta_2 = meta_rec(b"sealed-meta-book-2");
         let now_ts = 1_700_000_000i64;
 
         // Provision two address books.
@@ -2023,7 +2056,7 @@ mod tests {
         let req = ProvisionAddressbookRequest {
             actor_id: actor.to_vec(),
             addressbook_id: book_id.to_vec(),
-            encrypted_metadata: b"sealed-meta".to_vec(),
+            encrypted_metadata: meta_rec(b"sealed-meta"),
             ..Default::default()
         };
         let payload = Bytes::from(encode_canonical(&req).unwrap().to_vec());
@@ -2041,12 +2074,22 @@ mod tests {
     /// randomized) — seal once and reuse the returned bytes when a test needs
     /// the same body twice (idempotency/retry paths).
     fn sealed(plaintext: &[u8]) -> Vec<u8> {
-        use fauna_mls::wrapped_blob::{derive_recipient_hpke_keypair, seal_to_recipient};
-        let (_secret, pubkey) = derive_recipient_hpke_keypair(&[0x5Eu8; 32]);
-        seal_to_recipient(plaintext, &pubkey)
+        use fauna_mls::wrapped_blob::{
+            DavKind, derive_dav_root, derive_recipient_dav_hpke_keypair, seal_record_to_recipient,
+        };
+        let root = derive_dav_root(DavKind::Card, &[0x5Eu8; 32]);
+        let (_secret, pubkey) = derive_recipient_dav_hpke_keypair(DavKind::Card, &root);
+        seal_record_to_recipient(RecordKind::Card, plaintext, &pubkey)
             .expect("seal test fixture")
             .to_canonical_bytes()
             .expect("canonical test fixture")
+    }
+
+    /// A card-record collection metadata blob (or sidecar) — the only
+    /// shape the per-kind put path stores (`owner-key-material.md` § Path
+    /// B-sibling-5 → *AEAD and envelope*); deterministic per label.
+    fn meta_rec(label: &[u8]) -> Vec<u8> {
+        crate::test_support::fixture_record(RecordKind::Card, label)
     }
 
     fn make_put_payload(
@@ -2687,6 +2730,72 @@ mod tests {
             records, 0,
             "a rejected PUT must not leave an orphan content record"
         );
+    }
+
+    #[tokio::test]
+    async fn the_card_put_paths_refuse_a_record_of_another_kind() {
+        // The card twin of the calendar refusal: the address-book store takes
+        // card records only — body, sidecar and metadata
+        // (`owner-key-material.md` § Path B-sibling-6).
+        let state = fixture_state().await;
+        let mda = [208u8; 32];
+        approve_bridge(&state.db, &mda, BridgeRole::Mda).await;
+        let actor = [209u8; 32];
+        let book = [210u8; 32];
+        provision_one(&state, &mda, &actor, &book).await;
+        let foreign = [
+            crate::test_support::fixture_record(RecordKind::Mail, b"BEGIN:VCARD"),
+            crate::test_support::fixture_record(RecordKind::Calendar, b"BEGIN:VCARD"),
+        ];
+        for wrong in &foreign {
+            let payload = make_put_payload(
+                &actor,
+                &book,
+                &[211u8; 32],
+                wrong,
+                &sealed(b"hint"),
+                1_700_000_000,
+                None,
+            );
+            let err = put_card_ciphertext_handler()(state.clone(), mda, payload)
+                .await
+                .unwrap_err();
+            assert_eq!(err.code, "fauna.protocol.malformed");
+            let body = sealed(b"BEGIN:VCARD");
+            let req = PutCardCiphertextRequest {
+                actor_id: actor.to_vec(),
+                addressbook_id: book.to_vec(),
+                uid_hash: vec![212u8; 32],
+                ciphertext_size: body.len() as u32,
+                encrypted_body: body,
+                encrypted_index_hint: sealed(b"hint"),
+                timestamp: 1_700_000_000,
+                encrypted_fauna_ext: Some(wrong.clone()),
+                ..Default::default()
+            };
+            let err = put_card_ciphertext_handler()(
+                state.clone(),
+                mda,
+                Bytes::from(encode_canonical(&req).unwrap().to_vec()),
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(err.code, "fauna.protocol.malformed");
+            let req = ProvisionAddressbookRequest {
+                actor_id: actor.to_vec(),
+                addressbook_id: [213u8; 32].to_vec(),
+                encrypted_metadata: wrong.clone(),
+                ..Default::default()
+            };
+            let err = provision_addressbook_handler()(
+                state.clone(),
+                mda,
+                Bytes::from(encode_canonical(&req).unwrap().to_vec()),
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(err.code, "fauna.protocol.malformed");
+        }
     }
 
     #[tokio::test]
@@ -4258,7 +4367,7 @@ mod tests {
         let prov = ProvisionAddressbookRequest {
             actor_id: user_actor.to_vec(),
             addressbook_id: book_id.to_vec(),
-            encrypted_metadata: b"sealed-personal-meta".to_vec(),
+            encrypted_metadata: meta_rec(b"sealed-personal-meta"),
             ..Default::default()
         };
         let payload = Bytes::from(encode_canonical(&prov).unwrap().to_vec());
@@ -4338,7 +4447,7 @@ mod tests {
         let prov = ProvisionAddressbookRequest {
             actor_id: user_a.to_vec(),
             addressbook_id: book_id.to_vec(),
-            encrypted_metadata: b"sealed-meta".to_vec(),
+            encrypted_metadata: meta_rec(b"sealed-meta"),
             ..Default::default()
         };
         let payload = Bytes::from(encode_canonical(&prov).unwrap().to_vec());
@@ -4396,7 +4505,7 @@ mod tests {
         approve_bridge(&state.db, &mda, BridgeRole::Mda).await;
         let actor = [70u8; 32];
         let book_id = [101u8; 32];
-        let meta = b"sealed-addressbook-metadata-v1".to_vec();
+        let meta = meta_rec(b"sealed-addressbook-metadata-v1");
 
         let req = ProvisionAddressbookRequest {
             actor_id: actor.to_vec(),
@@ -4435,7 +4544,7 @@ mod tests {
         approve_bridge(&state.db, &mda, BridgeRole::Mda).await;
         let actor = [71u8; 32];
         let book_id = [102u8; 32];
-        let meta = b"identical-metadata".to_vec();
+        let meta = meta_rec(b"identical-metadata");
 
         let make_payload = || {
             let req = ProvisionAddressbookRequest {
@@ -4502,7 +4611,7 @@ mod tests {
         let req = ProvisionAddressbookRequest {
             actor_id: actor.to_vec(),
             addressbook_id: book_id.to_vec(),
-            encrypted_metadata: b"resealed-meta-v2".to_vec(),
+            encrypted_metadata: meta_rec(b"resealed-meta-v2"),
             update_metadata: true,
         };
         let payload = Bytes::from(encode_canonical(&req).unwrap().to_vec());
@@ -4519,7 +4628,8 @@ mod tests {
             "manifest carries exactly one AddressbookState for this address book",
         );
         assert_eq!(
-            manifest_after_update.addressbooks[0].encrypted_metadata, b"resealed-meta-v2",
+            manifest_after_update.addressbooks[0].encrypted_metadata,
+            meta_rec(b"resealed-meta-v2"),
             "manifest must carry the new metadata after UpdateAddressbookMetadata apply",
         );
         assert!(
@@ -4547,7 +4657,7 @@ mod tests {
             let req = ProvisionAddressbookRequest {
                 actor_id: actor.to_vec(),
                 addressbook_id: book_id.to_vec(),
-                encrypted_metadata: b"identical-resealed-meta".to_vec(),
+                encrypted_metadata: meta_rec(b"identical-resealed-meta"),
                 update_metadata: true,
             };
             Bytes::from(encode_canonical(&req).unwrap().to_vec())
@@ -4656,7 +4766,7 @@ mod tests {
             timestamp,
             ciphertext_size: body1.len() as u32,
             if_match: None,
-            encrypted_fauna_ext: Some(b"fauna-sidecar".to_vec()),
+            encrypted_fauna_ext: Some(meta_rec(b"fauna-sidecar")),
             ..Default::default()
         };
         let bytes = put_card_ciphertext_handler()(
@@ -4680,7 +4790,7 @@ mod tests {
         );
         assert_eq!(
             m.cards[0].encrypted_fauna_ext,
-            Some(b"fauna-sidecar".to_vec())
+            Some(meta_rec(b"fauna-sidecar"))
         );
 
         // MUA re-PUT: new body, NO sidecar on the wire.
@@ -4713,7 +4823,7 @@ mod tests {
         );
         assert_eq!(
             m.cards[0].encrypted_fauna_ext,
-            Some(b"fauna-sidecar".to_vec()),
+            Some(meta_rec(b"fauna-sidecar")),
             "the EFFECTIVE (preserved) sidecar, not the request's None"
         );
     }
@@ -5440,7 +5550,7 @@ mod tests {
             let req = ProvisionAddressbookRequest {
                 actor_id: actor.to_vec(),
                 addressbook_id: book_id.to_vec(),
-                encrypted_metadata: b"sealed-meta".to_vec(),
+                encrypted_metadata: meta_rec(b"sealed-meta"),
                 ..Default::default()
             };
             Bytes::from(encode_canonical(&req).unwrap().to_vec())
@@ -5475,7 +5585,7 @@ mod tests {
             let req = ProvisionAddressbookRequest {
                 actor_id: actor.to_vec(),
                 addressbook_id: book_id.to_vec(),
-                encrypted_metadata: meta.to_vec(),
+                encrypted_metadata: meta_rec(meta),
                 update_metadata: true,
             };
             Bytes::from(encode_canonical(&req).unwrap().to_vec())

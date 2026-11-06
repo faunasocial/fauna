@@ -6,6 +6,7 @@
     xmlns:controls="using:FaunaApp.Controls"
     Loaded="Page_Loaded"
     xmlns:local="using:FaunaApp.Views"
+    xmlns:loc="using:FaunaApp.Markup"
     xmlns:ids="using:FaunaApp.UiIds">
 
     <Page.Resources>
@@ -16,26 +17,36 @@
              `{Binding}` only, for the reason stated at length on the original template
              (no `x:DataType` here, so an `x:Bind` would crash the page). -->
         <DataTemplate x:Key="NavigableRowTemplate">
-            <Button AutomationProperties.AutomationId="notification-item"
-                    AutomationProperties.Name="{Binding Text}"
-                    Tag="{Binding}" Click="NotificationItem_Click"
-                    Background="Transparent" BorderThickness="0" Padding="8"
-                    HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch">
-                <Grid ColumnSpacing="12">
-                    <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="Auto" />
-                        <ColumnDefinition Width="*" />
-                        <ColumnDefinition Width="Auto" />
-                    </Grid.ColumnDefinitions>
-                    <TextBlock AutomationProperties.AutomationId="notification-type-icon"
-                               Text="{Binding TypeIcon}" FontFamily="Segoe MDL2 Assets"
-                               FontSize="16" VerticalAlignment="Center" />
-                    <TextBlock Grid.Column="1" Text="{Binding Text}" TextWrapping="Wrap"
-                               HorizontalAlignment="Left" />
-                    <TextBlock Grid.Column="2" Text="{Binding TimeAgo}" Opacity="0.5"
-                               FontSize="12" VerticalAlignment="Center" />
-                </Grid>
-            </Button>
+            <Grid ColumnSpacing="8">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <Button AutomationProperties.AutomationId="notification-item"
+                        AutomationProperties.Name="{Binding Text}"
+                        Tag="{Binding}" Click="NotificationItem_Click"
+                        Background="Transparent" BorderThickness="0" Padding="8"
+                        HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch">
+                    <Grid ColumnSpacing="12">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto" />
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <TextBlock AutomationProperties.AutomationId="notification-type-icon"
+                                   Text="{Binding TypeIcon}" FontFamily="Segoe MDL2 Assets"
+                                   FontSize="16" VerticalAlignment="Center" />
+                        <TextBlock Grid.Column="1" Text="{Binding Text}" TextWrapping="Wrap"
+                                   HorizontalAlignment="Left" />
+                        <TextBlock Grid.Column="2" Text="{Binding TimeAgo}" Opacity="0.5"
+                                   FontSize="12" VerticalAlignment="Center" />
+                    </Grid>
+                </Button>
+                <Button Grid.Column="1" AutomationProperties.AutomationId="notification-dismiss"
+                        Content="{loc:Localize Key=notifications/dismiss}"
+                        Tag="{Binding}" Click="Dismiss_Click" IsEnabled="{Binding CanDismiss}"
+                        Padding="8,2" FontSize="12" VerticalAlignment="Center" />
+            </Grid>
         </DataTemplate>
         <DataTemplate x:Key="InertRowTemplate">
             <Grid Padding="8" ColumnSpacing="12"
@@ -45,6 +56,7 @@
                     <ColumnDefinition Width="Auto" />
                     <ColumnDefinition Width="*" />
                     <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="Auto" />
                 </Grid.ColumnDefinitions>
                 <TextBlock AutomationProperties.AutomationId="notification-type-icon"
                            Text="{Binding TypeIcon}" FontFamily="Segoe MDL2 Assets"
@@ -52,11 +64,47 @@
                 <TextBlock Grid.Column="1" Text="{Binding Text}" TextWrapping="Wrap" />
                 <TextBlock Grid.Column="2" Text="{Binding TimeAgo}" Opacity="0.5"
                            FontSize="12" VerticalAlignment="Center" />
+                <Button Grid.Column="3" AutomationProperties.AutomationId="notification-dismiss"
+                        Content="{loc:Localize Key=notifications/dismiss}"
+                        Tag="{Binding}" Click="Dismiss_Click" IsEnabled="{Binding CanDismiss}"
+                        Padding="8,2" FontSize="12" VerticalAlignment="Center" />
+            </Grid>
+        </DataTemplate>
+        <!-- A muted-word collapse (`notifications.md` § Muted words rule 3): the type
+             icon, the placeholder in place of the sentence, the one gesture (reveal)
+             and the timestamp. Not a `notification-item` and no tap target, so a muted
+             sender's name never paints as a control's label. -->
+        <DataTemplate x:Key="MutedRowTemplate">
+            <Grid Padding="8" ColumnSpacing="12">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <TextBlock AutomationProperties.AutomationId="notification-type-icon"
+                           Text="{Binding TypeIcon}" FontFamily="Segoe MDL2 Assets"
+                           FontSize="16" VerticalAlignment="Center" />
+                <TextBlock Grid.Column="1" AutomationProperties.AutomationId="notification-muted"
+                           Text="{loc:Localize Key=muted_words/collapsed}"
+                           FontStyle="Italic" Opacity="0.6" VerticalAlignment="Center" />
+                <Button Grid.Column="2" AutomationProperties.AutomationId="notification-muted-reveal-button"
+                        Content="{loc:Localize Key=muted_words/reveal}"
+                        Tag="{Binding}" Click="MutedReveal_Click"
+                        Padding="8,2" FontSize="12" VerticalAlignment="Center" />
+                <TextBlock Grid.Column="3" Text="{Binding TimeAgo}" Opacity="0.5"
+                           FontSize="12" VerticalAlignment="Center" />
+                <Button Grid.Column="4" AutomationProperties.AutomationId="notification-dismiss"
+                        Content="{loc:Localize Key=notifications/dismiss}"
+                        Tag="{Binding}" Click="Dismiss_Click" IsEnabled="{Binding CanDismiss}"
+                        Padding="8,2" FontSize="12" VerticalAlignment="Center" />
             </Grid>
         </DataTemplate>
         <local:NotificationRowTemplateSelector x:Key="RowSelector"
             Navigable="{StaticResource NavigableRowTemplate}"
-            Inert="{StaticResource InertRowTemplate}" />
+            Inert="{StaticResource InertRowTemplate}"
+            Muted="{StaticResource MutedRowTemplate}" />
     </Page.Resources>
 
     <Grid Padding="16">
@@ -72,6 +120,8 @@
                        AutomationProperties.AutomationId="{x:Bind ids:Ids.PageHeading}" />
             <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.NotificationMarkRead}"
                     x:Name="MarkReadButton" Click="MarkRead_Click" />
+            <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.NotificationClear}"
+                    x:Name="ClearAllButton" Click="ClearAll_Click" />
             <TextBlock x:Name="CountBadge"
                        AutomationProperties.AutomationId="{x:Bind ids:Ids.NotificationCountBadge}"
                        VerticalAlignment="Center" Foreground="{ThemeResource SystemAccentColor}"

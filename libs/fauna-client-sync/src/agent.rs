@@ -37,6 +37,7 @@ use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 use zeroize::Zeroizing;
 
+use fauna_client_accounts::AccountRegistry;
 use fauna_core::identity::ActorKeypair;
 use fauna_ipc::convergence::{
     self, DEFAULT_SPAWN_GRACE, DEFAULT_TICK_INTERVAL, ProvisioningDelegate, RefreshBearerOutcome,
@@ -153,6 +154,51 @@ pub use fauna_ipc::sync::BearerToken as ProvisioningBearerToken;
 /// skips).
 pub trait ProvisioningBearerSource: Send + Sync {
     fn current_bearer(&self) -> impl Future<Output = Option<BearerToken>> + Send;
+}
+
+/// The convergence loop's **bearer hook** over an app's shared
+/// [`fauna_nest_http::BearerSource`] (the WS-handshake bearer cache —
+/// auto-refreshing and 401-reactive, so each tick pushes a currently-valid
+/// token).
+///
+/// The one bearer hook every app that drives the external `fauna-sync-agent`
+/// uses: tui and linux over their own client's source, the UniFFI apps through
+/// `fauna-ffi`'s provisioner over the session's `NestClient`. It lives beside
+/// the trait rather than in an app layer because the hook it replaces on the
+/// UniFFI apps — an app-side cached token read across the FFI — pushed a
+/// bearer the nest had stopped accepting: after a nest restart the app kept
+/// re-pushing its pre-restart token every tick, which overwrote each bearer
+/// the agent's renewal loop minted on its `401`, and the agent's control plane
+/// never came back (the macOS native pair of `p2p.md` § Same-account nest-down
+/// folder transfer, measured 2026-11-03). The client's own cache re-mints on
+/// that `401`, so the next tick pushes a bearer the nest accepts.
+///
+/// The pushed expiry is the source's own
+/// [`fauna_nest_http::BearerSource::bearer_with_expiry`] — the deadline on this
+/// machine's clock, anchored at receipt (`login.md` § Token lifetime on the
+/// client's clock), which the agent on the same machine plans its renewal on.
+/// A bearer the source refuses to produce reads as *not authenticated*, and the
+/// tick skips. So does a bearer whose source **cannot say** its expiry: the
+/// agent is never handed a deadline this seam would have to guess.
+pub struct AgentBearerSource(pub Arc<dyn fauna_nest_http::BearerSource>);
+
+impl ProvisioningBearerSource for AgentBearerSource {
+    fn current_bearer(&self) -> impl Future<Output = Option<BearerToken>> + Send {
+        let source = Arc::clone(&self.0);
+        async move {
+            let (token, expires_at) = source.bearer_with_expiry().await.ok()?;
+            let Some(expires_at) = expires_at else {
+                // A wiring defect, not a runtime state: every app's bearer
+                // source mints its own bearer and publishes its expiry. Loud,
+                // because the skipped tick is otherwise invisible.
+                tracing::warn!(
+                    "sync agent: bearer source publishes no expiry — tick skipped, agent not provisioned"
+                );
+                return None;
+            };
+            Some(BearerToken::new(token, expires_at))
+        }
+    }
 }
 
 /// Hook: observe the agent-reachability false→true edge
@@ -782,6 +828,13 @@ pub struct AgentCapabilityInputs {
     pub device_label: String,
     /// The nest URL the agent should dial (the capability carries it).
     pub nest_url: String,
+    /// The account registry whose per-actor `reach_ipv4` slot supplies the
+    /// reach hint of every capability this provisioner pushes
+    /// (`onboarding-provisioning.md` § Reach hint → *The session connector's
+    /// half*). The slot is read at each push, never here: the app's session
+    /// deletes it on its first domain success, and the next push must say so.
+    /// `None` provisions without a hint.
+    pub reach_registry: Option<AccountRegistry>,
 }
 
 /// The shared desktop control channel to the external `fauna-sync-agent`:
@@ -818,6 +871,7 @@ struct ProvisionerInner<R, B> {
     device_id: String,
     device_label: String,
     nest_url: String,
+    reach_registry: Option<AccountRegistry>,
     spawner: Arc<dyn AgentSpawner>,
     bearer_source: Arc<B>,
     /// Optional agent-up edge observer, fixed at construction (every folder UI
@@ -910,6 +964,7 @@ where
                 device_id: inputs.device_id,
                 device_label: inputs.device_label,
                 nest_url: inputs.nest_url,
+                reach_registry: inputs.reach_registry,
                 spawner,
                 bearer_source,
                 reachability,
@@ -981,6 +1036,7 @@ where
             predecessor_keys_by_actor: self.inner.predecessor_keys_by_actor.clone(),
             actor_id,
             nest_url: self.inner.nest_url.clone(),
+            reach_registry: self.inner.reach_registry.clone(),
             device_id: self.inner.device_id.clone(),
             provisioned_without_predecessor_keys: Arc::new(Mutex::new(None)),
             reachability: self.inner.reachability.clone(),
@@ -1409,6 +1465,82 @@ where
         }
     }
 
+    /// A group set's review list, read from the set's own state DB
+    /// (`RequestMethod::ListSetConflicts`; `group-set.md` § Build design — the
+    /// group set, decision 9). Plain [`ProvisionerInner::agent_request`]: the
+    /// status poll is the backstop, like [`Self::pull_folder_now`].
+    pub async fn list_set_conflicts(
+        &self,
+        folder_id: String,
+    ) -> Result<Vec<fauna_core::sync::RetainedConflict>, AgentControlError> {
+        match self
+            .inner
+            .agent_request(RequestMethod::ListSetConflicts { folder_id })
+            .await?
+        {
+            ResponsePayload::SetConflicts(rows) => Ok(rows),
+            other => Err(AgentControlError::new(format!(
+                "agent ListSetConflicts returned an unexpected payload: {other:?}"
+            ))),
+        }
+    }
+
+    /// The review list's *use the other version* on the group set's row
+    /// `conflict_id` (`RequestMethod::RestoreRetainedVersion`). A gesture, so
+    /// it ensures the agent; an `Err` is the refusal to show the user — the row
+    /// stands and nothing was written.
+    pub async fn restore_retained_version(
+        &self,
+        folder_id: String,
+        conflict_id: i64,
+    ) -> Result<(), AgentControlError> {
+        self.inner
+            .agent_request_ensuring_agent(RequestMethod::RestoreRetainedVersion {
+                folder_id,
+                conflict_id,
+            })
+            .await?;
+        Ok(())
+    }
+
+    /// Re-read the review list of every group set `model` holds a binding to,
+    /// folding the readings in; `true` when what the page shows moved. Every
+    /// app that drives the agent runs this one pass on its status poll. A read
+    /// the agent cannot answer folds nothing — the rows keep their last reading,
+    /// as a park does (`LocationBindingsModel::fold_parks`).
+    pub async fn refresh_set_conflicts(
+        &self,
+        model: &std::sync::Mutex<LocationBindingsModel>,
+    ) -> bool {
+        let sets = model.lock().unwrap().group_sets();
+        match self.read_set_conflicts(sets).await {
+            Some(readings) => model.lock().unwrap().fold_set_conflicts(readings),
+            None => false,
+        }
+    }
+
+    /// The read half of [`Self::refresh_set_conflicts`], for an app whose model
+    /// lives on its UI thread rather than behind a `Mutex` (linux's GTK
+    /// `RefCell`): read `sets` (from [`LocationBindingsModel::group_sets`]) and
+    /// hand back the readings for [`LocationBindingsModel::fold_set_conflicts`].
+    /// `None` when the agent could not answer for every set — fold nothing then,
+    /// so the rows keep their last reading.
+    pub async fn read_set_conflicts(&self, sets: Vec<String>) -> Option<SetConflicts> {
+        let mut readings = SetConflicts::new();
+        for set in sets {
+            match self.list_set_conflicts(set.clone()).await {
+                Ok(rows) => {
+                    readings.insert(set, rows);
+                }
+                Err(e) => {
+                    tracing::debug!(error = %e, "a set's review list stayed at its last reading");
+                    return None;
+                }
+            }
+        }
+        Some(readings)
+    }
+
     /// Where each bound folder's state DB and local tree live
     /// (`GetShareServeInfo`) — what the app-side share serve source opens by
     /// cross-process WAL read (`p2p.md` § Cross-user shared-set transfer,
@@ -1567,33 +1699,53 @@ where
         // three silent, and the session had to instrument every one to find out
         // which). Still no retry: the durable marker above plus the agent's own
         // signed-out reconcile are the designed backstop, by that same §.
+        //
+        // **One refusal is asked again** — the agent's still-mounted one
+        // ([`fauna_ipc::sync::UNPROVISION_STILL_MOUNTED_PREFIX`]): the capability
+        // is already gone and the mount is coming down, so the verb (idempotent)
+        // is asked again until its reply is the receipt, a bounded number of
+        // times. The caller's next step is to ERASE the store this receipt
+        // vouches for, and an erase under a still-held store leaves the
+        // signed-out user's data behind (measured on windows 2026-11-04: an
+        // account pass waiting on an unreachable home nest kept the mount up
+        // ~1 s past the agent's 4 s budget, and the erase that followed
+        // survived).
         let endpoint = self.inner.endpoint.clone();
-        match tokio::task::spawn_blocking(move || {
-            let client = endpoint.connect()?;
-            client.request(RequestMethod::UnprovisionCapability)
+        let (reply, asked) = ask_until_unmounted(UNPROVISION_ROUNDS, || {
+            let endpoint = endpoint.clone();
+            async move {
+                teardown_reply(
+                    tokio::task::spawn_blocking(move || {
+                        let client = endpoint.connect()?;
+                        client.request(RequestMethod::UnprovisionCapability)
+                    })
+                    .await,
+                )
+            }
         })
-        .await
-        {
-            // A delivered request can still carry the agent's own refusal, so the
-            // reply is inspected rather than assumed — "the write succeeded" is not
-            // "the capability is gone".
-            Ok(Ok(response)) => match response.result {
-                ResponseResult::Ok(_) => {
-                    tracing::info!("teardown push delivered: agent un-provisioned")
-                }
-                ResponseResult::Err(e) => tracing::warn!(
-                    error = %e,
-                    "teardown push reached the agent and was REFUSED — same exposure \
-                     as an undelivered push"
-                ),
-            },
-            Ok(Err(e)) => tracing::warn!(
+        .await;
+        match reply {
+            TeardownReply::Unprovisioned => {
+                tracing::info!(asked, "teardown push delivered: agent un-provisioned")
+            }
+            TeardownReply::StillMounted(e) => tracing::warn!(
+                error = %e,
+                asked,
+                "teardown push: the agent's account-store mount was still up after every \
+                 ask — the erase may leave this account's store behind"
+            ),
+            TeardownReply::Refused(e) => tracing::warn!(
+                error = %e,
+                "teardown push reached the agent and was REFUSED — same exposure \
+                 as an undelivered push"
+            ),
+            TeardownReply::Undelivered(e) => tracing::warn!(
                 error = %e,
                 "teardown push NOT delivered (agent unreachable, or the round trip \
                  failed) — the signed-out marker is the backstop; the agent may still \
                  be serving this account until its own reconcile"
             ),
-            Err(e) => tracing::warn!(
+            TeardownReply::TaskFailed(e) => tracing::warn!(
                 error = %e,
                 "teardown push task failed to run — same exposure as an undelivered push"
             ),
@@ -1744,6 +1896,75 @@ fn onboarding_reconcile_licensed(
         return false;
     };
     held_actor_hex == Some(hex::encode(marker_actor).as_str())
+}
+
+/// How many times the teardown push asks `UnprovisionCapability` while the
+/// agent answers still-mounted ([`fauna_ipc::sync::UNPROVISION_STILL_MOUNTED_PREFIX`])
+/// — the first ask and three more. Each ask is bounded by the agent's own 4 s
+/// unmount budget (under the 6 s pipe ceiling), so a mount that never comes
+/// down costs a sign-out about 16 s before it degrades open; one that comes
+/// down a moment late costs only that moment.
+pub(crate) const UNPROVISION_ROUNDS: usize = 4;
+
+/// What one `UnprovisionCapability` ask came to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum TeardownReply {
+    /// The receipt: the capability is gone and the agent's mount is down.
+    Unprovisioned,
+    /// The capability is gone but the mount was still up at the agent's
+    /// budget — the one reply another ask can cure.
+    StillMounted(String),
+    /// Any other refusal the agent answered with.
+    Refused(String),
+    /// The request never completed a round trip (no agent, a broken pipe).
+    Undelivered(String),
+    /// The blocking task carrying the request did not run to completion.
+    TaskFailed(String),
+}
+
+/// Classify one ask's outcome, as `spawn_blocking` hands it back.
+pub(crate) fn teardown_reply(
+    outcome: Result<std::io::Result<fauna_ipc::sync::Response>, tokio::task::JoinError>,
+) -> TeardownReply {
+    match outcome {
+        // A delivered request can still carry the agent's own refusal, so the
+        // reply is inspected rather than assumed — "the write succeeded" is not
+        // "the capability is gone".
+        Ok(Ok(response)) => match response.result {
+            ResponseResult::Ok(_) => TeardownReply::Unprovisioned,
+            ResponseResult::Err(e)
+                if e.starts_with(fauna_ipc::sync::UNPROVISION_STILL_MOUNTED_PREFIX) =>
+            {
+                TeardownReply::StillMounted(e)
+            }
+            ResponseResult::Err(e) => TeardownReply::Refused(e),
+        },
+        Ok(Err(e)) => TeardownReply::Undelivered(e.to_string()),
+        Err(e) => TeardownReply::TaskFailed(e.to_string()),
+    }
+}
+
+/// Ask through `ask` until a reply is anything but [`TeardownReply::StillMounted`],
+/// at most `rounds` times; returns the last reply and how many asks it took.
+pub(crate) async fn ask_until_unmounted<F, Fut>(rounds: usize, mut ask: F) -> (TeardownReply, usize)
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = TeardownReply>,
+{
+    let mut asked = 0;
+    loop {
+        asked += 1;
+        match ask().await {
+            TeardownReply::StillMounted(e) if asked < rounds => {
+                tracing::info!(
+                    error = %e,
+                    asked,
+                    "teardown push: the agent's mount is still coming down; asking again"
+                );
+            }
+            reply => return (reply, asked),
+        }
+    }
 }
 
 /// Shape (a) of `sync-agent.md` § Credential model → *The signed-out
@@ -1974,6 +2195,8 @@ pub struct AgentEndpointDelegate<B> {
     predecessor_keys_by_actor: Zeroizing<Vec<u8>>,
     actor_id: Vec<u8>,
     nest_url: String,
+    /// See [`AgentCapabilityInputs::reach_registry`].
+    reach_registry: Option<AccountRegistry>,
     device_id: String,
     /// Whether the last **successful** push this session omitted the retired
     /// owner keys — `None` until this session's first push, which is what makes
@@ -1994,6 +2217,17 @@ pub struct AgentEndpointDelegate<B> {
 }
 
 impl<B> AgentEndpointDelegate<B> {
+    /// The account's reach hint as of this push — the registry's per-actor
+    /// slot, the one the launch machine reads. Absent is the ordinary case and
+    /// clears the agent's entry, which is how a hint the app's session spent
+    /// reaches the agent.
+    fn current_reach_ipv4(&self) -> Option<String> {
+        let actor: [u8; 32] = self.actor_id.as_slice().try_into().ok()?;
+        self.reach_registry
+            .as_ref()?
+            .reach_ipv4(&fauna_core::hex32::encode(&actor))
+    }
+
     /// **The bound-(3) license, recomputed from a live agent answer** — whether
     /// this push may omit the account's retired owner keys
     /// (`sync-agent.md` § Credential model → *Bound (3)'s enforcement design*).
@@ -2044,7 +2278,8 @@ impl<B> AgentEndpointDelegate<B> {
         // signing back in must outrank the marker the sign-out left behind. A
         // stamp that only rode the initial provision would leave every later
         // one looking older than it is.
-        .with_provisioned_at_ms(fauna_core::data::Timestamp::now_millis_or_zero());
+        .with_provisioned_at_ms(fauna_core::data::Timestamp::now_millis_or_zero())
+        .with_reach_ipv4(self.current_reach_ipv4());
         // The attested predecessor ids ride on EVERY push — they are the
         // agent's fleet-view `prior`, public material outside bound (3)'s license,
         // and a predecessor-signed enrollment row never stops needing them.
@@ -2133,7 +2368,7 @@ impl<B: ProvisioningBearerSource> ProvisioningDelegate for AgentEndpointDelegate
         }
     }
 
-    fn full_provision(&self, bearer: &BearerToken) -> impl Future<Output = ()> + Send {
+    fn full_provision(&self, bearer: &BearerToken) -> impl Future<Output = bool> + Send {
         let endpoint = self.endpoint.clone();
         let provisioned_without_keys = Arc::clone(&self.provisioned_without_predecessor_keys);
         async move {
@@ -2144,13 +2379,15 @@ impl<B: ProvisioningBearerSource> ProvisioningDelegate for AgentEndpointDelegate
             // provision, never a cached verdict).
             let drop_keys = self.license_to_drop_predecessor_keys().await;
             let cap = self.build_capability(bearer, drop_keys);
+            // Taken = the agent answered `Ok`: a reply carrying the agent's
+            // refusal is a push that did not land, exactly as a dead socket is.
             let ok = matches!(
                 tokio::task::spawn_blocking(move || {
                     let client = endpoint.connect()?;
                     client.request(RequestMethod::ProvisionCapability(cap))
                 })
                 .await,
-                Ok(Ok(_))
+                Ok(Ok(response)) if matches!(response.result, ResponseResult::Ok(_))
             );
             // Advance the last-provisioned marker only on success, so a failed
             // push leaves `needs_reprovision` firing and the loop retries next
@@ -2158,6 +2395,7 @@ impl<B: ProvisioningBearerSource> ProvisioningDelegate for AgentEndpointDelegate
             if ok {
                 *provisioned_without_keys.lock().unwrap() = Some(drop_keys);
             }
+            ok
         }
     }
 
@@ -2582,9 +2820,46 @@ pub struct LocationBindingsModel {
     /// The host's on-demand surface, as the last status reply reported it
     /// ([`Self::fold_service_status`]).
     on_demand: OnDemandSurface,
+    /// Each bound group set's review list ([`Self::fold_set_conflicts`]),
+    /// keyed by the set's `FolderRef` wire form. Per set, not per row: two
+    /// folders bound to one set share one state DB, so one list.
+    set_conflicts: SetConflicts,
 }
 
+/// A review list per group set, keyed by the set's `FolderRef` wire form.
+pub type SetConflicts = std::collections::BTreeMap<String, Vec<fauna_core::sync::RetainedConflict>>;
+
 impl LocationBindingsModel {
+    /// The group sets this model holds a rendered binding to, each once.
+    pub fn group_sets(&self) -> Vec<String> {
+        let mut sets: Vec<String> = self
+            .rendered()
+            .into_iter()
+            .map(|row| row.folder_id)
+            .filter(|id| {
+                fauna_core::folder_keys::FolderRef::parse(id)
+                    .is_some_and(|r| r.group_scope().is_some())
+            })
+            .collect();
+        sets.sort();
+        sets.dedup();
+        sets
+    }
+
+    /// Replace the group sets' review lists, dropping a set with no rows;
+    /// `true` when that changed what the page shows.
+    pub fn fold_set_conflicts(&mut self, mut readings: SetConflicts) -> bool {
+        readings.retain(|_, rows| !rows.is_empty());
+        let changed = self.set_conflicts != readings;
+        self.set_conflicts = readings;
+        changed
+    }
+
+    /// The group sets' review lists, as last read.
+    pub fn set_conflicts(&self) -> &SetConflicts {
+        &self.set_conflicts
+    }
+
     /// The rows the UI renders: everything except pending unbinds. A
     /// [`BindingState::PendingBind`] row renders — an add made while the agent
     /// is down must stay visible (face (b) of the A4
@@ -3219,6 +3494,7 @@ mod tests {
             predecessor_keys_by_actor: Zeroizing::new(Vec::new()),
             actor_id: vec![9u8; 32],
             nest_url: "https://nest.example".to_string(),
+            reach_registry: None,
             provisioned_without_predecessor_keys: Arc::new(Mutex::new(None)),
             device_id: "dev-123".to_string(),
             reachability: None,
@@ -3247,6 +3523,45 @@ mod tests {
             8,
             "a provision pushes the pinned capability fields and no second credential: {:?}",
             fields.keys().collect::<Vec<_>>()
+        );
+    }
+
+    /// The capability carries the registry's reach hint as of each push, not
+    /// as of construction: once the app's session spends the slot, the next
+    /// push carries none, which is what clears the agent's entry
+    /// (`onboarding-provisioning.md` § Reach hint → *The session connector's
+    /// half*).
+    #[test]
+    fn each_push_reads_the_reach_hint_slot_afresh() {
+        let registry = AccountRegistry::new(Arc::new(
+            fauna_client_accounts::InMemorySecretStore::default(),
+        ));
+        let actor = registry
+            .add_account(&"01".repeat(32), Some("https://dark.example"), None)
+            .expect("account");
+        let actor_bytes = fauna_core::hex32::decode(&actor).expect("actor id is 32-byte hex");
+        let d = AgentEndpointDelegate {
+            actor_id: actor_bytes.to_vec(),
+            reach_registry: Some(registry.clone()),
+            ..delegate()
+        };
+        let bearer = BearerToken::new("tok".to_string(), 1);
+
+        assert_eq!(
+            d.build_capability(&bearer, false).reach_ipv4,
+            None,
+            "an account with no slot provisions no hint"
+        );
+        registry.set_reach_ipv4(&actor, "203.0.113.9");
+        assert_eq!(
+            d.build_capability(&bearer, false).reach_ipv4.as_deref(),
+            Some("203.0.113.9")
+        );
+        registry.clear_reach_ipv4(&actor);
+        assert_eq!(
+            d.build_capability(&bearer, false).reach_ipv4,
+            None,
+            "the push after the app spends the slot carries no hint"
         );
     }
 
@@ -4795,6 +5110,40 @@ mod tests {
     /// the member's row never said so, because the reconcile that mirrors the
     /// park runs only on a mutation or a reachability edge.
     #[test]
+    fn set_conflicts_fold_reports_a_change_and_only_group_sets_are_read() {
+        let group = fauna_core::folder_keys::FolderRef::Group([0x11; 32]).to_wire();
+        let mut model = LocationBindingsModel::default();
+        model.add("/a".into(), group.clone(), group.clone());
+        model.add("/b".into(), group.clone(), group.clone());
+        model.add(
+            "/c".into(),
+            "docs".into(),
+            fauna_core::folder_keys::FolderRef::Local(1).to_wire(),
+        );
+        assert_eq!(
+            model.group_sets(),
+            vec![group.clone()],
+            "each once, group only"
+        );
+
+        let row = fauna_core::sync::RetainedConflict {
+            id: 1,
+            ..Default::default()
+        };
+        let readings = SetConflicts::from([(group.clone(), vec![row])]);
+        assert!(model.fold_set_conflicts(readings.clone()));
+        assert!(
+            !model.fold_set_conflicts(readings),
+            "a steady list is quiet"
+        );
+        assert!(
+            model.fold_set_conflicts(SetConflicts::from([(group.clone(), Vec::new())])),
+            "a used row leaving moves the page"
+        );
+        assert!(model.set_conflicts().is_empty());
+    }
+
+    #[test]
     fn fold_parks_mirrors_the_park_without_reconciling_anything() {
         let mut model = with_rows(&[("/home/a/Shared", "photos")]);
         model.reconcile(&[agent_row("/home/a/Shared", Some("photos"))]);
@@ -5051,6 +5400,91 @@ mod tests {
 }
 
 #[cfg(test)]
+mod teardown_ask_tests {
+    use super::*;
+    use std::collections::VecDeque;
+
+    fn still_mounted() -> TeardownReply {
+        TeardownReply::StillMounted(format!(
+            "{} after 4s; its teardown is still running",
+            fauna_ipc::sync::UNPROVISION_STILL_MOUNTED_PREFIX
+        ))
+    }
+
+    /// Ask in order through a scripted run of replies, counting the asks.
+    async fn run(script: Vec<TeardownReply>) -> (TeardownReply, usize) {
+        let mut replies: VecDeque<TeardownReply> = script.into();
+        ask_until_unmounted(UNPROVISION_ROUNDS, || {
+            let next = replies.pop_front().expect("asked past the script");
+            async move { next }
+        })
+        .await
+    }
+
+    /// The case the re-ask exists for: the agent's mount came down a moment
+    /// after its own budget, so the second ask is the receipt — and the
+    /// app's erase then finds the store free.
+    #[tokio::test]
+    async fn a_still_mounted_refusal_is_asked_again_until_the_receipt() {
+        let (reply, asked) = run(vec![still_mounted(), TeardownReply::Unprovisioned]).await;
+        assert_eq!(reply, TeardownReply::Unprovisioned);
+        assert_eq!(asked, 2);
+    }
+
+    /// Bounded: a mount that never comes down gives up after the last ask,
+    /// and the caller degrades open exactly as before.
+    #[tokio::test]
+    async fn a_mount_that_stays_up_is_asked_a_bounded_number_of_times() {
+        let script = (0..UNPROVISION_ROUNDS).map(|_| still_mounted()).collect();
+        let (reply, asked) = run(script).await;
+        assert!(matches!(reply, TeardownReply::StillMounted(_)), "{reply:?}");
+        assert_eq!(asked, UNPROVISION_ROUNDS);
+    }
+
+    /// Only the still-mounted refusal is curable by asking again: any other
+    /// refusal, an undelivered push, and the receipt itself end the asking.
+    #[tokio::test]
+    async fn every_other_reply_ends_the_asking_at_once() {
+        for first in [
+            TeardownReply::Unprovisioned,
+            TeardownReply::Refused("something else".to_string()),
+            TeardownReply::Undelivered("pipe gone".to_string()),
+        ] {
+            let (reply, asked) = run(vec![first.clone()]).await;
+            assert_eq!(reply, first);
+            assert_eq!(asked, 1);
+        }
+    }
+
+    /// The classification keys on the pinned prefix the agent writes, not on
+    /// any refusal: the agent's own message must read as still-mounted.
+    #[test]
+    fn the_agents_still_mounted_message_classifies_as_still_mounted() {
+        let response = |result| fauna_ipc::sync::Response { id: 1, result };
+        let mounted = format!(
+            "{} after 4s; its teardown is still running",
+            fauna_ipc::sync::UNPROVISION_STILL_MOUNTED_PREFIX
+        );
+        assert!(matches!(
+            teardown_reply(Ok(Ok(response(ResponseResult::Err(mounted))))),
+            TeardownReply::StillMounted(_)
+        ));
+        assert!(matches!(
+            teardown_reply(Ok(Ok(response(ResponseResult::Err("other".to_string()))))),
+            TeardownReply::Refused(_)
+        ));
+        assert_eq!(
+            teardown_reply(Ok(Ok(response(ResponseResult::Ok(ResponsePayload::Empty))))),
+            TeardownReply::Unprovisioned
+        );
+        assert!(matches!(
+            teardown_reply(Ok(Err(std::io::Error::other("gone")))),
+            TeardownReply::Undelivered(_)
+        ));
+    }
+}
+
+#[cfg(test)]
 mod onboarding_reconcile_tests {
     use super::*;
 
@@ -5104,5 +5538,88 @@ mod onboarding_reconcile_tests {
             &marker,
             Some(hex::encode(ACTOR_A).as_str())
         ));
+    }
+}
+
+#[cfg(test)]
+mod agent_bearer_source_tests {
+    use super::{AgentBearerSource, ProvisioningBearerSource};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    /// A source that mints its own bearer and so can say its deadline.
+    struct ExpiringBearer;
+
+    #[async_trait::async_trait]
+    impl fauna_nest_http::BearerSource for ExpiringBearer {
+        async fn bearer(&self) -> Result<String, fauna_nest_http::ApiError> {
+            Ok("tok".into())
+        }
+        async fn bearer_with_expiry(
+            &self,
+        ) -> Result<(String, Option<u64>), fauna_nest_http::ApiError> {
+            Ok(("tok".into(), Some(1_900_000_000)))
+        }
+    }
+
+    /// The agent is handed the source's own client-clock deadline, so it
+    /// plans its renewal on a real expiry rather than a blind cadence.
+    #[tokio::test]
+    async fn agent_bearer_source_pushes_the_sources_own_expiry() {
+        let b = AgentBearerSource(Arc::new(ExpiringBearer))
+            .current_bearer()
+            .await
+            .expect("a minting source yields a bearer");
+        assert_eq!(b.token, "tok");
+        assert_eq!(b.expires_at, 1_900_000_000);
+    }
+
+    /// A source that cannot say its expiry (an opaque `StaticBearer`) skips the
+    /// tick — never a guessed deadline handed to the agent.
+    #[tokio::test]
+    async fn agent_bearer_source_skips_a_bearer_with_no_expiry() {
+        let b = AgentBearerSource(Arc::new(fauna_nest_http::StaticBearer("tok".into())))
+            .current_bearer()
+            .await;
+        assert!(
+            b.is_none(),
+            "no published expiry ⇒ not authenticated, tick skipped"
+        );
+    }
+
+    /// A source standing in for the client's bearer cache across a nest
+    /// restart: each mint (the `401`-reactive re-mint included) hands out a
+    /// new token with a later deadline.
+    struct RemintingBearer(AtomicU64);
+
+    #[async_trait::async_trait]
+    impl fauna_nest_http::BearerSource for RemintingBearer {
+        async fn bearer(&self) -> Result<String, fauna_nest_http::ApiError> {
+            Ok(format!("tok-{}", self.0.load(Ordering::SeqCst)))
+        }
+        async fn bearer_with_expiry(
+            &self,
+        ) -> Result<(String, Option<u64>), fauna_nest_http::ApiError> {
+            let n = self.0.load(Ordering::SeqCst);
+            Ok((format!("tok-{n}"), Some(1_900_000_000 + n)))
+        }
+    }
+
+    /// Every tick reads the client's cache afresh, so the tick after a re-mint
+    /// pushes the new bearer — never the one the hook saw first. The UniFFI
+    /// apps' former hook pushed an app-side cached token instead, and after a
+    /// nest restart that stale token overwrote each bearer the agent minted on
+    /// its `401` (`p2p.md` § Same-account nest-down folder transfer, the macOS
+    /// native pair).
+    #[tokio::test]
+    async fn agent_bearer_source_pushes_the_bearer_the_client_reminted() {
+        let cache = Arc::new(RemintingBearer(AtomicU64::new(1)));
+        let hook = AgentBearerSource(cache.clone());
+        let first = hook.current_bearer().await.expect("a bearer");
+        assert_eq!(first.token, "tok-1");
+        cache.0.store(2, Ordering::SeqCst);
+        let next = hook.current_bearer().await.expect("a bearer");
+        assert_eq!(next.token, "tok-2");
+        assert_eq!(next.expires_at, 1_900_000_002);
     }
 }

@@ -1,6 +1,21 @@
+# The CORE crate of the fauna-ffi rlib + thin-cdylib split
+# (docs/goal/architecture/build-target-layout-windows.md § UniFFI cdylib
+# rebuild cost (win) → The rlib + thin-cdylib split). Package `fauna-ffi-core`,
+# lib `fauna_ffi`, an rlib only: every line of FFI code, `uniffi.toml`, the
+# features and the tests live here, so the long compile is an rlib a compile
+# cache keys by content across checkouts — all but `status_text`, the one
+# export that reads the build stamp, which the thin crate carries (the stamp
+# is read only in the crate that IS the artifact). The shipped
+# artifacts are linked by the thin package `fauna-ffi` in
+# `libs/fauna-ffi-cdylib/`, whose lib is ALSO named `fauna_ffi` — UniFFI names
+# every exported symbol after the crate, so both keep the name. Commands tell
+# them apart by package: `-p fauna-ffi` builds an artifact, `-p fauna-ffi-core`
+# runs these tests. The directory keeps its name on purpose (cited thousands of
+# times). A feature added here needs its forward in the thin crate
+# (tests/e2e-unified/tests/test_ffi_feature_mirror.py prints the line).
 [package]
-name = "fauna-ffi"
-description = "UniFFI bindings for Fauna iOS and Android apps"
+name = "fauna-ffi-core"
+description = "UniFFI bindings for Fauna's native apps — the code of the fauna-ffi artifacts"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -32,10 +47,11 @@ kids-safe = ["accounts-registry", "pairing", "value-format", "moderation-badge",
 # planes the kids flavor excises — the feed and posting (`feed-badge`,
 # `feed-rules`, `feed-manager`, `feed-client`, the feed's source-badge
 # `search`), discovery (`search-manager`, `search-client`), every bridge (`mail-admin`, `mail-import`,
-# `atproto-settings`, `nostr-npub-confirm`), web publishing (`web-content`),
+# `atproto-settings`, `nostr-npub-confirm`), the archive import that authors
+# posts (`archive-import`), web publishing (`web-content`),
 # monetization (`subscriptions-author`) and third-party anything
 # (`connected-apps`, `labeler-catalog`).
-store-safe = ["kids-safe", "rule-editor", "feed-badge", "feed-rules", "feed-manager", "feed-client", "search", "search-manager", "search-client", "mail-admin", "mail-import", "atproto-settings", "nostr-npub-confirm", "web-content", "subscriptions-author", "connected-apps", "labeler-catalog"]
+store-safe = ["kids-safe", "rule-editor", "feed-badge", "feed-rules", "feed-manager", "feed-client", "search", "search-manager", "search-client", "mail-admin", "mail-import", "archive-import", "atproto-settings", "nostr-npub-confirm", "web-content", "subscriptions-author", "connected-apps", "labeler-catalog"]
 # The kids flavor's compiled-in content floor (`family-safety.md` § The account
 # age band → the kids-app bullet, item (4)): composes
 # `fauna_core::obligation::KIDS_CONTENT_FLOOR` — the four guardian categories at
@@ -652,7 +668,9 @@ feed-rules = ["fauna-core/uniffi", "dep:fauna-client-feed"]
 # the snapshot types get their `uniffi::Record`/`Enum` registration (it transitively enables
 # `fauna-core/uniffi` for the embedded `LocalizedText`); `fauna-feed` itself stays a plain
 # (non-uniffi) dep for src/feed.rs's gate-free `classifySources` badge export.
-feed-manager = ["dep:fauna-feed", "fauna-feed/uniffi"]
+# With `archive-import` on too, the machine's `feed-sink` gives the feed factory
+# `ArchiveComments`, the folded archive comments' read seam (src/archive_import.rs).
+feed-manager = ["dep:fauna-feed", "fauna-feed/uniffi", "fauna-archive-import-machine?/feed-sink"]
 # The shared, stateful Search page (src/search_manager.rs — the FfiSearchManager
 # façade over fauna_client_search::SearchManager<Arc<NestClient>> +
 # FfiNestClient::search_manager). Default-on so the Apple/Android/Windows app FFI
@@ -787,9 +805,12 @@ account-runtime = ["dep:fauna-client-account-runtime", "dep:tracing", "accounts-
 # (`mls-group-key-material.md` § M2 → *Writer-signed change records* (1)), and
 # an IN-PROCESS host (android's SAF provider) reads that principal straight out
 # of the T10 slot (`SlotChangeSigner` over `principal_bundle`), so the feature
-# carries the slot module and the credential store it reads.
+# carries the slot module and the credential store it reads. `folders`: the
+# host's app-dead presence door takes the mirrored group sets as
+# `fauna_folders_machine::on_demand_presence::HeldGroupScope`.
 file-provider-host = [
     "sync-engine-host",
+    "folders",
     "fauna-sync-engine/account-runtime",
     "dep:fauna-credential-store",
 ]
@@ -1003,6 +1024,18 @@ drafts = ["dep:fauna-client-drafts"]
 # and leaves `libs/fauna-mail-go` unchanged (no off-win Go regen). Same
 # reasoning as `drafts` above.
 mail-import = ["fauna-mail/imap-client-native"]
+# The import-from-an-export-archive wizard (src/archive_import.rs —
+# `ArchiveImportMachine`'s UniFFI face plus `build_archive_import_machine`;
+# archive-import.md § The wizard and its machine). Default-on through
+# `store-safe` so the Apple/Android/Windows app FFI exports it (the six-app
+# trickle-down, slice 7), outside `kids-safe` because an import authors posts
+# (the kids app excises posting), and gated so the Go mail-bridge
+# `--no-default-features` build drops it — its native `rpc-glue` seam pulls the
+# client crates uniffi-bindgen-go cannot emit. Pulls `account-runtime`: the
+# machine's period-key, folder-key and mail custody are the seat's.
+# `conversations-sink` gives the conversations factory the machine's
+# `ArchiveThreads`, the `Archive` rail's read seam (src/archive_import.rs).
+archive-import = ["dep:fauna-archive-import-machine", "fauna-archive-import-machine/uniffi", "fauna-archive-import-machine/conversations-sink", "account-runtime"]
 # Expose the state machines' `set_*_for_test` setters + observer/connector doubles
 # via UniFFI for E2E, so a test build's bridge can drive snapshots (tracked
 # internally — "E2E bridge contract").
@@ -1028,6 +1061,8 @@ mail-import = ["fauna-mail/imap-client-native"]
 test-helpers = [
     # The harness's networked seed exports (the `e2e-harness` feature above).
     "e2e-harness",
+    # The `fake` payment provider (compiled out of a production build).
+    "fauna-client-payments?/test-helpers",
     # The loud surfaces' e2e seams (`src/e2e_seams.rs`, and the wake beside the
     # re-sweep loop in `src/critical_alerts.rs`): the shared counters and
     # backoff parser, the NestClient reconnect pace, and the wakeable loop.
@@ -1046,6 +1081,12 @@ test-helpers = [
     "fauna-onboarding-machine/test-helpers",
     "fauna-launch-machine/test-helpers",
     "fauna-conversations/test-helpers",
+    # The archive import's one-shot pause-after / hold-after anchors
+    # (`set_test_pause_after_records` / `set_test_hold_after_records`, the
+    # `archive_import_pause_after` / `archive_import_hold_after` agent commands'
+    # mechanism): exported only under the machine's own `uniffi` + `test-helpers`,
+    # so a production flavor of any profile carries neither.
+    "fauna-archive-import-machine?/test-helpers",
     # The FAUNA_E2E_SYNC_AGENT_BIN pin read FfiChildAgentSpawner's spawn
     # resolves through (agent_spawner::agent_binary) — compiled out of a
     # production fauna-ffi build together with the spawner itself.
@@ -1151,13 +1192,8 @@ test-helpers = [
 ]
 
 [lib]
-crate-type = ["lib", "staticlib", "cdylib"]
-
-[build-dependencies]
-# The one derivation of `FAUNA_BUILD_COMMIT` (`ui/status.md` § State & data shape,
-# the build leg) — stamped so `status_text` names the commit the
-# native app's shared Rust was compiled from.
-fauna-build-commit = { path = "../fauna-build-commit" }
+name = "fauna_ffi"
+crate-type = ["lib"]
 
 [dependencies]
 # The shared `CloudBackupExclusion::ExcludedByShell` callback is typed
@@ -1412,8 +1448,9 @@ fauna-client-moderation = { path = "../fauna-client-moderation" }
 # wrap (tracked internally).
 fauna-client-dns = { path = "../fauna-client-dns", features = ["uniffi"], optional = true }
 fauna-client-mail-settings = { path = "../fauna-client-mail-settings", features = ["uniffi", "rpc-glue"], optional = true }
-# The archive-import wizard's machine and its native WS-RPC seam — `e2e-harness`
-# only (`fauna_harness_archive_import`); no app reaches it through this crate yet.
+# The archive-import wizard's machine and its native WS-RPC seam — the apps'
+# page through `archive-import` (src/archive_import.rs, which adds the machine's
+# `uniffi` face), and `e2e-harness`'s `fauna_harness_archive_import`.
 fauna-archive-import-machine = { path = "../fauna-archive-import-machine", features = ["rpc-glue"], optional = true }
 # The user-settings Linked-nests machine (fauna.pair.* over the bearer
 # connection), exported over UniFFI in src/pairing.rs.
@@ -1727,7 +1764,3 @@ fauna-core = { path = "../fauna-core", default-features = false, features = [
 # FFI seat declares itself there. Already in-graph through fauna-sync-engine,
 # which re-exports `db`/`root` but not `locks`.
 fauna-account-store = { path = "../fauna-account-store" }
-
-[[bin]]
-name = "uniffi-bindgen"
-path = "uniffi-bindgen.rs"

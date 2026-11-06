@@ -4,12 +4,20 @@ import BackgroundTasks
 import os
 
 public class BackgroundScheduler: NSObject {
+    // Photo backup's task — none in the kids build, whose Info.plist permits no
+    // such id (account-age-band.md § The account age band, the kids-app bullet,
+    // item (4): photo backup is not *Kept*). Registering an id the plist does not
+    // permit is a launch-time failure, so the gate is on the id itself.
+    #if !FAUNA_KIDS
     static let uploadTaskId = AppleIdentifiers.BackgroundTask.upload
+    #endif
     static let custodianPullTaskId = AppleIdentifiers.BackgroundTask.custodianPull
     static let widgetRefreshTaskId = AppleIdentifiers.BackgroundTask.widgetRefresh
     static let bgSessionId = AppleIdentifiers.BackgroundTask.backgroundUploadSession
 
+    #if !FAUNA_KIDS
     private var photoBackupEngine: PhotoBackupEngine?
+    #endif
     private var custodianEngine: CustodianBackupEngine?
     private var widgetRefresh: (@MainActor () async -> Int?)?
 
@@ -24,9 +32,11 @@ public class BackgroundScheduler: NSObject {
     /// (not configured yet, or pre-auth).
     @MainActor public private(set) var widgetRefreshLastPassCount: Int?
 
+    #if !FAUNA_KIDS
     public func configure(photoBackupEngine: PhotoBackupEngine) {
         self.photoBackupEngine = photoBackupEngine
     }
+    #endif
 
     public func configure(custodianEngine: CustodianBackupEngine) {
         self.custodianEngine = custodianEngine
@@ -42,9 +52,11 @@ public class BackgroundScheduler: NSObject {
     }
 
     public func registerTasks() {
+        #if !FAUNA_KIDS
         BGTaskScheduler.shared.register(forTaskWithIdentifier: Self.uploadTaskId, using: nil) { task in
             self.handleUploadTask(task as! BGProcessingTask)
         }
+        #endif
 
         BGTaskScheduler.shared.register(forTaskWithIdentifier: Self.custodianPullTaskId, using: nil) { task in
             self.handleCustodianPullTask(task as! BGProcessingTask)
@@ -84,9 +96,11 @@ public class BackgroundScheduler: NSObject {
         submit(request)
     }
 
+    #if !FAUNA_KIDS
     public func scheduleUpload() {
         scheduleBackgroundTask(identifier: Self.uploadTaskId)
     }
+    #endif
 
     /// Enqueue the custodian's next periodic pull pass. The 15-min cadence
     /// `ui/backups.md` § Scheduling settles for every destination tuple is the
@@ -183,6 +197,7 @@ public class BackgroundScheduler: NSObject {
     /// schedule by name, which was right there and would be wrong here:
     /// `WorkManager` persists unique periodic work across an upgrade under a
     /// name that was the mail worker's alone.)
+    #if !FAUNA_KIDS
     func handleUploadTask(_ task: BGProcessingTask) {
         runBackgroundTask(task, reschedule: scheduleUpload) {
             try await self.runScheduledUploadPass()
@@ -204,6 +219,7 @@ public class BackgroundScheduler: NSObject {
     public func runScheduledUploadPass() async throws {
         _ = try await photoBackupEngine?.syncNewPhotos()
     }
+    #endif // !FAUNA_KIDS
 
     /// The client-device backup custodian's periodic pull pass
     /// (`docs/goal/behavior/backup-destinations.md` § Third destination

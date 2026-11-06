@@ -210,7 +210,8 @@ def test_create_open_list_and_revoke_a_share_link(share_link_app):
 # rpc-hold refuse on `fauna.share.create`, released in a `finally`. The one
 # clock read is today's date, bracketed on both sides of each create so a run
 # straddling local midnight still knows which day the app may print. tui leads;
-# the other six drop the `tui` mark in their trickle-down.
+# linux, web, windows, macos and ios are marked beside it; android adds its mark
+# in its batched leg.
 
 EXPIRY = "share-link-expiry-select"
 CREATE_KIND = "fauna.share.create"
@@ -256,6 +257,12 @@ def _make_link(app, expiry: str | None) -> tuple[str, float, float]:
 
 
 @pytest.mark.tui
+@pytest.mark.linux
+@pytest.mark.web
+@pytest.mark.windows
+@pytest.mark.macos
+@pytest.mark.ios
+@pytest.mark.android
 @pytest.mark.feature("share-links")
 def test_four_lengths_a_week_by_default_shown_in_the_list_and_copied_exactly(share_link_app):
     """share-links 3, 5, 8."""
@@ -308,6 +315,14 @@ def test_four_lengths_a_week_by_default_shown_in_the_list_and_copied_exactly(sha
 
 
 @pytest.mark.tui
+@pytest.mark.linux
+@pytest.mark.web
+@pytest.mark.windows
+@pytest.mark.macos
+@pytest.mark.ios
+# android shares the media machine's create surface and routes its page error to
+# the shell's `error-message`; marked, not yet run on a device.
+@pytest.mark.android
 @pytest.mark.feature("share-links")
 def test_a_link_the_nest_did_not_record_is_never_shown_and_create_tries_again(
     share_link_app, nest_instance
@@ -367,6 +382,14 @@ def _age_share_links(nest_instance, actor_id_hex: str, secs: int) -> int:
 
 
 @pytest.mark.tui
+@pytest.mark.linux
+@pytest.mark.web
+@pytest.mark.windows
+@pytest.mark.macos
+@pytest.mark.ios
+# android's list rows carry `share-link-item-state` (stateDescription
+# active|expired|revoked); marked, not yet run on a device.
+@pytest.mark.android
 @pytest.mark.feature("share-links")
 def test_a_link_whose_time_has_run_out_stays_listed_marked_expired(
     share_link_owner, nest_instance
@@ -405,6 +428,12 @@ def test_a_link_whose_time_has_run_out_stays_listed_marked_expired(
 
 
 @pytest.mark.tui
+@pytest.mark.linux
+@pytest.mark.web
+@pytest.mark.windows
+@pytest.mark.macos
+@pytest.mark.ios
+@pytest.mark.android
 @pytest.mark.feature("share-links")
 def test_links_made_before_taking_the_account_back_still_work_and_can_be_revoked(
     share_link_owner,

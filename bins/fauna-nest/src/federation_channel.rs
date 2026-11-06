@@ -1052,7 +1052,35 @@ pub(crate) async fn validate_peer_url(base: &str, origin: PeerUrlOrigin) -> anyh
     // upgrade and fauna loopback services self-auth, so the reach is a
     // constrained blind port-reachability oracle, not data exfil (the dial is
     // `ws`, so HTTP-only IMDS never answers), and only an already-authenticated
-    // actor can reach it. Gating was rejected because there is NO build-time
+    // actor can reach it. That bound is the CALLER's to keep: every dial a
+    // stranger peer triggers unattended refuses loopback on production state
+    // (no `peer_fetch_loopback`) before it reaches this guard. Test state is
+    // the in-process constructor (`AppState::for_test`) and the e2e harness's
+    // `test-hooks` build (`harness_peer_fetch_loopback`), never shipped: the
+    // compile-time feature is the whole boundary — no knob, no env seed, and
+    // never an inference from this nest's own authority, because a shipped
+    // nest served at a loopback authority exists (the desktop machine-service
+    // nest, `desktop_serve.rs`) and is exactly the nest a stranger's loopback
+    // declaration would turn against its co-located services. Every address a
+    // peer DECLARES passes `ssrf::peer_declared_origin` (origin-form https, any
+    // other form refused) before it is recorded or dialled: the
+    // relayed home URL at the address-directory write
+    // (`federation_handlers::resolve_origin_home_url` — the directory's
+    // unattended readers, the follow outbox, the abuse-report outcome return
+    // and the succession pull, see only what passed), the obligation issuer's
+    // address (`moderation_federation`), a discovery referral's `nest_url`
+    // (`peer_query`) and a relayed room invitation's invitee node
+    // (`federation_handlers::admitted_invitee_node`); the
+    // succession dial itself refuses a loopback home on production state
+    // before calling this guard (`succession_pull::verify_and_record_from_home`).
+    // The three peer-asserted domain bindings refuse loopback the same way —
+    // the relayed Welcome's owner label
+    // (`federation_handlers::verified_owner_label`), the channel-fetch announce
+    // (`federation_handlers::record_announced_handle`) and the content-key
+    // relay's owner label (`folder_handlers`), all through
+    // `federation_handlers::well_formed_asserted_name`. A new
+    // peer-triggered unattended dial keeps the same bound or is listed here
+    // with a recorded ruling. Gating was rejected because there is NO build-time
     // signal that separates a production fauna-nest build from the in-process
     // build the conformance suite links: `conformance_federation_channel`,
     // `conformance_inbox`, and `conformance_cross_nest_mail_relay` all dial

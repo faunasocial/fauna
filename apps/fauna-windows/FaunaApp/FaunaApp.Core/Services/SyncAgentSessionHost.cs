@@ -90,12 +90,15 @@ internal sealed class SyncAgentSessionHost<T> where T : class, ISyncAgentSession
     /// asynchronous build outlived its own login installs nothing.</summary>
     private int _generation;
 
+#if DEBUG || FAUNA_E2E_AGENT
     /// <summary>How many installs are between "began building" and "finished starting".</summary>
     private int _installsInFlight;
 
     /// <summary>
     /// True while any install is still in flight — i.e. while a session could still go on
-    /// to provision the agent.
+    /// to provision the agent. Its only reader is the e2e state serializer, so it and its
+    /// counter compile out of a Release build (convention 15,
+    /// e2e-automation-surface-gating.md).
     ///
     /// <para><b>This exists to be a CAUSAL BARRIER for e2e negative asserts</b>
     /// (e2e-conventions.md § point 14). "Nothing re-provisions after sign-out" is otherwise
@@ -110,6 +113,7 @@ internal sealed class SyncAgentSessionHost<T> where T : class, ISyncAgentSession
     {
         get { lock (_gate) { return _installsInFlight > 0; } }
     }
+#endif
 
     /// <summary>
     /// The live session, or <c>null</c> when there is none — which every consumer already
@@ -139,7 +143,9 @@ internal sealed class SyncAgentSessionHost<T> where T : class, ISyncAgentSession
         lock (_gate)
         {
             generation = ++_generation;
+#if DEBUG || FAUNA_E2E_AGENT
             _installsInFlight++;
+#endif
             var superseded = _session;
             _session = null;
             // A newer login supersedes the previous session's handle but must NOT
@@ -173,7 +179,9 @@ internal sealed class SyncAgentSessionHost<T> where T : class, ISyncAgentSession
         }
         finally
         {
+#if DEBUG || FAUNA_E2E_AGENT
             lock (_gate) { _installsInFlight--; }
+#endif
         }
     }
 

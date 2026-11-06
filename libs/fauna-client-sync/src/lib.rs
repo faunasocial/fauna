@@ -31,9 +31,9 @@ use fauna_protocol::sync::{
     SyncChangeRecordReply, SyncChangeRecordRequest, SyncChangesListReply, SyncChangesListRequest,
     SyncChangesSupersedeReply, SyncChangesSupersedeRequest, SyncDeviceDeleteReply,
     SyncDeviceDeleteRequest, SyncDeviceP2pParticipationSetReply,
-    SyncDeviceP2pParticipationSetRequest, SyncDevicesListReply, SyncDevicesListRequest,
-    SyncFilesReply, SyncFilesRequest, SyncRegisterReply, SyncRegisterRequest, SyncStatusReply,
-    SyncStatusRequest,
+    SyncDeviceP2pParticipationSetRequest, SyncDeviceRenameReply, SyncDeviceRenameRequest,
+    SyncDevicesListReply, SyncDevicesListRequest, SyncFilesReply, SyncFilesRequest,
+    SyncRegisterReply, SyncRegisterRequest, SyncStatusReply, SyncStatusRequest,
 };
 use fauna_protocol::{ByteBuf, RpcErrorClass, RpcRequester};
 
@@ -274,6 +274,21 @@ pub enum SetNonceSource {
 }
 
 impl SetNonceSource {
+    /// This source for ONE read: a resolver's
+    /// [`fauna_core::folder_keys::read_scope`] — the roster and custody read
+    /// once, every set's lineage answered from them — and any other source as
+    /// it is. A projection reader asks once per set; per call, each ask is a
+    /// whole roster read (`docs/goal/ui/README.md` § List pages). Reads only:
+    /// a record's signing nonce resolves fresh, never from a scope.
+    pub async fn read_scope(&self) -> Self {
+        match self {
+            Self::Resolver(resolver) => {
+                Self::Resolver(fauna_core::folder_keys::read_scope(resolver).await)
+            }
+            other => other.clone(),
+        }
+    }
+
     /// [`Self::ByFolder`] over live nonces alone — each set's lineage holds
     /// its live nonce and nothing retired.
     pub fn by_folder(live: std::collections::HashMap<String, [u8; 32]>) -> Self {
@@ -1065,6 +1080,29 @@ impl<R: RpcRequester> SyncClient<R> {
             .await
     }
 
+    /// `fauna.sync.devices.rename` — name one of the actor's own rows
+    /// (`devices.md` § Device names, rule (1)). `label_sealed` is minted by
+    /// `fauna_core::label_custody::seal_owner_device_label`; the wire carries
+    /// no plaintext. Writes the row's label pair only — never a register, which would also rewrite its
+    /// capabilities. Another actor's row, or an unknown id, returns
+    /// `fauna.sync.not_found`.
+    pub async fn devices_rename(
+        &self,
+        device_id: impl Into<String>,
+        label_sealed: Vec<u8>,
+    ) -> Result<SyncDeviceRenameReply, R::Error> {
+        self.nest
+            .request(
+                fauna_protocol::sync::KIND_SYNC_DEVICES_RENAME,
+                SyncDeviceRenameRequest {
+                    device_id: device_id.into(),
+                    label_sealed: ByteBuf::from(label_sealed),
+                    extra: Default::default(),
+                },
+            )
+            .await
+    }
+
     /// `fauna.sync.devices.p2p_participation.set` — the devices page's
     /// `device-p2p-participation-toggle` (`p2p.md` § Per-device
     /// participation). Build the **self arm** (this device reporting its own
@@ -1298,10 +1336,10 @@ where
     // route: `identity` is exactly the material `BackupKey::derive` takes, the
     // same construction the engine's owner-key arm uses (`file-sync.md`
     // § Sealed names & paths).
+    // The seal site is the one the Devices page's rename shares.
     let owner_key = fauna_core::crypto::BackupKey::derive(identity.secret_bytes());
-    let label_seal_root = fauna_core::path_crypto::LabelRoot::owner_of(&owner_key);
-    let label_sealed = device_label_salt(&device_id).and_then(|salt| {
-        fauna_core::label_custody::seal_device_label(&label_seal_root, &salt, &device_label)
+    let label_sealed =
+        fauna_core::label_custody::seal_owner_device_label(&owner_key, &device_id, &device_label)
             .unwrap_or_else(|e| {
                 // Registration is best-effort, so a seal failure must not abort
                 // it either — register sealless (the row rests nameless
@@ -1309,8 +1347,7 @@ where
                 // re-stamp it.
                 tracing::warn!("sealing the device label failed, registering plaintext-only: {e}");
                 None
-            })
-    });
+            });
     match sync.register(device_id, device_label, label_sealed).await {
         Ok(_) => true,
         Err(e) => {
@@ -1326,17 +1363,6 @@ where
             false
         }
     }
-}
-
-/// The 32-byte device id a device-label seal salts under, decoded from the hex
-/// form every `fauna.sync.register` caller carries.
-///
-/// `None` for a device id that is not 32 bytes of hex — the label then registers
-/// plaintext-only rather than sealing under a salt no reader could reproduce.
-/// Unreachable in practice (every producer hex-encodes a `[u8; 32]`), which is
-/// why it degrades rather than erroring.
-fn device_label_salt(device_id_hex: &str) -> Option<[u8; 32]> {
-    fauna_core::hex32::decode(device_id_hex).ok()
 }
 
 /// Placeholder device label for a self-heal registration. Only ever used the first
@@ -1484,6 +1510,11 @@ where
     /// that do not track an anchor pass `None` — honestly "unknown causality",
     /// which readers read as no anchor.
     ///
+    /// `deposited_by` names the depositor of a folder deposit the owner's
+    /// device adopts (`folder-deposit.md` ruling 3) — the writer key the
+    /// adopter's check admitted; it rides in the signed statement. Every other
+    /// record passes `None`.
+    ///
     /// `row` is the set's identity when the sender holds it — `Local(id)`
     /// stamps the request's `folder_id`, which the nest resolves by row and
     /// never by the name (`set-addressing.md` § The row form); `None` (and a
@@ -1502,6 +1533,7 @@ where
         path_sealed: Option<Vec<u8>>,
         derived_through: Option<i64>,
         is_resolution: Option<bool>,
+        deposited_by: Option<[u8; 32]>,
         row: Option<fauna_core::folder_keys::FolderRef>,
     ) -> Result<SyncChangeRecordReply, R::Error> {
         let mut req = SyncChangeRecordRequest {
@@ -1520,6 +1552,7 @@ where
             name_hash: None,
             derived_through,
             is_resolution,
+            deposited_by: deposited_by.map(hex::encode),
             extra: Default::default(),
             signature: None,
             signer_key: None,
@@ -1571,6 +1604,10 @@ where
     /// re-point its own local copy*). Callers whose surface has no local file (the
     /// nest-side Media library) have nothing to do.
     ///
+    /// `thumbnail_hash` is the version's thumbnail manifest as the restore
+    /// records it — the version's own, or one re-sealed with its bytes; a
+    /// caller holding none passes `None` and the restored head names no tile.
+    ///
     /// `path_sealed` rides through unchanged — a restore records an ordinary
     /// `modify`, so it seals its path exactly as any other record does (see
     /// [`Self::changes_record`]). A caller holding no seal root passes `None`
@@ -1589,6 +1626,7 @@ where
         manifest_hash: String,
         size_bytes: i64,
         content_key_version: Option<u64>,
+        thumbnail_hash: Option<String>,
         path_sealed: Option<Vec<u8>>,
         row: Option<fauna_core::folder_keys::FolderRef>,
     ) -> Result<SyncChangeRecordReply, R::Error> {
@@ -1600,11 +1638,12 @@ where
             size_bytes,
             "modify",
             content_key_version,
-            None,
+            thumbnail_hash,
             path_sealed,
             // A restore is a deliberate USER action re-pointing the head — a
             // fresh edit semantically, never a resolution; this crate holds no
             // catch-up anchor, so causality is honestly unknown.
+            None,
             None,
             None,
             row,
@@ -1639,6 +1678,7 @@ where
             manifest_hash,
             size_bytes,
             change_type,
+            None,
             None,
             None,
             None,
@@ -1811,6 +1851,7 @@ mod tests {
             Some(5),
             None,
             None,
+            None,
         ))
         .expect("infallible mock");
 
@@ -1830,6 +1871,10 @@ mod tests {
         assert!(fauna_protocol::folders::SetAddressed::addresses(
             &req, "docs"
         ));
+        // No anchor: a resident root hearing this record as its own echo knows
+        // by this that no engine wrote it (`file-versions.md` § Restore, ordering 1).
+        assert_eq!(req.derived_through, None);
+        assert_eq!(req.is_resolution, None);
     }
 
     /// The self-heal must live IN `changes_record` itself, not beside it as an
@@ -1850,6 +1895,7 @@ mod tests {
             Some("aabb".to_string()),
             100,
             "create",
+            None,
             None,
             None,
             None,
@@ -1883,6 +1929,7 @@ mod tests {
             "docs/report.txt",
             "aabb".to_string(),
             100,
+            None,
             None,
             None,
             None,
@@ -1931,9 +1978,18 @@ mod tests {
         }
 
         let client = SyncClient::new(AlwaysDenied);
-        let err =
-            block_on(client.restore_version("docs", "d", "p", "aa".into(), 1, None, None, None))
-                .expect_err("permission_denied must propagate");
+        let err = block_on(client.restore_version(
+            "docs",
+            "d",
+            "p",
+            "aa".into(),
+            1,
+            None,
+            None,
+            None,
+            None,
+        ))
+        .expect_err("permission_denied must propagate");
         assert_eq!(err.0.code, "fauna.auth.permission_denied");
     }
 
@@ -2009,6 +2065,9 @@ mod tests {
                     folders_removed_from: 0,
                     extra: Default::default(),
                 })
+            }
+            "fauna.sync.devices.rename" => {
+                fauna_protocol::encode_canonical(&SyncDeviceRenameReply::default())
             }
             other => panic!("RecordingRequester: unhandled kind {other}"),
         }
@@ -2109,6 +2168,7 @@ mod tests {
             None,
             Some(17),
             Some(true),
+            None,
             None,
         ))
         .expect("infallible mock");
@@ -2366,6 +2426,7 @@ mod tests {
                 None,
                 None,
                 Some(b"sealed-path".to_vec()),
+                None,
                 None,
                 None,
                 None,
@@ -2632,6 +2693,19 @@ mod tests {
         assert_eq!(kind, "fauna.sync.devices.list");
         let _req: SyncDevicesListRequest =
             fauna_protocol::decode_strict(&payload).expect("decodes");
+    }
+
+    #[test]
+    fn devices_rename_composes_kind_and_sealed_payload() {
+        let rec = std::sync::Arc::new(RecordingRequester::new(reply));
+        let client = SyncClient::new(rec.clone());
+        block_on(client.devices_rename("dev-42", vec![1, 2, 3])).expect("infallible mock");
+        let (kind, payload) = rec.recorded();
+        assert_eq!(kind, "fauna.sync.devices.rename");
+        let req: SyncDeviceRenameRequest =
+            fauna_protocol::decode_strict(&payload).expect("decodes");
+        assert_eq!(req.device_id, "dev-42");
+        assert_eq!(req.label_sealed.as_ref(), &[1u8, 2, 3][..]);
     }
 
     #[test]

@@ -729,7 +729,7 @@ func TestCardDAVMetadataDecryptRoundTrip(t *testing.T) {
 	// whose secret rides on snapshotPlaintext).
 	sealed, err := SealCollectionMetadata(EncryptedCollectionMetadata{
 		Displayname: defaultDisplayname,
-	}, leaf.Pubkey, nil) // nil ek = classical seal
+	}, fixtureCardPubkey(), nil) // nil ek = classical seal
 	if err != nil {
 		t.Fatalf("SealCollectionMetadata: %v", err)
 	}

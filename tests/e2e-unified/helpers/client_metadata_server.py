@@ -1,5 +1,7 @@
 """An ``https`` client-metadata document on a real hostname, for a tier_3
-third-party journey that needs a **kind manifest**.
+third-party journey that needs a **kind manifest** — or the cli's published
+identity, whose document lives on the organisation's site
+(``cli_document_server``).
 
 A manifest verifies only against the host its document is served from
 (``third-party-kinds.md`` § The manifest), so the loopback development client —
@@ -27,8 +29,10 @@ import json
 import ssl
 import threading
 import time
+import urllib.parse
 from pathlib import Path
 
+import pytest
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec, ed25519
@@ -38,6 +42,19 @@ from drivers.port_util import find_free_port
 from helpers.atproto_fakes import _B58_ALPHABET
 
 DOCUMENT_PATH = "/client-metadata.json"
+
+#: The organisation's published Client ID Metadata Document for the cli app
+#: (``apps/cli.md`` § Open decisions 1) — the file the site serves byte for
+#: byte, read here so a journey serves exactly what production publishes.
+CLI_DOCUMENT_FILE = (
+    Path(__file__).resolve().parents[3] / "docs/sites/fauna-social/apps/cli/client-metadata.json"
+)
+#: Its ``client_id`` — the URL it is served at, and the cli's only identity
+#: (``fauna_protocol::principals::CLI_CLIENT_ID``, pinned to the file by a
+#: unit test in ``fauna_cli::catalog``).
+CLI_CLIENT_ID: str = json.loads(CLI_DOCUMENT_FILE.read_text())["client_id"]
+#: What the document calls the cli, the name its consent card shows.
+CLI_CLIENT_NAME: str = json.loads(CLI_DOCUMENT_FILE.read_text())["client_name"]
 
 
 def _b64u(raw: bytes) -> str:
@@ -167,6 +184,9 @@ class ClientMetadataServer:
         # Raw bodies by path — a hosted plugin's module, which a document's
         # signed `execution.module` names on the same host.
         self.blobs: dict[str, bytes] = {}
+        # Documents served as the bytes given rather than re-serialized — a
+        # published file, exactly as the site serves it (`serve_file`).
+        self.files: dict[str, bytes] = {}
         self.posts: list[tuple[str, dict[str, str], bytes]] = []
         self._posted = threading.Condition()
         self.port = find_free_port()
@@ -177,11 +197,17 @@ class ClientMetadataServer:
         class _Handler(http.server.BaseHTTPRequestHandler):
             def do_GET(self):  # noqa: N802 — the stdlib's name
                 blob = server.blobs.get(self.path)
+                file = server.files.get(self.path)
                 document = server.documents.get(self.path)
-                if blob is None and document is None:
+                if blob is None and file is None and document is None:
                     self.send_error(404)
                     return
-                body = blob if blob is not None else json.dumps(document).encode()
+                if blob is not None:
+                    body = blob
+                elif file is not None:
+                    body = file
+                else:
+                    body = json.dumps(document).encode()
                 self.send_response(200)
                 self.send_header(
                     "Content-Type",
@@ -211,6 +237,10 @@ class ClientMetadataServer:
         self._httpd.socket = ctx.wrap_socket(self._httpd.socket, server_side=True)
         self._thread = threading.Thread(target=self._httpd.serve_forever, daemon=True)
         self._thread.start()
+
+    def serve_file(self, path: str, body: bytes) -> None:
+        """Serve ``body`` at ``path`` as a JSON document, byte for byte."""
+        self.files[path] = body
 
     def client_id(self, path: str = DOCUMENT_PATH, host: str | None = None) -> str:
         """The ``client_id`` a document at ``path`` answers to, on the emulator host
@@ -273,3 +303,34 @@ def client_document(
     if manifest_jws is not None:
         doc["fauna"] = manifest_jws
     return doc
+
+
+def cli_document_server(tmp: Path) -> ClientMetadataServer:
+    """The cli's published document, served at its own URL's host and path —
+    so a journey resolves the cli's real identity through the mapped host,
+    without the internet. Hand the nest its ``nest_env()``."""
+    url = urllib.parse.urlsplit(CLI_CLIENT_ID)
+    server = ClientMetadataServer(url.hostname, tmp)
+    server.serve_file(url.path, CLI_DOCUMENT_FILE.read_bytes())
+    assert server.client_id(url.path) == CLI_CLIENT_ID
+    return server
+
+
+# The pair a journey adopts by import to run the cli under its published
+# identity: a module-scoped server, and the consent nest's `test-hooks` env
+# pointed at it (`helpers/atproto_consent.py`'s ``consent_nest_env`` is the
+# override seam).
+@pytest.fixture(scope="module")
+def cli_metadata(tmp_path_factory):
+    """The cli's published Client ID Metadata Document, served at its own
+    host through a mapped loopback port — the journey runs without the
+    internet and still resolves the cli's real identity."""
+    server = cli_document_server(tmp_path_factory.mktemp("cli-client-metadata"))
+    yield server
+    server.close()
+
+
+@pytest.fixture(scope="module")
+def consent_nest_env(cli_metadata):
+    """The consent nest's metadata fetcher pointed at ``cli_metadata``."""
+    return cli_metadata.nest_env()

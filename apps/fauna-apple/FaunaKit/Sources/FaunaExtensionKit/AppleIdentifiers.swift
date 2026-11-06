@@ -41,20 +41,21 @@ public enum AppleIdentifiers {
     /// container, same domain.
     public static let watchAppGroup = "group.social.fauna.watchkit"
 
-    #if os(macOS)
-        /// The **macOS account-credential keychain access group** —
-        /// `KeychainStore`'s data-protection-keychain rows live in it, and ONLY
-        /// the app is entitled to it (`Fauna-macOS.entitlements`; never an
-        /// appex). A second, app-only group rather than ``appGroup`` because
-        /// the shared group is also the sandboxed File Provider extension's,
-        /// and the extension must never be able to read the identity seed —
-        /// least privilege by entitlement, the boundary iOS gets for free from
-        /// its per-app default access group. Keychain-only; no container dir
-        /// is ever resolved for it. Rust twin:
-        /// `platform_ids::APPLE_MACOS_ACCOUNT_KEYCHAIN_GROUP`; pinned by
-        /// `test_apple_identifier_pins.py`.
-        public static let accountKeychainGroup = "7457N3M72H.group.social.fauna.account"
-    #endif
+    /// The **account-credential keychain access group** — the family App ID.
+    /// macOS's `KeychainStore` addresses its data-protection-plane rows through
+    /// it (`ios.md` § Credential Storage, *Across the Mac/iPhone line*): one
+    /// group across the line, so the opt-in iCloud copy meets there, and the
+    /// boundary is the App ID's — an appex has its own, so it can name neither
+    /// this group nor the identity seed in it.
+    ///
+    /// iOS never names it: its rows sit in the bundle's default access group,
+    /// which IS this App ID on a signed build, and an explicit attribute would
+    /// break an ad-hoc simulator bundle, whose synthesized application
+    /// identifier need not spell the team prefix (the e2e real-keychain lane,
+    /// `KeychainStore.e2eRealKeychain`). Rust twin:
+    /// `platform_ids::APPLE_ACCOUNT_KEYCHAIN_GROUP`; pinned by
+    /// `test_apple_identifier_pins.py`.
+    public static let accountKeychainGroup = "7457N3M72H.social.fauna.fauna"
 
     /// The home-screen widget's WidgetKit `kind`. The OS keys every widget a
     /// user has placed on this string, so a rename silently empties their home
@@ -101,7 +102,11 @@ public enum AppleIdentifiers {
     /// iOS app's `BGTaskSchedulerPermittedIdentifiers` array, or the system
     /// refuses to register the handler at launch.
     public enum BackgroundTask {
+        /// Photo backup's task. Not in the kids build, whose Info.plist omits it
+        /// from the permitted ids (`Fauna-iOS/Resources/Info-Kids.plist`).
+        #if !FAUNA_KIDS
         public static let upload = "social.fauna.sync.upload"
+        #endif
         /// The client-device backup custodian's periodic pull pass
         /// (`docs/goal/behavior/backup-destinations.md` § Third destination
         /// kind; the iOS twin of android's `CustodianHostWorker`).

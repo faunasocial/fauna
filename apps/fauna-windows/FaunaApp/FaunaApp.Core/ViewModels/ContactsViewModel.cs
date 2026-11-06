@@ -5,6 +5,7 @@ using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using FaunaApp.Core.Models;
 using FaunaApp.Core.Services;
+using uniffi.fauna_archive_import_machine;
 using uniffi.fauna_ffi;
 
 namespace FaunaApp.Core.ViewModels;
@@ -46,23 +47,117 @@ public partial class ContactsViewModel : ViewModelBase
     /// <see cref="Contacts"/>.</summary>
     public ObservableCollection<ContactRow> Rows { get; } = new();
 
+    /// <summary>The painted roster: <see cref="Rows"/> grouped by relationship status in
+    /// the shared order (<see cref="GroupByStatus"/>; contacts.md § Where logic lives →
+    /// Roster status grouping), rebuilt with <see cref="Rows"/>. The page binds its
+    /// grouped list to this; <see cref="Rows"/> stays the roster's own order, the one
+    /// <see cref="FilterRows"/> narrows.</summary>
+    public ObservableCollection<ContactRosterSection> Sections { get; } = new();
+
     /// <summary>The painted knock cards (<see cref="Knocks"/> + the sender names).</summary>
     public ObservableCollection<KnockRow> KnockRows { get; } = new();
 
     private ulong _namesRevision;
 
+    /// <summary>The account's archive links (phase two — <c>archive-import.md</c> §
+    /// Linking and merging, ruling 8): the views each row's
+    /// <see cref="ContactRow.ArchiveLinks"/> paints from, re-read with the roster.</summary>
+    private readonly ArchiveLinksHost _links;
+
+    /// <summary>The <see cref="ArchiveLinksHost.Revision"/> the rows were last painted at.</summary>
+    private ulong _linksRevision;
+
     /// <summary>Re-read every painted name from the overlay face. Cheap; the pages
-    /// call <see cref="RefreshNamesIfMoved"/> on each manager wake instead.</summary>
+    /// call <see cref="RefreshNamesIfMoved"/> on each manager wake instead. Each row's
+    /// archive-link paints are rebuilt from the host's current views in the same pass.</summary>
     public void RefreshNames()
     {
         using var names = ContactOverlayNames.Open();
         _namesRevision = names.Revision();
+        _linksRevision = _links.Revision;
+        var views = _links.Views;
         Rows.Clear();
         foreach (var c in Contacts)
-            Rows.Add(RowFor(names, c));
+            Rows.Add(RowFor(names, c, views));
+        Sections.Clear();
+        foreach (var section in GroupByStatus(Rows))
+            Sections.Add(section);
+        PaintKnockRows(names);
+    }
+
+    /// <summary>The roster grouped by relationship status (contacts.md § Where logic
+    /// lives → Roster status grouping): one <see cref="ContactRosterSection"/> per status
+    /// a row holds, in the shared <c>contact_roster_group_order</c> (FFI
+    /// <see cref="FaunaFfiMethods.ContactRosterGroupOrder"/> — confirmed, accepted,
+    /// pending, blocked, then any status this build does not name, first-seen), each
+    /// holding its rows in their given order. A status no row holds makes no section,
+    /// so a section the filter empties paints nothing. Keyed on the wire string
+    /// (<see cref="ContactInfo.WireStatus"/>), never the enum, so an unnamed status
+    /// keeps a section of its own.</summary>
+    public static IReadOnlyList<ContactRosterSection> GroupByStatus(IReadOnlyList<ContactRow> rows)
+    {
+        var order = FaunaFfiMethods.ContactRosterGroupOrder(
+            rows.Select(r => r.Contact.WireStatus).ToArray());
+        return order
+            .Select(status => new ContactRosterSection(
+                status, rows.Where(r => r.Contact.WireStatus == status)))
+            .ToList();
+    }
+
+    /// <summary>The grouped roster narrowed by the <c>contacts-search-field</c> query:
+    /// <see cref="FilterRows"/>, then <see cref="GroupByStatus"/> — the filter narrows
+    /// within sections and an emptied section drops out.</summary>
+    public IReadOnlyList<ContactRosterSection> FilterSections(string query) =>
+        GroupByStatus(FilterRows(query));
+
+    /// <summary>Re-paint the rows when the archive-link views moved (the page calls this
+    /// on <see cref="ArchiveLinksHost.Changed"/>: a question arrived, an answer or unlink
+    /// landed). Returns whether it did.</summary>
+    public bool RepaintArchiveLinksIfMoved()
+    {
+        if (_links.Revision == _linksRevision) return false;
+        RefreshNames();
+        return true;
+    }
+
+    /// <summary><c>contact-archive-link-yes</c> / <c>contact-archive-link-no</c> — the
+    /// row's same-person answer, once, either way, through the shared
+    /// <c>answer_link_token</c> with the row's own contact and platform.</summary>
+    public async Task AnswerArchiveLinkAsync(ArchiveLinkRowPaint paint, bool yes)
+    {
+        await _links.AnswerAsync(paint.Contact, paint.Platform, yes);
+        RepaintArchiveLinksIfMoved();
+    }
+
+    /// <summary><c>contact-archive-unlink</c> — future merges stop, claimed content stays
+    /// (the shared <c>unlink_token</c>).</summary>
+    public async Task UnlinkArchiveLinkAsync(ArchiveLinkRowPaint paint)
+    {
+        await _links.UnlinkAsync(paint.Contact, paint.Platform);
+        RepaintArchiveLinksIfMoved();
+    }
+
+    /// <summary>Repaint the knock cards when a status read moved
+    /// <see cref="WardAsksCache.KnocksAwaitGuardian"/> (the page calls this on
+    /// <see cref="WardAsksCache.Changed"/>), so the cards already shown gain or lose
+    /// their <c>knock-guardian-pending</c> without a reload.</summary>
+    public void RefreshKnockMarks()
+    {
+        var awaitsGuardian = WardAsksCache.KnocksAwaitGuardian;
+        if (KnockRows.All(r => r.AwaitsGuardian == awaitsGuardian)) return;
+        using var names = ContactOverlayNames.Open();
+        PaintKnockRows(names);
+    }
+
+    private void PaintKnockRows(ContactOverlayNames.Reader names)
+    {
+        // While the account is supervised with contact approval on, every knock is
+        // the guardian's to decide, so each card says so (family-safety.md § App
+        // surface) — one shared answer for all cards, no per-knock wire field.
+        var awaitsGuardian = WardAsksCache.KnocksAwaitGuardian;
         KnockRows.Clear();
         foreach (var k in Knocks)
-            KnockRows.Add(new KnockRow(k, names.PeerLabel(null, null, k.ActorId).primary));
+            KnockRows.Add(new KnockRow(k, names.PeerLabel(null, null, k.ActorId).primary, awaitsGuardian));
     }
 
     /// <summary>Re-paint the names only when the projection's content moved (the
@@ -77,11 +172,16 @@ public partial class ContactsViewModel : ViewModelBase
         return true;
     }
 
-    private static ContactRow RowFor(ContactOverlayNames.Reader names, ContactInfo c)
+    private static ContactRow RowFor(
+        ContactOverlayNames.Reader names, ContactInfo c, IReadOnlyList<ArchiveLinkView> linkViews)
     {
-        // Roster row: `peer_label(None, handle, id)` (the face's contract).
+        // Roster row: `peer_label(None, handle, id)` (the face's contract). The archive
+        // link prompt names the contact by the same primary line the row shows.
         var label = names.PeerLabel(null, c.Handle, c.ActorId);
-        return new ContactRow(c, label.primary, label.@public, names.LabelsLine(c.ActorId));
+        return new ContactRow(c, label.primary, label.@public, names.LabelsLine(c.ActorId))
+        {
+            ArchiveLinks = ArchiveLinksHost.RowPaints(linkViews, c.ActorId, label.primary),
+        };
     }
 
     /// <summary>The <c>contacts-search-field</c> roster filter: narrows the
@@ -113,7 +213,9 @@ public partial class ContactsViewModel : ViewModelBase
         RecipientKind Kind, string ActorId, string User, string Domain);
 
     /// <summary>Classify a typed find-user input (<c>64-hex actor-id</c> |
-    /// <c>user@domain</c> handle | invalid) via the shared
+    /// <c>user@domain</c> or bare <c>localpart</c> handle | invalid — a bare localpart
+    /// is a home-nest handle with an empty <see cref="RecipientClassification.Domain"/>,
+    /// forwarded as it is) via the shared
     /// <c>fauna_core::resolve::classify_recipient</c> (FFI
     /// <see cref="FaunaFfiMethods.ClassifyRecipient"/>), the SAME parse linux/android/
     /// web run — never a per-platform length/hex/`@` re-derivation (priority #2/#3/#4;
@@ -133,6 +235,25 @@ public partial class ContactsViewModel : ViewModelBase
         };
     }
 
+    /// <summary>A handle-kind <paramref name="c"/> resolved to its actor id through the
+    /// shared find-user lookup (<see cref="FaunaFfiMethods.FindUser"/>, the one
+    /// <see cref="LookUpRecipientAsync"/>'s handle branch runs): the typed domain is
+    /// forwarded as it is, so a bare localpart's EMPTY domain probes the home nest alone
+    /// (contacts.md § Layout & flow region 3) and a qualified handle may resolve on a
+    /// peer nest. Returns slot 0 of <c>[actor_id, handle, domain, nest_url]</c>; a miss
+    /// throws, as the lookup does. The folder-share picker's handle leg
+    /// (<c>FoldersPage.ShareFolderAsync</c>) — never a second resolve chain.
+    /// <paramref name="findUser"/> is the unit-test seam (the lookup is a live network
+    /// hop).</summary>
+    public static async Task<string> FindRecipientActorIdAsync(
+        string homeUrl,
+        RecipientClassification c,
+        Func<string, string, string?, Task<string[]>>? findUser = null)
+    {
+        var found = await (findUser ?? FaunaFfiMethods.FindUser)(homeUrl, c.User, c.Domain);
+        return found[0];
+    }
+
     private readonly INestRpcClient _rpc;
 
     /// <summary>The Find User lookup seam: <c>(homeUrl, handle, domain)</c> →
@@ -142,9 +263,10 @@ public partial class ContactsViewModel : ViewModelBase
     internal Func<string, string, string?, Task<string[]>> FindUserAsync { get; set; } =
         FaunaFfiMethods.FindUser;
 
-    internal ContactsViewModel(INestRpcClient rpc)
+    internal ContactsViewModel(INestRpcClient rpc, ArchiveLinksHost? archiveLinks = null)
     {
         _rpc = rpc;
+        _links = archiveLinks ?? ArchiveLinksHost.Instance;
         // Re-fetch contacts + knocks on every WS reconnect (the linux
         // ResyncRequired sweep set; transport.md § Push events). LoadAsync
         // re-pulls both rosters.
@@ -194,6 +316,10 @@ public partial class ContactsViewModel : ViewModelBase
             Knocks.Clear();
             foreach (var k in knocks)
                 Knocks.Add(k);
+            // Phase two's views are read with the roster (archive-import.md § Linking
+            // and merging, ruling 8); a failed read keeps the last ones, and no links
+            // wired reads nothing.
+            await _links.RefreshAsync();
             RefreshNames();
         }
         catch (Exception ex)
@@ -352,7 +478,8 @@ public partial class ContactsViewModel : ViewModelBase
     private async Task LookUpRecipientAsync(string? input)
     {
         // The federated find-user (contact-actor-id-lookup) path: classify the
-        // typed 64-hex actor-id | user@domain handle, then resolve it into a single
+        // typed 64-hex actor-id | user@domain or bare localpart handle (a bare
+        // localpart carries an empty domain: the home-nest probe), then resolve it into a single
         // add-able result. Windows was the LONE client without the handle branch
         // (contacts.md § Where logic lives → Contact lookup by handle); it now mirrors
         // linux/android: classify → (actor_id) build the row directly, (handle)

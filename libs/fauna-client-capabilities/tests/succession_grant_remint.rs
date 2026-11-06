@@ -26,7 +26,7 @@ use fauna_client_capabilities::{
 };
 use fauna_client_config::test_helpers::FakeSuccessionLedgerStore;
 use fauna_client_config::{SuccessionLedgerStore, keep_grant_mark};
-use fauna_core::data::{GrantUnattestedMark, MailConfig, Timestamp};
+use fauna_core::data::{GrantUnattestedMark, MailConfig, Timestamp, UnattestedVerdict};
 use fauna_core::grant_event::GrantEventScope;
 use fauna_core::identity::ActorKeypair;
 use fauna_core::succession_ledger::SuccessionLedger;
@@ -60,6 +60,9 @@ struct FakeNest {
     /// `Some(n)`: accept `n` more `fauna.capabilities.mint`s, then refuse every
     /// further one (`fauna-client-pair`'s `mint_accepts_before_refusing` shape).
     mint_accepts_before_refusing: Mutex<Option<usize>>,
+    /// Run once per accepted `fauna.capabilities.mint`, before it answers —
+    /// another gesture landing while the re-mint's deposit is in flight.
+    on_mint: Mutex<Option<Box<dyn Fn() + Send>>>,
 }
 
 impl FakeNest {
@@ -164,6 +167,9 @@ impl RpcRequester for FakeNest {
                     GrantBlob::from_canonical_bytes(&blob_bytes).expect("a decodable grant blob");
                 let grant_id = fauna_protocol::ByteBuf::from(blob.index.1.clone());
                 self.minted.lock().unwrap().push(blob_bytes);
+                if let Some(hook) = self.on_mint.lock().unwrap().as_ref() {
+                    hook();
+                }
                 fauna_protocol::encode_canonical(&MintGrantReply {
                     grant_id,
                     ok: true,
@@ -390,6 +396,63 @@ fn a_predecessor_minted_grant_is_reminted_marked_and_idempotent() {
     assert!(
         !GrantUnattestedMark::any_open(&ledger.current().unattested_grant_marks, &mark_id),
         "a re-run of the raising pass must not re-ask a question already answered"
+    );
+}
+
+/// **A Keep pressed on the inherited row while the re-mint is in flight
+/// follows the row onto its replacement.** Between the replacement's recorded
+/// `Mint` and the retirement that revokes the old id, the Nests page renders
+/// the OLD row, raised — so the owner's Keep lands on the old id's mark. The
+/// retirement carries the old id's marks onto the replacement "with its
+/// verdict" (`succession-aftermath.md` § Adjudicating what the aftermath
+/// carries across): it must carry the verdict as it stands at the retirement,
+/// never the `Open` it read before the deposit, or the answered question is
+/// asked again on a row the owner already settled.
+#[test]
+fn a_keep_landing_during_the_deposit_is_carried_onto_the_replacement() {
+    let nest = Arc::new(FakeNest::default());
+    let ledger = successor_ledger(vec![master_mail_scope()], far_future());
+    *nest.roster.lock().unwrap() = vec![("mda-1".into(), "mda".into())];
+    let old_id = [0xABu8; 16];
+    assert!(
+        GrantUnattestedMark::any_open(&ledger.current().unattested_grant_marks, &old_id),
+        "precondition: the inherited row is raised"
+    );
+
+    // The owner's Keep on the rendered (old) row, landing mid-deposit — the
+    // same per-row join `keep_grant_mark` writes.
+    let pressed = ledger.clone();
+    *nest.on_mint.lock().unwrap() = Some(Box::new(move || {
+        pressed.mutate(|log| {
+            assert!(log.decide_grant_marks_for(&old_id, UnattestedVerdict::Kept));
+        });
+    }));
+
+    let outcome = block_on(remint_capability_grants(
+        nest.clone(),
+        SUCCESSOR_SEED,
+        &ledger,
+        None,
+        &mail(),
+    ))
+    .expect("run");
+    assert_eq!(
+        outcome,
+        GrantRemintOutcome::Reminted {
+            reminted: 1,
+            owed: 0
+        }
+    );
+
+    let log = ledger.current();
+    let live = current_grants(&log);
+    assert_eq!(live.len(), 1, "old id dark, replacement live");
+    assert!(
+        !GrantUnattestedMark::any_open(&log.unattested_grant_marks, &live[0].grant_id),
+        "the Keep the owner pressed during the re-mint must settle the row the \
+         page now renders, not be overwritten by the Open read before the deposit; \
+         marks: {:?}",
+        log.unattested_grant_marks
     );
 }
 
@@ -1026,4 +1089,86 @@ fn an_ext_consent_grant_reminted_under_the_successors_delegable_pairs() {
     assert_eq!(live[0].scope, grant_log::event_scope_of(&tuples));
     assert_eq!(live[0].window_end, window_end);
     assert_every_held_grant_is_named(&nest, &ledger);
+}
+
+/// A consent grant carrying folder `deposit` tuples re-mints with the same
+/// folders and the same writer (`folder-deposit.md` § The depositor signs, the
+/// owner's device verifies): the log twin folds each folder into its `kind` as
+/// `folder:<id>` beside the writer factor, the re-mint rebuilds the tuple's
+/// `set` and `factor` from it, and the replacement's twin reads back the same
+/// deposit authority. Both shapes the consent mints: deposits riding an
+/// `ext.*` grant, and a deposit-only grant.
+#[test]
+fn a_consent_grant_with_deposit_tuples_reminted_with_its_folders_and_writer() {
+    use fauna_client_capabilities::{ext_kinds_scope_wraps, folder_deposit_scope_wraps};
+    use fauna_core::crypto::{BackupKey, DelegableSchedule};
+    use fauna_core::grant_event::deposit_authorizations;
+    use fauna_mls::wrapped_blob::generate_x25519_keypair;
+    use fauna_protocol::ext_kind::ExtKind;
+
+    const WRITER: [u8; 32] = [0xE7u8; 32];
+    let kinds: Vec<ExtKind> = vec!["ext.app.example.notes".parse().expect("an ext kind")];
+    let predecessor = DelegableSchedule::derive(&BackupKey::derive(&PREDECESSOR_SEED));
+    let mut with_ext = ext_kinds_scope_wraps(&predecessor, &kinds, Some(&WRITER));
+    with_ext.extend(folder_deposit_scope_wraps(&[7, -2], &WRITER));
+    let deposit_only = folder_deposit_scope_wraps(&[9], &WRITER);
+
+    for (label, scopes) in [("with ext reads", with_ext), ("deposit only", deposit_only)] {
+        let (_holder_sk, holder_pk) = generate_x25519_keypair();
+        let nest = Arc::new(FakeNest::default());
+        let window_end = far_future();
+        let tuples: Vec<ScopeTuple> = scopes.into_iter().map(|(t, _)| t).collect();
+        let twin = grant_log::event_scope_of(&tuples);
+        let ledger = successor_ledger_with(&[([0xEEu8; 16], holder_pk, twin.clone(), window_end)]);
+        let authority_before = deposit_authorizations(&ledger.current().grant_events);
+        assert!(
+            !authority_before.is_empty(),
+            "{label}: the twin names its folders"
+        );
+
+        let outcome = block_on(remint_capability_grants(
+            nest.clone(),
+            SUCCESSOR_SEED,
+            &ledger,
+            None,
+            &mail(),
+        ))
+        .expect("run");
+        assert_eq!(
+            outcome,
+            GrantRemintOutcome::Reminted {
+                reminted: 1,
+                owed: 0
+            },
+            "{label}: a deposit-bearing consent grant is never owed"
+        );
+
+        let minted = nest.minted.lock().unwrap().clone();
+        assert_eq!(minted.len(), 1, "{label}");
+        let blob = GrantBlob::from_canonical_bytes(&minted[0]).expect("decode");
+        assert_eq!(blob.holder, holder_pk, "{label}");
+        let deposits: Vec<&ScopeTuple> = blob
+            .scope
+            .iter()
+            .filter(|t| t.class == ScopeTuple::CLASS_DEPOSIT)
+            .collect();
+        let expected: Vec<&ScopeTuple> = tuples
+            .iter()
+            .filter(|t| t.class == ScopeTuple::CLASS_DEPOSIT)
+            .collect();
+        assert_eq!(
+            deposits, expected,
+            "{label}: the same folders, the same writer"
+        );
+
+        let live = current_grants(&ledger.current());
+        assert_eq!(live.len(), 1, "{label}");
+        assert_ne!(live[0].grant_id.as_slice(), &[0xEEu8; 16], "{label}");
+        assert_eq!(live[0].scope, twin, "{label}: the twin re-records verbatim");
+        assert_eq!(
+            deposit_authorizations(&ledger.current().grant_events),
+            authority_before,
+            "{label}: the deposit authority survives the succession"
+        );
+    }
 }

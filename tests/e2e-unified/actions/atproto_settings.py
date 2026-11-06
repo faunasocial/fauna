@@ -245,7 +245,8 @@ class AtprotoSettingsActions:
         return self.history_backfill_checked() == on
 
     def did_method_state(self, method: str) -> str:
-        """`on` | `off` — a DID-method radio's own selection (`state` attr)."""
+        """`active` | `inactive` — a DID-method radio's own selection (`state`
+        attr; the depth rungs' vocabulary, the same on every app)."""
         return self.driver.get_attr(f"atproto-did-method-{method}", "state") or ""
 
     def confirm_transition(self) -> None:
@@ -329,7 +330,7 @@ class AtprotoSettingsActions:
         return self.driver.is_visible("atproto-did-method")
 
     def is_delete_presence_visible(self) -> bool:
-        return self.driver.is_visible("atproto-delete-presence")
+        return not self.driver.is_absent("atproto-delete-presence")
 
     # ── The delete ceremony (atproto-delete-confirm-card / -confirm / -cancel) ──
     #
@@ -440,7 +441,11 @@ class AtprotoSettingsActions:
     def delegation_status(self) -> str:
         """The liveness wire spelling (`active` | `expiring_soon` | `expired` |
         `never_expires`), read off `atproto-delegation-status`'s `state` attr —
-        the state itself, not its localized prose."""
+        the state itself, not its localized prose. `""` when no status is
+        rendered — checked first, because web's attribute read waits for the
+        element rather than answering empty."""
+        if self.driver.is_absent("atproto-delegation-status"):
+            return ""
         return self.driver.get_attr("atproto-delegation-status", "state") or ""
 
     def delegation_scope_text(self) -> str:

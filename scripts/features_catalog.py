@@ -4,7 +4,7 @@
 Owner of the *format*: `docs/goal/architecture/feature-catalog.md` — this module is
 that document made executable, and every rule below cites the section it implements.
 Two thin CLIs sit on top: `scripts/features-render.py` (writes) and
-`scripts/features_lint.py` (the six rules of § The catalog lint).
+`scripts/features_lint.py` (the seven rules of § The catalog lint).
 
 **Pure stdlib, sub-second, idempotent** (§ Render). No PyYAML: the front-matter shape
 is a fixed, tiny grammar — scalars plus the one nested `absences` map — and a
@@ -57,13 +57,26 @@ def scan_app_marks(repo: Path = REPO) -> dict:
     lint already pays (§ Retiring the hand matrix: a merge-gated artifact is derived
     by a parse, never by a pytest collection, which differs per machine).
     """
+    return scan_marks(repo)[0]
+
+
+def scan_marks(repo: Path = REPO) -> tuple:
+    """`({node id: (apps)}, {node id: (surface keys)}, {node id: (host platforms)})`
+    from ONE scan of the e2e tree — the app markers `applicable` wants, the
+    `requires_surface` markers the test → surface map's first reader wants (§ Cell
+    semantics, *Not built is declared*), and the `host_platform` markers
+    `witness_platforms` wants (§ The ledger, *Stale records*, ruling (i)). One `ast`
+    pass for all three, so the render pays the ~2 s once."""
     import sys
     scripts = str(Path(__file__).resolve().parent)
     if scripts not in sys.path:
         sys.path.insert(0, scripts)
     import features_scan
     scanned = features_scan.scan_tree(root=repo / "tests" / "e2e-unified", repo=repo)
-    return {node_id: facts.apps for node_id, facts in scanned.items() if facts.apps}
+    return ({node_id: facts.apps for node_id, facts in scanned.items() if facts.apps},
+            {node_id: facts.surfaces for node_id, facts in scanned.items() if facts.surfaces},
+            {node_id: facts.platforms for node_id, facts in scanned.items()
+             if facts.platforms is not None})
 
 #: The version-skew pin the release table derives (§ Tag gate and release table → *The
 #: pin is derived from it*). Repo-relative because it lives OUTSIDE the catalog: it is
@@ -103,12 +116,32 @@ MARKS = {
     "full": "✅",      # white heavy check mark
     "partial": "⚠",   # warning sign
     "failing": "❌",   # cross mark
+    "unbuilt": "🚧",  # construction sign — held short by build work, not by a failure
     "none": "",
     "absent": "—",    # em dash
 }
 
 #: Outcomes that count as a witness having succeeded (§ Cell semantics).
 PASSING = frozenset({"passed", "xpassed"})
+
+
+def is_unbuilt(record: dict, app: str) -> bool:
+    """Is this record *unbuilt* for `app`'s column (§ Cell semantics, the *unbuilt*
+    row)? The recorded route: its outcome is a skip of class `unbuilt`. A record the
+    registry reads otherwise — stale (its `surface` is built on the column) or held by
+    a `harness` surface — never reaches here: `live_records` drops it first, so it
+    reads as unrun (`Declared.record_reading`)."""
+    return record.get("outcome") == "skipped" and record.get("skip_class") == "unbuilt"
+
+
+def is_real_red(record: dict) -> bool:
+    """A non-passing record that is a failure, not a declared skip: `failed`, `error`,
+    `xfailed`, or a skip of no class (§ Cell semantics). It is what turns an
+    *unbuilt* column ⚠ — the failure is the more urgent signal."""
+    outcome = record.get("outcome")
+    if outcome == "skipped":
+        return not record.get("skip_class")
+    return outcome not in PASSING
 
 BEGIN = "<!-- features-render:begin -->"
 END = "<!-- features-render:end -->"
@@ -414,7 +447,7 @@ def column_trickle_down(pages: list, app: str, max_reach: int,
 
 @dataclass(frozen=True)
 class Cell:
-    state: str            # full | partial | failing | none | absent
+    state: str            # full | partial | failing | unbuilt | none | absent
     stamp: str
     date: str
     #: The stamp's run had uncommitted changes, so its commit is a lower bound on the
@@ -735,11 +768,25 @@ def _section_rank(section: str) -> tuple:
         return (1, 0)
 
 
-def load_ledger(features: Path = FEATURES) -> dict:
+def load_ledger(features: Path = FEATURES, *, last_green: bool = True,
+                repo: Path = REPO) -> dict:
     """`{app: {slug: {"cell": {...}, "tests": {node id: {platform: record}}}}}`,
     missing files absent (§ The ledger, *Platform keying*: one test can carry more
     than one platform's outcome, so the render folds across them — never reads a
-    bare record straight off `tests[node id]`)."""
+    bare record straight off `tests[node id]`).
+
+    With `last_green` (the default) each record is the NEWER of the ledger's and the
+    published last-green snapshot's for its key (§ Cell semantics, *Two sources*;
+    `overlay_last_green`), so every reader of a cell — the render, the lint, the gap
+    view — reads one observation. `last_green=False` is the files as written: what
+    the prune rewrites and what lint rule 6 judges, since only a file can be pruned."""
+    out = _load_ledger_files(features)
+    if last_green:
+        overlay_last_green(out, features, repo=repo)
+    return out
+
+
+def _load_ledger_files(features: Path) -> dict:
     out: dict = {}
     ledger_dir = features / "ledger"
     if not ledger_dir.is_dir():
@@ -777,6 +824,220 @@ def load_releases(features: Path = FEATURES) -> list:
     return data.get("releases") or []
 
 
+# ── the surface registry (e2e-conventions.md convention 7) ──────────────────
+#: The registry file. Convention 7 owns it (*The surface registry*); this is its one
+#: reader — the run-time gate (`helpers/app_surface.py::require_surface`) and the
+#: conftest marker call it too, so the matrix and the run cannot read it apart.
+SURFACES = REPO / "tests" / "e2e-unified" / "surfaces.toml"
+#: `product` — the APP lacks the surface (the matrix's *not built*); `harness` — the
+#: e2e driver lacks it for that app (read as unrun).
+SURFACE_KINDS = ("product", "harness")
+_SURFACE_KEY = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+
+
+@dataclass(frozen=True)
+class Surface:
+    key: str
+    kind: str
+    built: frozenset
+    detail: str = ""
+    tracked: str = ""
+
+
+def load_surface_registry(path: Path = SURFACES) -> dict:
+    """`{key: Surface}` from `surfaces.toml` — stdlib `tomllib`, never an import of
+    the test tree. An absent file is an empty registry; a malformed one is a
+    `CatalogError`, never a partial read: a gate that silently lost an entry would
+    turn an unbuilt skip into an unknown-key error mid-run, or worse, a key into
+    *built everywhere*."""
+    import tomllib
+
+    if not path.exists():
+        return {}
+    try:
+        data = tomllib.loads(path.read_text(encoding="utf-8"))
+    except tomllib.TOMLDecodeError as exc:
+        raise CatalogError(f"{path.name}: {exc}") from exc
+    registry = {}
+    for key, entry in data.items():
+        where = f"{path.name} [{key}]"
+        if not _SURFACE_KEY.match(key):
+            raise CatalogError(f"{where}: a surface key is kebab-case")
+        if not isinstance(entry, dict):
+            raise CatalogError(f"{where}: an entry is a table")
+        unknown = set(entry) - {"kind", "built", "detail", "tracked"}
+        if unknown:
+            raise CatalogError(f"{where}: unknown field(s) {', '.join(sorted(unknown))}")
+        kind = entry.get("kind")
+        if kind not in SURFACE_KINDS:
+            raise CatalogError(f"{where}: kind must be one of {', '.join(SURFACE_KINDS)}")
+        built = entry.get("built")
+        if not isinstance(built, list) or not all(isinstance(a, str) for a in built):
+            raise CatalogError(f"{where}: built is a list of app names")
+        strays = set(built) - set(APPS)
+        if strays:
+            raise CatalogError(f"{where}: built names no app {', '.join(sorted(strays))}")
+        for text in ("detail", "tracked"):
+            if not isinstance(entry.get(text, ""), str):
+                raise CatalogError(f"{where}: {text} is a string")
+        registry[key] = Surface(key=key, kind=kind, built=frozenset(built),
+                                detail=entry.get("detail", ""),
+                                tracked=entry.get("tracked", ""))
+    return registry
+
+
+def surfaces_path(features: Path) -> Path:
+    """The registry beside a catalog — `tests/e2e-unified/surfaces.toml` of the tree
+    that holds `docs/features/`, so a fixture world reads its own (or none)."""
+    return features.parent.parent / "tests" / "e2e-unified" / "surfaces.toml"
+
+
+def _record_keys(record: dict) -> list:
+    keys = list(record.get("surfaces") or [])
+    if record.get("surface"):
+        keys.append(record["surface"])
+    return keys
+
+
+def test_surfaces(node_id: str, scan: dict, ledger: dict) -> frozenset:
+    """The surface keys `node_id` requires (§ Cell semantics, *Not built is declared*:
+    the test → surface map is the union of two readers) — its `requires_surface`
+    markers (`scan`, `{node id: keys}`, the second half of `scan_marks`) and the
+    `surfaces` every record of it carries, in every ledger file, under every feature,
+    on every platform. A run on any app teaches the map what every column meets."""
+    keys = set(scan.get(node_id) or ())
+    for features in ledger.values():
+        for entry in features.values():
+            for record in ((entry.get("tests") or {}).get(node_id) or {}).values():
+                keys.update(_record_keys(record))
+    return frozenset(keys)
+
+
+def surface_map(scan: dict, ledger: dict) -> dict:
+    """`{node id: keys}` — `test_surfaces` for every test either reader names, in one
+    pass over the ledger (the render asks it ~900 cells × their witnesses over)."""
+    out = {node_id: set(keys) for node_id, keys in scan.items()}
+    for features in ledger.values():
+        for entry in features.values():
+            for node_id, by_platform in (entry.get("tests") or {}).items():
+                for record in by_platform.values():
+                    keys = _record_keys(record)
+                    if keys:
+                        out.setdefault(node_id, set()).update(keys)
+    return {node_id: frozenset(keys) for node_id, keys in out.items() if keys}
+
+
+#: The first day every ledger record lists the gates its run reached — the writer
+#: (`feature_ledger.record`) grew `surfaces` late on 2026-10-25 and omits it when the
+#: run reached none, so from this date a record WITHOUT the field reached no gate
+#: (§ Cell semantics, *Not built is declared*, the map's second reading).
+SURFACES_RECORDED_SINCE = "2026-10-26"
+
+
+def record_reach(record: dict) -> frozenset | None:
+    """The surface keys `record`'s own run reached, or None where the record cannot
+    say — written before the writer listed them, so its silence is no evidence."""
+    if "surfaces" in record or str(record.get("date") or "") >= SURFACES_RECORDED_SINCE:
+        return frozenset(_record_keys(record))
+    return None
+
+
+def borrowed_map(scan: dict, smap: dict) -> dict:
+    """`{node id: keys}` — the keys `surface_map` holds for a test only because some
+    record listed them, never its own `requires_surface` markers. A record that
+    knows its own reach is judged without these (`Declared.requires`)."""
+    out = {}
+    for node_id, keys in smap.items():
+        borrowed = keys - frozenset(scan.get(node_id) or ())
+        if borrowed:
+            out[node_id] = borrowed
+    return out
+
+
+@dataclass(frozen=True)
+class Declared:
+    """The declared route's inputs (§ Cell semantics, *Not built is declared*): the
+    registry and the test → surface map. Every reading the cell, the cause view, the
+    prune and the lint make of them is a method here, so the five cannot read the
+    registry apart. Empty (no registry, no map) reads exactly as the recorded route
+    alone — the catalog before the registry."""
+
+    registry: dict = field(default_factory=dict)
+    surfaces: dict = field(default_factory=dict)
+    #: The part of `surfaces` only records taught (`borrowed_map`) — dropped when the
+    #: record being judged knows its own reach, so a gate the test no longer calls
+    #: cannot outlive its removal through another platform's older record.
+    borrowed: dict = field(default_factory=dict)
+
+    def requires(self, test: str, record: dict | None = None) -> frozenset:
+        """The surface keys `test` requires — for a column with no record, the whole
+        map (what a run elsewhere taught it to expect); for one record, the map minus
+        every borrowed key that record's own run did not reach, when it can say."""
+        keys = frozenset(self.surfaces.get(test, ()))
+        reach = None if record is None else record_reach(record)
+        if reach is None:
+            return keys
+        return keys - (frozenset(self.borrowed.get(test, ())) - reach)
+
+    def unbuilt(self, test: str, app: str, kind: str = "product",
+                record: dict | None = None) -> tuple:
+        """The `kind` surfaces `test` requires (`requires`, read for `record` when one
+        is given) that `app` has not built, sorted. A key the registry does not
+        declare is rule 7's finding, never a declaration."""
+        return tuple(sorted(
+            k for k in self.requires(test, record)
+            if (s := self.registry.get(k)) is not None and s.kind == kind
+            and app not in s.built))
+
+    def record_reading(self, record: dict, app: str) -> str | None:
+        """How the registry reads a `skipped: unbuilt` record on `app`'s column:
+        `"stale"` — its `surface` is built there now (unrun; rule 6 refuses it, the
+        prune drops it); `"harness"` — its `surface` is a harness surface (unrun, *the
+        harness cannot drive it here*); `None` — the record stands as it is. A
+        pre-registry record (no `surface`) and one naming an undeclared key stand."""
+        if not is_unbuilt(record, app) or app not in APPS:
+            return None
+        entry = self.registry.get(record.get("surface") or "")
+        if entry is None:
+            return None
+        if app in entry.built:
+            return "stale"
+        return "harness" if entry.kind == "harness" else None
+
+    def ungated(self, test: str, record: dict, app: str) -> bool:
+        """An ungated failure: a `failed`/`error` record on a column that has not
+        built a product surface the map says the test requires — read as unbuilt,
+        listed as *unbuilt (ungated)*, never a real red. Read for the record itself:
+        a failure whose run reached no gate for the surface on a test that no longer
+        asks for it is the red it says it is."""
+        return record.get("outcome") in ("failed", "error") and bool(
+            self.unbuilt(test, app, record=record))
+
+
+def build_declared(registry: dict, surface_marks: dict, ledger: dict) -> Declared:
+    """The registry with the map over `surface_marks` × `ledger` and its borrowed part."""
+    smap = surface_map(surface_marks, ledger)
+    return Declared(registry=registry, surfaces=smap,
+                    borrowed=borrowed_map(surface_marks, smap))
+
+
+def load_declared(features: Path = FEATURES, surface_marks: dict | None = None,
+                  ledger: dict | None = None) -> Declared:
+    """The registry beside `features` and the map over `surface_marks` × the ledger."""
+    ledger = load_ledger(features) if ledger is None else ledger
+    return build_declared(load_surface_registry(surfaces_path(features)),
+                          surface_marks or {}, ledger)
+
+
+def live_records(by_platform: dict, app: str, declared: Declared | None) -> dict:
+    """One test's `{platform: record}` with every record the registry reads as unrun
+    (stale, or held by a harness surface) dropped — what a column's cell is judged on.
+    The nest file is not a column, so its records pass through untouched."""
+    if declared is None:
+        return by_platform
+    return {p: r for p, r in by_platform.items() if declared.record_reading(r, app) is None}
+
+
 #: The trees a test's staleness is counted over (delayed-testing.md § The last-green
 #: directory, *Staleness is read in commits*): the suite, the shared code, the nest,
 #: the strings and the harness — plus its own app's tree (`app_tree`).
@@ -806,6 +1067,254 @@ def load_last_green(platform: str, features: Path = FEATURES) -> dict:
     except json.JSONDecodeError as exc:
         raise CatalogError(f"last-green/{path.name}: {exc}") from exc
     return data.get("tests") or {}
+
+
+# ── two sources, one observation (§ Cell semantics, *Two sources*) ─────────
+#: A directory outcome as the ledger spells it: `(outcome, skip_class)` — only the
+#: outcomes the ledger records from the SAME report every time. The directory also
+#: notes reds and errors the ledger deliberately declines (a setup-time
+#: `NestModeError`, an own-artifact test naming no artifact, a `--strict-app`
+#: refusal the ledger records as `skipped: unbuilt`), so a directory red or error
+#: cannot say whether the ledger would have recorded it: it never supersedes a
+#: ledger record. The inverse of `tests/e2e-unified/helpers/last_green.py::classify`.
+_DIRECTORY_OUTCOMES = {
+    "green": ("passed", None),
+    "skip:unbuilt": ("skipped", "unbuilt"),
+    "skip:absence": ("skipped", "absence"),
+}
+#: The nest-mode tokens a directory key's parametrization can carry — the default
+#: mode is unstamped (testing.md § *Mode mechanics*), so a key with none of these
+#: is the default `standalone` run.
+_MODE_TOKENS = ("docker", "live")
+_PARAMS = re.compile(r"\[(.*)\]$")
+
+
+def _split_directory_key(key: str) -> tuple:
+    """`(ledger node id, param tokens)` for a directory key — the ledger drops the
+    parametrization exactly as conftest's `_repo_node_id` does (greedy, from the
+    first `[` after `::`), so the two key spaces meet on the stripped id."""
+    path, sep, rest = key.partition("::")
+    match = _PARAMS.search(rest)
+    if not match:
+        return key, ()
+    return path + sep + rest[:match.start()], tuple(match.group(1).split("-"))
+
+
+def _directory_index(snapshot: dict) -> dict:
+    """`{ledger node id: [(param tokens, record)]}` over one platform's snapshot."""
+    out: dict = {}
+    for key, record in snapshot.items():
+        node_id, tokens = _split_directory_key(key)
+        out.setdefault(node_id, []).append((tokens, record))
+    return out
+
+
+def _mode_of(tokens: tuple) -> str | None:
+    return next((m for m in _MODE_TOKENS if m in tokens), None)
+
+
+#: A convention-16 seat set's token (`2seat`, `3seat`); the token after it is the
+#: set's seat MODES joined by `+` (`native+native`) — `sync_seats.seat_set_param_id`.
+_SEAT_TOKEN = re.compile(r"^\d+seat$")
+SEAT_MODES_PATH = REPO / "tests" / "e2e-unified" / "helpers" / "seat_modes.py"
+_seat_modes_module = None
+
+
+def _seat_modes():
+    """`tests/e2e-unified/helpers/seat_modes.py`, loaded by path — the ONE mode→app
+    table conftest's `_apps_for_seat_pair` reads, stdlib-only so the catalog stays
+    parse-only (no test helper package is imported)."""
+    global _seat_modes_module
+    if _seat_modes_module is None:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("_fauna_seat_modes", SEAT_MODES_PATH)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        _seat_modes_module = module
+    return _seat_modes_module
+
+
+def _seat_modes_of(tokens: tuple) -> tuple | None:
+    """The seat modes a seat-set key carries (`("native", "native")`), or None when
+    the key is not a seat set's."""
+    for i, token in enumerate(tokens):
+        if _SEAT_TOKEN.match(token):
+            return tuple(tokens[i + 1].split("+")) if i + 1 < len(tokens) else ()
+    return None
+
+
+def seat_key_apps(modes: tuple, platform: str | None) -> frozenset:
+    """The apps a seat-set key WITNESSES on the snapshot's `platform` — conftest's
+    `_apps_for_seat_pair(under_test=True)` over the same table, the snapshot's
+    platform name (`linux`, `macos`, `windows`) mapped to the `sys.platform` value
+    the table keys on. Empty for a platform or a mode the table does not know."""
+    table = _seat_modes()
+    sys_platform = table.SNAPSHOT_SYS_PLATFORM.get(platform or "")
+    if sys_platform is None:
+        return frozenset()
+    return frozenset(table.apps_for_seat_set(list(modes), sys_platform, under_test=True))
+
+
+def directory_records_for(candidates: list, app: str, nest_mode: str | None,
+                          platform: str | None = None) -> list:
+    """The directory records answering ONE ledger record of `app` (or the nest file)
+    in `nest_mode` on `platform` — every variant the ledger collapsed into it
+    (`[linux-eml]`, `[linux-mbox]`, … are one ledger record, worst outcome winning),
+    or `[]` when the keys cannot say which, and the ledger then stands.
+
+    An app file's record is answered by the keys carrying its app token, and by the
+    seat-set keys (`[2seat-native+native]`) whose modes resolve to it on `platform`
+    (`seat_key_apps`: a device-only seat credits only itself); an unparametrized key
+    answers when no key names an app (a test the run attributed to the app without
+    an app axis) — never a seat-set key, whose app is its modes' alone. The nest
+    file's record is answered by keys naming no app and no seat set. Of those, the
+    keys stamped with the record's own mode (the default mode is unstamped); a
+    `docker` record with none is answered by a lone unstamped key, since an
+    own-artifact test records `docker` under any key — never the reverse."""
+    apps = set(APPS)
+
+    def key_apps(tokens: tuple) -> set:
+        modes = _seat_modes_of(tokens)
+        return set(tokens) & apps if modes is None else set(seat_key_apps(modes, platform))
+
+    if app == NEST:
+        named = [(t, r) for t, r in candidates
+                 if _seat_modes_of(t) is None and not set(t) & apps]
+    else:
+        named = [(t, r) for t, r in candidates if app in key_apps(t)]
+        if not named and not any(key_apps(t) or _seat_modes_of(t) is not None
+                                 for t, _ in candidates):
+            named = list(candidates)
+    want = nest_mode if nest_mode in _MODE_TOKENS else None
+    exact = [(t, r) for t, r in named if _mode_of(t) == want]
+    if not exact and want is not None and len(named) == 1 and _mode_of(named[0][0]) is None:
+        exact = named
+    return [r for _, r in exact]
+
+
+def is_ancestor(older: str, newer: str, repo: Path = REPO) -> bool:
+    """`older` is a PROPER ancestor of `newer` in this checkout's history. False when
+    git cannot say (a commit unknown here) — the caller then keeps the ledger."""
+    if not older or not newer or older == newer:
+        return False
+    try:
+        run = subprocess.run(
+            ["git", "-C", str(repo), "merge-base", "--is-ancestor", older, newer],
+            capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return run.returncode == 0
+
+
+def directory_is_newer(ledger_record: dict, directory_record: dict,
+                       ancestor=is_ancestor) -> bool:
+    """Is the directory's newest observation later than the ledger record's?
+
+    The ledger keeps the day only and the directory the second (delayed-testing.md
+    § The last-green directory, *The record*), so a later DAY decides alone; on the
+    same day the merge bases decide — the directory's (its last green's, which a
+    green `last` shares) must descend from the ledger record's. Both bases sit on
+    `origin/main` and the snapshot is committed after its runs, so every checkout
+    holding the snapshot reads the same answer. Anything else keeps the ledger."""
+    last = directory_record.get("last") or {}
+    day = str(last.get("time") or "")[:10]
+    ledger_day = str(ledger_record.get("date") or "")
+    if not day or not ledger_day or day < ledger_day:
+        return False
+    if day > ledger_day:
+        return True
+    green = directory_record.get("last_green") or {}
+    if last.get("outcome") != "green" or green.get("time") != last.get("time"):
+        return False
+    return bool(ancestor(ledger_record.get("base") or "", green.get("base") or ""))
+
+
+def directory_as_ledger_record(ledger_record: dict, directory_records: list) -> dict | None:
+    """The directory's newest observation of every variant, in the ledger's record
+    shape — or None when the variants disagree or one carries nothing the ledger may
+    take (`_DIRECTORY_OUTCOMES`); the ledger then stands.
+
+    The record is the OLDEST variant's (its commit, its day: the lower bound on what
+    the run saw), dirty when any variant's green was. The run identity the directory
+    does not keep — the version, the nest mode, the artifact — is the ledger record's:
+    same test, same platform, same key; so is its `surface` / `surfaces` reach, so the
+    registry reads the record as it read the one it supersedes. `source: last-green`
+    marks it."""
+    if not directory_records:
+        return None
+    kinds = {(r.get("last") or {}).get("outcome") for r in directory_records}
+    if len(kinds) != 1 or (kind := kinds.pop()) not in _DIRECTORY_OUTCOMES:
+        return None
+    outcome, skip_class = _DIRECTORY_OUTCOMES[kind]
+    is_green = outcome == "passed"
+    oldest = min(directory_records, key=lambda r: str((r.get("last") or {}).get("time") or ""))
+    last = oldest.get("last") or {}
+    green = oldest.get("last_green") or {}
+    commit = last.get("commit") or ""
+    dirty = is_green and any((r.get("last_green") or {}).get("dirty")
+                             for r in directory_records)
+    version = ledger_record.get("version") or ""
+    nest_mode = ledger_record.get("nest_mode") or "standalone"
+    metadata = ".".join([commit[:8]] + (["dirty"] if dirty else [])) if commit else ""
+    record = dict(ledger_record)
+    record.update({
+        "outcome": outcome,
+        "skip_class": skip_class,
+        "commit": commit,
+        "base": green.get("base") if is_green else None,
+        "date": str(last.get("time") or "")[:10],
+        "dirty": bool(dirty),
+        "image_digest": None,
+        "stamp": f"{version}-dev{'+' + metadata if metadata else ''} {nest_mode}",
+        "source": "last-green",
+    })
+    return record
+
+
+def overlay_last_green(ledger: dict, features: Path = FEATURES, repo: Path = REPO,
+                       ancestor=None) -> dict:
+    """Replace, IN PLACE, every ledger record the published snapshot holds a newer
+    observation of (§ Cell semantics, *Two sources*). Returns `ledger`.
+
+    Conftest writes both from one event (delayed-testing.md § The last-green
+    directory, *one event, two projections*), but a session's ledger write lands only
+    when it commits it while the check publishes the directory from the machine's
+    store — so the committed ledger can hold an older outcome than the snapshot. A
+    record is replaced when EVERY directory variant answering it is newer and they
+    agree on an outcome the ledger takes. Only records the ledger already holds are
+    replaced: the slug a test answers for is the ledger's knowledge, never the
+    directory's. The snapshot in git is read, never the machine-local store, so every
+    checkout renders the same matrix. A replaced passing record that is dirty marks
+    its feature's cell dirty, as a dirty ledger pass would."""
+    if ancestor is None:
+        asked: dict = {}
+
+        def ancestor(older, newer):
+            # One git call per pair: a sweep's records share a handful of bases.
+            if (older, newer) not in asked:
+                asked[(older, newer)] = is_ancestor(older, newer, repo)
+            return asked[(older, newer)]
+    indexes: dict = {}
+    for app, features_map in ledger.items():
+        for entry in features_map.values():
+            for node_id, by_platform in (entry.get("tests") or {}).items():
+                for platform, record in list(by_platform.items()):
+                    if platform not in indexes:
+                        indexes[platform] = _directory_index(load_last_green(platform, features))
+                    candidates = indexes[platform].get(node_id)
+                    if not candidates:
+                        continue
+                    found = directory_records_for(candidates, app, record.get("nest_mode"), platform)
+                    if not found or not all(directory_is_newer(record, r, ancestor)
+                                            for r in found):
+                        continue
+                    replaced = directory_as_ledger_record(record, found)
+                    if replaced is None:
+                        continue
+                    by_platform[platform] = replaced
+                    if replaced["dirty"] and isinstance(entry.get("cell"), dict):
+                        entry["cell"]["dirty"] = True
+    return ledger
 
 
 def behind_commits(record: dict, app: str | None, repo: Path = REPO,
@@ -931,8 +1440,11 @@ def _fold_platform_records(by_platform: dict) -> dict:
     computation (§ Cell semantics: cross-platform disagreement is a *mixed* outcome
     like any other) — passing only if EVERY platform passed, else a representative
     non-passing record, so one failing platform is never masked by a passing sibling.
-    `compute_cell` reads only `outcome` off the result."""
+    The representative is a real red first, so an `unbuilt` skip on one platform
+    never hides a failure on another (§ Cell semantics, the *unbuilt* row).
+    `compute_cell` reads only `outcome` and `skip_class` off the result."""
     non_passing = [r for r in by_platform.values() if r.get("outcome") not in PASSING]
+    non_passing.sort(key=lambda r: not is_real_red(r))
     return non_passing[0] if non_passing else next(iter(by_platform.values()))
 
 
@@ -963,52 +1475,332 @@ def mapped_tests(page: Page | None) -> frozenset:
     return frozenset(t for o in page.outcomes for t in o.tests)
 
 
-def stale_records(pages: list, ledger: dict) -> list:
-    """`[(app file, slug, node id)]` for every record whose test its feature's contract
-    no longer maps (§ The ledger, *Stale records*): a test re-marked to another feature,
-    renamed, deleted, or filed under a feature whose page is gone.
+#: The ledger platforms (`helpers/feature_ledger.host_platform`) each app column can be
+#: run on — the machines whose `--app sweep` set can name the app (`conftest.sweep_apps`),
+#: by the platform each machine records: Linux linux, macOS macos, Windows windows. A
+#: record keyed by any other platform is one no run can ever refresh (§ The ledger,
+#: *Stale records*, ruling (e)) — web runs on Linux alone (build-system.md § The Deno
+#: build sandbox). The nest surface (`nest.json`) is not a column: its file is pruned
+#: by the VENUES a feature's nest set holds instead (`NEST_VENUE_PLATFORMS`, ruling (g)).
+COLUMN_PLATFORMS = {
+    "web": frozenset({"linux"}),
+    "linux": frozenset({"linux"}),
+    "tui": frozenset({"linux", "macos", "windows"}),
+    "android": frozenset({"linux", "macos"}),
+    "macos": frozenset({"macos"}),
+    "ios": frozenset({"macos"}),
+    "windows": frozenset({"windows"}),
+}
 
-    Decided from the contract alone — the contract and lint rule 2 already hold every
-    mapped test to exist and carry its marker — never from one machine's collection, so
-    a windows-only test is not stale on Linux. Sorted, so the lint's report and the
-    prune's are stable."""
+#: Every platform a run records (`helpers/feature_ledger.host_platform`).
+PLATFORMS = frozenset({"linux", "macos", "windows"})
+
+#: The platforms a NEST witness can run on, by the venue its node id sits under — the
+#: nest file's half of the platform rule (§ The ledger, *Stale records*, rulings (g)
+#: and (h)). A `tests/platform/docker/` module boots its own container (*Own-artifact
+#: records*), which needs a docker daemon: Linux and the hosted runner have one (both
+#: record `linux`); macOS has none by design (its setup notes say so) and Windows's setup
+#: installs none. A `tests/platform/<os>/` module drives that OS's own artifact — the
+#: linux or windows sync agent, the macOS File Provider, the iOS simulator (which runs
+#: on macOS) — and is a `skipif` everywhere else. Either way the module skips at setup
+#: through a plain `skipif`, which the writer records as nothing — so no run elsewhere
+#: can ever see such a witness, and the platforms a feature's nest set can be observed
+#: on follow from this table alone (`legs`). A venue not listed runs everywhere.
+NEST_VENUE_PLATFORMS = {
+    "tests/e2e-unified/tests/platform/docker/": frozenset({"linux"}),
+    # The fediverse interop venue brings up its pinned peer with `docker compose`
+    # (its conftest), so it needs the daemon exactly as the docker venue does.
+    "tests/e2e-unified/tests/platform/fediverse/": frozenset({"linux"}),
+    "tests/e2e-unified/tests/platform/linux/": frozenset({"linux"}),
+    "tests/e2e-unified/tests/platform/windows/": frozenset({"windows"}),
+    "tests/e2e-unified/tests/platform/macos/": frozenset({"macos"}),
+    "tests/e2e-unified/tests/platform/ios/": frozenset({"macos"}),
+}
+
+
+def venue_platforms(node_id: str) -> frozenset:
+    """The platforms a witness can run on by its venue — every platform unless its
+    node id sits under a venue `NEST_VENUE_PLATFORMS` narrows."""
+    for prefix, platforms in NEST_VENUE_PLATFORMS.items():
+        if node_id.startswith(prefix):
+            return platforms
+    return PLATFORMS
+
+
+def witness_platforms(node_id: str, platform_marks: dict | None = None) -> frozenset:
+    """A witness's HOST PLATFORMS (§ The ledger, *Stale records*, ruling (i)): its
+    venue's (`venue_platforms`) intersected with its `@pytest.mark.host_platform`
+    marker's (`platform_marks`, the third half of `scan_marks`) — every platform with
+    neither. Decided from declarations alone, never from one machine's collection."""
+    venue = venue_platforms(node_id)
+    marked = (platform_marks or {}).get(node_id)
+    return venue if marked is None else venue & frozenset(marked)
+
+
+def candidate_platforms(app: str) -> frozenset:
+    """The platforms a surface's cell can be stamped on before its witnesses narrow
+    them: every platform for the nest file, the column's runners for an app file
+    (`COLUMN_PLATFORMS`); an unknown file name gets every platform."""
+    return PLATFORMS if app == NEST else COLUMN_PLATFORMS.get(app, PLATFORMS)
+
+
+def platform_sets(page: Page | None, app: str = NEST, app_marks: dict | None = None,
+                  platform_marks: dict | None = None) -> dict:
+    """`{platform: frozenset(node ids)}` — each candidate platform's set for one
+    surface of a feature: its applicable citations (the nest witnesses, or the column's
+    `page.surface_tests("app", app, app_marks)`) whose host platforms include it
+    (`witness_platforms`; rulings (h) and (i)). Empty sets for a page with no witness."""
+    if page is None:
+        tests = []
+    elif app == NEST:
+        tests = list(page.surface_tests(NEST))
+    else:
+        tests = list(page.surface_tests("app", app, app_marks))
+    return {p: frozenset(t for t in tests if p in witness_platforms(t, platform_marks))
+            for p in sorted(candidate_platforms(app))}
+
+
+def legs(page: Page | None, app: str = NEST, app_marks: dict | None = None,
+         platform_marks: dict | None = None) -> tuple:
+    """The LEGS of one surface's set (§ The ledger, *Stale records*, rulings (h) and
+    (i)): one per distinct platform set that no other platform's set contains
+    outright, each a frozenset of the platforms sharing it. A platform whose set a
+    sibling's contains is redundant — it owes nothing a sibling does not observe in
+    full — and belongs to no leg; an empty set is no leg. The surface is complete when
+    every leg holds a stamp (`helpers/feature_ledger.fold_platform_cells`); a cell
+    stamp keyed by a platform on no leg is one no run should ever write
+    (`stale_records`). One definition for every file: the nest file's candidates are
+    `PLATFORMS`, an app column's `COLUMN_PLATFORMS[app]`.
+
+    Measured 2026-10-31 on the nest half: an ordinary page has one leg holding all
+    three platforms; a page with a docker witness one leg, `linux`; `notifications`
+    two legs, `linux` and `windows`, `macos` redundant under both. Measured 2026-11-02
+    on the app half: a single-platform column has one leg of one platform; `tui` on
+    identity-protected-on-this-device two legs, `linux` and `windows`, `macos`
+    redundant under both. Sorted for a stable render."""
+    by_set: dict = {}
+    for platform, tests in platform_sets(page, app, app_marks, platform_marks).items():
+        if tests:
+            by_set.setdefault(tests, set()).add(platform)
+    maximal = [s for s in by_set if not any(s < other for other in by_set)]
+    return tuple(sorted((frozenset(by_set[s]) for s in maximal), key=sorted))
+
+
+def set_platforms(page: Page | None, app: str = NEST, app_marks: dict | None = None,
+                  platform_marks: dict | None = None) -> frozenset:
+    """The platforms that may hold a cell stamp for this surface of the feature: the
+    union of its legs — a platform whose set a sibling's contains outright can complete
+    nothing a sibling does not, so its stamp is one no run should write (ruling (g)'s
+    reading, kept). The candidate platforms for a page with no witness there."""
+    found = legs(page, app, app_marks, platform_marks)
+    if not found:
+        return candidate_platforms(app)
+    return frozenset().union(*found)
+
+
+def scope_by_platform(page: Page | None, app: str = NEST, app_marks: dict | None = None,
+                      platform_marks: dict | None = None) -> dict:
+    """`{platform: set(node ids)}` the ledger writer judges a cell against on each
+    platform (`helpers/feature_ledger.cell_complete`, rulings (h) and (i)): that
+    platform's set, for the platforms on a leg; a redundant platform gets no entry, so
+    a run there never stamps a cell the prune would drop."""
+    sets = platform_sets(page, app, app_marks, platform_marks)
+    return {p: set(sets[p]) for p in sorted(set_platforms(page, app, app_marks, platform_marks))
+            if sets[p]}
+
+
+def legs_by_slug(features: Path = FEATURES, marks: tuple | None = None) -> dict:
+    """`{(file, slug): legs(page, file, …)}` for every page under `features` and every
+    ledger file (the seven columns and `nest`) — what a re-folder that holds no `Page`
+    objects (the merge-gate harvest, the rebase resolver) passes to
+    `fold_platform_cells` (rulings (h) and (i)). `marks` is `scan_marks`' answer; by
+    default the tree beside `features` is scanned (~2 s)."""
+    app_marks, _surfaces, platform_marks = marks or scan_marks(features.parent.parent)
+    return {(app, page.slug): legs(page, app, app_marks, platform_marks)
+            for page in load_pages(features) for app in (*APPS, NEST)}
+
+
+def misfolded_cells(pages: list, ledger: dict, app_marks: dict | None = None,
+                    platform_marks: dict | None = None) -> list:
+    """`[(file, slug)]` for every cell, in any ledger file, whose top-level fields
+    disagree with the fold of its own `platforms` over the surface's legs (rulings (h)
+    and (i)) — a contract or marker that gained or lost a leg since the cell was last
+    written, or a re-fold made without the legs. The cell is re-folded by
+    `prune_ledger`; lint rule 6 refuses a ledger that holds one."""
+    by_slug = {page.slug: page for page in pages}
+    fold = _fold_platform_cells()
+    out = []
+    for app, features in sorted(ledger.items()):
+        if app != NEST and app not in APPS:
+            continue
+        for slug, entry in sorted(features.items()):
+            cell = entry.get("cell") or {}
+            platforms = cell.get("platforms")
+            if not platforms or slug not in by_slug:
+                continue
+            found = legs(by_slug[slug], app, app_marks, platform_marks)
+            if fold(platforms, legs=found) != cell:
+                out.append((app, slug))
+    return out
+
+
+def stale_unbuilt_records(ledger: dict, registry: dict) -> list:
+    """`[(app file, slug, node id, platform)]` for every `skipped: unbuilt` record whose
+    `surface` the registry lists as built on the record's column (§ Cell semantics,
+    *Staleness is decided by the registry*) — rule 6 refuses them, the prune drops
+    them, the render reads them as unrun (`Declared.record_reading`, the one test). A
+    pre-registry record (no `surface`) is left for the migration's last step."""
+    probe = Declared(registry=registry)
+    return sorted((app, slug, node_id, platform)
+                  for app, features in ledger.items() if app in APPS
+                  for slug, entry in features.items()
+                  for node_id, by_platform in (entry.get("tests") or {}).items()
+                  for platform, record in by_platform.items()
+                  if probe.record_reading(record, app) == "stale")
+
+
+def surfaceless_unbuilt_records(ledger: dict) -> list:
+    """`[(app file, slug, node id, platform)]` for every `skipped: unbuilt` record with
+    no `surface` key — the pre-registry shape the free-text gate wrote (§ Cell semantics,
+    *Not built is declared*). NOT stale by `stale_records`' reading (the lint leaves them
+    standing); the migration's one-time prune drops them all at once
+    (`features-prune --unbuilt-without-surface`), and a gate that still fires on that
+    column writes the record back with its key on the next run."""
+    return sorted((app, slug, node_id, platform)
+                  for app, features in ledger.items() if app in APPS
+                  for slug, entry in features.items()
+                  for node_id, by_platform in (entry.get("tests") or {}).items()
+                  for platform, record in by_platform.items()
+                  if record.get("skip_class") == "unbuilt" and not record.get("surface"))
+
+
+def stale_records(pages: list, ledger: dict, registry: dict | None = None,
+                  app_marks: dict | None = None, platform_marks: dict | None = None) -> list:
+    """`[(app file, slug, node id, platform)]` for every stale record (§ The ledger,
+    *Stale records*), sorted so the lint's report and the prune's are stable:
+
+    - `platform` `None` — the test's records on every platform: its feature's contract
+      no longer maps it (re-marked, renamed, deleted, or filed under a feature whose page
+      is gone). Decided from the contract alone — the contract and lint rule 2 already
+      hold every mapped test to exist and carry its marker — never from one machine's
+      collection, so a windows-only test is not stale on Linux;
+    - `platform` named — that one platform's record, on a platform the witness cannot
+      run on for this file (`candidate_platforms` ∩ `witness_platforms`: the column's
+      runners, its venue, its `host_platform` marker), or — `node id` `None`, the
+      feature cell's own stamp — on a platform on no leg of that surface's set
+      (`set_platforms`, rulings (e), (g), (h) and (i), one rule for every file) — or,
+      with `registry`, a `skipped: unbuilt` record the registry has made stale
+      (`stale_unbuilt_records`).
+
+    `app_marks` / `platform_marks` are `scan_marks`' first and third halves; without
+    them every test reads as unmarked (every column, every platform)."""
     by_slug = {page.slug: page for page in pages}
     out = []
     for app, features in sorted(ledger.items()):
         for slug, entry in sorted(features.items()):
-            mapped = mapped_tests(by_slug.get(slug))
-            out += [(app, slug, t) for t in sorted(entry.get("tests") or {}) if t not in mapped]
+            page = by_slug.get(slug)
+            mapped = mapped_tests(page)
+            tests = entry.get("tests") or {}
+            cell_runnable = set_platforms(page, app, app_marks, platform_marks)
+            cell_platforms = (entry.get("cell") or {}).get("platforms") or {}
+            out += [(app, slug, None, p) for p in sorted(cell_platforms)
+                    if p not in cell_runnable]
+            for t in sorted(tests):
+                if t not in mapped:
+                    out.append((app, slug, t, None))
+                    continue
+                test_runnable = candidate_platforms(app) & witness_platforms(t, platform_marks)
+                out += [(app, slug, t, p) for p in sorted(tests[t]) if p not in test_runnable]
+    if registry:
+        seen = set(out)
+        # A record its feature no longer maps is already removed whole.
+        unmapped = {(a, s, t) for a, s, t, p in out if p is None}
+        out += [r for r in stale_unbuilt_records(ledger, registry)
+                if r not in seen and r[:3] not in unmapped]
+        out.sort(key=lambda r: (r[0], r[1], r[2] or "", r[3] or ""))
     return out
 
 
-def prune_ledger(features: Path = FEATURES) -> list:
-    """Remove every `stale_records` record from the ledger files and return them.
+def _fold_platform_cells():
+    """The cell fold is the ledger writer's (§ The ledger, *Platform keying*) — one
+    definition, imported the way `gate-check-ledger-harvest.py` reaches it."""
+    import sys
+    e2e = str(REPO / "tests" / "e2e-unified")
+    if e2e not in sys.path:
+        sys.path.insert(0, e2e)
+    from helpers.feature_ledger import fold_platform_cells  # noqa: PLC0415 — a test-tree import, not a dep
+    return fold_platform_cells
+
+
+def prune_ledger(features: Path = FEATURES, *, unbuilt_without_surface: bool = False,
+                 marks: tuple | None = None) -> list:
+    """Remove every `stale_records` record from the ledger files and return them;
+    with `unbuilt_without_surface`, also every `skipped: unbuilt` record that names
+    no surface (`surfaceless_unbuilt_records`, the migration's one-time last step).
 
     A feature whose page is gone loses its whole entry (its `cell` names a stamp for a
     contract nobody holds); a feature that still has a page keeps its `cell`, which is
-    judged on mapped tests only. The files are rewritten exactly as the run-time writer
-    writes them (`indent=2, sort_keys`), so an untouched file stays byte-identical."""
+    judged on mapped tests only. An unrunnable platform's cell stamp is dropped and the
+    cell re-folded over the platforms left (or removed when none is). A cell whose top
+    level disagrees with the fold of its platforms over its surface's legs
+    (`misfolded_cells`, rulings (h) and (i)) is re-folded in the same write; it is not
+    a record and is not in the returned list. `marks` is `scan_marks`' answer; by
+    default the tree beside `features` is scanned. The files are rewritten exactly as the
+    run-time writer writes them (`indent=2, sort_keys`), so an untouched file stays
+    byte-identical."""
     loaded = load_pages(features)
     pages = {p.slug for p in loaded}
-    stale = stale_records(loaded, load_ledger(features))
+    by_slug = {p.slug: p for p in loaded}
+    ledger = load_ledger(features, last_green=False)
+    app_marks, _surfaces, platform_marks = marks or scan_marks(features.parent.parent)
+    stale = stale_records(loaded, ledger, load_surface_registry(surfaces_path(features)),
+                          app_marks, platform_marks)
+    if unbuilt_without_surface:
+        seen = set(stale)
+        # A record its feature no longer maps is already removed whole.
+        unmapped = {(a, s, t) for a, s, t, p in stale if p is None}
+        stale += [r for r in surfaceless_unbuilt_records(ledger)
+                  if r not in seen and r[:3] not in unmapped]
+        stale.sort(key=lambda r: (r[0], r[1], r[2] or "", r[3] or ""))
     ledger_dir = features / "ledger"
-    for app in sorted({app for app, _, _ in stale}):
+    misfolded = set(misfolded_cells(loaded, ledger, app_marks, platform_marks))
+    touched = {app for app, _, _, _ in stale} | {app for app, _ in misfolded}
+    for app in sorted(touched):
         path = ledger_dir / f"{app}.json"
         data = json.loads(path.read_text(encoding="utf-8"))
         feats = data.get("features") or {}
-        for a, slug, node_id in stale:
-            if a != app:
+        for a, slug, node_id, platform in stale:
+            if a != app or slug not in feats:
                 continue
             if slug not in pages:
-                feats.pop(slug, None)
-            else:
+                feats.pop(slug)
+            elif node_id is None:
+                cell = feats[slug]["cell"]
+                cell["platforms"].pop(platform, None)
+                if cell["platforms"]:
+                    feats[slug]["cell"] = _fold_platform_cells()(
+                        cell["platforms"],
+                        legs=legs(by_slug[slug], app, app_marks, platform_marks))
+                else:
+                    feats[slug].pop("cell")
+            elif platform is None:
                 feats[slug]["tests"].pop(node_id, None)
+            else:
+                by_platform = feats[slug]["tests"][node_id]
+                by_platform.pop(platform, None)
+                if not by_platform:
+                    feats[slug]["tests"].pop(node_id)
+        for a, slug in sorted(misfolded):
+            cell = (feats.get(slug) or {}).get("cell") or {}
+            if a == app and cell.get("platforms"):
+                feats[slug]["cell"] = _fold_platform_cells()(
+                    cell["platforms"], legs=legs(by_slug[slug], app, app_marks, platform_marks))
         path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return stale
 
 
 def surface_view(page: Page, ledger: dict, surface: str, app: str,
-                 app_marks: dict | None = None) -> tuple:
+                 app_marks: dict | None = None, declared: Declared | None = None) -> tuple:
     """`(participates, tests, records, cell)` for one of a feature's witness surfaces.
 
     Public because it is `compute_cell`'s whole input: the maintainers' view that
@@ -1027,7 +1819,9 @@ def surface_view(page: Page, ledger: dict, surface: str, app: str,
 
     `records` is one FOLDED record per test (`_fold_platform_records`), never the
     raw `{platform: record}` map — every caller here judges pass/fail, and the fold
-    is where cross-platform disagreement becomes a mixed outcome.
+    is where cross-platform disagreement becomes a mixed outcome. With `declared`, an
+    app record the registry reads as unrun (`live_records`) is dropped before the
+    fold, so a test whose every record is stale or harness-held reads as unrun.
     """
     tests = (page.surface_tests(surface, app, app_marks) if surface == "app"
              else page.surface_tests(surface))
@@ -1035,38 +1829,80 @@ def surface_view(page: Page, ledger: dict, surface: str, app: str,
         return False, [], {}, None
     entry = _ledger_entry(page, ledger, surface, app)
     recorded = entry.get("tests") or {}
+    if surface == "app":
+        recorded = {t: live for t, by_platform in recorded.items()
+                    if (live := live_records(by_platform, app, declared))}
     return True, tests, {t: _fold_platform_records(recorded[t]) for t in tests if t in recorded}, \
         entry.get("cell")
 
 
-def compute_cell(page: Page, app: str, ledger: dict, app_marks: dict | None = None) -> Cell:
+def unbuilt_witnesses(app_tests: list, app_records: dict, app: str,
+                      declared: Declared | None) -> dict:
+    """`{node id: route}` for every `[app]` witness *unbuilt* for the column (§ Cell
+    semantics, *One state, two routes*): `"recorded"` — its folded record is
+    `skipped: unbuilt`; `"declared"` — no record, and the registry says the column
+    has not built a product surface the map says it requires; `"ungated"` — a
+    `failed`/`error` record under such a declaration. A record that PASSED refutes a
+    declaration rather than being read through it (lint rule 7 reports the stale
+    declaration), so it is never unbuilt here."""
+    out = {}
+    for test in app_tests:
+        record = app_records.get(test)
+        if record is not None and is_unbuilt(record, app):
+            out[test] = "recorded"
+        elif declared is None:
+            continue
+        elif record is None:
+            if declared.unbuilt(test, app):
+                out[test] = "declared"
+        elif declared.ungated(test, record, app):
+            out[test] = "ungated"
+    return out
+
+
+def compute_cell(page: Page, app: str, ledger: dict, app_marks: dict | None = None,
+                 declared: Declared | None = None) -> Cell:
     """The mark for one (feature, app column), computed — never typed (§ Cell semantics).
 
     `app_marks` (`features_catalog.app_marks()`) is what makes the column's scope its
     own; without it every witness reads as applicable to every column, which is the
     honest answer for a caller that has no marker knowledge — and the answer for an
-    unmarked test either way.
+    unmarked test either way. `declared` (`load_declared`) adds the registry's route
+    to *unbuilt*; without it the cell reads the recorded route alone.
     """
     if app in page.absences:
         return Cell("absent", "", "")
 
     app_part, app_tests, app_records, app_cell = surface_view(
-        page, ledger, "app", app, app_marks)
+        page, ledger, "app", app, app_marks, declared)
     nest_part, nest_tests, nest_records, nest_cell = surface_view(
         page, ledger, NEST, app, app_marks)
 
     if not (app_part or nest_part):
         return Cell("none", "", "")
+
+    records = list(app_records.values()) + list(nest_records.values())
+    stamp, date, dirty = _older_stamp(app_cell, nest_cell)
+    # An unbuilt `[app]` witness — recorded, declared or ungated — is read BEFORE the
+    # nest conjunct: the column cannot reach ✅ until the app builds, whatever the nest
+    # half says. A real red anywhere on the column beside it is ⚠ — the failure is the
+    # more urgent signal; an ungated failure is read as unbuilt, never as that red.
+    unbuilt = unbuilt_witnesses(app_tests, app_records, app, declared)
+    if unbuilt:
+        ungated = {t for t, route in unbuilt.items() if route == "ungated"}
+        reds = [r for t, r in app_records.items() if t not in ungated] + \
+            list(nest_records.values())
+        if any(is_real_red(r) for r in reds):
+            return Cell("partial", stamp, date, dirty)
+        return Cell("unbuilt", stamp, date, dirty)
     # The nest half is a conjunct on every column: a participating surface with no
     # record leaves the cell empty however green the other half is.
     if (app_part and not app_records) or (nest_part and not nest_records):
         return Cell("none", "", "")
 
-    records = list(app_records.values()) + list(nest_records.values())
     mapped = len(app_tests) + len(nest_tests)
     passed = [r for r in records if r.get("outcome") in PASSING]
 
-    stamp, date, dirty = _older_stamp(app_cell, nest_cell)
     if not passed:
         return Cell("failing", stamp, date, dirty)
     if page.full_for(app, app_marks) and len(records) == mapped and len(passed) == len(records):
@@ -1089,9 +1925,13 @@ def _older_stamp(*cells) -> tuple:
 _LEGEND = f"""\
 {MARKS['full']} every outcome in the feature's contract is mapped to a test and every
 one of those tests passed for that app &middot; {MARKS['partial']} the contract has an
-outcome no test witnesses yet, or the mapped tests are mixed &middot;
-{MARKS['failing']} tests witness this feature and none of them passed &middot;
-*(blank)* our records hold no run for this feature and app &middot; {MARKS['absent']}
+outcome no test witnesses yet, the mapped tests are mixed, or a test needed something
+not yet built while another failed &middot;
+{MARKS['failing']} tests witness this feature and none of them passed, and none of them
+reported missing build work &middot; {MARKS['unbuilt']} at its last run, one of the
+feature's tests needed something not yet built for that app (a part of the app, or the
+test tooling that drives it), and nothing else on that cell failed — the work the mark
+points to is building, not fixing &middot; *(blank)* our records hold no run for this feature and app &middot; {MARKS['absent']}
 the feature is absent on that app by design, and the page says where that is written.
 
 Each cell carries the stamp of the nest artifact its tests were witnessed against (where
@@ -1103,11 +1943,13 @@ code it saw — the next run from a clean tree supersedes it.
 """
 
 
-def _cells_for(page: Page, ledger: dict, app_marks: dict | None = None) -> dict:
-    return {app: compute_cell(page, app, ledger, app_marks) for app in APPS}
+def _cells_for(page: Page, ledger: dict, app_marks: dict | None = None,
+               declared: Declared | None = None) -> dict:
+    return {app: compute_cell(page, app, ledger, app_marks, declared) for app in APPS}
 
 
-def _matrix_md(pages: list, ledger: dict, releases: list, app_marks: dict | None = None) -> str:
+def _matrix_md(pages: list, ledger: dict, releases: list, app_marks: dict | None = None,
+               declared: Declared | None = None, drafts: dict | None = None) -> str:
     out = ["# Feature matrix",
            "",
            "Generated by `just features-render` from every page in this directory and",
@@ -1123,7 +1965,7 @@ def _matrix_md(pages: list, ledger: dict, releases: list, app_marks: dict | None
         out.append("| Feature | " + " | ".join(APPS) + " |")
         out.append("|---" * (len(APPS) + 1) + "|")
         for page in by_section[section]:
-            out.append(_matrix_row(page, ledger, app_marks))
+            out.append(_matrix_row(page, ledger, app_marks, declared, drafts))
         out.append("")
     out.append("## Releases")
     out.append("")
@@ -1174,13 +2016,15 @@ def _shipped_apps(row: dict) -> str:
     return ", ".join(f"{app} {shipped[app]}" for app in sorted(shipped))
 
 
-def _matrix_row(page: Page, ledger: dict, app_marks: dict | None = None) -> str:
-    label = f"[{page.title}]({page.slug}.md)"
+def _matrix_row(page: Page, ledger: dict, app_marks: dict | None = None,
+                declared: Declared | None = None, drafts: dict | None = None) -> str:
+    title = (drafts or {}).get(page.slug, {}).get("title", page.title)
+    label = f"[{title}]({page.slug}.md)"
     if page.nest_only:
-        cell = compute_cell(page, APPS[0], ledger, app_marks)
+        cell = compute_cell(page, APPS[0], ledger, app_marks, declared)
         body = _cell_text(cell) + " (the nest — every app)"
         return f"| {label} | " + " | ".join([body] + [""] * (len(APPS) - 1)) + " |"
-    cells = _cells_for(page, ledger, app_marks)
+    cells = _cells_for(page, ledger, app_marks, declared)
     return f"| {label} | " + " | ".join(_cell_text(cells[app]) for app in APPS) + " |"
 
 
@@ -1190,11 +2034,12 @@ def _cell_text(cell: Cell) -> str:
     return f"{cell.mark} {cell.stamp}".strip()
 
 
-def _status_block(page: Page, ledger: dict, app_marks: dict | None = None) -> str:
+def _status_block(page: Page, ledger: dict, app_marks: dict | None = None,
+                  declared: Declared | None = None) -> str:
     lines = ["| App | Status | Stamp |", "|---|---|---|"]
     # The same per-column scope the matrix row reads — without the marks every
     # column is judged on all seven apps' witnesses and the two disagree.
-    cells = _cells_for(page, ledger, app_marks)
+    cells = _cells_for(page, ledger, app_marks, declared)
     for app in APPS:
         cell = cells[app]
         state = "no run recorded" if cell.state == "none" else cell.state
@@ -1211,7 +2056,7 @@ def _status_block(page: Page, ledger: dict, app_marks: dict | None = None) -> st
             # public tree does not carry (§ The coverage contract, *Maintainer-only
             # witnesses*) — and rule 5 keeps the two spellings in step.
             witness = (maintainer_only_witness(test) if test in outcome.maintainer_only
-                       else f"`{test}`")
+                       else f"`{test}`") + _surface_note(test, declared)
             lines.append(
                 f"| {outcome.number} | {outcome.surface} | {witness} | "
                 f"{_witness_summary(page, outcome.surface, test, ledger)} |")
@@ -1222,6 +2067,26 @@ def _status_block(page: Page, ledger: dict, app_marks: dict | None = None) -> st
             lines.append(f"| {outcome.number} | {outcome.surface} | "
                          f"absent by design on {', '.join(excused)} | — |")
     return "\n".join(lines)
+
+
+def _surface_note(test: str, declared: Declared | None) -> str:
+    """The registry surfaces a witness requires that some app has not built, named
+    beside it (§ Cell semantics, *Not built is declared*), so a reader of an
+    *unbuilt* column sees which surface holds it short and where: ` — requires
+    `events-day-cell` (not built: android, windows)`. A surface built everywhere, or
+    one the registry does not declare, says nothing."""
+    if declared is None:
+        return ""
+    parts = []
+    for key in sorted(declared.surfaces.get(test, ())):
+        entry = declared.registry.get(key)
+        if entry is None:
+            continue
+        short = [a for a in APPS if a not in entry.built]
+        if short:
+            kind = "" if entry.kind == "product" else " (test harness)"
+            parts.append(f"`{key}`{kind} (not built: {', '.join(short)})")
+    return f" — requires {'; '.join(parts)}" if parts else ""
 
 
 def _witness_summary(page: Page, surface: str, test: str, ledger: dict) -> str:
@@ -1249,7 +2114,8 @@ def _apply_status(text: str, block: str, path: Path) -> str:
     return text[:start] + BEGIN + "\n" + block + "\n" + text[end:]
 
 
-def _matrix_json(pages: list, ledger: dict, releases: list, app_marks: dict | None = None) -> dict:
+def _matrix_json(pages: list, ledger: dict, releases: list, app_marks: dict | None = None,
+                 declared: Declared | None = None, drafts: dict | None = None) -> dict:
     by_section: dict = {}
     for page in pages:
         by_section.setdefault(page.section, []).append(page)
@@ -1257,14 +2123,15 @@ def _matrix_json(pages: list, ledger: dict, releases: list, app_marks: dict | No
     for section in sorted(by_section, key=lambda s: (_section_rank(s), s)):
         entries = []
         for page in by_section[section]:
-            cells = _cells_for(page, ledger, app_marks)
+            cells = _cells_for(page, ledger, app_marks, declared)
+            words = (drafts or {}).get(page.slug, {})
             entries.append({
                 "slug": page.slug,
-                "title": page.title,
+                "title": words.get("title", page.title),
                 "page": f"docs/features/{page.slug}.md",
                 "goal": page.goal,
                 "guide": page.guide,
-                "what": page.what,
+                "what": words.get("what", page.what),
                 "full": page.full,
                 "nest_only": page.nest_only,
                 "absences": dict(sorted(page.absences.items())),
@@ -1281,28 +2148,89 @@ def _matrix_json(pages: list, ledger: dict, releases: list, app_marks: dict | No
         "marks": dict(MARKS),
         "sections": sections,
         "releases": releases,
+        "versions": released_versions(releases),
     }
 
 
-def render_all(features: Path = FEATURES, app_marks: dict | None = None) -> dict:
+def released_versions(releases: list) -> list:
+    """The site's Releases table: one line per released version, in table order.
+
+    The release table holds one row per BUILD, and a version's private verified builds
+    carry its number as well as the build its candidate run tested — so listing rows
+    listed "0.1.5" once per build. A version is released by its candidate run (the tag
+    gate reads nothing else, release-table.md § Tag gate and release table), so only
+    those rows count: the date is the version's newest candidate run, and it is in
+    production once any of its builds was promoted."""
+    by_version: dict = {}
+    for row in releases:
+        if not row.get("candidate_run"):
+            continue
+        line = by_version.setdefault(row["version"], {
+            "version": row["version"], "date": "", "promoted": False})
+        line["date"] = max(line["date"], row["candidate_run"])
+        line["promoted"] = line["promoted"] or bool(row.get("promoted"))
+    return list(by_version.values())
+
+
+def draft_placeholders(features: Path, pages: list) -> dict:
+    """`{slug: {"title": …, "what": …}}` — the placeholder for every page whose words are
+    still a draft (§ Render, the placeholder paragraph; public-texts.md § Classes owns
+    the draft record and the placeholder's shape).
+
+    The record is the public-texts inventory beside the catalog's tree, read through
+    `_public_texts.withheld_members` — the same reading the public sync's transform
+    applies. Both are unshipped, so the import is lazy and a tree without either (the
+    public one, a fixture world) has no drafts and renders every page verbatim."""
+    root = features.parent.parent
+    try:
+        import _public_texts  # noqa: PLC0415 — unshipped; beside this module in the repo
+    except ImportError:
+        return {}
+    if not (root / _public_texts.INVENTORY).is_file():
+        return {}
+    by_path = {}
+    for page in pages:
+        try:
+            by_path[page.path.resolve().relative_to(root.resolve()).as_posix()] = page
+        except ValueError:
+            continue
+    inv = _public_texts.load(root)
+    return {by_path[rel].slug: {"title": _public_texts.draft_placeholder_title(rel),
+                                "what": _public_texts.DRAFT_PLACEHOLDER_SENTENCE}
+            for rel in _public_texts.withheld_members(inv, by_path)}
+
+
+def render_all(features: Path = FEATURES, app_marks: dict | None = None,
+               declared: Declared | None = None) -> dict:
     """`{relative path: content}` for everything the render owns. Pure; writes nothing.
 
-    The app markers are derived from the tree beside the catalog, so a fixture world
-    is narrowed by its OWN tests exactly as the repo is by its — the render must not
-    be a path that only the real repo exercises.
+    The app and surface markers are derived from the tree beside the catalog, and the
+    registry is read from it, so a fixture world is narrowed by its OWN tests and
+    registry exactly as the repo is by its — the render must not be a path that only
+    the real repo exercises. A caller passing `app_marks` and no `declared` gets the
+    registry with the map read from the ledger alone.
     """
     pages = load_pages(features)
     ledger = load_ledger(features)
     releases = load_releases(features)
-    marks = scan_app_marks(features.parent.parent) if app_marks is None else app_marks
+    surface_marks: dict = {}
+    if app_marks is None:
+        marks, surface_marks, _platform_marks = scan_marks(features.parent.parent)
+    else:
+        marks = app_marks
+    if declared is None:
+        declared = load_declared(features, surface_marks, ledger)
+    drafts = draft_placeholders(features, pages)
     out = {
-        "MATRIX.md": _matrix_md(pages, ledger, releases, marks),
-        "matrix.json": json.dumps(_matrix_json(pages, ledger, releases, marks),
+        "MATRIX.md": _matrix_md(pages, ledger, releases, marks, declared, drafts),
+        "matrix.json": json.dumps(_matrix_json(pages, ledger, releases, marks, declared,
+                                               drafts),
                                   indent=2, sort_keys=True, ensure_ascii=False) + "\n",
     }
     for page in pages:
         out[page.path.name] = _apply_status(
-            page.path.read_text(encoding="utf-8"), _status_block(page, ledger, marks), page.path)
+            page.path.read_text(encoding="utf-8"),
+            _status_block(page, ledger, marks, declared), page.path)
     return out
 
 

@@ -1050,6 +1050,17 @@ impl OnboardingMachine {
         serde_json::to_string(&self.0.handle_check_snapshot()).unwrap_or_default()
     }
 
+    /// The nest's rules for the joining surface of the current step
+    /// (`onboarding-nest-rules`, `nest-rules.md` § Acceptance at joining) as
+    /// JSON — a `NestRulesSummary`, its not-applied sentence included — or
+    /// `null` when this page shows none. The chunk links `fauna-client-policy`
+    /// without `scorers`, so a labeler rule reads *not applied on this device*;
+    /// accepted, since the chunk runs no labelers.
+    #[wasm_bindgen(js_name = joiningNestRulesJson)]
+    pub fn joining_nest_rules_json(&self, lang: String) -> String {
+        serde_json::to_string(&self.0.joining_nest_rules(&lang)).unwrap_or_default()
+    }
+
     #[wasm_bindgen(js_name = setControlCheckbox)]
     pub fn set_control_checkbox(&self, checked: bool) {
         self.0.set_control_checkbox(checked)
@@ -2578,6 +2589,14 @@ impl NestRetireMachine {
 #[wasm_bindgen(start)]
 fn panic_hook_start() {
     fauna_wasm_panic_hook::install("fauna-wasm-onboarding");
+}
+
+/// Hand this chunk's `tracing` to the SPA's `logMessage`, so the shared
+/// provisioning orchestrator's per-attempt narration reaches Settings → Logs
+/// (see [`fauna_wasm_panic_hook::forward_tracing`]).
+#[wasm_bindgen(js_name = setLogSink)]
+pub fn set_log_sink(sink: js_sys::Function) {
+    fauna_wasm_panic_hook::forward_tracing(sink);
 }
 
 /// Test-only: deliberately panics, so an e2e can assert the hook above really

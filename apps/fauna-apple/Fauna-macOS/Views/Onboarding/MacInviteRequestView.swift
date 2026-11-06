@@ -68,13 +68,14 @@ struct MacInviteRequestView: View {
                     .automationValue(Ids.inviteCodeStatus,
                                      text: { renderLocalizedText(vm.machine.inviteRequestSnapshot().oobMessage) })
 
-                guardianSupervisedNotice(for: snap.outOfBandCodeState, font: .callout)
+                guardianSupervisedNotice(snap.supervisedNotice, font: .callout)
             }
 
             if let error = vm.errorMessage {
                 ErrorBanner(message: error)
             }
 
+            JoiningNestRules(summary: vm.joiningNestRules)
             TermsNotice()
 
             HStack {

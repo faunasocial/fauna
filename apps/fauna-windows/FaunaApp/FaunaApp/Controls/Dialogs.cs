@@ -95,9 +95,11 @@ internal static class Dialogs
         }
     }
 
+#if DEBUG || FAUNA_E2E_AGENT
     /// <summary>
     /// Hide every open dialog and clear the registry. Called by the e2e
-    /// <c>reset</c> and actor-swap arms, on the UI thread, before they navigate.
+    /// <c>reset</c> and actor-swap arms, on the UI thread, before they navigate —
+    /// its only callers, so it compiles out of Release with them (convention 15).
     /// </summary>
     internal static void CloseAll()
     {
@@ -108,6 +110,7 @@ internal static class Dialogs
             try { d.Hide(); } catch { /* already closing */ }
         }
     }
+#endif
 
     private static void Refuse(string why)
     {

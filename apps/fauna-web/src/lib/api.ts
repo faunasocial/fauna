@@ -13,7 +13,7 @@ import { AccountLockedError, SignInRefusedError } from './auth-errors';
 import { toArrayBufferView } from './bytes';
 import { isSafeNodeUrl } from './safe-url';
 import { tabNestUrl, tabPin } from './tabPin';
-import { accountsActiveSessionMaterial } from './accounts';
+import { accountsActiveSessionMaterial, accountsSessionMaterial } from './accounts';
 import * as rpc from './rpc';
 import { OwnSessionIds } from './own-session-ids';
 import { LockLatch } from './lock-latch';
@@ -39,6 +39,25 @@ export function storedNestUrlOrNull(): string | null {
   if (tabPin()) return null;
   const active = accountsActiveSessionMaterial()?.nest_url;
   return active && isSafeNodeUrl(active) ? active : null;
+}
+
+/**
+ * The home nest of the identity `actorId` — {@link storedNestUrlOrNull} when
+ * this tab is pinned to that actor, else that actor's OWN registry row's
+ * `nest_url` — or `null` when it has none yet. Never another account's nest and
+ * never the SPA origin: in the append-mode "Add account" wizard the tab stays
+ * pinned to the live account while the wizard holds a new identity, and the
+ * tab's nest is the live account's, not the new identity's (`web.md`, *An
+ * identity that exists before its account dials nothing*). An unpinned tab's
+ * stored nest is the active account's, so it answers only for that actor. */
+export function homeNestUrlOrNull(actorId: string): string | null {
+  if (typeof window === 'undefined') return null;
+  const pin = tabPin();
+  if (pin ? pin === actorId : accountsActiveSessionMaterial()?.actor_id === actorId) {
+    return storedNestUrlOrNull();
+  }
+  const own = accountsSessionMaterial(actorId)?.nest_url;
+  return own && isSafeNodeUrl(own) ? own : null;
 }
 
 /**
@@ -1170,6 +1189,17 @@ export async function checkIsAdmin(secretHex: string): Promise<boolean> {
     return await rpc.accountAmIAdmin(secretHex);
   } catch {
     return false;
+  }
+}
+
+// The gate read that distinguishes "read failed" (`null`) from "not an admin"
+// (`false`) — the reconnect re-read keeps the last answer on `null`
+// (`admin-gate.ts`, `transport.md` `admin_gate`).
+export async function readAdminGate(secretHex: string): Promise<boolean | null> {
+  try {
+    return await rpc.accountAmIAdmin(secretHex);
+  } catch {
+    return null;
   }
 }
 

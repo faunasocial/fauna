@@ -41,15 +41,6 @@ pytestmark = [pytest.mark.tier_3, pytest.mark.standalone_only]
 
 
 @pytest.fixture(scope="module")
-def ap_binary():
-    """fauna-nest with ``activitypub`` + ``test-hooks`` — the federation
-    suite's build, replayed from the collection-time prebuild through
-    conftest's memoized ensure layer rather than paid inside a test."""
-    from conftest import _ensure_ap_nest_built
-    return _ensure_ap_nest_built()
-
-
-@pytest.fixture(scope="module")
 def requests_nest(ap_binary, tmp_path_factory):
     """One AP-enabled nest for the module, its domain its own loopback
     authority. Each test registers its own user, so no test reads another's
@@ -118,6 +109,10 @@ def _wait_for(read, want, what: str, timeout: float = 30.0):
 @pytest.mark.tui
 @pytest.mark.linux
 @pytest.mark.web
+@pytest.mark.macos
+@pytest.mark.ios
+@pytest.mark.android
+@pytest.mark.windows
 @pytest.mark.feature("fediverse")
 def test_follow_requests_are_listed_and_approved_or_refused_on_the_card(
     request, app, requests_nest

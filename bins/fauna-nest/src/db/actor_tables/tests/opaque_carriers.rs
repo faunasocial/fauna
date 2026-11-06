@@ -373,6 +373,35 @@ const ACTOR_BEARING_OPAQUE_COLUMNS: &[(&str, &str, &str)] = &[
          `mlkem_ek`'s reason",
     ),
     (
+        "actor_mls_pubkeys",
+        "calendar_pubkey",
+        "the 32-byte X25519 HPKE recipient key of the calendar plane, the calendar and card key \
+         split's sibling of the mail key above: a public key of the row's own actor, \
+         MSEK-derived and self-registered. FOLLOWS THE ROW (Purge / Stay), for `mlkem_ek`'s \
+         reason",
+    ),
+    (
+        "actor_mls_pubkeys",
+        "calendar_mlkem_ek",
+        "the ML-KEM-768 encapsulation key (1184 bytes) of the calendar plane: a public key of the \
+         row's own actor, MSEK-derived and self-registered. FOLLOWS THE ROW (Purge / Stay), for \
+         `mlkem_ek`'s reason",
+    ),
+    (
+        "actor_mls_pubkeys",
+        "card_pubkey",
+        "the 32-byte X25519 HPKE recipient key of the contacts (card) plane: a public key of the \
+         row's own actor, MSEK-derived and self-registered. FOLLOWS THE ROW (Purge / Stay), for \
+         `mlkem_ek`'s reason",
+    ),
+    (
+        "actor_mls_pubkeys",
+        "card_mlkem_ek",
+        "the ML-KEM-768 encapsulation key (1184 bytes) of the contacts (card) plane: a public key \
+         of the row's own actor, MSEK-derived and self-registered. FOLLOWS THE ROW (Purge / \
+         Stay), for `mlkem_ek`'s reason",
+    ),
+    (
         "actor_successions",
         "statement",
         "the verbatim `SignedIdentitySuccession`: it names `old_actor_id`, `new_actor_id` and the \
@@ -1355,6 +1384,18 @@ const NON_ACTOR_OPAQUE_COLUMNS: &[(&str, &str, &str)] = &[
          channel-verified origin (`transport-trust.md` § The post arm) — a box, never an \
          account, the `channel_foreign_members.home_nest_id` shape",
     ),
+    (
+        "follow_delivery_homes",
+        "post_id",
+        "a CONTENT ID — the delivered post's content address (`blake3` of its wire bytes) \
+         whose custody the row records (`federated-follow.md` § Decision 3)",
+    ),
+    (
+        "follow_delivery_homes",
+        "origin_nest_id",
+        "a delivering home DEPLOYMENT's identity key, the follow delivery's channel-verified \
+         origin — a box, never an account, the `content.origin_nest_id` shape",
+    ),
     ("conv_attachment_refs", "channel_id", "a CHANNEL ID"),
     ("conv_record_authors", "channel_id", "a CHANNEL ID"),
     // ── The content and curation planes (2026-09-21). One family recurs:
@@ -1683,6 +1724,12 @@ const NON_ACTOR_OPAQUE_COLUMNS: &[(&str, &str, &str)] = &[
         "segment_ids",
         "the dag-cbor list of a restored corpus's content segment ids -- small integers this box's \
          own segment store numbered, naming no actor",
+    ),
+    (
+        "materialize_deleted_collections",
+        "collection_id",
+        "as `bridge_carddav_addressbooks.addressbook_id`: the id of a collection a door deleted \
+         mid-flip",
     ),
     (
         "generation_escrow_wraps",

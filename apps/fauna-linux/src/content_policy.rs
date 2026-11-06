@@ -231,6 +231,19 @@ pub fn note_enforcement(item_id: &str, labels: &[ContentLabelEntry]) {
     });
 }
 
+/// Does this item's region placeholder carry the sealed-item sentence
+/// (`region.sealed_note`)? The shared
+/// `fauna_core::obligation::ContentPolicyState::region_sealed_note`; pass the
+/// same `labels` as [`note_enforcement`] (`region-blocking.md` § Implementation
+/// status today).
+pub fn region_sealed_note(
+    verdict: &ComposedVerdict,
+    sealed: bool,
+    labels: &[ContentLabelEntry],
+) -> bool {
+    CORE.with(|c| c.borrow().region_sealed_note(verdict, sealed, labels))
+}
+
 /// Drop every field of the shared content-policy state on an actor change
 /// (`crate::actor_scope`), registered on the canonical drop list.
 ///
@@ -292,7 +305,7 @@ pub fn take_notify_report() -> Option<(Vec<FamilyContentNotice>, i32)> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fauna_core::obligation::{ContentFloor, RenderVerdict};
+    use fauna_core::obligation::RenderVerdict;
 
     fn entry(category: &str, per_mille: u16) -> ContentLabelEntry {
         ContentLabelEntry {
@@ -400,10 +413,9 @@ mod tests {
         );
 
         // A guardian floor composes on top and is what Notify counts.
-        set_ward_content_policy(Some(ContentPolicy {
-            spam: ContentFloor::Block,
-            ..Default::default()
-        }));
+        set_ward_content_policy(Some(fauna_core::obligation::ContentPolicy::category_rules(
+            &[("spam", fauna_core::content_policy::ContentVerdict::Block)],
+        )));
         set_ward_content_notify(true);
         note_enforcement("p1", &[entry("spam", 900)]);
         let (entries, _offset) = take_notify_report().expect("a due report after one enforcement");

@@ -1,6 +1,6 @@
 import type { SharedRpcPort } from '../../static/fauna_wasm_media.js';
 import { asset } from '$app/paths';
-import { registerIdentityStoreChunk } from './identity-store';
+import { joinChunk } from './chunk-join';
 import { sharedAccountPort } from './account-runtime';
 import { conversationsManagerIfReady } from './conversations';
 import type { MediaMachine } from '../../static/fauna_wasm_media.js';
@@ -38,9 +38,8 @@ export function ensureMediaWasm(): Promise<void> {
     wasmInit = (async () => {
       const mod = await import('../../static/fauna_wasm_media.js');
       await mod.default(asset('fauna_wasm_media_bg.wasm'));
-      // The identity store's key, if this page holds it, goes in before
-      // anything reads the registry through this chunk (identity-store.ts).
-      registerIdentityStoreChunk(mod);
+      // Its tracing to the ring, its identity-store doors (chunk-join.ts).
+      joinChunk(mod);
       wasmModule = mod;
     })().catch((e) => {
       wasmInit = null;

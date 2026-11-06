@@ -14,13 +14,28 @@ can only be built where that client's toolchain lives (§ Dim 6: "the apple and
 windows legs follow the same pattern on their own machines"). So a call materializes
 the nest plus exactly ONE client — `linux` on the Linux dev box, `macos` on the Mac,
 `windows` on Windows — and `_default_client()` picks it from the platform. Pass `client=`
-to override.
+to override. `tui` is the one client every machine can build, so it is always such an
+override (`just e2e-prev-build --client tui`), `ios` is the Mac's second client
+(`--client ios`), and `web` the Linux box's (`--client web`: the pinned SPA tree, built by the
+pinned `just web-test`). Each shares the cache with the machine's own client: one cache key, the
+binaries side by side, and a nest already there is not built again.
+
+**Any commit, not only the pin.** The cache is keyed on a commit, so a caller may name
+one of its own choosing — the organisation drives against a kept box name the commit the
+box's image was built from (`org-nests.md` § fauna.build → *Disposable*, rule (1);
+`helpers/release_app.py` resolves it) — and may ask for the client alone
+(`nest=False`, `--client-only`): those drives run no local nest. `reports-pass` is one
+more cargo client in the table (`bins/fauna-reports-pass`, the headless reports pass), and
+a client whose source directory the commit's tree does not have is refused before
+anything is extracted (`client_absent_reason`). The tui's sync agent travels with it
+(`CLIENT_COMPANIONS`): the tui resolves `fauna-sync-agent` beside itself, so a cached tui
+without one would run agentless.
 
 Layout (under a per-platform root — see `_tmp_root()`):
 
     <root>/fauna-prev-src/<commit12>/        the pinned source tree (git archive)
     <root>/fauna-prev-target/<commit12>/     scratch cargo target dir (deleted after build)
-    <root>/fauna-prev-builds/<commit>/<profile>/{fauna-nest,fauna-desktop,FaunaMacOS,windows-app/}
+    <root>/fauna-prev-builds/<commit>/<profile>/{fauna-nest,fauna-desktop,fauna-tui,fauna-sync-agent,fauna-reports-pass,FaunaMacOS,windows-app/,ios-app/}
 
 Only the *binaries* are cached; the multi-GB build dirs are torn down once they are
 extracted (set FAUNA_PREV_KEEP_TARGET=1 to keep them for iteration). The cache key is
@@ -30,14 +45,16 @@ The source tree is materialized with `git archive` (a plain extraction) rather t
 second checkout: nothing is registered with git, so the pinned tree cannot be swept by
 the housekeeping that retires stale checkouts — and a tree pinned to an old release
 commit is, by construction, always stale-looking. It needs no `.git`: the one consumer of
-git metadata in this build is `bins/fauna-nest/build.rs`, which prefers the
-FAUNA_BUILD_COMMIT env var this module sets explicitly.
+git metadata in this build is the nest's build-commit stamp (`libs/fauna-build-commit`:
+the `commit!()` macro the nest's `main` expands, or `bins/fauna-nest/build.rs` in pins
+older than 2026-10-26), which prefers the FAUNA_BUILD_COMMIT env var this module sets
+explicitly.
 
 **Profile: debug, deliberately.** The convention (§ Dim 6) prefers release and asks a
 session choosing debug to record why. The reason here is fidelity, not speed: every HEAD
 counterpart in the harness is a *debug* build — `tests/common/nest.py:build_node()` builds
 `fauna-nest` debug, the linux driver launches `$CARGO_TARGET_DIR/debug/fauna-desktop`, and
-the macOS driver launches `.build/arm64-apple-macosx/debug/FaunaMacOS` (conftest
+the macOS driver launches `.build/debug/FaunaMacOS` (conftest
 `APP_PATHS`). Pairing a release previous build against a debug HEAD build would confound
 *profile* skew (`debug_assertions`, overflow checks, timing) with the *version* skew under
 test. Debug on both sides isolates the version axis, which is the whole point of the grid.
@@ -93,6 +110,87 @@ SRC_ROOT = TMP_ROOT / "fauna-prev-src"
 TARGET_ROOT = TMP_ROOT / "fauna-prev-target"
 CACHE_ROOT = TMP_ROOT / "fauna-prev-builds"
 
+# ---------------------------------------------------------------------------
+# The keep rule — the previous-build cache's own retention (fleet-disk.md § The ladder,
+# rung 0, and § Decisions of the design pass, 3)
+# ---------------------------------------------------------------------------
+#
+# Every pin advance used to leave its predecessor's tree and binaries under the three
+# roots for ever. The rule: keep the pinned commit and the newest PREV_KEEP_OTHERS other
+# commits (by the newest write across their entries), never an entry written in the last
+# PREV_ACTIVE_S (a build in flight). This module runs it at its own write (`build_prev`);
+# the dev machines' temp-dir sweep calls `prev_cache_doomed` and takes exactly what it lists.
+
+PREV_KEEP_OTHERS = 2
+PREV_ACTIVE_S = 15 * 60
+PREV_ROOT_NAMES = ("fauna-prev-src", "fauna-prev-target", "fauna-prev-builds")
+_KEY_LEN = 12  # src and target are keyed by commit[:12], builds by the full commit
+
+
+def prev_cache_doomed(tmp_root: Path, pin_commit: str, now: float | None = None,
+                      also_keep: tuple[str, ...] = ()) -> list[Path]:
+    """The cache entries the keep rule drops under `tmp_root`: every `<root>/<commit>`
+    whose commit is neither the pin, nor one of `also_keep`, nor among the newest
+    PREV_KEEP_OTHERS others, and that nothing wrote into in the last PREV_ACTIVE_S."""
+    import time
+
+    now = time.time() if now is None else now
+    entries: dict[str, list[tuple[Path, float]]] = {}
+    for root_name in PREV_ROOT_NAMES:
+        root = tmp_root / root_name
+        try:
+            children = list(os.scandir(root))
+        except OSError:
+            continue
+        for c in children:
+            try:
+                if not c.is_dir(follow_symlinks=False):
+                    continue
+                m = c.stat(follow_symlinks=False).st_mtime
+            except OSError:
+                continue
+            entries.setdefault(c.name[:_KEY_LEN], []).append((Path(c.path), m))
+    keep = {pin_commit[:_KEY_LEN], *(k[:_KEY_LEN] for k in also_keep)}
+    others = sorted((k for k in entries if k not in keep),
+                    key=lambda k: max(m for _, m in entries[k]), reverse=True)
+    keep.update(others[:PREV_KEEP_OTHERS])
+    doomed: list[Path] = []
+    for key in others[PREV_KEEP_OTHERS:]:
+        for path, m in entries[key]:
+            if m < now - PREV_ACTIVE_S and not _written_since(path, now - PREV_ACTIVE_S):
+                doomed.append(path)
+    return doomed
+
+
+def _written_since(path: Path, cutoff: float) -> bool:
+    for dirpath, dirnames, filenames in os.walk(path, followlinks=False):
+        for name in dirnames + filenames:
+            try:
+                if os.lstat(os.path.join(dirpath, name)).st_mtime >= cutoff:
+                    return True
+            except OSError:
+                continue
+    return False
+
+
+def prune_prev_cache(tmp_root: Path | None = None, pin_commit: str | None = None,
+                     also_keep: tuple[str, ...] = ()) -> list[Path]:
+    """Run the keep rule: remove what `prev_cache_doomed` lists. Best effort."""
+    tmp_root = TMP_ROOT if tmp_root is None else tmp_root
+    try:
+        pin_commit = pin_commit or prev_commit()
+    except Exception:  # noqa: BLE001 — no readable pin: keep everything
+        return []
+    removed = []
+    for path in prev_cache_doomed(tmp_root, pin_commit, also_keep=also_keep):
+        shutil.rmtree(path, ignore_errors=True)
+        if not path.exists():
+            removed.append(path)
+    if removed:
+        print(f"[prev_build] keep rule removed {len(removed)} cache entries "
+              f"(pin {pin_commit[:12]} + newest {PREV_KEEP_OTHERS})", flush=True)
+    return removed
+
 # The nest is built on every machine; the client is whichever one this machine can build.
 # NEST[1] is the cargo-produced BINARY filename — `.exe` on Windows (cargo's own platform
 # convention), bare elsewhere. Every other app entry in CLIENT_BINARY already spells
@@ -107,18 +205,53 @@ NEST = (
 # windows is a subpath, not a bare filename: its MSBuild output is a whole directory of
 # managed DLLs/resources + the native fauna_ffi.dll, not a standalone executable (see
 # `_build_client` / `build_prev`'s windows handling) — the cached exe lives inside a
-# `windows-app/` copy of that entire directory.
+# `windows-app/` copy of that entire directory. tui is the one cargo binary that builds
+# on windows too, so it carries the suffix NEST[1] does. ios is a bundle: `simctl install`
+# takes the `.app` directory, which lives inside an `ios-app/` directory beside its stamp.
+# web is no binary at all: its "app" is the built SPA tree (`apps/fauna-web/build`, what the
+# `static_dir` fixture names at HEAD), served by the harness's SPA proxy over whichever nest
+# a cell dials, so it is cached as a `web-app/` directory beside its stamp. Linux-only, as
+# every web build (`build-system.md` § The Deno build sandbox).
 CLIENT_BINARY = {
     "linux": "fauna-desktop",
+    "tui": "fauna-tui.exe" if sys.platform == "win32" else "fauna-tui",
     "macos": "FaunaMacOS",
     "windows": "windows-app/FaunaApp.exe",
+    "ios": "ios-app/FaunaiOS.app",
+    "web": "web-app/build",
+    "reports-pass": "fauna-reports-pass.exe" if sys.platform == "win32" else "fauna-reports-pass",
 }
 
-# The cargo package behind each cargo-built client. macOS and windows are absent on
-# purpose: macOS is a SwiftPM product, windows is an MSBuild/WinUI project — neither is a
-# cargo binary (see `_build_client`).
+# The cargo package behind each cargo-built client. macOS, ios and windows are absent on
+# purpose: the apple apps are SwiftPM products, windows is an MSBuild/WinUI project — none
+# is a cargo binary (see `_build_client`).
 CLIENT_PACKAGE = {
     "linux": "fauna-linux",
+    "tui": "fauna-tui",
+    "reports-pass": "fauna-reports-pass",
+}
+
+# client -> the source directory its build needs in the commit's tree. A commit older than
+# the client has no such directory, and the build would fail deep inside cargo; asked
+# first instead (`client_absent_reason`), so the refusal names the reason.
+CLIENT_SOURCE_DIR = {
+    "linux": "apps/fauna-linux",
+    "tui": "apps/fauna-tui",
+    "macos": "apps/fauna-apple",
+    "ios": "apps/fauna-apple",
+    "windows": "apps/fauna-windows",
+    "web": "apps/fauna-web",
+    "reports-pass": "bins/fauna-reports-pass",
+}
+
+# client -> (cargo package, binary) pairs built in the same cargo call and cached BESIDE
+# the client. The tui resolves its sync agent beside itself
+# (`agent_spawner::agent_binary_absolute`; the tui driver pins `FAUNA_E2E_SYNC_AGENT_BIN`
+# to that sibling), exactly as `just tui-debug` builds the two together — a cached tui
+# without its agent runs agentless, which reads as "connected but syncing nothing".
+CLIENT_COMPANIONS = {
+    "tui": (("fauna-sync-agent",
+             "fauna-sync-agent.exe" if sys.platform == "win32" else "fauna-sync-agent"),),
 }
 
 
@@ -570,6 +703,33 @@ def reads_keyed_trust_seed(commit: str) -> bool:
     return _is_ancestor(KEYED_TRUST_SEED_COMMIT, commit)
 
 
+#: Per client: the commit from which a build of that client can be DRIVEN by the harness
+#: on this machine's toolchain. Not a compat break and not a capability: the build runs,
+#: but its test agent never reaches the app it renders, so a cell that drives the pinned
+#: build of that client cannot assert anything until the pin includes the fix. Ancestry
+#: decides, as for the breaks above, so the window lifts when the pin advances.
+#:
+#: ios: under the Xcode 27.1 SDK the in-process agent's closures, built in `App.init()`,
+#: read an AppState the app never renders, so the session patch lands on that copy and
+#: the rendered app logs "no usable stored session" and stays signed out (measured
+#: 2026-11-01 on macOS against the pin). Fixed (the
+#: agent stays unbound until the rendered scene binds it).
+PREV_BUILD_DRIVABLE_FROM = {"ios": "f6856235648e"}
+
+
+def prev_build_undrivable_reason(client: str, pin_commit: str | None = None) -> str:
+    """Why the pinned build of `client` cannot be driven, or ``""`` when it can."""
+    fix = PREV_BUILD_DRIVABLE_FROM.get(client)
+    pin_commit = pin_commit or prev_commit()
+    if not fix or _is_ancestor(fix, pin_commit):
+        return ""
+    return (
+        f"PREVIOUS BUILD UNDRIVABLE: the pin {pin_commit[:10]} predates {fix}, the fix that "
+        f"lets the harness drive a {client} build of this toolchain "
+        f"(helpers/prev_build.py::PREV_BUILD_DRIVABLE_FROM); clears when the pin advances"
+    )
+
+
 def pending_inplace_breaks(pin_commit: str | None = None) -> tuple[InplaceBreak, ...]:
     """The ratified breaks the pin does NOT yet include — the windows currently open.
 
@@ -596,11 +756,20 @@ def cache_dir(commit: str, profile: str = "debug") -> Path:
 
 
 def cached_binaries(
-    commit: str, profile: str = "debug", client: str | None = None
+    commit: str, profile: str = "debug", client: str | None = None, nest: bool = True
 ) -> dict[str, Path] | None:
-    """The cached {nest, <client>} binaries for this key, or None if the cache is cold."""
+    """The cached {nest, <client>} binaries for this key, or None if the cache is cold.
+
+    `nest=False` asks for the client alone (a drive against a deployed nest runs none).
+    A client's companions (`CLIENT_COMPANIONS`) must be there too, or the cache is cold:
+    a tui cached before its agent was is rebuilt once rather than launched agentless.
+    """
     client = client or _default_client()
-    wanted = {"nest": NEST[1], client: CLIENT_BINARY[client]}
+    wanted = {client: CLIENT_BINARY[client]}
+    if nest:
+        wanted = {"nest": NEST[1], **wanted}
+    for package, binary in CLIENT_COMPANIONS.get(client, ()):
+        wanted[package] = binary
     out_dir = cache_dir(commit, profile)
     out = {}
     for key, binary in wanted.items():
@@ -610,10 +779,30 @@ def cached_binaries(
         out[key] = path
     if client == "macos" and not _macos_cache_is_complete(out_dir, out[client]):
         return None  # binaries there, frameworks missing — cold, not warm
-    if client == "windows" and not _windows_cache_is_complete(out_dir):
-        return None  # exe there, but the directory copy that stages its managed deps
-                      # alongside it may not have finished — see `_windows_cache_is_complete`
+    if client in _WHOLE_DIR_CLIENTS and not _app_dir_cache_is_complete(out_dir, client):
+        return None  # app there, but the directory copy that carries it may not have
+                     # finished — see `_app_dir_cache_is_complete`
     return out
+
+
+def client_absent_reason(commit: str, client: str, repo: Path | None = None) -> str | None:
+    """Why `client` cannot be built at `commit`, or None when its source is there.
+
+    A tree read (`git cat-file -e <commit>:<dir>`), so the refusal comes before any
+    extraction or build: 0.1.5's tree has no `bins/fauna-reports-pass`, and the reports
+    pass is then unavailable for that release (`org-nests.md` § fauna.build →
+    *Disposable*, rule (1), the consequence it accepts)."""
+    rel = CLIENT_SOURCE_DIR.get(client)
+    if rel is None:
+        return f"unknown client {client!r} (known: {sorted(CLIENT_SOURCE_DIR)})"
+    root = repo or repo_root()
+    if subprocess.run(["git", "-C", str(root), "cat-file", "-e", f"{commit}^{{commit}}"],
+                      capture_output=True).returncode != 0:
+        return f"commit {commit[:12]} is not in this repository"
+    if subprocess.run(["git", "-C", str(root), "cat-file", "-e", f"{commit}:{rel}"],
+                      capture_output=True).returncode != 0:
+        return f"commit {commit[:12]} has no {rel} — the {client} client does not exist there"
+    return None
 
 
 def _cargo_cmd(args: list[str]) -> list[str]:
@@ -624,9 +813,17 @@ def _cargo_cmd(args: list[str]) -> list[str]:
     `scripts/cargo-win.cmd`, which prepends the correct MSVC/LLVM paths first.
     Elsewhere `cargo` is a bare command.
     """
-    if sys.platform == "win32":
-        return ["cmd", "/c", "scripts\\cargo-win.cmd", *args]
-    return ["cargo", *args]
+    cmd = ["cmd", "/c", "scripts\\cargo-win.cmd", *args] if sys.platform == "win32" \
+        else ["cargo", *args]
+    if os.environ.get("FAUNA_SLOT_HELD_BUILD"):
+        return cmd  # already inside a 'build' grant (`just e2e-prev-build`'s wrap)
+    # Unwrapped — the web leg, whose `just web-test` must not sit inside an outer build
+    # slot (`e2e-prev-build`), or a pytest fixture warming a cold cache: a compile is
+    # counted whoever runs it (`core-bound.md` § Per-core tokens).
+    slot = repo_root() / "scripts" / "build-slot.py"
+    if not slot.exists():
+        return cmd
+    return ["uv", "run", "--no-project", "python", str(slot), "--pool", "build", "--", *cmd]
 
 
 def _run(cmd: list[str], cwd: Path, env: dict[str, str], timeout: int) -> None:
@@ -663,7 +860,7 @@ def _target_dir(src: Path, commit: str, client: str) -> Path:
     """Where cargo writes while building the pinned tree.
 
     Off-tree by default (so the whole dir can be dropped without disturbing the source
-    stamp). **The macOS and windows legs must keep it IN-tree**, and that is load-bearing
+    stamp). **The apple and windows legs must keep it IN-tree**, and that is load-bearing
     rather than cosmetic: `apple-ffi-host` hardcodes the *relative* slice path
     `target/<profile>/apple-ffi-host/<features>/libfauna_ffi.a` (its own
     `--artifact-dir`, implicit-host since 2026-08-22), and `windows-ffi` hardcodes
@@ -675,7 +872,7 @@ def _target_dir(src: Path, commit: str, client: str) -> Path:
     (or, on windows, ships a stale `.dll`). Keeping cargo's output where the recipe
     already expects it is the fix; the dir is wiped after extraction either way.
     """
-    if client in ("macos", "windows"):
+    if client in ("macos", "ios", "windows"):
         return src / "target"
     return TARGET_ROOT / commit[:12]
 
@@ -697,12 +894,80 @@ def _resolve_windows_built_exe(src: Path, profile: str) -> Path:
     return max(candidates, key=lambda p: p.stat().st_mtime)
 
 
+def _ios_derived(src: Path) -> Path:
+    """The pinned iOS app's derived data, inside the pinned tree so the tear-down takes it."""
+    return src / "apps/fauna-apple/.ios-derived"
+
+
+#: The rust targets `apple-ffi-test`'s device and simulator slices compile for.
+_IOS_RUST_TARGETS = ("aarch64-apple-ios", "aarch64-apple-ios-sim")
+
+
+def _require_ios_rust_targets(src: Path) -> None:
+    """Refuse before a build that cannot finish, naming the owner's install.
+
+    The pin's tree builds with the PIN's toolchain (its `rust-toolchain.toml`), which
+    trails the working tree's after a toolchain bump, and rustup installs a toolchain's
+    pinned targets only: the apple ones are a machine's own setup step, done for the
+    toolchain of the day. Cargo's own answer to
+    the gap is an `E0463` on the first dependency, after the slot wait.
+    """
+    with open(src / "rust-toolchain.toml", "rb") as fh:
+        channel = tomllib.load(fh)["toolchain"]["channel"]
+    listed = subprocess.run(
+        ["rustup", f"+{channel}", "target", "list", "--installed"],
+        capture_output=True, text=True, check=True,
+    ).stdout.split()
+    missing = [t for t in _IOS_RUST_TARGETS if t not in listed]
+    if missing:
+        raise RuntimeError(
+            f"[prev_build] the pin's toolchain {channel} has no {' '.join(missing)} target "
+            f"on this machine, so the pinned iOS app cannot build. A toolchain install is "
+            f"the owner's to approve: rustup +{channel} target add {' '.join(missing)}"
+        )
+
+
+def _build_ios(src: Path, env: dict[str, str], profile: str) -> Path:
+    """The pinned tree's iOS Simulator app: its `.app`, in the shape HEAD's harness builds.
+
+    Two steps, as at HEAD (`conftest._build_ios_app`): the xcframework, then the SPM
+    product. The recipe is `apple-ffi-test`, the three-slice test flavor, because a pin can
+    predate the simulator-only `apple-ffi-test-sim`. Its simulator slice is the one this
+    build links, so the difference is compile time, never the artifact.
+    """
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    from drivers.ios import BUNDLE_ID
+    from helpers.ios_app_bundle import (
+        SIMULATOR_BUILD_ARGS,
+        write_app_bundle,
+        write_package_workspace,
+    )
+
+    _require_ios_rust_targets(src)
+    _run(["just", "apple-ffi-test"], cwd=src, env=env, timeout=5400)
+    package_dir = src / "apps/fauna-apple"
+    derived = _ios_derived(src)
+    configuration = "Release" if profile == "release" else "Debug"
+    workspace = write_package_workspace(derived.parent / ".ios-package.xcworkspace", package_dir)
+    _run(
+        ["xcodebuild", "build", "-workspace", str(workspace), "-configuration", configuration,
+         *SIMULATOR_BUILD_ARGS, "-derivedDataPath", str(derived)],
+        cwd=package_dir, env=env, timeout=5400,
+    )
+    exe = derived / "Build/Products" / f"{configuration}-iphonesimulator" / "FaunaiOS"
+    if not exe.exists():
+        raise RuntimeError(f"[prev_build] xcodebuild produced no executable at {exe}")
+    app_dir = derived / "FaunaiOS.app"
+    write_app_bundle(app_dir, exe, BUNDLE_ID)
+    return app_dir
+
+
 def _build_client(
     client: str, src: Path, target: Path, env: dict[str, str], profile: str
 ) -> Path:
     """Build the pinned tree's client and return the produced binary.
 
-    linux is a plain cargo binary. macOS is a SwiftPM product whose build is a two-step
+    linux and tui are plain cargo binaries. macOS is a SwiftPM product whose build is a two-step
     the `justfile` already owns (`mac-debug` = `apple-ffi-host` — the 1-slice host-only
     debug xcframework — then `swift build --product FaunaMacOS`). windows is a WinUI/MSBuild
     project, likewise a two-step `justfile` recipe (`windows-debug` = `windows-ffi` — the
@@ -710,14 +975,27 @@ def _build_client(
     through `just` rather than open-coding the steps keeps the build-if-stale gates and
     the generated-file deps firing exactly as they do for a HEAD build, which is the whole
     point of a *fidelity* harness — and routes the FFI half through `cargo-win.cmd`
-    exactly as a normal dev build does (see `windows-ffi` in `justfile`).
+    exactly as a normal dev build does (see `windows-ffi` in `justfile`). ios has no such
+    recipe: `_build_ios`.
     """
+    if client == "ios":
+        return _build_ios(src, env, profile)
+
+    if client == "web":
+        # `web-test`, not `web`: the e2e flavour HEAD's `static_dir` builds, whose wasm
+        # chunks carry the test-helpers feature the harness's web agent drives. One
+        # profile only — the SPA's wasm is built as the recipe builds it at HEAD too, so
+        # `profile` has no web meaning and the cache key alone carries it.
+        _run(["just", "web-test"], cwd=src, env=env, timeout=5400)
+        return src / "apps/fauna-web/build"
+
     if client == "macos":
         recipe = "mac-release" if profile == "release" else "mac-debug"
         # The apple toolchain is slow from cold: a full FFI cdylib build for the darwin
         # slice, then the Swift compile of FaunaKit + the app.
         _run(["just", recipe], cwd=src, env=env, timeout=5400)
-        return src / "apps/fauna-apple/.build/arm64-apple-macosx" / profile / "FaunaMacOS"
+        # SwiftPM's `.build/<profile>` symlink resolves under either build system.
+        return src / "apps/fauna-apple/.build" / profile / "FaunaMacOS"
 
     if client == "windows":
         recipe = "windows-release" if profile == "release" else "windows-debug"
@@ -725,8 +1003,9 @@ def _build_client(
         return _resolve_windows_built_exe(src, profile)
 
     profile_args = ["--release"] if profile == "release" else []
+    companions = [a for package, _ in CLIENT_COMPANIONS.get(client, ()) for a in ("-p", package)]
     _run(
-        _cargo_cmd(["build", "-p", CLIENT_PACKAGE[client], *profile_args]),
+        _cargo_cmd(["build", "-p", CLIENT_PACKAGE[client], *companions, *profile_args]),
         cwd=src, env=env, timeout=5400,
     )
     return target / profile / CLIENT_BINARY[client]
@@ -773,24 +1052,34 @@ def _macos_cache_is_complete(out_dir: Path, binary: Path) -> bool:
     return all((out_dir / dep).exists() for dep in _macos_rpath_deps(binary))
 
 
-def _windows_cache_is_complete(out_dir: Path) -> bool:
-    """The cached windows app directory copy finished (stamp written last).
+#: Clients cached as a whole directory, not a file: `CLIENT_BINARY[client]`'s first
+#: segment is that directory, and it holds the stamp `_app_dir_cache_is_complete` reads.
+_WHOLE_DIR_CLIENTS = ("windows", "ios", "web")
 
-    Windows analogue of `_macos_cache_is_complete`, but stamp-based rather than
-    dep-introspected: there is no cheap "list every file this .exe needs" equivalent to
-    `otool -L` for a managed .NET app, and the fix is the same shape as
+
+def _cache_app_dir(client: str) -> str:
+    return CLIENT_BINARY[client].split("/", 1)[0]
+
+
+def _app_dir_cache_is_complete(out_dir: Path, client: str) -> bool:
+    """The cached app directory copy finished (stamp written last).
+
+    The analogue of `_macos_cache_is_complete`, but stamp-based rather than
+    dep-introspected: there is no cheap "list every file this needs" equivalent to
+    `otool -L` for a managed .NET app or a bundle, and the fix is the same shape as
     `ensure_source_tree`'s extraction stamp — the directory copy either finishes and
     writes the stamp, or it didn't finish and there is nothing to trust.
     """
-    return (out_dir / "windows-app" / ".fauna-prev-complete").exists()
+    return (out_dir / _cache_app_dir(client) / ".fauna-prev-complete").exists()
 
 
-def build_prev(commit: str, profile: str = "debug", client: str | None = None) -> dict[str, Path]:
+def build_prev(commit: str, profile: str = "debug", client: str | None = None,
+               nest: bool = True) -> dict[str, Path]:
     """Build the pinned release's nest + client binaries and populate the cache.
 
-    Returns {"nest": path, "<client>": path}. Slow (a full workspace build, plus the
-    apple toolchain on macOS) on a cold cache; a no-op once cached. Warm it out-of-band
-    with:
+    Returns {"nest": path, "<client>": path} (plus the client's companions; no "nest"
+    when `nest=False`). Slow (a full workspace build, plus the apple toolchain on macOS)
+    on a cold cache; a no-op once cached. Warm it out-of-band with:
 
         python3 tests/e2e-unified/helpers/prev_build.py --build
     """
@@ -798,9 +1087,12 @@ def build_prev(commit: str, profile: str = "debug", client: str | None = None) -
     if client not in CLIENT_BINARY:
         raise RuntimeError(f"unknown client {client!r} (known: {sorted(CLIENT_BINARY)})")
 
-    cached = cached_binaries(commit, profile, client)
+    cached = cached_binaries(commit, profile, client, nest=nest)
     if cached:
         return cached
+    absent = client_absent_reason(commit, client)
+    if absent:
+        raise RuntimeError(f"[prev_build] {absent}")
 
     src = ensure_source_tree(commit)
     target = _target_dir(src, commit, client)
@@ -811,7 +1103,7 @@ def build_prev(commit: str, profile: str = "debug", client: str | None = None) -
     # dir, mixing pinned artifacts with HEAD artifacts and eating its budget. (On the
     # macOS leg this points back in-tree on purpose — see `_target_dir`.)
     env["CARGO_TARGET_DIR"] = str(target)
-    # build.rs prefers this over `git rev-parse HEAD`; pin it so the previous nest
+    # The build-commit stamp prefers this over `git rev-parse HEAD`; pin it so the previous nest
     # honestly reports the pinned commit on /api/v1/health (the tests assert on it).
     env["FAUNA_BUILD_COMMIT"] = commit[:8]
 
@@ -819,21 +1111,32 @@ def build_prev(commit: str, profile: str = "debug", client: str | None = None) -
     # extraction has none — the same deps `just linux-debug` / `just mac-debug` declare.
     _run(["just", "i18n-generate", "providers-generate"], cwd=src, env=env, timeout=900)
 
-    profile_args = ["--release"] if profile == "release" else []
-    _run(
-        _cargo_cmd(["build", "-p", NEST[0], *NEST[2], *profile_args]),
-        cwd=src, env=env, timeout=5400,
-    )
-    produced = {"nest": target / profile / NEST[1]}
-    produced[client] = _build_client(client, src, target, env, profile)
-
     out_dir = cache_dir(commit, profile)
     out_dir.mkdir(parents=True, exist_ok=True)
     built = {}
+    produced = {}
+    # A second client on this machine finds the nest already cached: one commit, one
+    # profile, the same features, so it is this build's nest too.
+    cached_nest = out_dir / NEST[1]
+    if not nest:
+        pass  # the client alone — a drive against a deployed nest runs no local one
+    elif cached_nest.exists():
+        built["nest"] = cached_nest
+    else:
+        profile_args = ["--release"] if profile == "release" else []
+        _run(
+            _cargo_cmd(["build", "-p", NEST[0], *NEST[2], *profile_args]),
+            cwd=src, env=env, timeout=5400,
+        )
+        produced["nest"] = target / profile / NEST[1]
+    produced[client] = _build_client(client, src, target, env, profile)
+    for package, binary in CLIENT_COMPANIONS.get(client, ()):
+        produced[package] = target / profile / binary
+
     for key, path in produced.items():
         if not path.exists():
             raise RuntimeError(f"[prev_build] expected binary not produced: {path}")
-        if key == client and client == "windows":
+        if key == client and client in _WHOLE_DIR_CLIENTS:
             continue  # a whole-directory copy, not a single-file one — see below
         dest = out_dir / path.name
         shutil.copy2(path, dest)
@@ -858,6 +1161,28 @@ def build_prev(commit: str, profile: str = "debug", client: str | None = None) -
         (windows_out / ".fauna-prev-complete").write_text(commit + "\n")
         built[client] = windows_out / produced[client].name
         print(f"[prev_build] cached windows app dir {windows_out}", flush=True)
+
+    if client == "ios":
+        # The whole `.app`: `simctl install` takes the bundle, and its plist is part of
+        # what it installs. Stamped last, as windows' directory above.
+        ios_out = out_dir / _cache_app_dir("ios")
+        shutil.rmtree(ios_out, ignore_errors=True)
+        ios_out.mkdir()
+        shutil.copytree(produced[client], ios_out / produced[client].name)
+        (ios_out / ".fauna-prev-complete").write_text(commit + "\n")
+        built[client] = ios_out / produced[client].name
+        print(f"[prev_build] cached ios app {built[client]}", flush=True)
+
+    if client == "web":
+        # The whole SPA tree the proxy serves (`/app/` index, chunks, wasm). Stamped last,
+        # as windows' directory above.
+        web_out = out_dir / _cache_app_dir("web")
+        shutil.rmtree(web_out, ignore_errors=True)
+        web_out.mkdir()
+        shutil.copytree(produced[client], web_out / produced[client].name)
+        (web_out / ".fauna-prev-complete").write_text(commit + "\n")
+        built[client] = web_out / produced[client].name
+        print(f"[prev_build] cached web tree {built[client]}", flush=True)
 
     if client == "macos":
         # Stage the framework bundles the executable links (@rpath -> @executable_path):
@@ -886,9 +1211,11 @@ def build_prev(commit: str, profile: str = "debug", client: str | None = None) -
         # on the Mac it is a shared one: a full apple toolchain output alongside a live
         # checkout's target/ has filled this machine's disk before, and an ENOSPC mid-build
         # silently truncates binaries that other builds on the box are still using.
-        if client == "macos":
+        if client in ("macos", "ios"):
             shutil.rmtree(src / "apps/fauna-apple/.build", ignore_errors=True)
             shutil.rmtree(src / "apps/fauna-apple/FaunaFFI.xcframework", ignore_errors=True)
+        if client == "ios":
+            shutil.rmtree(_ios_derived(src), ignore_errors=True)
         if client == "windows":
             # MSBuild's bin/obj (extracted into the cache above) — disk is even scarcer
             # here than on the Mac (a single shared `C:` across ~38 concurrent checkouts).
@@ -897,6 +1224,9 @@ def build_prev(commit: str, profile: str = "debug", client: str | None = None) -
         shutil.rmtree(target, ignore_errors=True)
         print(f"[prev_build] removed scratch build dirs under {src}", flush=True)
 
+    # The keep rule at this module's own write: the pin, this commit and the newest two
+    # others stay; every older commit's tree and binaries go.
+    prune_prev_cache(TMP_ROOT, also_keep=(commit,))
     return built
 
 
@@ -937,18 +1267,25 @@ def prev_nest_binary(profile: str = "debug", build: bool = True) -> Path:
 #: same source tree (`tests/test_prev_build_cli.py`).
 _USAGE = """\
 usage: prev_build.py [--build] [--client <app>] [--profile debug|release]
+                     [--commit <sha>] [--client-only]
        prev_build.py --path [--client <app>] [--profile debug|release]
+                     [--commit <sha>] [--client-only]
        prev_build.py --expected-incompatible <cell> [--pin <sha>]
 
   --build    build the pinned previous release's nest + client into the cache
              (a no-op when warm; slow when cold — run it as `just e2e-prev-build`,
              which takes a build slot)
   --path     print the cached binaries, or exit 1 when the cache is cold
+  --commit <sha>
+             key the build on <sha> (40 hex) instead of the pin (the release-app
+             drives: helpers/release_app.py)
+  --client-only
+             the client (and its companions) alone, no nest
   --expected-incompatible <cell>
              print why <cell> is expected to fail against the pin (exit 0), or exit 3
 """
-_FLAGS_WITH_VALUE = ("--client", "--profile", "--pin", "--expected-incompatible")
-_BARE_FLAGS = ("--build", "--path")
+_FLAGS_WITH_VALUE = ("--client", "--profile", "--pin", "--expected-incompatible", "--commit")
+_BARE_FLAGS = ("--build", "--path", "--client-only")
 
 
 def _unknown_flag(args: list[str]) -> str | None:
@@ -992,20 +1329,31 @@ def main() -> int:
     client = _default_client()
     if "--client" in args:
         client = args[args.index("--client") + 1]
-    pin = load_pin()
-    print(
-        f"[prev_build] pin: commit={pin['commit'][:12]} released={pin['released']} "
-        f"profile={profile} client={client}"
-    )
+    with_nest = "--client-only" not in args
+    if "--commit" in args:
+        commit = args[args.index("--commit") + 1]
+        if len(commit) != 40 or not all(c in "0123456789abcdef" for c in commit):
+            print(f"prev_build.py: --commit takes a full 40-hex commit, not {commit!r}",
+                  file=sys.stderr)
+            return 2
+        print(f"[prev_build] commit={commit[:12]} (named, not the pin) "
+              f"profile={profile} client={client} nest={with_nest}")
+    else:
+        pin = load_pin()
+        commit = pin["commit"]
+        print(
+            f"[prev_build] pin: commit={commit[:12]} released={pin['released']} "
+            f"profile={profile} client={client} nest={with_nest}"
+        )
     if "--path" in args:
-        cached = cached_binaries(pin["commit"], profile, client)
+        cached = cached_binaries(commit, profile, client, nest=with_nest)
         if not cached:
             print("[prev_build] cache is COLD", file=sys.stderr)
             return 1
         for key, path in cached.items():
             print(f"{key}={path}")
         return 0
-    binaries = build_prev(pin["commit"], profile, client)
+    binaries = build_prev(commit, profile, client, nest=with_nest)
     for key, path in binaries.items():
         print(f"{key}={path}")
     return 0

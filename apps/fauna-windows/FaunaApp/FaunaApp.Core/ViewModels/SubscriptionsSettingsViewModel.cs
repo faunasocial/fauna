@@ -67,18 +67,19 @@ public class SubscriptionsSettingsViewModel : ViewModelBase
                 names.SubscriptionAuthorLabel(s.handle, s.authorId),
                 s.tier,
                 s.status,
-                s.since));
+                s.since,
+                s.homeNestUrl));
     }
 
     /// <summary>Unsubscribe from <paramref name="authorId"/> then re-read (plaintext
     /// drops the row; encrypted leaves it pending until the author's key rotation).
     /// Same error handling as <see cref="HydrateAsync"/>.</summary>
-    public async Task UnsubscribeAsync(byte[] authorId)
+    public async Task UnsubscribeAsync(byte[] authorId, string? tier = null, string? homeNestUrl = null)
     {
         ErrorMessage = null;
         try
         {
-            await _nest.SubscriptionUnsubscribeAsync(authorId);
+            await _nest.SubscriptionUnsubscribeAsync(authorId, tier, homeNestUrl);
             await HydrateAsync();
         }
         catch (Exception ex)

@@ -759,7 +759,7 @@ mod tests {
     /// tags and render labels with carries both arms.
     ///
     /// Mutation: revert `client()` to owner-only → `has_resolver()` false →
-    /// exactly this pin reds (`cargo test -p fauna-ffi --lib`, the same crate
+    /// exactly this pin reds (`cargo test -p fauna-ffi-core --lib`, the same crate
     /// as the production change).
     #[cfg(all(feature = "folders-author", not(target_arch = "wasm32")))]
     #[test]

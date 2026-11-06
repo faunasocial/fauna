@@ -23,7 +23,7 @@ use fauna_account_store::sqlite::SqliteBackend;
 use fauna_account_store::store::AccountStore;
 use fauna_account_store::types::{StateEntry, WriterId};
 use fauna_core::crypto::{AccountStateKeySchedule, BackupKey};
-use fauna_core::data::ModerationConfig;
+use fauna_core::data::SyncPrefsConfig;
 use fauna_core::device_endpoints::DeviceEndpoints;
 use fauna_core::encoding::{canonical_decode, canonical_encode};
 use fauna_core::identity::ActorKeypair;
@@ -31,7 +31,7 @@ use fauna_credential_store::CredentialStore;
 use fauna_protocol::account_state::ACCOUNT_STATE_FLEET_SCOPE;
 use fauna_protocol::discovery::NestInfoReply;
 use fauna_protocol::merge_policy::{
-    KIND_DEVICE_ENDPOINTS, KIND_GENERATION_MINT, KIND_MODERATION, home_scope_for_kind,
+    KIND_DEVICE_ENDPOINTS, KIND_GENERATION_MINT, KIND_SYNC_PREFS, home_scope_for_kind,
 };
 use fauna_protocol::{RpcErrorClass, RpcRequester, decode_strict, encode_canonical};
 use fauna_sync_engine::account_runtime::{
@@ -150,6 +150,7 @@ fn params(base: &Path, device: &str, listeners: &Listeners) -> AccountRuntimePar
         peer_transport: Some(mem_factory(listeners)),
         // The machine's named row — never read here (no nest answers enrollment).
         enrollment_target_device_id: "ab".repeat(32),
+        enrollment_device_label: None,
     }
 }
 
@@ -277,19 +278,14 @@ where
     }
 }
 
-async fn moderation_of(handle: &AccountStoreHandle) -> Option<Vec<String>> {
+async fn sync_prefs_of(handle: &AccountStoreHandle) -> Option<String> {
     handle
-        .get_preference(KIND_MODERATION)
+        .get_preference(KIND_SYNC_PREFS)
         .await
         .ok()
         .flatten()
-        .and_then(|row| canonical_decode::<ModerationConfig>(&row.value).ok())
-        .map(|m| {
-            m.muted_keywords
-                .into_iter()
-                .map(|k| k.keyword)
-                .collect::<Vec<_>>()
-        })
+        .and_then(|row| canonical_decode::<SyncPrefsConfig>(&row.value).ok())
+        .and_then(|p| p.default_conflict_policy)
 }
 
 /// **The slice's own success sentence**: two runtimes, two store dirs, one
@@ -344,16 +340,15 @@ async fn preference_converges_over_the_dialed_leg(path: Option<PathCell>) -> Dia
         .expect("start A");
     // The blob leg fails (no nest) — the plane row is durable first, which is
     // exactly the offline-mutation posture; the error is the nest leg's.
-    let value = canonical_encode(&ModerationConfig {
-        muted_keywords: vec!["over-the-dialed-leg".into()],
-        ..Default::default()
+    let value = canonical_encode(&SyncPrefsConfig {
+        default_conflict_policy: Some("over-the-dialed-leg".into()),
     })
     .unwrap()
     .to_vec();
-    let _ = a.put_preference(KIND_MODERATION, value).await;
+    let _ = a.put_preference(KIND_SYNC_PREFS, value).await;
     assert_eq!(
-        moderation_of(&a).await.as_deref(),
-        Some(&["over-the-dialed-leg".to_string()][..]),
+        sync_prefs_of(&a).await.as_deref(),
+        Some("over-the-dialed-leg"),
         "A's row is durable locally despite the dead nest"
     );
     // A's prologue (holder from birth) binds; barrier on the registration.
@@ -374,8 +369,7 @@ async fn preference_converges_over_the_dialed_leg(path: Option<PathCell>) -> Dia
             else {
                 return false;
             };
-            let arrived = moderation_of(&b).await.as_deref()
-                == Some(&["over-the-dialed-leg".to_string()][..]);
+            let arrived = sync_prefs_of(&b).await.as_deref() == Some("over-the-dialed-leg");
             if arrived {
                 *converged.lock().unwrap() = Some(dialed);
             }
@@ -761,6 +755,11 @@ async fn a_forged_body_is_refused_and_its_sibling_dropped() {
         "a sibling that served a forgery is dropped"
     );
     assert_eq!(siblings.tally().to_nest, 1);
+    assert_eq!(
+        siblings.tally().refused,
+        1,
+        "the forgery is counted as refused, apart from a channel that merely failed"
+    );
 
     a.shutdown().await;
     b.shutdown().await;

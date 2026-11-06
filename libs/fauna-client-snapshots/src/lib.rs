@@ -876,6 +876,41 @@ pub fn immediate_delete_button_enabled(
         && acknowledge_typed == fauna_protocol::filesync::IMMEDIATE_DELETE_ACK_TEXT
 }
 
+/// The `restore-kind-checkbox` set in paint order: `(wire message kind,
+/// localized label)`, the five kinds the nest restores, in
+/// `fauna_backups_machine::KIND_ENTRIES` order (`backups.md` § Restore from
+/// backup destination). Shared by every Rust-direct app (tui, linux); the
+/// token is the wire kind, never shown to the reader.
+pub const RESTORE_KINDS: [(&str, &str); 5] = [
+    ("mail", fauna_i18n::strings::backups::RESTORE_KINDS_MAIL),
+    (
+        "calendar",
+        fauna_i18n::strings::backups::RESTORE_KINDS_CALENDAR,
+    ),
+    ("card", fauna_i18n::strings::backups::RESTORE_KINDS_CONTACTS),
+    ("post", fauna_i18n::strings::backups::RESTORE_KINDS_POSTS),
+    (
+        "conv",
+        fauna_i18n::strings::backups::RESTORE_KINDS_CONVERSATIONS,
+    ),
+];
+
+/// The index of `message_kind` in [`RESTORE_KINDS`], `None` for an unknown or
+/// absent kind.
+pub fn restore_kind_index(message_kind: Option<&str>) -> Option<usize> {
+    let kind = message_kind?;
+    RESTORE_KINDS.iter().position(|(token, _)| *token == kind)
+}
+
+/// A snapshot row's option label with the kind named by its checkbox label
+/// (`card` → "Contacts"), falling back to the raw token for an unknown kind.
+pub fn snapshot_restore_kind_option_label(message_kind: Option<&str>, id: i64) -> String {
+    let named = restore_kind_index(message_kind)
+        .map(|i| RESTORE_KINDS[i].1)
+        .or(message_kind);
+    snapshot_restore_option_label(named, id)
+}
+
 /// A `restore-snapshot-select` option's label: `"{kind} (#{id})"`, kind first
 /// so two same-day snapshots are told apart by what they hold rather than by
 /// an opaque number. `message_kind` absent (a folder snapshot) reads as an
@@ -1194,8 +1229,7 @@ mod tests {
         assert_eq!(req.actor_id, None);
 
         let channel = ActorId([7u8; 32]);
-        block_on(client.create_message_kind("conv", Some(channel.clone())))
-            .expect("infallible mock");
+        block_on(client.create_message_kind("conv", Some(channel))).expect("infallible mock");
         let (_, payload) = rec.recorded();
         let req: SnapshotCreateMessageKindRequest =
             fauna_protocol::decode_strict(&payload).expect("decodes");
@@ -1299,6 +1333,23 @@ mod tests {
     #[test]
     fn snapshot_restore_option_label_kind_first_then_id() {
         assert_eq!(snapshot_restore_option_label(Some("mail"), 7), "mail (#7)");
+    }
+
+    #[test]
+    fn restore_kind_option_label_names_the_kind_by_its_checkbox_label() {
+        assert_eq!(
+            snapshot_restore_kind_option_label(Some("card"), 7),
+            format!(
+                "{} (#7)",
+                fauna_i18n::strings::backups::RESTORE_KINDS_CONTACTS
+            )
+        );
+        assert_eq!(
+            snapshot_restore_kind_option_label(Some("zzz"), 3),
+            "zzz (#3)"
+        );
+        assert_eq!(restore_kind_index(Some("conv")), Some(4));
+        assert_eq!(restore_kind_index(None), None);
     }
 
     #[test]

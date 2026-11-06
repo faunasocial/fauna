@@ -146,3 +146,29 @@ async fn a_superseded_verdict_clears_the_identity() {
     m.refresh_token().await;
     assert_no_identity(&m);
 }
+
+/// The public key of an account secret — the actor id a mint for it names.
+fn actor_of(secret: [u8; 32]) -> [u8; 32] {
+    ed25519_dalek::SigningKey::from_bytes(&secret)
+        .verifying_key()
+        .to_bytes()
+}
+
+/// The published identity names the account it was confirmed for, so a
+/// follower that read it can tell an earlier account's value from a later
+/// one's without a separate "who does the bearer mint for" check, which the
+/// machine could move past between that check and the read.
+#[tokio::test]
+async fn the_published_identity_names_the_account_it_was_confirmed_for() {
+    let (m, _p) = confirmed_a_then(transient()).await;
+    let published = m
+        .subscribe_identity()
+        .borrow()
+        .clone()
+        .expect("A confirmed");
+    assert!(
+        published.is_for(&actor_of(ACCOUNT_A)),
+        "the watch must name account A's actor"
+    );
+    assert!(!published.is_for(&actor_of(ACCOUNT_B)));
+}

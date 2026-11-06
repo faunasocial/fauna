@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- The Debug SIMULATOR build's entitlements: Fauna-iOS.entitlements verbatim
+       (keep the two in step) plus the File Provider testing-mode key below.
+       Selected only by `CODE_SIGN_ENTITLEMENTS[sdk=iphonesimulator*]` in the
+       Debug configuration — a device or Release signature never claims it, so
+       no profile has to carry it. -->
+  <key>com.apple.security.application-groups</key>
+  <array>
+    <string>group.social.fauna.shared</string>
+  </array>
+  <key>aps-environment</key>
+  <string>production</string>
+  <key>com.apple.developer.declared-age-range</key>
+  <true/>
+  <key>com.apple.developer.devicecheck.appattest-environment</key>
+  <string>production</string>
+  <!-- Lets the DEBUG File Provider test CLI add a domain with the
+       `.alwaysEnabled` testing mode (`register <ref> <name> always-enabled`):
+       the OS adds a fresh domain disabled until a person enables it in the
+       Files app, so without the mode a headless run never launches the
+       extension (on-demand-files-apple.md § Apple File Provider binding). -->
+  <key>com.apple.developer.fileprovider.testing-mode</key>
+  <true/>
+</dict>
+</plist>

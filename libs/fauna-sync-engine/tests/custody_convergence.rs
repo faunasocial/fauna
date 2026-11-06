@@ -44,7 +44,7 @@ use fauna_core::custody_ceremony::DEFAULT_RETAINED_BYTES_CAP;
 use fauna_core::custody_grant::{
     CUSTODY_GRANT_ID_LEN, CustodyGrant, CustodyScopeSet, custody_entry_key, sign_custody_grant,
 };
-use fauna_core::data::{ModerationConfig, Timestamp};
+use fauna_core::data::{SyncPrefsConfig, Timestamp};
 use fauna_core::device_endpoints::DeviceEndpoints;
 use fauna_core::encoding::{canonical_decode, canonical_encode};
 use fauna_core::identity::ActorKeypair;
@@ -52,7 +52,7 @@ use fauna_credential_store::CredentialStore;
 use fauna_protocol::account_state::{ACCOUNT_STATE_SCOPE, ItemClass};
 use fauna_protocol::discovery::NestInfoReply;
 use fauna_protocol::merge_policy::{
-    KIND_CUSTODIAN_ENDPOINTS, KIND_CUSTODIES_HELD, KIND_MODERATION, home_scope_for_kind,
+    KIND_CUSTODIAN_ENDPOINTS, KIND_CUSTODIES_HELD, KIND_SYNC_PREFS, home_scope_for_kind,
 };
 use fauna_protocol::sync::{SyncChangesListReply, SyncChangesListRequest};
 use fauna_protocol::{RpcErrorClass, RpcRequester, decode_strict, encode_canonical};
@@ -169,6 +169,7 @@ fn params(
         peer_transport: Some(mem_factory(listeners)),
         // The machine's named row — never read here (no nest answers enrollment).
         enrollment_target_device_id: "ab".repeat(32),
+        enrollment_device_label: None,
     }
 }
 
@@ -397,19 +398,14 @@ where
     }
 }
 
-async fn moderation_of(handle: &AccountStoreHandle) -> Option<Vec<String>> {
+async fn sync_prefs_of(handle: &AccountStoreHandle) -> Option<String> {
     handle
-        .get_preference(KIND_MODERATION)
+        .get_preference(KIND_SYNC_PREFS)
         .await
         .ok()
         .flatten()
-        .and_then(|row| canonical_decode::<ModerationConfig>(&row.value).ok())
-        .map(|m| {
-            m.muted_keywords
-                .into_iter()
-                .map(|k| k.keyword)
-                .collect::<Vec<_>>()
-        })
+        .and_then(|row| canonical_decode::<SyncPrefsConfig>(&row.value).ok())
+        .and_then(|p| p.default_conflict_policy)
 }
 
 /// The whole W8.5 success sentence, one flow — see the module docs.
@@ -509,13 +505,12 @@ async fn an_owner_row_converges_to_a_second_device_through_a_keyless_custodian()
     let a = AccountStoreRuntime::start(params(&base, "a", &owner(), &net))
         .await
         .expect("start A");
-    let value = canonical_encode(&ModerationConfig {
-        muted_keywords: vec!["through-the-custodian".into()],
-        ..Default::default()
+    let value = canonical_encode(&SyncPrefsConfig {
+        default_conflict_policy: Some("through-the-custodian".into()),
     })
     .unwrap()
     .to_vec();
-    let _ = a.put_preference(KIND_MODERATION, value).await; // nest leg dead — locally durable
+    let _ = a.put_preference(KIND_SYNC_PREFS, value).await; // nest leg dead — locally durable
     await_listening(&net, &a_pub).await;
     // ── C: the custodian pulls A's sealed rows under the REAL witness ────
     let c = AccountStoreRuntime::start(params(&base, "c", &custodian(), &net))
@@ -573,7 +568,7 @@ async fn an_owner_row_converges_to_a_second_device_through_a_keyless_custodian()
         );
         assert!(
             probe
-                .states_of_kind(KIND_MODERATION)
+                .states_of_kind(KIND_SYNC_PREFS)
                 .await
                 .unwrap()
                 .is_empty(),
@@ -590,7 +585,7 @@ async fn an_owner_row_converges_to_a_second_device_through_a_keyless_custodian()
         async move {
             let _ = c.reconcile_now().await; // C refreshes its serve registry
             let _ = b.reconcile_now().await;
-            moderation_of(&b).await.as_deref() == Some(&["through-the-custodian".to_string()][..])
+            sync_prefs_of(&b).await.as_deref() == Some("through-the-custodian")
         }
     })
     .await;
@@ -960,13 +955,12 @@ async fn the_custodians_pump_enforces_the_accepted_byte_budget() {
     let a = AccountStoreRuntime::start(params(&base, "a", &owner(), &net))
         .await
         .expect("start A");
-    let value = canonical_encode(&ModerationConfig {
-        muted_keywords: vec!["over-the-custodians-budget".into()],
-        ..Default::default()
+    let value = canonical_encode(&SyncPrefsConfig {
+        default_conflict_policy: Some("over-the-custodians-budget".into()),
     })
     .unwrap()
     .to_vec();
-    let _ = a.put_preference(KIND_MODERATION, value).await;
+    let _ = a.put_preference(KIND_SYNC_PREFS, value).await;
     await_listening(&net, &a_pub).await;
 
     let c = AccountStoreRuntime::start(params(&base, "c", &custodian(), &net))

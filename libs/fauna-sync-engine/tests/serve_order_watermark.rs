@@ -31,10 +31,10 @@ use fauna_account_store::store::AccountStore;
 use fauna_account_store::types::WriterId;
 use fauna_core::account_entry_crypto::{EntryCoordinates, EntryPlaintext, seal_entry};
 use fauna_core::crypto::{AccountStateKeySchedule, BackupKey};
-use fauna_core::data::ModerationConfig;
+use fauna_core::data::SyncPrefsConfig;
 use fauna_core::identity::ActorKeypair;
 use fauna_protocol::account_state::{ACCOUNT_STATE_SCOPE, ItemClass, OP_STATE_PUT};
-use fauna_protocol::merge_policy::{KIND_MODERATION, LwwStamp, MODERATION_KEY, kind_keys};
+use fauna_protocol::merge_policy::{KIND_SYNC_PREFS, LwwStamp, PREFERENCE_KEY, kind_keys};
 use fauna_protocol::sync::{SyncChange, SyncChangesListReply, SyncChangesListRequest};
 use fauna_protocol::{ByteBuf, decode_strict, encode_canonical};
 use fauna_sync_engine::MAX_FRONTIER_WRITERS;
@@ -76,7 +76,7 @@ fn fleet_writer(i: u32) -> SigningKey {
 /// its SECOND page and leaves one row past the page that crosses it.
 const PAGE_ROWS: u32 = MAX_FRONTIER_WRITERS as u32 / 2 + 1;
 
-/// One `fauna.state.moderation` entry sealed by `writer` exactly as its own
+/// One `fauna.state.sync-prefs` entry sealed by `writer` exactly as its own
 /// plane would seal it, served at nest-log position `nest_seq`.
 fn sealed_row(
     sched: &AccountStateKeySchedule,
@@ -86,8 +86,8 @@ fn sealed_row(
 ) -> SyncChange {
     let writer_id = writer.verifying_key().to_bytes();
     let plaintext = EntryPlaintext {
-        kind: KIND_MODERATION.into(),
-        key: MODERATION_KEY.into(),
+        kind: KIND_SYNC_PREFS.into(),
+        key: PREFERENCE_KEY.into(),
         merge_meta: Some(ByteBuf::from(
             LwwStamp {
                 at_ms: nest_seq,
@@ -97,16 +97,15 @@ fn sealed_row(
             .unwrap(),
         )),
         value: ByteBuf::from(
-            encode_canonical(&ModerationConfig {
-                muted_keywords: vec![format!("row-{nest_seq}").as_str().into()],
-                ..Default::default()
+            encode_canonical(&SyncPrefsConfig {
+                default_conflict_policy: Some(format!("row-{nest_seq}")),
             })
             .unwrap()
             .to_vec(),
         ),
         tombstone: false,
     };
-    let keys = kind_keys(sched, KIND_MODERATION).expect("moderation is registered");
+    let keys = kind_keys(sched, KIND_SYNC_PREFS).expect("sync-prefs is registered");
     let sealed = seal_entry(
         &keys,
         &EntryCoordinates {

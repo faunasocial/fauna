@@ -52,6 +52,19 @@ pub const MAX_MESSAGE_BYTES: usize = 512;
 /// Maximum accepted `event` identifier length in bytes.
 pub const MAX_EVENT_BYTES: usize = 64;
 
+/// Whether `event` is an admissible event identifier: non-empty, at most
+/// [`MAX_EVENT_BYTES`] bytes, and only `[a-z0-9_.-]`. The one owner of the
+/// rule — nest's admission enforces it (truncating the length first) and each
+/// sidecar's catalogue test asserts its ids against it, so a catalogue id nest
+/// would drop can never be written.
+pub fn event_id_is_admissible(event: &str) -> bool {
+    !event.is_empty()
+        && event.len() <= MAX_EVENT_BYTES
+        && event
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '_' | '.' | '-'))
+}
+
 /// One reported event.
 ///
 /// `message` is a **compile-time-constant template** at the source, with

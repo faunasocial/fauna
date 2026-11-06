@@ -9,11 +9,15 @@ not coverage.**
 Convention 7's only sanctioned skip is *structural impossibility*. Everything
 else is one of three things, and this module makes each one say which:
 
-    skip_unbuilt(...)      this app has not built the surface yet — TEMPORARY
-                           parity debt. Skips normally; under `--strict-app` it
-                           FAILS, and either way the run counts it and prints
-                           the total, so the number is a ratchet that can only
-                           go down.
+    require_surface(...)   this app has not built the surface yet — TEMPORARY
+                           parity debt, its app set declared ONCE in the surface
+                           registry (`tests/e2e-unified/surfaces.toml`). Skips
+                           normally; under `--strict-app` it FAILS, and either
+                           way the run counts it and prints the total, so the
+                           number is a ratchet that can only go down.
+                           (The pre-registry free-text form is private since
+                           the migration closed, and the ratchet's second
+                           counter fails any call to it.)
 
     declared_absence(...)  a PERMANENT platform absence declared in a goal doc
                            (`apps/tui.md` § Declared platform absences — inline
@@ -139,9 +143,90 @@ def app_name(driver) -> str:
     return type(driver).__name__.lower().removesuffix("driver") or "unknown"
 
 
+# ── The surface registry (convention 7, *The surface registry*) ─────────────
+# `tests/e2e-unified/surfaces.toml`: ONE description of which apps have built a
+# surface, read here at run time and by the catalog without a run — through the
+# same reader, `features_catalog.load_surface_registry`, so the two cannot parse
+# it apart. Loaded once per run.
+_REGISTRY: dict | None = None
+
+
+def surface_registry() -> dict:
+    """`{key: Surface}` — the registry, read once per run."""
+    global _REGISTRY
+    if _REGISTRY is None:
+        import sys
+        from pathlib import Path
+
+        scripts = Path(__file__).resolve().parents[3] / "scripts"
+        if str(scripts) not in sys.path:
+            sys.path.insert(0, str(scripts))
+        import features_catalog
+
+        _REGISTRY = features_catalog.load_surface_registry()
+    return _REGISTRY
+
+
+def set_surface_registry(registry: dict | None) -> None:
+    """Test-only: substitute a registry (`None` re-reads the file on next use)."""
+    global _REGISTRY
+    _REGISTRY = registry
+
+
+def surface_entry(key: str):
+    """The registry entry for `key`; an unknown key is a `ValueError` — the
+    `feature` marker's unknown-slug rule, so a typo cannot mint a surface nobody
+    declared."""
+    entry = surface_registry().get(key)
+    if entry is None:
+        raise ValueError(
+            f"unknown surface key {key!r}: no [{key}] table in "
+            "tests/e2e-unified/surfaces.toml (e2e-conventions.md convention 7, "
+            "*The surface registry*). Declare it there — kind, built, detail, "
+            "tracked — or correct the key."
+        )
+    return entry
+
+
+def surface_built(key: str, app: str) -> bool:
+    """Whether `app` has built `key` — a function of (surface, app) alone."""
+    return app in surface_entry(key).built
+
+
 # ── The three declarations ─────────────────────────────────────────────────
-def skip_unbuilt(driver, *, surface: str, detail: str = "", tracked: str = ""):
+def require_surface(driver, key: str) -> None:
+    """The gate for a surface the app may not have built — declared ONCE, in the
+    surface registry, never in the call.
+
+    Returns when the app under test is in the key's `built`; otherwise the
+    unbuilt path, exactly as `_skip_unbuilt` takes it (skips normally, FAILS under
+    `--strict-app`, tallied either way, the record's class `unbuilt`), with the
+    entry's `detail` and `tracked` in the message. Every call, fired or not, notes
+    the key on the test's ledger record (`surfaces`); a firing one also names it
+    (`surface`) — `feature-catalog.md` § The ledger.
+
+    Takes a driver or the app id as a plain string, like `app_name`. An unknown
+    key raises `ValueError` at the call.
+    """
+    entry = surface_entry(key)
+    app = app_name(driver)
+    from helpers import feature_ledger
+
+    built = app in entry.built
+    feature_ledger.note_surface(key, fired=not built)
+    if built:
+        return
+    _unbuilt(app, surface=key, detail=entry.detail, tracked=entry.tracked)
+
+
+def _skip_unbuilt(driver, *, surface: str, detail: str = "", tracked: str = ""):
     """This app has not built `surface` yet — temporary parity debt.
+
+    The PRE-REGISTRY form of `require_surface`, private since the migration
+    closed (convention 7): the app set lived in the caller's own `if` and the
+    surface was free text. No test calls it; the mechanism proofs reach it
+    directly, and `check_app_gate_ratchet.py` fails any free-text call in the
+    tree. Gates use `require_surface`.
 
     Skips normally; FAILS under `--strict-app`. Either way the run tallies it.
 
@@ -154,7 +239,11 @@ def skip_unbuilt(driver, *, surface: str, detail: str = "", tracked: str = ""):
         detail:  why it is missing / what would close it.
         tracked: where the work is captured (a NEXT file, a goal-doc section).
     """
-    app = app_name(driver)
+    _unbuilt(app_name(driver), surface=surface, detail=detail, tracked=tracked)
+
+
+def _unbuilt(app: str, *, surface: str, detail: str, tracked: str):
+    """The one unbuilt path both gates take: tally, ledger class, strict fail, skip."""
     _UNBUILT_HITS.append((app, surface, detail))
     message = f"{app} has not built {surface}"
     if detail:
@@ -164,6 +253,7 @@ def skip_unbuilt(driver, *, surface: str, detail: str = "", tracked: str = ""):
     from helpers import feature_ledger
     feature_ledger.note_skip_class(feature_ledger.UNBUILT)
     if _STRICT_APP:
+        feature_ledger.note_strict_refusal()
         pytest.fail(
             f"--strict-app: {message}\n"
             "This is unbuilt-surface debt, not a platform absence: under "
@@ -193,7 +283,8 @@ def declared_absence(driver, *, capability: str, doc: str):
         raise ValueError(
             "declared_absence() requires a `doc` citation naming the goal-doc "
             "section that declares this absence. If no goal doc declares it, it "
-            "is unbuilt debt — use skip_unbuilt() instead."
+            "is unbuilt debt — declare it in surfaces.toml and gate it with "
+            "require_surface() instead."
         )
     app = app_name(driver)
     from helpers import feature_ledger

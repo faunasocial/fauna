@@ -19,7 +19,10 @@
 //! - the feature-limits capability set (`capabilities`; its one runtime-gated
 //!   token, `relay`, gates no feature-limits row —
 //!   `fauna_client_features::capability_token`);
-//! - the sign-in update look (`newest_release`, read once per sign-in).
+//! - the sign-in update look (`newest_release`, read once per sign-in);
+//! - the capability probes (`nest_supports` in `fauna-client-subscriptions`
+//!   and the mail-settings seam) and the follow intent's home-nest id
+//!   (`nest_id`).
 //!
 //! A reader that needs `newest_release` or `relay` as they are *now*, mid
 //! connection (an admin surface polling for an update), reads
@@ -61,22 +64,28 @@ pub async fn read_nest_info<R: RpcRequester + ?Sized>(nest: &R) -> Result<NestIn
             .request("fauna.nest.info", NestInfoRequest::default())
             .await;
     };
+    // Ticketed once a connection is live: a reader issued in the gap before
+    // the first connect waits for it, as its read would, so the reply is
+    // remembered for the connection it rides. The wait is taken BEFORE the
+    // slot: with the nest down, readers queued behind one another's bounded
+    // waits would hold a landing for one wait per leg, where side by side
+    // they settle within one. A reader that found no connection has nothing
+    // to share or remember, so it reads (and fails) without the slot.
+    let Some(ticket) = nest.ready_connection_id().await else {
+        return nest
+            .request("fauna.nest.info", NestInfoRequest::default())
+            .await;
+    };
     let mut slot = memo.slot.lock().await;
-    let ticket = nest.live_connection_id();
-    if let (Some(live), Some((connection, reply))) = (ticket, slot.as_ref())
-        && *connection == live
+    if let Some((connection, reply)) = slot.as_ref()
+        && *connection == ticket
     {
         return Ok(reply.clone());
     }
     let reply: NestInfoReply = nest
         .request("fauna.nest.info", NestInfoRequest::default())
         .await?;
-    match ticket {
-        Some(ticket) if nest.live_connection_id() == Some(ticket) => {
-            *slot = Some((ticket, reply.clone()));
-        }
-        _ => *slot = None,
-    }
+    *slot = (nest.live_connection_id() == Some(ticket)).then(|| (ticket, reply.clone()));
     Ok(reply)
 }
 
@@ -95,6 +104,13 @@ mod tests {
         reads: AtomicUsize,
         fail: AtomicBool,
         reconnect_during_read: AtomicBool,
+        /// `ready_connection_id` brings connection 1 up, as a transport's
+        /// in-gap wait does.
+        connects_on_wait: AtomicBool,
+        /// `ready_connection_id` parks this long and finds no connection — a
+        /// nest that refuses every dial, as the transport's bounded in-gap
+        /// wait sees it.
+        down_wait: Option<std::time::Duration>,
     }
 
     impl Fake {
@@ -150,9 +166,67 @@ mod tests {
             *self.connection.lock().unwrap()
         }
 
+        async fn ready_connection_id(&self) -> Option<u64> {
+            if let Some(wait) = self.down_wait {
+                tokio::time::sleep(wait).await;
+                return None;
+            }
+            if self.connects_on_wait.load(Ordering::SeqCst) {
+                let mut c = self.connection.lock().unwrap();
+                c.get_or_insert(1);
+            }
+            *self.connection.lock().unwrap()
+        }
+
         fn nest_info_memo(&self) -> Option<&NestInfoMemo> {
             self.memo.as_ref()
         }
+    }
+
+    /// A sign-in's readers start while the socket is still dialling: a read
+    /// issued in that gap waits for the connection, as its request would, and
+    /// is remembered for it — the readers after it are served, rather than
+    /// each reading (measured 2026-11-02 on linux: the archive-import check's
+    /// gap read was remembered for nothing, and the node leg read again).
+    #[tokio::test]
+    async fn a_read_issued_before_the_first_connect_is_remembered_for_it() {
+        let nest = Fake {
+            memo: Some(NestInfoMemo::new()),
+            connects_on_wait: AtomicBool::new(true),
+            ..Fake::default()
+        };
+        let (a, b) = tokio::join!(read_nest_info(&nest), read_nest_info(&nest));
+        assert_eq!(a.unwrap(), b.unwrap());
+        read_nest_info(&nest).await.unwrap();
+        assert_eq!(nest.reads(), 1);
+    }
+
+    /// With the nest down, every reader's wait for a connection runs side by
+    /// side, never queued behind the memo's slot: a settings landing whose
+    /// legs each read `fauna.nest.info` settles within one in-gap wait, not
+    /// one per leg (2026-11-03: tui's settings sub-page nav sat behind the
+    /// queued waits and was never acknowledged).
+    #[tokio::test(start_paused = true)]
+    async fn readers_on_a_down_nest_wait_side_by_side() {
+        let wait = std::time::Duration::from_secs(5);
+        let nest = Fake {
+            memo: Some(NestInfoMemo::new()),
+            fail: AtomicBool::new(true),
+            down_wait: Some(wait),
+            ..Fake::default()
+        };
+        let start = tokio::time::Instant::now();
+        let (a, b, c) = tokio::join!(
+            read_nest_info(&nest),
+            read_nest_info(&nest),
+            read_nest_info(&nest)
+        );
+        assert!(a.is_err() && b.is_err() && c.is_err());
+        let took = start.elapsed();
+        assert!(
+            took < wait * 2,
+            "three readers on a down nest took {took:?}: their waits queued behind the memo"
+        );
     }
 
     #[tokio::test]

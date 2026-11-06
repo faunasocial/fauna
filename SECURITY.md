@@ -27,7 +27,10 @@ that require a compromised device, and findings in third-party dependencies
 affected). A compromised nest or hosting provider, and a nest's own user acting
 against others, are in scope: the design's promise is that a nest cannot read
 what you did not share with it, beyond the mail and the messages it passes to
-and from email and other networks.
+and from email and other networks; beyond the address of a link standing on a
+line of its own in a post or a message, which the nest of each person who reads
+it fetches for its preview; and beyond the text of a message or a post only some
+people can open that someone attaches to a report.
 
 ## Disclosure
 

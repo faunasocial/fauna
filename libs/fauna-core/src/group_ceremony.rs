@@ -128,6 +128,15 @@ pub struct GroupPlaneRow {
     /// The canonical value bytes, verbatim.
     #[serde(with = "serde_bytes")]
     pub value: Vec<u8>,
+    /// The row's merge-policy metadata, verbatim — the encoded `LwwStamp` a
+    /// `LatestWins` kind merges under, whose first contact `apply_class2`
+    /// refuses without one. `None` for the absorbing and insert-once kinds
+    /// the snapshot was born with, which encode byte-identically to before
+    /// the field existed. The one stamped row the ceremony carries is the
+    /// initiator's `fauna.group.endpoints` cell, the bootstrap of decision 8
+    /// (`p2p-shared-set-build.md` § Build design — the group set).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merge_meta: Option<serde_bytes::ByteBuf>,
 }
 
 /// The initiator's signed admission delivery (ceremony step 3).
@@ -486,6 +495,19 @@ fn pick_bytes(ours: &[u8], theirs: &[u8]) -> Vec<u8> {
     }
 }
 
+/// [`pick_bytes`]'s rule over an address list: a recorded list beats none,
+/// and two recorded lists pick deterministically (the lesser), so the join
+/// commutes. One ceremony reads one compare code, so two devices disagreeing
+/// is a corner the rule only has to settle, not reconcile.
+fn pick_addrs(ours: &[String], theirs: &[String]) -> Vec<String> {
+    match (ours.is_empty(), theirs.is_empty()) {
+        (true, _) => theirs.to_vec(),
+        (_, true) => ours.to_vec(),
+        _ if theirs < ours => theirs.to_vec(),
+        _ => ours.to_vec(),
+    }
+}
+
 // ── The plane rows' key grammar (`config-dissolution.md` § Phases and gates
 // → *Bounded rows*) ──
 //
@@ -677,6 +699,15 @@ pub struct InitiatedGroupShare {
     pub offered_at: Timestamp,
     /// Higher wins the record's scalar remainder at the cross-device merge.
     pub updated_at: Timestamp,
+    /// The LAN candidates the recipient's compare code read out, as socket
+    /// address strings, most-preferred first — the initiator's first dial of
+    /// the recipient on the group pump, until the recipient's own
+    /// `fauna.group.endpoints` cell has reached it
+    /// (`p2p-shared-set-build.md` § Build design — the group set, decision
+    /// 8). Peer-supplied, so a reader dials them only through the PT-4
+    /// hygiene. Additive: absent decodes empty, empty is never encoded.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub recipient_lan_addrs: Vec<String>,
 }
 
 impl Default for InitiatedGroupShare {
@@ -694,6 +725,7 @@ impl Default for InitiatedGroupShare {
             plane_rows_written: false,
             offered_at: Timestamp(0),
             updated_at: Timestamp(0),
+            recipient_lan_addrs: Vec::new(),
         }
     }
 }
@@ -726,6 +758,8 @@ impl InitiatedGroupShare {
         ours.delivered |= theirs.delivered;
         ours.root_row_written |= theirs.root_row_written;
         ours.plane_rows_written |= theirs.plane_rows_written;
+        ours.recipient_lan_addrs =
+            pick_addrs(&ours.recipient_lan_addrs, &theirs.recipient_lan_addrs);
         if (theirs.updated_at, theirs.offered_at) > (ours.updated_at, ours.offered_at) {
             ours.offered_at = theirs.offered_at;
             ours.updated_at = theirs.updated_at;
@@ -947,6 +981,7 @@ mod tests {
             machinery_snapshot: vec![GroupPlaneRow {
                 kind: "fauna.group.birth".into(),
                 key: "self".into(),
+                merge_meta: None,
                 value: crate::encoding::canonical_encode(&birth()).unwrap(),
             }],
             delivered_at: Timestamp(3_000),
@@ -1043,5 +1078,39 @@ mod tests {
         assert!(decode_group_share_row(second_key, &first.encode().unwrap()).is_err());
         assert!(decode_group_share_row(first_key, &invited.encode().unwrap()).is_err());
         assert!(decode_group_share_row(invited_key, &invited.encode().unwrap()).is_ok());
+    }
+
+    /// The recipient's compare-code candidates are additive on the record: a
+    /// record holding none encodes as every earlier build's did, and the
+    /// cross-device join keeps a recorded list and commutes.
+    #[test]
+    fn recipient_candidates_are_additive_and_join() {
+        let bare = InitiatedGroupShare {
+            scope_id: [7u8; 32],
+            recipient: recipient().actor_id(),
+            ..Default::default()
+        };
+        let bytes = crate::encoding::canonical_encode(&bare).unwrap();
+        assert!(
+            !bytes
+                .windows(b"recipient_lan_addrs".len())
+                .any(|w| w == b"recipient_lan_addrs"),
+            "an empty list is never encoded"
+        );
+        let a = InitiatedGroupShare {
+            recipient_lan_addrs: vec!["192.168.1.7:4433".into()],
+            ..bare.clone()
+        };
+        let b = InitiatedGroupShare {
+            recipient_lan_addrs: vec!["192.168.1.9:4433".into()],
+            ..bare.clone()
+        };
+        let back: InitiatedGroupShare =
+            crate::encoding::canonical_decode(&crate::encoding::canonical_encode(&a).unwrap())
+                .unwrap();
+        assert_eq!(back, a);
+        assert_eq!(bare.merge(&a).recipient_lan_addrs, a.recipient_lan_addrs);
+        assert_eq!(a.merge(&bare).recipient_lan_addrs, a.recipient_lan_addrs);
+        assert_eq!(a.merge(&b), b.merge(&a));
     }
 }

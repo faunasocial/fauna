@@ -99,8 +99,8 @@ use crate::sync_client::FfiSyncClient;
 /// Bounded wait for the WS handshake inside [`FfiNestClient::connect`].
 /// The reconnect supervisor keeps retrying past this; the timeout only
 /// bounds the *first* connect so a bad URL surfaces as an error instead of
-/// hanging the caller.
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+/// hanging the caller. The e2e harness's one-call connections wait the same.
+pub(crate) const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// FFI mirror of [`fauna_protocol::discovery::SetupStatusReply`] — the
 /// setup-wizard progress the authed [`FfiNestClient::setup_status`] read
@@ -275,6 +275,14 @@ pub struct FfiNestClient {
     /// witness has seen nothing" are different readings.
     #[cfg(feature = "conversations-session")]
     succession_report: crate::succession_witness::SuccessionReportHolder,
+    /// This login's phase-two archive links (`archive-import.md` § Linking
+    /// and merging), built by [`Self::conversations_session`] over the same
+    /// archive seam as the `Archive` rail and registered there as the
+    /// session's archive-signal sink; read back with
+    /// [`Self::archive_links`]. Late-populated like `scheduling_session`, and
+    /// `None` until a session with a sync device id is built.
+    #[cfg(all(feature = "archive-import", feature = "conversations-session"))]
+    archive_links: crate::archive_import::ArchiveLinksHolder,
     /// The post-succession aftermath sink most recently registered by
     /// [`crate::succession_aftermath::run_succession_aftermath`], reused as
     /// leg 3's (the `__mls` re-seal) progress target — see
@@ -438,6 +446,12 @@ impl FfiNestClient {
     /// signed that identity's own root (`writer-signed-change-records.md`
     /// ruling (8)(c)). `None` sends no pairs — the agent then note-skips such
     /// a row, fail-closed.
+    ///
+    /// `bearer_source` `None` — what every app should pass — pushes the agent
+    /// this client's own bearer cache (the shared
+    /// `fauna_client_sync::agent::AgentBearerSource`, as tui and linux do),
+    /// which re-mints on a `401`; an app-side hook is the legacy shape, and one
+    /// that caches its token re-pushes a dead bearer after a nest restart.
     #[uniffi::method(default(accounts = None))]
     #[allow(clippy::too_many_arguments)] // UniFFI export — capability inputs + three Swift hooks
     pub fn sync_agent_provisioner(
@@ -449,7 +463,7 @@ impl FfiNestClient {
         device_id: String,
         device_label: String,
         spawner: Arc<dyn crate::FfiAgentSpawner>,
-        bearer_source: Arc<dyn crate::FfiProvisioningBearerSource>,
+        bearer_source: Option<Arc<dyn crate::FfiProvisioningBearerSource>>,
         reachability_observer: Option<Arc<dyn crate::FfiAgentReachabilityObserver>>,
         accounts: Option<Arc<crate::accounts_registry::FfiAccountRegistry>>,
     ) -> Result<Arc<crate::FfiSyncAgentProvisioner>, FfiError> {
@@ -1023,6 +1037,11 @@ pub struct FfiStaleSurfaces {
     /// login read can lose the socket, and only a re-read restores the
     /// own-threshold collapse.
     pub own_thresholds: bool,
+    /// The nest-admin gate (`fauna.account.am_i_admin`, the `admin-tab`
+    /// entry) — reconnect-only, like `family` (`StaleSurfaces::admin_gate`): a
+    /// login read that found no nest fails closed, and only a re-read shows the
+    /// entry to the admin. Move the gate on a successful reply only.
+    pub admin_gate: bool,
     /// The Address Book page's books and open book's cards — page-gated, like
     /// `media`: re-read only while the Address Book is showing, since a contacts
     /// app's first sync is one push per card (`StaleSurfaces::address_book`).
@@ -1064,6 +1083,7 @@ impl From<fauna_protocol::StaleSurfaces> for FfiStaleSurfaces {
             media: s.media,
             family: s.family,
             own_thresholds: s.own_thresholds,
+            admin_gate: s.admin_gate,
             address_book: s.address_book,
             mail_spam: s.mail_spam,
             mail_export: s.mail_export,
@@ -1174,6 +1194,24 @@ impl FfiPushSubscription {
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => return None,
             }
         }
+    }
+}
+
+// Phase two's archive links — their own `impl` block for the same reason as
+// the sibling blocks: `#[uniffi::export]` does not honor a method-level
+// `#[cfg]`.
+#[cfg(all(feature = "archive-import", feature = "conversations-session"))]
+#[uniffi::export]
+impl FfiNestClient {
+    /// The archive links [`Self::conversations_session`] built for this login
+    /// (`archive-import.md` § Linking and merging, ruling 8), or `None` before
+    /// a session, or for one with no sync device id. The app reads
+    /// `link_views()` with its Contacts roster, paints the five
+    /// `contact-archive-*` IDs from them, calls `drive_links()` once at login
+    /// and whenever `link_work_due()` reads true on its tick, and hands them
+    /// to its archive-import machine with `attach_links`.
+    pub fn archive_links(&self) -> Option<Arc<fauna_archive_import_machine::link::ArchiveLinks>> {
+        self.archive_links.lock().ok()?.clone()
     }
 }
 
@@ -1471,6 +1509,8 @@ impl FfiNestClient {
             index_arm: Arc::new(Mutex::new(None)),
             #[cfg(feature = "conversations-session")]
             succession_report: Arc::new(Mutex::new(None)),
+            #[cfg(all(feature = "archive-import", feature = "conversations-session"))]
+            archive_links: Arc::new(Mutex::new(None)),
             #[cfg(feature = "recovery-aftermath")]
             aftermath_sink: Arc::new(Mutex::new(None)),
             #[cfg(feature = "recovery-aftermath")]
@@ -1729,20 +1769,18 @@ impl FfiNestClient {
 #[cfg(feature = "accounts-registry")]
 #[derive(uniffi::Object)]
 pub struct FfiSelfIdentitySubscription {
-    rx: tokio::sync::Mutex<watch::Receiver<Option<fauna_protocol::auth::MintedIdentity>>>,
+    /// The one shared follower (`fauna_client::SelfIdentityFollower`): it
+    /// judges every value it reads against this session's actor and ends on
+    /// another's, so no identity minted for another account reaches the
+    /// app's account row.
+    follower: tokio::sync::Mutex<fauna_client::SelfIdentityFollower>,
 }
 
 #[cfg(feature = "accounts-registry")]
 impl FfiSelfIdentitySubscription {
-    pub(crate) fn new(
-        mut rx: watch::Receiver<Option<fauna_protocol::auth::MintedIdentity>>,
-    ) -> Arc<Self> {
-        // Mark the current value unseen so the first `next()` delivers an
-        // identity that has already landed instead of waiting for the next
-        // mint — the session client usually minted before the app subscribed.
-        rx.mark_changed();
+    pub(crate) fn new(follower: fauna_client::SelfIdentityFollower) -> Arc<Self> {
         Arc::new(Self {
-            rx: tokio::sync::Mutex::new(rx),
+            follower: tokio::sync::Mutex::new(follower),
         })
     }
 }
@@ -1755,19 +1793,12 @@ impl FfiSelfIdentitySubscription {
     /// `while let Some(i) = sub.next().await` loop terminates. Never yields a
     /// "not yet": it waits until a mint has confirmed one.
     pub async fn next(&self) -> Option<fauna_launch_machine::LaunchIdentity> {
-        let mut rx = self.rx.lock().await;
-        loop {
-            if rx.changed().await.is_err() {
-                return None;
-            }
-            if let Some(minted) = rx.borrow_and_update().clone() {
-                return Some(fauna_launch_machine::LaunchIdentity {
-                    handle: minted.handle,
-                    domain: minted.domain,
-                    tier: minted.tier,
-                });
-            }
-        }
+        let minted = self.follower.lock().await.next().await?;
+        Some(fauna_launch_machine::LaunchIdentity {
+            handle: minted.handle,
+            domain: minted.domain,
+            tier: minted.tier,
+        })
     }
 }
 
@@ -1780,7 +1811,7 @@ impl FfiNestClient {
     /// builds. Cheap; each call gets its own receiver.
     pub fn subscribe_self_identity(&self) -> Option<Arc<FfiSelfIdentitySubscription>> {
         self.nest
-            .subscribe_self_identity()
+            .follow_self_identity()
             .map(FfiSelfIdentitySubscription::new)
     }
 }
@@ -1800,14 +1831,35 @@ impl FfiNestClient {
     /// the web `fauna-wasm` `WasmFeedManager` (`docs/goal/ui/feed.md` § State &
     /// data shape). `secret: Vec<u8>` matches the `mls` / `backup_coordinator`
     /// sub-client constructors that also need the actor secret.
-    pub fn feed_manager(&self, secret: Vec<u8>) -> Result<Arc<crate::FfiFeedManager>, FfiError> {
+    ///
+    /// `recording_device` (hex) is the app's sync device id — the one it
+    /// passes `conversations_session` — and registers the folded archive
+    /// comments' source (`archive-import.md` § What each category becomes →
+    /// *Placement under the owner's own post*); the app then re-reads it with
+    /// `FfiFeedManager::refresh_archive_comments` on every feed visit. `None`
+    /// (the UniFFI default, so an unwired caller compiles) folds nothing.
+    #[uniffi::method(default(recording_device = None))]
+    pub fn feed_manager(
+        &self,
+        secret: Vec<u8>,
+        recording_device: Option<String>,
+    ) -> Result<Arc<crate::FfiFeedManager>, FfiError> {
         let secret: [u8; 32] = secret
             .as_slice()
             .try_into()
             .map_err(|_| FfiError::General {
                 msg: "secret must be 32 bytes".into(),
             })?;
-        Ok(crate::FfiFeedManager::new(Arc::clone(&self.nest), secret))
+        let manager = crate::FfiFeedManager::new(Arc::clone(&self.nest), secret);
+        #[cfg(feature = "archive-import")]
+        crate::archive_import::wire_archive_comments(
+            manager.inner(),
+            Arc::clone(&self.nest),
+            recording_device.as_deref(),
+        );
+        #[cfg(not(feature = "archive-import"))]
+        let _ = recording_device;
+        Ok(manager)
     }
 
     /// This session's post-blob planes (`fauna_client::PostBlobHosts`): a
@@ -1919,6 +1971,23 @@ impl FfiNestClient {
 #[cfg(feature = "conversations-session")]
 #[uniffi::export]
 impl FfiNestClient {
+    /// Register the contact roster source on a `manager` **no conversations
+    /// session serves** — the one [`Self::conversations_session`] registers
+    /// with its siblings (`NestContactRoster` over this connection), for a
+    /// seat that holds a manager without a session: every Apple app under
+    /// plain e2e, whose mock rails stand in for the real ones. Without it the
+    /// projection never holds the roster, so a surface holding no handle — the
+    /// OTHER Profile header — falls to the short id for a contact the roster
+    /// knows by handle (`value-formatting.md` § Peer display label → *the
+    /// roster handle*). Load it with `FfiContactOverlays::refresh_roster`.
+    /// Replaces any source registered before; a session built over the same
+    /// manager later registers its own, which is the same source.
+    pub fn register_contact_roster(&self, manager: Arc<fauna_conversations::ConversationsManager>) {
+        manager.register_contact_roster(Arc::new(
+            fauna_client_conversations::NestContactRoster::new(Arc::clone(&self.nest)),
+        ));
+    }
+
     /// A dual-rail conversations session for the native UniFFI apps — the
     /// native twin of the wasm `fauna-wasm` wrapper's `with_conversations`. Wires
     /// **both** rails on a fresh manager over this one WS-RPC connection: the
@@ -2086,6 +2155,9 @@ impl FfiNestClient {
         // stash is also what makes a second call a no-op.
         let session = self.scheduling_session.lock().unwrap().take();
         if let Some(session) = session {
+            // The account's conversations door goes with its engine.
+            #[cfg(feature = "conversations-session")]
+            crate::conversations_door::SEAT.release(&session);
             // Drops the rail registration AND retires the engine behind it —
             // flushing the provider snapshot, releasing the role lock, and
             // closing the database. The receive loop selects on the same retire
@@ -2452,6 +2524,27 @@ impl FfiNestClient {
         // (`crate::account_runtime`), so `start_receive_loop` launches it first
         // in its own prologue, inside the runtime the app already drives it on.
         crate::succession_witness::wire(&session, Arc::clone(&self.nest), &self.succession_report);
+        // The `Archive` rail's read seam (`archive-import.md` § What each
+        // category becomes): the archive-import machine's folder reader,
+        // registered here so the four FFI legs list an import's message
+        // threads with no per-app glue — the app re-reads it at login and on
+        // every conversations-page visit (`archive_import::refresh_archive_threads`).
+        //
+        // Phase two's sink rides the same seam (ruling 2, beside the custody
+        // sink): the links are built here, registered as the session's
+        // archive-signal sink and stashed for [`Self::archive_links`] — the
+        // app drives them once at login and on its tick, and attaches them to
+        // the archive-import machine so a finished run announces itself.
+        #[cfg(feature = "archive-import")]
+        {
+            let links = crate::archive_import::wire_archive_seams(
+                &session,
+                Arc::clone(&self.nest),
+                recording_device.as_deref(),
+                &crate::keypair_from_bytes(&self_secret)?,
+            );
+            *self.archive_links.lock().unwrap() = links;
+        }
         #[cfg(feature = "recovery-aftermath")]
         let mls_launcher = crate::mls_sync_launch::mls_sync_launcher(
             Arc::clone(&self.nest),
@@ -2534,6 +2627,29 @@ impl FfiNestClient {
             // unsize-coerces at the argument position.
             session.set_index_builder_launcher(index_launcher.clone());
         }
+        // The conversations oracle's door (`conversations-oracle.md` § The
+        // custodian and the door): this login holds the account's engine, so it
+        // may serve; the endpoint lock decides whether it does. The same
+        // assembly tui and linux call, staged rather than spawned — this export
+        // has no runtime — and started on the store's runtime, here if the store
+        // came first, else at its install (`crate::conversations_door`). macOS
+        // and windows only: the custodians are the desktop apps.
+        #[cfg(all(any(target_os = "macos", windows), not(test)))]
+        crate::conversations_door::stage(
+            &session,
+            fauna_client_account_runtime::conversations_door::ConversationsDoorInputs {
+                actor_id: self_actor.0,
+                manager: session.manager(),
+                nest: Arc::clone(&self.nest),
+                ledger: crate::ledger_seam(),
+                store: Arc::new(crate::account_runtime::handle),
+                index: Some(fauna_client_conversations::LauncherLocalIndex::new(
+                    Arc::clone(&index_launcher),
+                    session.manager(),
+                )),
+            },
+        );
+        crate::account_runtime::start_conversations_door();
         *self.index_arm.lock().unwrap() = Some(crate::index_launch::IndexArm {
             launcher: index_launcher,
             lookup: session.manager(),
@@ -2990,29 +3106,25 @@ impl FfiNestClient {
     /// reaches `Connected` (bounded by [`CONNECT_TIMEOUT`]). After this
     /// returns `Ok`, `bridges()`/`email()` calls can be issued.
     pub async fn connect(&self) -> Result<(), FfiError> {
-        self.nest.connect().await.map_err(|e| e.to_string())?;
+        self.nest
+            .connect_and_wait(CONNECT_TIMEOUT)
+            .await
+            .map_err(|e| FfiError::General { msg: e.to_string() })
+    }
 
-        let mut rx = self.nest.connection_state();
-        let wait = async {
-            loop {
-                if *rx.borrow_and_update() == ConnectionState::Connected {
-                    return Ok(());
-                }
-                if rx.changed().await.is_err() {
-                    return Err("connection-state channel closed before connect".to_string());
-                }
-            }
-        };
-        match tokio::time::timeout(CONNECT_TIMEOUT, wait).await {
-            Ok(Ok(())) => Ok(()),
-            Ok(Err(msg)) => Err(FfiError::General { msg }),
-            Err(_) => Err(FfiError::General {
-                msg: format!(
-                    "WS connect did not reach Connected within {}s",
-                    CONNECT_TIMEOUT.as_secs()
-                ),
-            }),
-        }
+    /// Authenticate and start the reconnect supervisor, **without** waiting for
+    /// the socket — the form a long-lived app session takes, where
+    /// [`Self::connect`] is the form for a caller that must know the nest
+    /// answered (`transport-connection.md` § Connection lifecycle). `Err` is
+    /// only ever a refusal no retry clears, and no supervisor is left behind
+    /// it; a nest that did not answer is `Ok`, the supervisor retrying it, and
+    /// a request made meanwhile waits for the connection within its own
+    /// deadline. Idempotent: a running supervisor is left alone.
+    pub async fn ensure_connected(&self) -> Result<(), FfiError> {
+        self.nest
+            .ensure_connected()
+            .await
+            .map_err(|e| FfiError::General { msg: e.to_string() })
     }
 
     /// Stop the reconnect supervisor and drop the connection. Pending RPCs
@@ -3082,6 +3194,12 @@ impl FfiNestClient {
     ///   displaces a live renewer. `None` (a profile that has never registered
     ///   one) fails the runtime start: the machine's named row is the one
     ///   enrollment target.
+    /// * `device_label` — the app's **app default** (`fauna-windows`,
+    ///   `fauna-macos`, `fauna-ios`, `fauna-android`; `devices.md` § Device
+    ///   names), the same constant the app hands its engine host: when that
+    ///   row does not exist yet, the enrollment ceremony creates it under this
+    ///   name, so a phone with no folder bound reads `fauna-ios` rather than
+    ///   the `fauna` placeholder. Never an OS-derived name (class (3)).
     /// * `accounts` — the app's account registry. This seat resolves the
     ///   account's **attested** succeeded-from identities off it in Rust, for
     ///   THIS session's own actor — never the active account, which can
@@ -3113,6 +3231,7 @@ impl FfiNestClient {
         app_data_dir: String,
         store_container: Option<crate::cloud_backup::FfiStoreContainer>,
         own_device_id: Option<Vec<u8>>,
+        device_label: String,
         accounts: Option<Arc<crate::accounts_registry::FfiAccountRegistry>>,
     ) -> Result<(), FfiError> {
         // Kept for the exported signature only (see the doc above).
@@ -3143,6 +3262,7 @@ impl FfiNestClient {
                     }
                 }),
                 own_device_id_hex,
+                device_label,
                 accounts,
                 #[cfg(feature = "recovery-aftermath")]
                 ledger_pass: self.ledger_pass_seams(),
@@ -3300,6 +3420,7 @@ pub enum FfiCustodianRestoreOutcome {
     Restored { applied: u64, sealed_rows: u64 },
     NothingNew,
     IdentityMismatch { expected: Vec<u8>, got: Vec<u8> },
+    IdentityUnchecked,
     Failed { reason: String },
 }
 
@@ -3350,6 +3471,7 @@ fn shared_restore_outcome(
             expected: key(expected),
             got: key(got),
         },
+        FfiCustodianRestoreOutcome::IdentityUnchecked => O::IdentityUnchecked,
         FfiCustodianRestoreOutcome::Failed { .. } => return None,
     })
 }
@@ -3376,6 +3498,7 @@ impl From<fauna_sync_engine::custodian_nest_restore::CustodianRestoreOutcome>
                 expected: expected.to_vec(),
                 got: got.to_vec(),
             },
+            O::IdentityUnchecked => Self::IdentityUnchecked,
         }
     }
 }
@@ -3399,7 +3522,7 @@ fn drive_custody_after_pump(
 
 /// The `device_set_state` e2e reader — the FFI twin of tui's `device_set_state`
 /// automation arm (`apps/fauna-tui/src/automation.rs`) and linux's
-/// `"device_set_state"` bridge command (`apps/fauna-linux/src/main.rs`) —
+/// `"device_set_state"` bridge command (`apps/fauna-linux/src/lib.rs`) —
 /// whether `device_id_hex`'s plane `fauna.state.device-set` row reads
 /// Removed/Enrolled from THIS app's own account runtime
 /// (`docs/goal/behavior/devices.md` § Removing a Device).
@@ -3440,6 +3563,21 @@ impl FfiNestClient {
         fauna_client_account_runtime::read_marker_state_json(
             crate::account_runtime::handle().as_ref(),
             &channel_id_hex,
+        )
+        .await
+        .to_string()
+    }
+
+    /// The `escrow_wrap_coordinates` e2e reader — the FFI twin of tui's and
+    /// linux's `escrow_wrap_coordinates` arm, the recovery-kit let-go
+    /// journey's staging read (`fleet-scope-reclamation.md` § *Fleet-scope
+    /// reclamation*, clause (3)(j)): `{"found": true, "rows": [...]}` or
+    /// `{"found": false}`, from THIS app's own account runtime. Same gate and
+    /// block as [`Self::device_set_state_json`]; serves every native app
+    /// over UniFFI.
+    pub async fn escrow_wrap_coordinates_json(&self) -> String {
+        fauna_client_account_runtime::escrow_wrap_coordinates_json(
+            crate::account_runtime::handle().as_ref(),
         )
         .await
         .to_string()
@@ -3585,8 +3723,30 @@ mod tests {
         let nest = FfiNestClient::new("wss://127.0.0.1:0/ws".into(), vec![7u8; 32]).unwrap();
         // A valid 32-byte secret builds a manager; a short one is rejected at the
         // boundary (mirrors `backup_coordinator`'s 32-byte validation).
-        assert!(nest.feed_manager(vec![7u8; 32]).is_ok());
-        assert!(nest.feed_manager(vec![0u8; 16]).is_err());
+        assert!(nest.feed_manager(vec![7u8; 32], None).is_ok());
+        assert!(nest.feed_manager(vec![0u8; 16], None).is_err());
+    }
+
+    /// The folded archive comments' door (`archive-import.md` § What each
+    /// category becomes → *Placement under the owner's own post*): a
+    /// malformed recording device leaves the source unset rather than failing
+    /// the build, and the refresh is then a no-op that folds nothing.
+    #[cfg(all(feature = "feed-manager", feature = "archive-import"))]
+    #[test]
+    fn feed_manager_without_a_usable_recording_device_folds_nothing() {
+        let nest = FfiNestClient::new("wss://127.0.0.1:0/ws".into(), vec![7u8; 32]).unwrap();
+        let manager = nest
+            .feed_manager(vec![7u8; 32], Some("not hex".into()))
+            .unwrap();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(manager.refresh_archive_comments()).unwrap();
+        assert!(
+            manager
+                .snapshot()
+                .posts
+                .iter()
+                .all(|p| p.archive_comments.is_empty())
+        );
     }
 
     #[cfg(feature = "push-subscription")]
@@ -3807,8 +3967,7 @@ mod tests {
             ssh_door_admitted_from: None,
             web_app_origin: "bundled".into(),
             web_app_origin_target: None,
-            web_app_origin_domainless: false,
-            extra: Default::default(),
+            ..Default::default()
         };
         let ffi = FfiSetupStatus::from(reply);
         assert_eq!(ffi.domain, "nest.example");

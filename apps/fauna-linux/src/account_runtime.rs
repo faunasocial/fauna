@@ -177,6 +177,10 @@ pub fn install(
                     // supplies its own container — and with it, its cloud-backup
                     // exclusion; the desktop posture is shared Rust's own.
                     store_container: None,
+                    // The app default the engine host registers under too
+                    // (`devices.md` § Device names): the ceremony's
+                    // register-create names the machine's row with it.
+                    device_label: Some(crate::sync_agent::DEVICE_LABEL.to_string()),
                 },
                 rpc,
                 &nest_url,

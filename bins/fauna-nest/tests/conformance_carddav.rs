@@ -22,8 +22,6 @@ mod common;
 
 use std::sync::Arc;
 
-use common::sealed;
-
 use bytes::Bytes;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -54,6 +52,11 @@ fn nest() -> (Arc<AppState>, RpcRouter) {
     let mut b = RpcRouter::builder();
     register_bridge_carddav_handlers(&mut b);
     (state, b.build())
+}
+
+/// A card-record seal — the only body shape the address-book put door takes.
+fn sealed(plaintext: &[u8]) -> Vec<u8> {
+    common::sealed_as(fauna_mls::wrapped_blob::RecordKind::Card, plaintext)
 }
 
 /// Encode → dispatch the registered handler keyed on `kind` with `actor` as the
@@ -89,7 +92,10 @@ async fn provision(router: &RpcRouter, state: &Arc<AppState>) -> ProvisionAddres
         ProvisionAddressbookRequest {
             actor_id: USER_ACTOR.to_vec(),
             addressbook_id: ADDRESSBOOK_ID.to_vec(),
-            encrypted_metadata: b"sealed-addressbook-metadata".to_vec(),
+            encrypted_metadata: common::fixture_record(
+                fauna_mls::wrapped_blob::RecordKind::Card,
+                b"sealed-addressbook-metadata",
+            ),
             update_metadata: false,
         },
     )

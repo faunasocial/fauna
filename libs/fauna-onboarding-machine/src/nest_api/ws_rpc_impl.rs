@@ -69,6 +69,7 @@ mod kinds {
     pub const REGISTER: &str = "fauna.account.register";
     pub const NAT_MODE: &str = "fauna.setup.nat_mode";
     pub const ACTOR_BY_HANDLE: &str = "fauna.actor.by_handle";
+    pub const NEST_INFO: &str = "fauna.nest.info";
 }
 
 /// Shared, transport-generic WS-RPC mapping of the wizard's nest surface. Holds
@@ -343,6 +344,53 @@ where
         })
     }
 
+    /// `fauna.nest.info` — the self-description's signed rules, for the
+    /// joining surfaces (`nest-rules.md` § Acceptance at joining). The identity
+    /// is the one this connection proves (`nest_trust::read_login_binding`),
+    /// and a reply naming another is refused: the rules' signature is checked
+    /// against the named key, so a reply's own `nest_id` alone would let any
+    /// box present rules it signed itself as another nest's.
+    pub async fn read_nest_rules(&self) -> Result<NestRulesAnswer, NestRulesError> {
+        use fauna_client_core::nest_trust::{self, LoginBindingError};
+
+        let proven = nest_trust::read_login_binding(&self.requester, self.captured_spki.as_ref())
+            .await
+            .map_err(|e| match e {
+                LoginBindingError::Transport(_) => NestRulesError::Transient {
+                    cause: e.to_string(),
+                },
+                LoginBindingError::Refused(_)
+                | LoginBindingError::NoBinding
+                | LoginBindingError::Binding(_) => NestRulesError::IdentityMismatch {
+                    reason: e.to_string(),
+                },
+            })?;
+        let reply: fauna_protocol::discovery::NestInfoReply = self
+            .requester
+            .request(
+                kinds::NEST_INFO,
+                fauna_protocol::discovery::NestInfoRequest::default(),
+            )
+            .await
+            .map_err(|e| NestRulesError::Transient {
+                cause: e.to_string(),
+            })?;
+        let nest_id = hex::encode(proven);
+        if !reply.nest_id.eq_ignore_ascii_case(&nest_id) {
+            return Err(NestRulesError::IdentityMismatch {
+                reason: format!(
+                    "the self-description names {}, the connection proved {nest_id}",
+                    reply.nest_id
+                ),
+            });
+        }
+        Ok(NestRulesAnswer {
+            nest_id,
+            domain: reply.domain,
+            content_policy: reply.moderation.content_policy,
+        })
+    }
+
     /// `fauna.account.register` — final commit. The wizard treats register as
     /// binary ("succeeded or didn't"), so every failure collapses to `Failed`.
     pub async fn register(&self, body: RegisterBody) -> Result<RegisterResponse, RegisterError> {
@@ -363,9 +411,7 @@ where
             .requester
             .request(kinds::REGISTER, req)
             .await
-            .map_err(|e| RegisterError::Failed {
-                cause: e.to_string(),
-            })?;
+            .map_err(map_register_err)?;
         Ok(RegisterResponse { ok: true })
     }
 
@@ -687,6 +733,25 @@ fn map_invite_err<E: RpcErrorClass + core::fmt::Display>(e: E) -> InviteRequestE
             cause: e.to_string(),
         },
         None => InviteRequestError::Transient {
+            cause: e.to_string(),
+        },
+    }
+}
+
+/// A refusal keeps its code and the nest's reason in words; only a transport
+/// fault stays a bare `Failed`. The refusal used to be flattened to the
+/// transport error's `Display` like a fault, so the redeem showed nothing of
+/// why the nest said no.
+fn map_register_err<E: RpcErrorClass + core::fmt::Display>(e: E) -> RegisterError {
+    match e.as_rpc_error() {
+        Some(rpc) => {
+            rpc.log_operator_details("fauna.account.register");
+            RegisterError::Refused {
+                code: rpc.code.clone(),
+                message: rpc.localized().to_string(),
+            }
+        }
+        None => RegisterError::Failed {
             cause: e.to_string(),
         },
     }

@@ -296,9 +296,9 @@ pub fn keep_backup_destination(state: &mut BackupState, destination_id: &str) ->
 // The user's private, sealed muted-keywords word-list. Edited on the
 // `muted-words` Settings sub-page (all 7 apps), applied client-side
 // post-decrypt over conversation bodies via
-// `fauna_core::keyword::body_excludes_matches`. The
-// `fauna.state.moderation` entry's merge rule resolves concurrent edits across
-// the device fleet.
+// `fauna_core::keyword::body_excludes_matches`. Each term is its own
+// latest-wins `fauna.state.moderation` row (`fauna_core::moderation_rows`),
+// so concurrent edits of different terms across the device fleet all survive.
 
 /// Normalize a muted-keywords list to its canonical stored shape: trim each
 /// term, drop blanks, collapse case-insensitive duplicates keeping the

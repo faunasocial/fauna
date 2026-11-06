@@ -13,10 +13,12 @@ namespace FaunaApp.Core.Helpers;
 /// <c>refreshMailEpochSchedule</c>
 /// (<c>encryption-at-rest.md</c> § Capability tiering → Content-sealing epochs).
 /// <para>
-/// Pure trigger glue over the shared, <b>idempotent</b>
-/// <c>MailSettingsMachine::refresh_epoch_schedule</c>. It is a no-op when mail
-/// isn't enabled — so it is always safe to call unconditionally at
-/// the post-auth hook, exactly like
+/// Pure start glue over the shared trigger
+/// (<c>fauna_client_mail_settings::rpc_glue::refresh_epoch_schedule_on_every_connect</c>),
+/// which runs the <b>idempotent</b> <c>MailSettingsMachine::refresh_epoch_schedule</c>
+/// at start and after every reconnect of the client, and refreshes the
+/// submission token. It is a no-op when mail isn't enabled — so it is always
+/// safe to start unconditionally at the post-auth hook, exactly like
 /// <see cref="DeploymentSeedCustody.SelfHealAsync"/> beside which it fires.
 /// </para>
 /// <para>
@@ -27,26 +29,26 @@ namespace FaunaApp.Core.Helpers;
 internal static class MailEpochSchedule
 {
     /// <summary>
-    /// Refresh this client's content-sealing epoch schedule once for a freshly
-    /// connected session. Call from the <b>universal</b> post-auth hook
-    /// (<c>App.StartMainAppAsync</c>'s single "transition into Online" site), so
-    /// every login and returning-user relaunch refreshes exactly once. Rides the
-    /// session's own connection (<paramref name="rpc"/>) through the same machine
-    /// the mail-settings page builds, never a one-shot connection of its own
-    /// (transport.md: one WebSocket per actor). Never throws.
+    /// Start the shared connect-time refresh trigger for this client, once per
+    /// client (<see cref="INestRpcClient.StartMailEpochRefreshOnEveryConnectAsync"/>
+    /// is idempotent). Call from the <b>universal</b> post-auth hook
+    /// (<c>App.StartMainAppAsync</c>'s single "transition into Online" site) and
+    /// from the e2e <c>session</c> door, which builds its own client. Rides the
+    /// session's own connection (<paramref name="rpc"/>), never a one-shot
+    /// connection of its own (transport.md: one WebSocket per actor). Never
+    /// throws — the connect behind it can fail, and the call is fire-and-forget.
     /// </summary>
-    internal static async Task RefreshAsync(INestRpcClient rpc)
+    internal static async Task StartAsync(INestRpcClient rpc)
     {
         try
         {
-            using var machine = await rpc.BuildMailSettingsMachineAsync();
-            await machine.RefreshEpochSchedule();
-            ShellLog.Info("MailEpochSchedule", "content-sealing epoch schedule refreshed");
+            await rpc.StartMailEpochRefreshOnEveryConnectAsync();
+            ShellLog.Info("MailEpochSchedule", "mail connect-time refresh trigger started");
         }
         catch (Exception ex)
         {
             ShellLog.Warn("MailEpochSchedule",
-                $"epoch-schedule refresh failed, best-effort: {ex.GetType().Name}: {ex.Message}");
+                $"mail refresh trigger start failed, best-effort: {ex.GetType().Name}: {ex.Message}");
         }
     }
 }

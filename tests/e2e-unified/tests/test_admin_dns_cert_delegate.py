@@ -55,6 +55,28 @@ def _seed_local_domain(nest_instance, domain: str) -> None:
         )
 
 
+def _sections(admin_app, idx: int) -> str:
+    """Each `admin-dns-domain` section as the page paints it — its own scoped
+    name and which delegation control it carries — beside the flat name list
+    the index came from (convention 6: splits "the index named another row"
+    from "the row has no control")."""
+    d = admin_app.driver
+    flat = admin_app.admin.dns_domain_names()
+    rows = []
+    for i in range(d.count("admin-dns-domain")):
+        scope = f"admin-dns-domain[{i}]"
+        try:
+            name = d.get_text("admin-dns-domain-name", scope=scope)
+        except Exception as e:  # noqa: BLE001 — diagnostics must not mask the assert
+            name = f"<{e!r}>"
+        rows.append((
+            i, name,
+            d.count("admin-dns-cert-delegate-button", scope=scope),
+            d.count("admin-dns-cert-remove-delegation-button", scope=scope),
+        ))
+    return f"flat names {flat!r}; sections (i, name, delegate, remove) {rows!r}; asked {idx}"
+
+
 @pytest.mark.feature("admin-dns-and-certificates")
 def test_admin_dns_cert_delegate_and_remove(admin_app, nest_instance):
     """Delegate a manual domain's `_acme-challenge` renewals to a held-credential
@@ -81,8 +103,7 @@ def test_admin_dns_cert_delegate_and_remove(admin_app, nest_instance):
     )
 
     try:
-        while admin_app.admin.dns_credential_count() > 0:
-            admin_app.admin.clear_dns_credential(0)
+        admin_app.admin.clear_all_dns_credentials()
 
         # A held credential covering the controlled zone — the valid delegation
         # target. (Cloudflare has a single Secret field `api-token`.)
@@ -99,7 +120,13 @@ def test_admin_dns_cert_delegate_and_remove(admin_app, nest_instance):
         idx = admin_app.admin.dns_domain_names().index(_DOMAIN)
 
         # --- 1. Delegate the manual domain's renewals to the controlled zone. ---
-        admin_app.admin.delegate_cert_renewal(idx)
+        try:
+            admin_app.admin.delegate_cert_renewal(idx)
+        except LookupError as e:
+            raise AssertionError(
+                f"delegate click on section {idx} missed ({e}); "
+                f"{_sections(admin_app, idx)}"
+            ) from e
 
         def _delegated():
             names = admin_app.admin.dns_domain_names()
@@ -146,7 +173,6 @@ def test_admin_dns_cert_delegate_and_remove(admin_app, nest_instance):
                 i = names.index(_DOMAIN)
                 if admin_app.admin.cert_delegation_present(i):
                     admin_app.admin.remove_cert_delegation(i)
-            while admin_app.admin.dns_credential_count() > 0:
-                admin_app.admin.clear_dns_credential(0)
+            admin_app.admin.clear_all_dns_credentials()
         except Exception:
             pass

@@ -25,6 +25,10 @@ final class FileProviderItem: NSObject, NSFileProviderItem {
     let contentVersionBytes: Data
     /// The set is served read-only (the account holds it as a reader).
     let readOnly: Bool
+    /// The holder-keeps gate keeps this body on the device (`FfiFileProviderItem.kept`).
+    let kept: Bool
+    /// The `faunaShare` entry the Share action gates on (`FileProviderShareEntry`).
+    let shareEntry: String?
 
     init(
         identifier: NSFileProviderItemIdentifier,
@@ -34,7 +38,9 @@ final class FileProviderItem: NSObject, NSFileProviderItem {
         size: Int64 = 0,
         mtime: Int64? = nil,
         contentVersion: Data = Data(),
-        readOnly: Bool
+        readOnly: Bool,
+        kept: Bool = false,
+        shareEntry: String? = nil
     ) {
         self.identifier = identifier
         self.parent = parent
@@ -44,6 +50,8 @@ final class FileProviderItem: NSObject, NSFileProviderItem {
         self.mtime = mtime
         self.contentVersionBytes = contentVersion
         self.readOnly = readOnly
+        self.kept = kept
+        self.shareEntry = shareEntry
         super.init()
     }
 
@@ -64,7 +72,9 @@ final class FileProviderItem: NSObject, NSFileProviderItem {
             size: ffi.sizeBytes,
             mtime: ffi.mtime,
             contentVersion: overrideContentVersion ?? ffi.contentVersion,
-            readOnly: readOnly
+            readOnly: readOnly,
+            kept: ffi.kept,
+            shareEntry: FileProviderShareEntry.forFile(shareLinkEligible: ffi.shareLinkEligible)
         )
     }
 
@@ -78,13 +88,19 @@ final class FileProviderItem: NSObject, NSFileProviderItem {
     }
 
     /// The Fauna root container the domain presents in Finder / the Files app.
-    static func rootContainer(named name: String, readOnly: Bool) -> FileProviderItem {
+    /// `shareable` gives it the `faunaShare` folder entry (its member sharing)
+    /// when `domainIdentifier` names a set of this nest; a domain the extension
+    /// cannot serve passes `nil` and offers no Share.
+    static func rootContainer(
+        named name: String, readOnly: Bool, shareable domainIdentifier: String? = nil
+    ) -> FileProviderItem {
         FileProviderItem(
             identifier: .rootContainer,
             parent: .rootContainer,
             name: name,
             isFolder: true,
-            readOnly: readOnly
+            readOnly: readOnly,
+            shareEntry: domainIdentifier.flatMap(FileProviderShareEntry.forRoot(domainIdentifier:))
         )
     }
 
@@ -92,9 +108,24 @@ final class FileProviderItem: NSObject, NSFileProviderItem {
     var parentItemIdentifier: NSFileProviderItemIdentifier { parent }
     var filename: String { name }
 
-    var capabilities: NSFileProviderItemCapabilities {
-        FileProviderItemCapabilities.capabilities(isFolder: isFolder, readOnly: readOnly)
+    /// Read by the Share action's activation rule (`Fauna-FileProviderUI/Info.plist`).
+    /// The OS re-reads it as items sync: a flip of the set's share-link fact is
+    /// reported through the working set's change feed (`takeKeptFlips`).
+    var userInfo: [AnyHashable: Any]? {
+        FileProviderShareEntry.userInfo(shareEntry)
     }
+
+    var capabilities: NSFileProviderItemCapabilities {
+        FileProviderItemCapabilities.capabilities(isFolder: isFolder, readOnly: readOnly, kept: kept)
+    }
+
+    #if os(macOS)
+        /// A body the holder-keeps gate keeps is kept downloaded, out of the OS's
+        /// own eviction (`FileProviderKeep`); every other item inherits.
+        var contentPolicy: NSFileProviderContentPolicy {
+            FileProviderKeep.contentPolicy(kept: kept)
+        }
+    #endif
 
     var contentType: UTType {
         guard !isFolder else { return .folder }

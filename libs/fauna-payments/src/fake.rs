@@ -7,7 +7,9 @@
 //! - Signature: `X-Fauna-Signature: hex(HMAC_SHA256(secret, raw_body))`.
 //! - Body (JSON): `{ "id": "...", "event": "payment"|"refund",
 //!   "reference": "<actor hex>"?, "product": "..."?, "valid_until": secs?,
-//!   "return_ref": "..."? }`.
+//!   "return_ref": "..."?, "purchase": "..."? }` — `purchase` is the stable
+//!   per-purchase reference a later refund names (`VerifiedPaymentEvent::
+//!   purchase_refs`); absent, the engine keys on `id` alone.
 //!
 //! No timestamp/replay tolerance — the real-provider replay concern is
 //! covered by the Stripe adapter; this one exists to exercise the engine.
@@ -48,6 +50,8 @@ struct FakeEventBody {
     valid_until: Option<u64>,
     #[serde(default)]
     return_ref: Option<String>,
+    #[serde(default)]
+    purchase: Option<String>,
 }
 
 pub struct FakeProvider;
@@ -86,6 +90,7 @@ impl PaymentProvider for FakeProvider {
             valid_until_secs: parsed.valid_until,
             external_ref: parsed.id,
             return_ref: parsed.return_ref,
+            purchase_refs: parsed.purchase.into_iter().collect(),
         })
     }
 }

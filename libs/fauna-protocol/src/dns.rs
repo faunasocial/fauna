@@ -203,6 +203,53 @@ pub struct ProbeTxtVisibleReply {
     pub extra: BTreeMap<String, Value>,
 }
 
+/// One TXT record a fake-provider write touched: its owner name and value.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct E2eTxtPair {
+    pub name: String,
+    pub value: String,
+    /// Forward-compat catch-all: unknown keys from a newer peer are
+    /// preserved here and re-emitted on encode (transport.md § Schema
+    /// and forward-compat discipline, rule 4).
+    #[serde(flatten, default)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+/// Request for `fauna.dns.e2e_mirror_txt` (Admin) — **served by a `test-hooks`
+/// nest build alone** (`e2e-gated-seeds.md` § The ACME directory seed → *The
+/// web order*, leg 3).
+///
+/// The web app's e2e fake DNS provider runs in the browser, which has no TCP,
+/// so it cannot write the managed challenge into the harness's fake name server
+/// the way native's does (an RFC 2136 UPDATE). It asks the nest instead, which
+/// sends the identical UPDATE to the name server its own launch environment
+/// names (`FAUNA_E2E_ACME_NAMESERVER`) — never to an address this request
+/// names: it carries the touched `(name, value)` pairs and nothing else. A
+/// shipped nest answers `fauna.protocol.unknown_kind`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct E2eMirrorTxtRequest {
+    /// TXT records the fake provider published.
+    pub published: Vec<E2eTxtPair>,
+    /// TXT records the fake provider withdrew.
+    pub withdrawn: Vec<E2eTxtPair>,
+    /// Forward-compat catch-all: unknown keys from a newer peer are
+    /// preserved here and re-emitted on encode (transport.md § Schema
+    /// and forward-compat discipline, rule 4).
+    #[serde(flatten, default)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+/// Reply for `fauna.dns.e2e_mirror_txt`: an empty acknowledgement — the name
+/// server accepted every UPDATE (a refusal is the call's error).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct E2eMirrorTxtReply {
+    /// Forward-compat catch-all: unknown keys from a newer peer are
+    /// preserved here and re-emitted on encode (transport.md § Schema
+    /// and forward-compat discipline, rule 4).
+    #[serde(flatten, default)]
+    pub extra: BTreeMap<String, Value>,
+}
+
 /// Request for `fauna.dns.set_host_address` (Admin) — the onboarding hand-off
 /// that persists the deployment's own public address nest-side so the host
 /// `A`/`AAAA`/`PTR` rows can be assembled + verified. The address is **public,

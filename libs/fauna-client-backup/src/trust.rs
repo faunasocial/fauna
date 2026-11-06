@@ -212,18 +212,22 @@ pub trait BackupNestSeam: MaybeSendSync {
     ) -> Result<Vec<fauna_protocol::nest_rotation::SignedNestRotation>, String> {
         Err("this seam does not answer fauna.auth.rotation_chain".to_string())
     }
-    /// `fauna.backup.writer_grant.register { succeeds }` (**destination**) —
-    /// hand the seat `succeeds` holds to `writer_nest_id`. The seam has no
-    /// registration without `succeeds`: the carry is its only caller, and
-    /// without a predecessor the successor is a second box.
+    /// `fauna.backup.writer_grant.register { succeeds, in_force_only }`
+    /// (**destination**) — hand the seat `succeeds` holds to `writer_nest_id`,
+    /// only while its grant is in force. The seam has no registration without
+    /// `succeeds` and none that re-grants: the carry is its only caller,
+    /// without a predecessor the successor is a second box, and a revoked
+    /// seat is the owner's freeze, which the destination keeps
+    /// ([`crate::seat_carry::SeatHandover::Revoked`]) in the same transaction
+    /// that would have moved it.
     ///
     /// Defaulted to "could not ask", like [`Self::rotation_chain`]. The
     /// production adapter (`impl_backup_nest_seam!`) always answers.
-    async fn writer_grant_succeed(
+    async fn writer_grant_carry(
         &self,
         writer_nest_id: String,
         succeeds: String,
-    ) -> Result<(), String> {
+    ) -> Result<crate::seat_carry::SeatHandover, String> {
         Err(format!(
             "this seam does not answer fauna.backup.writer_grant.register \
              (writer={writer_nest_id}, succeeds={succeeds})"
@@ -384,18 +388,24 @@ macro_rules! impl_backup_nest_seam {
                     .map_err(|e| e.to_string())
             }
 
-            async fn writer_grant_succeed(
+            async fn writer_grant_carry(
                 &self,
                 writer_nest_id: ::std::string::String,
                 succeeds: ::std::string::String,
-            ) -> ::core::result::Result<(), ::std::string::String> {
+            ) -> ::core::result::Result<
+                $crate::seat_carry::SeatHandover,
+                ::std::string::String,
+            > {
                 match self
                     .client
-                    .writer_grant_succeed(writer_nest_id, succeeds)
+                    .writer_grant_carry(writer_nest_id, succeeds)
                     .await
                 {
                     ::core::result::Result::Ok(reply) if reply.ok => {
-                        ::core::result::Result::Ok(())
+                        ::core::result::Result::Ok($crate::seat_carry::SeatHandover::Moved)
+                    }
+                    ::core::result::Result::Ok(reply) if reply.seat_revoked => {
+                        ::core::result::Result::Ok($crate::seat_carry::SeatHandover::Revoked)
                     }
                     ::core::result::Result::Ok(_) => ::core::result::Result::Err(
                         "the destination did not confirm the seat handover".into(),
@@ -785,13 +795,13 @@ mod tests {
         ) -> Result<GenerationRestoreReply, String> {
             panic!("the trust facet never restores — that is the recovery surface's write")
         }
-        async fn writer_grant_succeed(
+        async fn writer_grant_carry(
             &self,
             writer_nest_id: String,
             _succeeds: String,
-        ) -> Result<(), String> {
+        ) -> Result<crate::seat_carry::SeatHandover, String> {
             *self.grants.lock().unwrap() = vec![granted(&writer_nest_id, 1_800_000_000)];
-            Ok(())
+            Ok(crate::seat_carry::SeatHandover::Moved)
         }
     }
 

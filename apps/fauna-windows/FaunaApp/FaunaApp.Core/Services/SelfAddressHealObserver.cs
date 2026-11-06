@@ -26,10 +26,27 @@ internal sealed class SelfAddressHealObserver : LaunchObserver
 {
     public ILaunchMachine? Machine { get; set; }
 
+    /// <summary>
+    /// Every change of the observed machine, forwarded raw — on the machine's own
+    /// thread, so a subscriber marshals to the UI itself. The launch flow is
+    /// otherwise pulled (each entry point is awaited, then one snapshot is
+    /// dispatched); the tick exists for the one change no app call starts: the
+    /// machine's own refresh at a lock's unlock time, which the locked launch
+    /// surface follows out (<c>LockedLaunchViewModel.NoticeHolds</c>; FaunaKit's
+    /// <c>LaunchTicks</c> is the twin). This observer is the one the app wires onto
+    /// every <see cref="LaunchMachine"/> it builds, so the hook rides it rather than
+    /// a second observer at each construction site.
+    /// </summary>
+    public Action? Ticked { get; set; }
+
     private IConversationsSession? _session;
     private string? _lastApplied;
 
-    public void OnChanged() => Apply();
+    public void OnChanged()
+    {
+        Apply();
+        Ticked?.Invoke();
+    }
 
     public void AttachSession(IConversationsSession session)
     {

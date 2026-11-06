@@ -14,8 +14,9 @@ and a domainless box keeps serving bundled whatever the choice
 (``web-content-hosting.md`` § The nest-served `/app/` and the central origin) —
 there would be no redirect to observe. ``web_hosting_nest`` claims a real
 DNS-shaped domain. A tier_3 nest ships no SPA, so its bundled ``/app/`` answers
-404 (still reserved, never user content); what the SPA serves under bundled is
-pinned in Rust against the real ``mount_spa``.
+404 (still reserved, never user content), while an image nest answers it with its
+bundled SPA (200) — the handle's ``serves_spa`` says which; what the SPA serves
+under bundled is pinned in Rust against the real ``mount_spa``.
 
 tui is the lead app; the other six follow in their batched trickle-down.
 """
@@ -27,13 +28,9 @@ import pytest
 
 from common.auth import no_redirect_opener
 from conftest import _login_admin_as
-from helpers.app_surface import app_name, skip_unbuilt
 from i18n.strings import S
 
 pytestmark = pytest.mark.tier_3
-
-# The apps whose admin-nest renders the section. tui leads.
-BUILT = {"tui", "web", "linux", "windows", "macos", "ios", "android"}
 
 
 # A redirect is the assertion here, so it is handed back rather than
@@ -76,13 +73,6 @@ def origin_admin_app(request, app, web_hosting_nest):
 @pytest.mark.feature("admin-nest")
 def test_admin_flips_app_to_the_central_origin_and_back(origin_admin_app, web_hosting_nest):
     app = origin_admin_app
-    if app_name(app.driver) not in BUILT:
-        skip_unbuilt(
-            app.driver,
-            surface="admin-nest-web-app-origin-section",
-            detail="the web-app origin section's six-app trickle-down has not reached this app yet",
-            tracked="",
-        )
     nest_url = web_hosting_nest["url"]
     app.admin.navigate_nest()
 
@@ -91,9 +81,10 @@ def test_admin_flips_app_to_the_central_origin_and_back(origin_admin_app, web_ho
         f"a fresh nest must read bundled; status {app.admin.web_app_origin_status_text()!r}, "
         f"error: {app.error_text()!r}"
     )
+    bundled_status = 200 if web_hosting_nest["serves_spa"] else 404
     status, location = _get_app(nest_url)
-    assert status == 404 and location is None, (
-        f"bundled with no shipped SPA must answer 404, not redirect: {status} {location!r}"
+    assert status == bundled_status and location is None, (
+        f"bundled must answer {bundled_status}, not redirect: {status} {location!r}"
     )
 
     app.admin.select_web_app_origin("central")
@@ -122,6 +113,6 @@ def test_admin_flips_app_to_the_central_origin_and_back(origin_admin_app, web_ho
             f"status did not return to bundled. error: {app.error_text()!r}"
         )
     status, location = _get_app(nest_url)
-    assert status == 404 and location is None, (
+    assert status == bundled_status and location is None, (
         f"bundled again must stop redirecting: {status} {location!r}"
     )

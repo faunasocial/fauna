@@ -45,8 +45,10 @@ pub struct PrincipalInfo {
     /// encoding every scope surface uses.
     pub granted_scopes: String,
     pub created_at: i64,
-    /// Stamped at every consent that finds this row. Advisory, as the grant
-    /// row's own `last_used_at` is.
+    /// Unix milliseconds of the newest use the nest observed: a consent that
+    /// found this row, a refresh of one of its grant families, or an act a
+    /// custodian served for it. Advisory, as the grant row's own
+    /// `last_used_at` is.
     pub last_used_at: Option<i64>,
     /// The display name: the RESOLVED `client_name` at first consent — what
     /// the card showed — never the client's self-asserted string as-is.
@@ -96,6 +98,14 @@ pub struct PrincipalInfo {
     #[serde(flatten, default)]
     pub extra: BTreeMap<String, Value>,
 }
+
+/// The `client_id` of the cli app (`apps/fauna-cli`): the URL the
+/// organisation's Client ID Metadata Document is published at, "Fauna for AI
+/// assistants" (`apps/cli.md` § Open decisions 1). A third-party principal
+/// like any other, so this is its only identity — the shell connects under it,
+/// and the consent card adds the cli's own line when it asks
+/// (`apps/cli.md` § Hosting cases).
+pub const CLI_CLIENT_ID: &str = "https://fauna.social/apps/cli/client-metadata.json";
 
 /// The class an [`OracleOp`] carries for one write an external app made at
 /// the ATProto PDS write funnel (`key-material-hierarchy.md` § *The oracle* →

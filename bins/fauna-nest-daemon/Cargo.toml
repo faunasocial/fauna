@@ -29,20 +29,25 @@ path = "src/main.rs"
 # `FAUNA_INSECURE_DISABLE_TLS` string.
 test-hooks = ["fauna-nest/test-hooks"]
 
-[dependencies]
-# The macOS daemon runs the nest IN-PROCESS via the shared cross-OS serve loop
-# `fauna_nest::desktop_serve::run_serve_loop` (the same loop the Windows SCM shell
-# drives; priority #2/#3). The serving-port reconcile policy it needs lives one
-# level down in `fauna-nest-supervisor`, pulled in transitively via `fauna-nest`.
-fauna-nest.workspace = true
+# `main.rs` is `cfg(target_os = "macos")` (a stub elsewhere), so every dependency
+# sits in the macOS table — off macOS Cargo reports them as unused.
+[target.'cfg(target_os = "macos")'.dependencies]
+# The build-commit `commit!()` macro, expanded in `main` and handed to the
+# embedded nest (`fauna_nest::build_identity::stamp`), or health reports `dev`.
+fauna-build-commit = { path = "../../libs/fauna-build-commit" }
 # `parse_dir_override` for the FAUNA_DATA_DIR env convention shared with
 # fauna-nest / fauna-bridge-supervisor — zero-dependency, already transitive
 # via fauna-nest, so this direct edge adds nothing to the build.
 fauna-deployment-flags.workspace = true
 tokio.workspace = true
 tracing.workspace = true
+dirs.workspace = true
+# The macOS daemon runs the nest IN-PROCESS via the shared cross-OS serve loop
+# `fauna_nest::desktop_serve::run_serve_loop` (the same loop the Windows SCM shell
+# drives; priority #2/#3). The serving-port reconcile policy it needs lives one
+# level down in `fauna-nest-supervisor`, pulled in transitively via `fauna-nest`.
+fauna-nest.workspace = true
 # The shared logging stack (ring + size-capped file + stderr) — the daemon's
 # only persistent log, since its LaunchDaemon plist redirects nothing
 # (observability.md § Persistence & privacy). Already transitive via fauna-nest.
 fauna-log = { path = "../../libs/fauna-log" }
-dirs.workspace = true

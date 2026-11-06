@@ -63,3 +63,46 @@ func flushDraftsAutosave(
                    message: "[drafts] leave-flush failed (transient): \(error)")
     }
 }
+
+/// How long a session-teardown door waits for its drafts rails — the same 2.5 s
+/// ceiling macOS's quit gate and linux's blocking flush hold.
+private let leaveFlushBound: Duration = .milliseconds(2500)
+
+/// Resumes its continuation once, for whichever of the flush and the bound lands
+/// first. Main-actor-held, so the two racers need no lock.
+@MainActor
+private final class LeaveFlushRace {
+    private var continuation: CheckedContinuation<Void, Never>?
+
+    init(_ continuation: CheckedContinuation<Void, Never>) {
+        self.continuation = continuation
+    }
+
+    func finish() {
+        continuation?.resume()
+        continuation = nil
+    }
+}
+
+/// The session-teardown leave door's wait (`reserved-folders.md` § The leave-flush
+/// promise: "signing out, and switching to another account, is a leave door too, on
+/// every app"): run `flush` while the outgoing session still has its transport, and
+/// return when it finishes or `leaveFlushBound` passes, so a sign-out never hangs on
+/// an unreachable nest.
+///
+/// A race of two tasks rather than a task group: a group waits for every child
+/// before it returns, so a put that ignores cancellation would hold the door open.
+@MainActor
+public func boundedLeaveFlush(_ flush: @escaping @MainActor () async -> Void) async {
+    await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+        let race = LeaveFlushRace(continuation)
+        Task { @MainActor in
+            await flush()
+            race.finish()
+        }
+        Task { @MainActor in
+            try? await Task.sleep(for: leaveFlushBound)
+            race.finish()
+        }
+    }
+}

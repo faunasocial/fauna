@@ -1182,6 +1182,12 @@ pub struct ForwardMessageRequest {
     /// Copy vs redirect (see `ForwardCopyMode`).
     #[serde(default)]
     pub copy_mode: ForwardCopyMode,
+    /// The source message's inbound SPF/DKIM/DMARC/ARC verdicts, as the MX
+    /// door computed them; `None` from the submission door, whose sender
+    /// authenticated. The forwarder NDR's backscatter suppressors read them
+    /// (`mail-forwarding.md` § Suppression matches the outbound shape).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_results: Option<AuthVerdicts>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
@@ -1476,7 +1482,8 @@ pub const DMARC_FORENSIC_RETENTION_DAYS_MAX: u32 = 90;
 /// The **effective** (override-or-default) deployment-wide DMARC policy the
 /// `fauna.bridges.get_dmarc_policy` admin read twin returns — the ten tags of
 /// the published `_dmarc.<domain>` record (`dmarc-reporting.md` § Record
-/// shape) plus the two inbound-report retentions (§ Retention, both), every
+/// shape) plus the two inbound-report retentions (§ Retention, both) and the
+/// outbound aggregate-report switch (§ Generation is on by default), every
 /// `None` override resolved to its catalog default so each field is concrete.
 /// The `admin-mail` form hydrates from this before edit, then writes the whole
 /// sub-struct back via [`PutDmarcPolicyRequest`] (full PUT). Like the alias
@@ -1518,6 +1525,12 @@ pub struct DmarcReportingPolicy {
     pub aggregate_retention_days: u32,
     /// `mail.dmarc.forensic_retention_days`.
     pub forensic_retention_days: u32,
+    /// `mail.dmarc.outbound_aggregate_enabled` (`dmarc-reporting.md`
+    /// § Generation is on by default): whether the daily outbound
+    /// aggregate-report sender mails reports to peers that publish `rua=`.
+    /// Absent on decode (an older nest) ⇒ the shipped default, on.
+    #[serde(default = "default_outbound_aggregate_enabled")]
+    pub outbound_aggregate_enabled: bool,
     /// Forward-compat catch-all: unknown keys from a newer peer are
     /// preserved here and re-emitted on encode (transport.md § Schema
     /// and forward-compat discipline, rule 4). This kind is APP-callable,
@@ -1546,9 +1559,18 @@ impl Default for DmarcReportingPolicy {
             ri_seconds: 86_400,
             aggregate_retention_days: DMARC_AGGREGATE_RETENTION_DAYS_DEFAULT,
             forensic_retention_days: DMARC_FORENSIC_RETENTION_DAYS_DEFAULT,
+            outbound_aggregate_enabled: DMARC_OUTBOUND_AGGREGATE_ENABLED_DEFAULT,
             extra: BTreeMap::new(),
         }
     }
+}
+
+/// `mail.dmarc.outbound_aggregate_enabled` default (`dmarc-reporting.md`
+/// § Generation is on by default): cooperative, so on.
+pub const DMARC_OUTBOUND_AGGREGATE_ENABLED_DEFAULT: bool = true;
+
+fn default_outbound_aggregate_enabled() -> bool {
+    DMARC_OUTBOUND_AGGREGATE_ENABLED_DEFAULT
 }
 
 /// Admin write for the deployment-wide `mail.dmarc.*` catalog
@@ -1579,6 +1601,8 @@ pub struct PutDmarcPolicyRequest {
     pub ri_seconds: Option<u32>,
     pub aggregate_retention_days: Option<u32>,
     pub forensic_retention_days: Option<u32>,
+    /// `mail.dmarc.outbound_aggregate_enabled`; `None` ⇒ on.
+    pub outbound_aggregate_enabled: Option<bool>,
     /// Forward-compat catch-all: unknown keys from a newer peer are
     /// preserved here and re-emitted on encode (transport.md § Schema
     /// and forward-compat discipline, rule 4). This kind is APP-callable,
@@ -1677,6 +1701,16 @@ pub struct MailDomainRow {
     /// no override; projected and degraded exactly like
     /// [`Self::role_address_overrides`].
     pub dmarc_overrides: DmarcOverrides,
+    /// The `p=` this domain PUBLISHES — its [`Self::dmarc_overrides`] partial
+    /// overlaid on the deployment-wide `mail.dmarc.*` catalog, resolved
+    /// nest-side because the catalog lives there (`dmarc-reporting.md`
+    /// § Multi-domain deployments). The per-domain policy select shows this,
+    /// never the bare partial: a domain with no override publishes whatever the
+    /// deployment does, which an admin may have softened below the shipped
+    /// `reject`. `None` only from a nest that predates the field; the reader
+    /// then falls back to the partial.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effective_dmarc_policy_mode: Option<DmarcMode>,
     pub spf_record: String,
     /// Epoch-ms when the active `dkim_selector` last became active (stamped on
     /// every rotation flip); `None` until the first flip (the due window then
@@ -1799,11 +1833,12 @@ pub struct UpdateLocalDomainConfigRequest {
     pub spf_record: Option<String>,
     /// The domain's published DMARC policy — the per-domain policy select
     /// (`dmarc-reporting.md` § Multi-domain deployments). `None` = unchanged;
-    /// `Some(Quarantine | None)` sets the stored override's `policy_mode` and
-    /// `subdomain_policy_mode` together; `Some(Reject)` — the default — clears
-    /// both keys, so the domain inherits the deployment policy again. The nest
-    /// merges into the stored partial, leaving its other keys alone. Additive:
-    /// an older nest ignores it and an older client never sends it.
+    /// `Some(mode)` sets the stored override's `policy_mode` and
+    /// `subdomain_policy_mode` together — unless the effective deployment-wide
+    /// policy already publishes `mode` for both, which clears both keys so the
+    /// domain inherits it (`fauna_mail::dmarc_publish::set_policy_mode_json`).
+    /// The nest merges into the stored partial, leaving its other keys alone.
+    /// Additive: an older nest ignores it and an older client never sends it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dmarc_policy_mode: Option<DmarcMode>,
 }
@@ -2190,6 +2225,18 @@ pub struct FetchRecipientMlsPubkeyReply {
     /// caller already knows how to handle.
     #[serde(default)]
     pub succession_pending: bool,
+    /// The recipient's standing **calendar** seal key — both public halves of
+    /// the recipient-calendar keypair every calendar body seals to as a
+    /// `calendar-record` (`owner-key-material.md` § Path B-sibling-5 →
+    /// *Registration*). Registered in the same row as [`Self::key`], so it is
+    /// `Some` exactly when `key` is. Required on the wire (no serde default —
+    /// the 0.1.x compat-free window); `None` only for an unprovisioned
+    /// recipient. Always the standing key, whatever `mail_new_ingest` asked:
+    /// calendar has no sealing epochs.
+    pub calendar_key: Option<RecipientSealKeyHalves>,
+    /// [`Self::calendar_key`]'s twin for the address book: the recipient-card
+    /// keypair every card body seals to as a `card-record` (§ Path B-sibling-6).
+    pub card_key: Option<RecipientSealKeyHalves>,
 }
 
 /// Admin-class request to upsert a recipient's MLS public encryption key
@@ -2228,6 +2275,22 @@ pub struct ProvisionRecipientMlsPubkeyRequest {
     /// recipient's inbound mail under the hybrid suite from the first
     /// message.
     pub mlkem_ek: ByteBuf,
+    /// 32-byte X25519 public half of the recipient-**calendar** keypair
+    /// (`fauna_mls::wrapped_blob::derive_recipient_calendar_hpke_keypair`),
+    /// MSEK-derived through the calendar root alongside `mls_pubkey` — the key
+    /// every calendar body seals to (`owner-key-material.md` § Path B-sibling-5
+    /// → *Registration*). Required, like the three pairs' every half: one
+    /// request carries all three, so a half-registered actor is unrepresentable.
+    pub calendar_pubkey: ByteBuf,
+    /// 1184-byte ML-KEM-768 encapsulation key of the recipient-calendar X-Wing
+    /// keypair.
+    pub calendar_mlkem_ek: ByteBuf,
+    /// 32-byte X25519 public half of the recipient-**card** keypair
+    /// (§ Path B-sibling-6).
+    pub card_pubkey: ByteBuf,
+    /// 1184-byte ML-KEM-768 encapsulation key of the recipient-card X-Wing
+    /// keypair.
+    pub card_mlkem_ek: ByteBuf,
     /// Content-sealing-epoch schedule (design 2026-07-18 § 3): the horizon
     /// of per-epoch mail sealing **public** keys the owner's client
     /// pre-publishes so the MTA can epoch-seal inbound mail with no client
@@ -3455,6 +3518,33 @@ pub enum SpamDisposition {
     PolicyJunk,
 }
 
+impl SpamDisposition {
+    /// The snake_case wire/at-rest token (identical to the serde form; pinned
+    /// by `spam_disposition_wire_tokens_match_serde`).
+    pub const fn as_wire(self) -> &'static str {
+        match self {
+            Self::Accept => "accept",
+            Self::AcceptToSpamFolder => "accept_to_spam_folder",
+            Self::PolicyJunk => "policy_junk",
+        }
+    }
+
+    /// Inverse of [`Self::as_wire`]; `None` for an unrecognized token.
+    pub fn from_wire(token: &str) -> Option<Self> {
+        match token {
+            "accept" => Some(Self::Accept),
+            "accept_to_spam_folder" => Some(Self::AcceptToSpamFolder),
+            "policy_junk" => Some(Self::PolicyJunk),
+            _ => None,
+        }
+    }
+
+    /// Whether this disposition files the mail to Junk.
+    pub const fn files_to_junk(self) -> bool {
+        !matches!(self, Self::Accept)
+    }
+}
+
 // ── Perimeter scan results (ClamAV verdict, rspamd score) ─────────────
 //
 // ONE definition, in `fauna_core::mail_scan` — which owns the wire-shape
@@ -3910,13 +4000,22 @@ pub enum ReportIngestOutcome {
     /// §4.4 required fields.
     Malformed,
     /// Over the leg's compressed / decompressed size bounds (DMARC aggregate
-    /// 50 MiB / 500 MiB; the forensic size bound; TLSRPT 16 MiB / 64 MiB).
+    /// 16 MiB / 64 MiB per message; the forensic size bound; TLSRPT 16 MiB /
+    /// 64 MiB).
     Oversize,
     /// The report is about a domain that is not one of this nest's local
     /// domains (`policy_published.domain`; for a forensic report its
     /// `Reported-Domain`, else the reported message's `From:` domain; for
     /// TLSRPT, none of its policies' `policy-domain`s).
     WrongDomain,
+    /// DMARC forensic: the deployment has not opted in to forensic reports
+    /// (`mail.dmarc.ruf_publish` off), so none is stored, whatever a sender
+    /// mails (`dmarc-reporting.md` § Forensic-report receive).
+    NotOptedIn,
+    /// The leg's table is at its row or byte cap; the report is dropped and
+    /// counted, nothing older is evicted (`deployment-threat-model.md` § What
+    /// it attacks, storage exhaustion).
+    Full,
 }
 
 /// Which DMARC report a `dmarc-report@` message turned out to be.
@@ -9411,6 +9510,7 @@ mod tests {
             dkim_selector_activated_at: Some(1_700_000_500),
             dkim_rotation_due: true,
             catch_all_cleared_by_succession_at: Some(1_700_000_600),
+            effective_dmarc_policy_mode: Some(DmarcMode::None),
         };
         let bytes = encode_canonical(&r).unwrap();
         assert_eq!(r, decode::<MailDomainRow>(&bytes).unwrap());
@@ -10330,6 +10430,16 @@ mod tests {
                 extra: Default::default(),
             }),
             succession_pending: false,
+            calendar_key: Some(RecipientSealKeyHalves {
+                mls_pubkey: ByteBuf::from(vec![0xCAu8; 32]),
+                mlkem_ek: ByteBuf::from(vec![0xCBu8; 1184]),
+                extra: Default::default(),
+            }),
+            card_key: Some(RecipientSealKeyHalves {
+                mls_pubkey: ByteBuf::from(vec![0xC0u8; 32]),
+                mlkem_ek: ByteBuf::from(vec![0xC1u8; 1184]),
+                extra: Default::default(),
+            }),
         };
         let bytes = encode_canonical(&r).unwrap();
         assert_eq!(r, decode::<FetchRecipientMlsPubkeyReply>(&bytes).unwrap());
@@ -10340,6 +10450,8 @@ mod tests {
         let r = FetchRecipientMlsPubkeyReply {
             key: None,
             succession_pending: false,
+            calendar_key: None,
+            card_key: None,
         };
         let bytes = encode_canonical(&r).unwrap();
         assert_eq!(r, decode::<FetchRecipientMlsPubkeyReply>(&bytes).unwrap());
@@ -10353,6 +10465,8 @@ mod tests {
         let r = FetchRecipientMlsPubkeyReply {
             key: None,
             succession_pending: true,
+            calendar_key: None,
+            card_key: None,
         };
         let bytes = encode_canonical(&r).unwrap();
         assert_eq!(r, decode::<FetchRecipientMlsPubkeyReply>(&bytes).unwrap());
@@ -10367,8 +10481,14 @@ mod tests {
         #[derive(Serialize)]
         struct OldShape {
             key: Option<RecipientSealKeyHalves>,
+            calendar_key: Option<RecipientSealKeyHalves>,
+            card_key: Option<RecipientSealKeyHalves>,
         }
-        let old = OldShape { key: None };
+        let old = OldShape {
+            key: None,
+            calendar_key: None,
+            card_key: None,
+        };
         let bytes = encode_canonical(&old).unwrap();
         let decoded: FetchRecipientMlsPubkeyReply = decode(&bytes).unwrap();
         assert!(decoded.key.is_none());
@@ -10381,6 +10501,10 @@ mod tests {
             actor_id: ByteBuf::from(vec![0x42u8; 32]),
             mls_pubkey: ByteBuf::from(vec![0xDDu8; 32]),
             mlkem_ek: ByteBuf::from(vec![0x55u8; 1184]),
+            calendar_pubkey: ByteBuf::from(vec![0xCAu8; 32]),
+            calendar_mlkem_ek: ByteBuf::from(vec![0xCBu8; 1184]),
+            card_pubkey: ByteBuf::from(vec![0xC0u8; 32]),
+            card_mlkem_ek: ByteBuf::from(vec![0xC1u8; 1184]),
             ..Default::default()
         };
         let bytes = encode_canonical(&r).unwrap();
@@ -10388,6 +10512,27 @@ mod tests {
             r,
             decode::<ProvisionRecipientMlsPubkeyRequest>(&bytes).unwrap()
         );
+    }
+
+    /// The three pairs are REQUIRED (0.1.x compat-free window,
+    /// `owner-key-material.md` § Path B-sibling-5 → *Registration*): a request
+    /// carrying the mail pair alone — a pre-split client — is refused at
+    /// decode, so a half-registered actor cannot be written.
+    #[test]
+    fn provision_recipient_mls_pubkey_request_requires_all_three_pairs() {
+        #[derive(Serialize)]
+        struct MailOnly {
+            actor_id: ByteBuf,
+            mls_pubkey: ByteBuf,
+            mlkem_ek: ByteBuf,
+        }
+        let bytes = encode_canonical(&MailOnly {
+            actor_id: ByteBuf::from(vec![0x42u8; 32]),
+            mls_pubkey: ByteBuf::from(vec![0xDDu8; 32]),
+            mlkem_ek: ByteBuf::from(vec![0x55u8; 1184]),
+        })
+        .unwrap();
+        assert!(decode::<ProvisionRecipientMlsPubkeyRequest>(&bytes).is_err());
     }
 
     #[test]
@@ -10411,6 +10556,7 @@ mod tests {
                     mlkem_ek: ByteBuf::from(vec![0x04u8; 1184]),
                 },
             ]),
+            ..Default::default()
         };
         let bytes = encode_canonical(&r).unwrap();
         assert_eq!(
@@ -10954,6 +11100,21 @@ mod tests {
             let bytes = encode_canonical(&d).unwrap();
             assert_eq!(d, decode::<SpamDisposition>(&bytes).unwrap());
         }
+    }
+
+    #[test]
+    fn spam_disposition_wire_tokens_match_serde() {
+        for d in [
+            SpamDisposition::Accept,
+            SpamDisposition::AcceptToSpamFolder,
+            SpamDisposition::PolicyJunk,
+        ] {
+            let json = serde_json::to_string(&d).unwrap();
+            assert_eq!(json, format!("\"{}\"", d.as_wire()));
+            assert_eq!(SpamDisposition::from_wire(d.as_wire()), Some(d));
+            assert_eq!(d.files_to_junk(), d != SpamDisposition::Accept);
+        }
+        assert_eq!(SpamDisposition::from_wire("bogus"), None);
     }
 
     #[test]
@@ -13340,6 +13501,10 @@ mod tests {
             raw_message: b"From: alice@example.com\r\n\r\nhi\r\n".to_vec(),
             rule_id_or_forward_all: "forward-all".into(),
             copy_mode: ForwardCopyMode::Copy,
+            auth_results: Some(AuthVerdicts {
+                spf: SpfVerdict::Fail,
+                ..Default::default()
+            }),
         };
         let bytes = encode_canonical(&r).unwrap();
         assert_eq!(r, decode::<ForwardMessageRequest>(&bytes).unwrap());

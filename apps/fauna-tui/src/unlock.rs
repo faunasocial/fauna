@@ -95,14 +95,19 @@ pub(crate) fn mask(value: &str) -> String {
 /// The ordered ui.yaml element list for the surface — the one source paint,
 /// the automation registry, and the focus ring all read (ui.yaml `unlock`).
 pub fn elements(app: &App, mode: Mode) -> Vec<Element> {
-    let mut out = vec![
-        Element::input(
-            ids::UNLOCK_PASSPHRASE_INPUT,
-            mask(&app.unlock.passphrase),
-            Field::Unlock(UnlockField::Passphrase),
-        )
-        .labelled(t::PASSPHRASE_LABEL),
-    ];
+    let mut out = Vec::new();
+    if mode == Mode::Create && keyring_was_locked(app) {
+        out.push(Element::label(
+            ids::UNLOCK_KEYRING_LOCKED_NOTICE,
+            t::KEYRING_LOCKED_NOTICE,
+        ));
+    }
+    out.extend([Element::input(
+        ids::UNLOCK_PASSPHRASE_INPUT,
+        mask(&app.unlock.passphrase),
+        Field::Unlock(UnlockField::Passphrase),
+    )
+    .labelled(t::PASSPHRASE_LABEL)]);
     if mode == Mode::Create {
         out.push(
             Element::input(
@@ -123,6 +128,18 @@ pub fn elements(app: &App, mode: Mode) -> Vec<Element> {
         crate::element::Gesture::Unlock(UnlockAction::Submit),
     ));
     out
+}
+
+/// Whether the store's probe found an OS keyring that answered but is locked
+/// (`tui.md` § Credential storage, ④'s `KeyringLocked`) — the one cause the
+/// person is owed a word about on this page (`common.md` § Credential
+/// storage: an unreachable protected store is reported, never a quiet
+/// fallback). A notice, never a refusal to start (ruled 2026-10-16): the same
+/// answer can come from an SSH login, which the sealed arm must keep serving.
+/// ② runs before the probe, so the cause can only hold in create mode.
+fn keyring_was_locked(app: &App) -> bool {
+    app.credentials.sealed_arm_cause()
+        == Some(fauna_credential_store::HeadlessArmCause::KeyringLocked)
 }
 
 /// Pane title (chrome, not an automatable element).
@@ -220,6 +237,44 @@ mod tests {
                 "unlock-submit-button",
             ],
         );
+    }
+
+    /// ui.yaml `unlock-keyring-locked-notice`: painted in create mode when
+    /// the probe found the keyring locked, first, with the reviewed copy —
+    /// and nowhere else (unlock mode, or any other cause of the sealed arm).
+    #[test]
+    fn the_locked_keyring_notice_paints_in_create_mode_only() {
+        use fauna_credential_store::{CredentialStore, HeadlessArmCause};
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = crate::app::tests::test_app();
+        app.credentials = std::sync::Arc::new(CredentialStore::with_sealed_backend_cause(
+            "fauna-tui",
+            dir.path().to_path_buf(),
+            HeadlessArmCause::KeyringLocked,
+        ));
+        let create = elements(&app, Mode::Create);
+        assert_eq!(create[0].id, "unlock-keyring-locked-notice");
+        assert_eq!(create[0].text, t::KEYRING_LOCKED_NOTICE);
+        assert!(!create[0].focusable());
+        assert!(
+            !ids(&elements(&app, Mode::Unlock)).contains(&"unlock-keyring-locked-notice".into())
+        );
+        for cause in [
+            HeadlessArmCause::KeyringAbsent,
+            HeadlessArmCause::Forced,
+            HeadlessArmCause::ExistingFile,
+        ] {
+            app.credentials = std::sync::Arc::new(CredentialStore::with_sealed_backend_cause(
+                "fauna-tui",
+                dir.path().to_path_buf(),
+                cause,
+            ));
+            assert!(
+                !ids(&elements(&app, Mode::Create))
+                    .contains(&"unlock-keyring-locked-notice".into()),
+                "{cause:?} must paint no locked-keyring notice"
+            );
+        }
     }
 
     /// The registry (and so `get_text` / `/app/state`) must never see the

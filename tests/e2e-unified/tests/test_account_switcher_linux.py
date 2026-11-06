@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 import time
 import urllib.request
 from types import SimpleNamespace
@@ -43,6 +44,7 @@ from drivers.machine_test_setter import set_handle_check_snapshot
 from helpers import enrollment
 from helpers.app_surface import skip_environment
 from helpers.budgets import APP_RELAUNCH_S, RPC_ROUNDTRIP_S, UI_SETTLE_S
+from helpers.registry_store import flock_waiters
 from helpers.waiting import (
     assert_no_relaunch,
     await_session_actor,
@@ -1589,6 +1591,47 @@ def test_linux_switching_identity_keeps_device_settings_and_moves_drafts(
         driver.teardown()
 
 
+@pytest.mark.feature("drafts-survive")
+def test_linux_a_new_message_draft_never_shows_under_another_identity(
+    nest_instance, linux_app_path, request
+):
+    """Each identity's half-written new message stays its own across switches —
+    the shared arc in `helpers/identity_switch_drafts.py`, which every app's
+    switcher module runs (tui's twin of the same name)."""
+    from helpers.identity_switch_drafts import assert_new_message_draft_never_crosses_identity
+
+    admin_sk = nest_instance["admin"]["signing_key"]
+    admin_actor = bytes(admin_sk.verify_key).hex()
+    user = create_actor_and_register(nest_instance["port"], admin_signing_key=admin_sk)
+    user_actor = user["actor_id_hex"]
+    seed = build_registry_seed(
+        [
+            {"actor_id": user_actor, "secret_hex": bytes(user["signing_key"]).hex(),
+             "nest_url": nest_instance["url"], "device_id": "drafts-user", "handle": "user"},
+            {"actor_id": admin_actor, "secret_hex": bytes(admin_sk).hex(),
+             "nest_url": nest_instance["url"], "device_id": "drafts-admin", "handle": "admin"},
+        ],
+        active=user_actor,
+    )
+    driver = create_driver("linux")
+    driver.launch({
+        "app_path": linux_app_path,
+        "url": nest_instance["url"],
+        "seed_credentials": seed,
+        "environment": _seeded_environment(request, nest_instance),
+    })
+    try:
+        assert_new_message_draft_never_crosses_identity(
+            driver, nest_instance["url"],
+            user=(user_actor, bytes(user["signing_key"])),
+            admin=(admin_actor, bytes(admin_sk)),
+            show_switcher=lambda: _wait_switcher_count(driver, 2, timeout=30),
+            await_session=lambda actor, what: _await_working_session(driver, actor, what),
+        )
+    finally:
+        driver.teardown()
+
+
 @pytest.mark.feature("multiple-accounts")
 def test_linux_abandoned_created_identity_never_shows_among_your_identities(
     nest_instance, linux_app_path, request
@@ -1676,4 +1719,92 @@ def test_linux_abandoned_created_identity_never_shows_among_your_identities(
         )
         assert index["active"] == second_actor
     finally:
+        driver.teardown()
+
+
+@pytest.mark.feature("multiple-accounts")
+def test_linux_a_registry_write_queues_behind_a_sibling_instances_mutation_lock(
+    nest_instance, linux_app_path, request
+):
+    """``multiple-accounts`` outcome 14 on linux: a second window changing the
+    identities at the same time never loses the change — one waits for the
+    other (``account-scoping.md`` § Concurrent instances; ``long-term-store.md``
+    § Multi-account evolution → *Cross-process mutation lock*). Every registry
+    mutator is a read-modify-write of one ``fauna/index`` under the install-scoped
+    ``flock`` on ``<state base>/account-registry.lock``.
+
+    The test stands in for the sibling instance mid-mutation: it takes that same
+    ``flock`` and holds it, then presses ``account-require-confirm-toggle`` — a
+    real gesture whose write is one index read-modify-write. Polarised
+    (convention 14): the positive observable is the kernel's ``/proc/locks``
+    record of the app BLOCKED on that inode, with the flag still off in the same
+    reading; after release the write lands and the waiter drains. A registry
+    built without the lock writes straight through, which the poll reports as
+    the first failure it sees."""
+    import fcntl
+
+    seed, user_actor, admin_actor = _seed_two_accounts(nest_instance)
+    driver = create_driver("linux")
+    driver.launch({
+        "app_path": linux_app_path,
+        "url": nest_instance["url"],
+        "seed_credentials": seed,
+        "environment": _seeded_environment(request, nest_instance),
+    })
+    held = None
+    try:
+        driver.wait_for_state(
+            lambda s: bool(s.get("session", {}).get("authenticated")), timeout=30
+        )
+        _wait_switcher_count(driver, 2, timeout=30)
+
+        fauna_dir = XdgScopeStore("linux", driver.config_home, "fauna").scope_roots()[0]
+        lock_path = os.path.join(str(fauna_dir), "account-registry.lock")
+        wait_until(
+            lambda: os.path.isfile(lock_path) or None, 20.0,
+            diagnose=lambda: f"the app never stamped {lock_path}",
+        )
+        inode = os.stat(lock_path).st_ino
+
+        # (1) The sibling holds the registry lock.
+        held = open(lock_path, "a+")
+        fcntl.flock(held, fcntl.LOCK_EX)
+
+        # (2) The app flips the admin row's flag — it must QUEUE behind the hold.
+        _wait_flag(driver, admin_actor, False, timeout=10)
+        # The mutator blocks the app's UI thread inside the `flock`, so the
+        # click helper's own follow-up driver calls cannot answer until the
+        # sibling lets go: press from a thread, and watch only the kernel's lock
+        # table and the index file (neither goes through the app) meanwhile.
+        pressed = threading.Thread(
+            target=lambda: driver.click(REQUIRE_CONFIRM_TOGGLE, scope=f"{SWITCHER_ITEM}[1]"),
+            daemon=True,
+        )
+        pressed.start()
+        deadline = time.monotonic() + 30.0
+        while flock_waiters(inode) == 0:
+            flags = {
+                a["actor_id"]: a.get("require_confirm_to_activate", False)
+                for a in (_read_registry_index(driver) or {}).get("accounts", [])
+            }
+            assert flags.get(admin_actor) is not True, (
+                "the registry write LANDED while a sibling held "
+                f"{lock_path} — the mutator never asked for the lock. flags={flags!r}"
+            )
+            assert time.monotonic() < deadline, (
+                f"the toggle write never showed as blocked on {lock_path}"
+            )
+            time.sleep(0.3)
+
+        # (3) The sibling lets go → the write lands, the waiter drains.
+        fcntl.flock(held, fcntl.LOCK_UN)
+        pressed.join(timeout=60)
+        _wait_flag(driver, admin_actor, True, timeout=30)
+        wait_until(
+            lambda: flock_waiters(inode) == 0 or None, 20.0,
+            diagnose=lambda: "the app is still blocked on the registry lock",
+        )
+    finally:
+        if held is not None:
+            held.close()
         driver.teardown()

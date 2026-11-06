@@ -29,7 +29,7 @@
 // still running the shared tick.
 
 import { get } from 'svelte/store';
-import { identity } from './store';
+import { signedInIdentity } from './store';
 import { ensureWasm } from './wasm';
 import { pollIntervalMs } from './conversations';
 import { subscriptionsReconcileOnce } from './rpc';
@@ -47,7 +47,7 @@ export async function startSubscriptionsAuthorPump(): Promise<void> {
   pumpStarted = true;
   await ensureWasm();
   for (;;) {
-    const id = get(identity);
+    const id = get(signedInIdentity);
     if (id?.secretHex) {
       try {
         await subscriptionsReconcileOnce(id.secretHex);

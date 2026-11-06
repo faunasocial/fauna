@@ -48,3 +48,18 @@ import Testing
     #expect(vm.snapshot == nil)
     #expect(vm.errorMessage == nil)
 }
+
+/// The picker labels a shared set with the shared-Rust label (`name (owner)`) and
+/// keys it on the `local:<id>` value, even beside an own set of the same name
+/// (`media.md` § Encryption at rest → *The filter and the upload target address
+/// the row*, (a)/(b)).
+@Test func filterPickerRendersMintedValueLabelPairs() {
+    let options = [
+        MediaFolderOption(name: "photos", folderId: "local:own", value: "photos", label: "photos"),
+        MediaFolderOption(name: "photos", folderId: "local:abc", value: "local:abc",
+                          label: "photos (alice)"),
+    ]
+    let entries = MediaExplorerContent.filterEntries(options)
+    #expect(entries.map(\.value) == ["photos", "local:abc"])
+    #expect(entries.map(\.label) == ["photos", "photos (alice)"])
+}

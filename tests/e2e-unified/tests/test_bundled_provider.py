@@ -26,7 +26,7 @@ nest mode — the rust-first ordering); linux, web, and android are the first
 three trickle-down legs; the other three
 render a `hosted-auth` field as a secret/password input until their own
 trickle-down lands (`onboarding.md` § 4 degradation rule) and are declared
-`skip_unbuilt` here.
+`require_surface` here.
 """
 from __future__ import annotations
 
@@ -35,7 +35,6 @@ import json
 import pytest
 
 from drivers.machine_test_setter import set_handle_check_snapshot
-from helpers.app_surface import app_name, skip_unbuilt
 from helpers.budgets import ORCHESTRATION_STEP_S
 from helpers.waiting import wait_until
 
@@ -59,22 +58,11 @@ CONTACT = {
 }
 
 
-def _require_hosted_auth_button(driver) -> None:
-    if app_name(driver) not in ("tui", "linux", "web", "android", "macos", "ios", "windows"):
-        skip_unbuilt(
-            driver,
-            surface="the hosted-auth field button (dns-credentials-form-api-token as a button)",
-            detail="renders the bundled provider's hosted-auth field as a secret input for now",
-            tracked="onboarding.md § 4 hosted-auth rendering rule — per-app trickle-down rows in each app's own queue",
-        )
-
-
 @pytest.mark.feature("set-up-a-nest-from-the-app")
 def test_bundled_provider_buys_domain_and_server_through_one_row(
     app, fake_cloud, provision_target_nest
 ):
     drv = app.driver
-    _require_hosted_auth_button(drv)
     bundled = fake_cloud.bundled
     nest = provision_target_nest
 

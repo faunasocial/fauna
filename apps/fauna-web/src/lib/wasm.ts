@@ -1,6 +1,6 @@
 import { asset } from '$app/paths';
 import { registerIdentityStoreChunk } from './identity-store';
-import type { WsRpcClient, WasmUploadPayload } from '../../static/fauna_wasm.js';
+import type { WasmContactOverlays, WsRpcClient, WasmUploadPayload } from '../../static/fauna_wasm.js';
 import type { LocalizedText } from '#lib/i18n/localized';
 import type { ImportTotals } from '#lib/mail-import-confirm';
 // Type-only (erased at build, so no runtime cycle with rpc.ts, which imports this
@@ -218,6 +218,13 @@ export async function accountEnrolledDeviceRow(): Promise<string | null> {
   if (!wasmModule) return null;
   return (await wasmModule.accountEnrolledDeviceRow()) ?? null;
 }
+/** Who holds this account's generation-key escrow, as lowercase hex — the
+ *  escrow-holder badge's source — or `null` while no runtime runs or the read
+ *  failed (keep what was last painted). */
+export async function accountEscrowHolders(): Promise<string[] | null> {
+  if (!wasmModule) return null;
+  return (await wasmModule.accountEscrowHolders()) ?? null;
+}
 /** The let-go's clock face: the shared line's mint date, rendered in JS
  *  because wasm has no OS timezone database (`fauna-wasm`'s
  *  `generation_let_go` module docs). */
@@ -278,6 +285,21 @@ export async function accountReadMarkerState(channelIdHex: string): Promise<unkn
   }
   return JSON.parse(await (fn as (id: string) => Promise<string>)(channelIdHex));
 }
+/** Test-only: the `escrow_wrap_coordinates` command's body — where this
+ *  browser's account store's escrow-wrap rows sit on the fleet feed, the
+ *  shared reader every hosting app answers with. Same `wasm-core-test`-only
+ *  gating as `accountDeviceSetState`; THROWS on a production bundle. */
+export async function accountEscrowWrapCoordinates(): Promise<unknown> {
+  await ensureWasm();
+  const fn = (wasm() as unknown as Record<string, unknown>).accountEscrowWrapCoordinatesJsonForTest;
+  if (typeof fn !== 'function') {
+    throw new Error(
+      'accountEscrowWrapCoordinatesJsonForTest is absent: this SPA is running the PRODUCTION ' +
+        'wasm flavor, which compiles the e2e seams out. Build with `just web-test`.',
+    );
+  }
+  return JSON.parse(await (fn as () => Promise<string>)());
+}
 /** One full account-pump pass now (`fauna_e2e_agent::ACCOUNT_PUMP_NOW`). */
 export async function accountPumpNow(): Promise<void> {
   if (!wasmModule) return;
@@ -294,14 +316,16 @@ export async function accountRestoreFromCustodian(url: string): Promise<string> 
  *  half of the account port (`accountPortCall`; `#lib/account-runtime`'s
  *  `sharedAccountPort` is the one caller). Rejects while the core chunk is not
  *  loaded, which the calling chunk reads as a port fault: no runtime can run
- *  before it. */
+ *  before it. `coming` answers whether a runtime is on its way for the account,
+ *  which the call waits for. */
 export async function accountPortCall(
   actorIdHex: string,
   door: string,
   payload: Uint8Array,
+  coming: () => boolean,
 ): Promise<Uint8Array> {
   if (!wasmModule) throw new Error('account port: the core wasm chunk is not loaded');
-  return wasmModule.accountPortCall(actorIdHex, door, payload);
+  return wasmModule.accountPortCall(actorIdHex, door, payload, coming);
 }
 
 /** The initialized core wasm module, for a feature-gated glue module that must
@@ -349,6 +373,9 @@ export interface StaleSurfaces {
    *  write). Web's Address Book does not consume it yet. */
   address_book: boolean;
   media: boolean;
+  /** The Devices & Folders reads: a reconnect and `ResyncRequired`, never one
+   *  kind alone (`transport.md`). */
+  devices: boolean;
   /** The ward's supervision read (`fauna.family.status`) — reconnect-only,
    *  like `feed`: no push feeds it. Web serves it from the root layout's own
    *  connection-status effect rather than from this flag, and that effect's
@@ -806,6 +833,10 @@ export interface ProfileDisplay {
   avatar_hash_hex: string | null;
   /** Hex blob hash of the stored banner, or null. */
   banner_hash_hex: string | null;
+  /** The signed `Profile.audience` — whether people on other nests may read
+   *  the profile. The own edit form's start value (`decodeOwnProfileDisplay`
+   *  resolves it as the save will sign it). */
+  audience_everyone: boolean;
 }
 
 /** Decode a stored profile body (from `profileHeaderRead`) to its editable display
@@ -813,6 +844,37 @@ export interface ProfileDisplay {
  *  `fauna_client_profile::decode_profile_display`). */
 export function decodeProfileDisplay(body: Uint8Array): ProfileDisplay {
   return JSON.parse(wasm().decode_profile_display(body)) as ProfileDisplay;
+}
+
+/** The OWN edit form's projection: `decodeProfileDisplay`'s fields with
+ *  `audience_everyone` resolved exactly as the save will sign it, over the
+ *  base `loadProfileEditBase` read and the owner's last identity-signed row
+ *  (`lastDirectBody`, `null` when the read carried none). Shared
+ *  `fauna_client_profile::decode_own_profile_display` (`profile.md` § Where
+ *  logic lives → *Profile publish/edit* → *Edit surface*). */
+export function decodeOwnProfileDisplay(
+  ownActorIdHex: string,
+  body: Uint8Array,
+  lastDirectBody: Uint8Array | null,
+): ProfileDisplay {
+  return JSON.parse(
+    wasm().decodeOwnProfileDisplay(ownActorIdHex, body, lastDirectBody ?? undefined),
+  ) as ProfileDisplay;
+}
+
+/** The page's actor-home slot (`null` = this nest), read by the follow, the
+ *  knock and the remote header read alike. `carried` is the home the open
+ *  target carried, `profileBody` the header read's bytes (`null` before it
+ *  answers), `ownNestUrl` this box's nest base URL. The rule is the shared
+ *  `fauna_client_profile::actor_home` (`profile.md` § Where logic lives →
+ *  *The actor's home*) — never re-derived here. */
+export function actorHome(
+  carried: string | null,
+  actorIdHex: string,
+  profileBody: Uint8Array | null,
+  ownNestUrl: string,
+): string | null {
+  return wasm().actorHome(carried ?? undefined, actorIdHex, profileBody ?? undefined, ownNestUrl) ?? null;
 }
 
 /** Where a knock sent from `actorIdHex`'s profile page goes — `inboxSend`'s
@@ -858,13 +920,12 @@ export function buildEditedProfile(
   displayName: string | null,
   bio: string | null,
   links: ProfileLinkInput[],
+  lastDirectBody: Uint8Array | null = null,
 ): Uint8Array {
   return wasm().build_edited_profile(
     secretHex,
     baseBody ?? undefined,
-    // The owner's last identity-signed row (`last_direct_body`): not threaded
-    // on web yet, so a save over an external app's edit degrades as before.
-    undefined,
+    lastDirectBody ?? undefined,
     displayName ?? undefined,
     bio ?? undefined,
     JSON.stringify(links),
@@ -880,7 +941,10 @@ export function buildEditedProfile(
  *  untouched. `clear` wins over a supplied hash. The picture bytes are
  *  uploaded separately, through the ordinary public-post blob path
  *  (`uploadBlobMultipart`) — this only records the resulting hash on the
- *  signed profile. */
+ *  signed profile. `audienceEveryone` is `profile-edit-audience-toggle`:
+ *  `null` while the toggle is untouched (the base's audience stands),
+ *  otherwise the staged value; `lastDirectBody` is the owner's last
+ *  identity-signed row `loadProfileEditBase` handed back. */
 export function buildEditedProfileWithImages(
   secretHex: string,
   baseBody: Uint8Array | null,
@@ -891,12 +955,13 @@ export function buildEditedProfileWithImages(
   avatarHashHex: string | null,
   bannerClear: boolean,
   bannerHashHex: string | null,
+  audienceEveryone: boolean | null,
+  lastDirectBody: Uint8Array | null,
 ): Uint8Array {
   return wasm().build_edited_profile_with_images(
     secretHex,
     baseBody ?? undefined,
-    // `last_direct_body`: not threaded on web yet (see `buildEditedProfile`).
-    undefined,
+    lastDirectBody ?? undefined,
     displayName ?? undefined,
     bio ?? undefined,
     JSON.stringify(links),
@@ -904,7 +969,7 @@ export function buildEditedProfileWithImages(
     avatarHashHex ?? undefined,
     bannerClear,
     bannerHashHex ?? undefined,
-    undefined,
+    audienceEveryone ?? undefined,
   );
 }
 
@@ -2686,6 +2751,15 @@ export function contactStatusLabel(status: string): LocalizedText {
   return wasm().contactStatusLabel(status) as LocalizedText;
 }
 
+// The roster's status groups in paint order for the statuses its contacts carry
+// (one entry per contact) — `fauna_core::format::contact_roster_group_order` owns
+// the confirmed → accepted → pending → blocked order, placing any other status
+// after it so no contact drops out of the roster. See `docs/goal/ui/contacts.md`
+// § Where logic lives → Roster status grouping.
+export function contactRosterGroupOrder(statuses: string[]): string[] {
+  return wasm().contactRosterGroupOrder(statuses) as string[];
+}
+
 // Shared Nostr Connect (bunker) roster-row label decisions
 // (`fauna_core::format::{bunker_app_label,bunker_last_used_label}` over wasm) —
 // a `nostr-bunker-app-item` row's primary label (own label verbatim, else a
@@ -2837,6 +2911,15 @@ export function roleAddressOptions(): RoleAddressOption[] {
   return wasm().roleAddressOptions() as RoleAddressOption[];
 }
 
+// Whether a `LocalDomainAction` (the JSON the local-domain machine's `dispatch`
+// takes) moves the DNS record matrix, so the `admin-dns` page runs the DNS
+// machine's `recheckMatrix` before its next render
+// (`fauna_client_mail_settings::local_domains::local_domain_action_moves_record_matrix`;
+// `mail-multidomain.md` § Wizard steps, step 8).
+export function localDomainActionMovesRecordMatrix(action: unknown): boolean {
+  return wasm().localDomainActionMovesRecordMatrix(action) as boolean;
+}
+
 // One `admin-dns-domain-dmarc-policy-select` option, as [dmarcPolicyOptions]
 // hands it over.
 export interface DmarcPolicyOption {
@@ -2883,6 +2966,12 @@ export function dmarcReportWindowOptions(): number[] {
 // the shared cadence; the page owns only the timer.
 export function recordRecheckSecs(): number {
   return wasm().recordRecheckSecs();
+}
+
+// The certificate auto-renew tick's cadence (`fauna_client_dns::auto_renew_poll_secs`
+// over wasm, six hours) — shared policy; `#lib/cert-auto-renew` owns only the timer.
+export function autoRenewPollSecs(): number {
+  return wasm().autoRenewPollSecs() as number;
 }
 
 // The shared `fcrdns_mode` picker catalog
@@ -2992,25 +3081,12 @@ export function reachPolicySummaryRaw(
 }
 
 // The full read-only ward policy summary — the four reach-knob lines PLUS one
-// line per non-inherit guardian content floor and, when on, the Notify line
+// line per guardian content category a rule acts on and, when on, the Notify line
 // (`ReachPolicy::summary_lines()` over wasm). Pass the whole wire `ReachPolicy`
 // object off `familyStatus()`. Superset of [reachPolicySummaryRaw], which showed
 // only the four v1 knobs — `family-safety.md` § Content policy (ward transparency).
 export function reachPolicySummaryFull(policy: unknown): PolicySummaryLine[] {
   return wasm().reachPolicySummaryFull(policy) as PolicySummaryLine[];
-}
-
-// The canonical guardian content-floor picker catalog (`inherit | collapse |
-// block`, `fauna_core::format::content_floor_options` over wasm) — the content
-// pillar's twin of [unknownSenderOptions]. `family-safety.md` § Content policy.
-export function contentFloorOptions(): ReachPolicyOption[] {
-  return wasm().contentFloorOptions() as ReachPolicyOption[];
-}
-
-// The localized label for a stored guardian content-floor wire value, failing
-// closed to `block` for anything unrecognized.
-export function contentFloorLabelRaw(value: string): LocalizedText {
-  return wasm().contentFloorLabel(value) as LocalizedText;
 }
 
 /** A content label riding a post/message (`ContentLabelEntry`) — `category` and
@@ -3020,15 +3096,12 @@ export interface ContentLabelEntry {
   confidence_per_mille: number;
 }
 
-/** A guardian content policy — a per-category floor (wire string values). */
+/** A guardian content policy — the guardian's rule document only
+ *  (`fauna_core::obligation::ContentPolicy`). */
 export interface ContentPolicyValue {
-  nsfw: string;
-  spam: string;
-  phishing: string;
-  commercial: string;
   /** The guardian's rule document (`ContentPolicy.document`, an object on the
    *  wasm face; `nest-rules.md` § The shared rule editor (b)); absent on a
-   *  floors-only policy. Opaque here: the editor and the engine read it. */
+   *  policy with no rules. Opaque here: the editor and the engine read it. */
   document?: unknown;
 }
 
@@ -3039,7 +3112,7 @@ export type ContentRenderVerdict = 'show' | 'badge' | 'collapse' | 'block';
 // The client render verdict for a piece of content — the web twin of linux
 // `content_policy::verdict_for` (`family-safety.md` § Content policy). Composes,
 // strictest-wins, the viewer's OWN spam/phishing thresholds (→ collapse) with,
-// when supervised, the guardian's per-category floor (collapse/block), entirely
+// when supervised, the guardian's rule document (collapse/block), entirely
 // in shared Rust. `contentPolicy` is the object off `familyStatus()` (or
 // null/undefined for an unsupervised viewer); the own thresholds are per-mille
 // (`Math.round(prefs.threshold * 1000)`, undefined until preferences load).
@@ -3297,8 +3370,8 @@ export type NestRulesReadResult =
   | { kind: 'changed'; domain: string; sequence: number }
   | { kind: 'refused'; reason: string };
 
-/** The rules in force for a nest, as the settings surface paints them
- *  (`NestRulesSummary`). */
+/** The rules in force for a nest, as the joining and settings surfaces paint
+ *  them (`NestRulesSummary`). */
 export interface NestRulesSummaryValue {
   domain: string;
   sequence: number;
@@ -3310,6 +3383,9 @@ export interface NestRulesSummaryValue {
     inert: LocalizedText | null;
   }[];
   not_applied: string | null;
+  /** The member-facing sentence for `not_applied`, painted under the heading
+   *  on the joining surface and on the settings rules surface. */
+  not_applied_sentence: LocalizedText | null;
 }
 
 /** The member's nest-rules book — `WasmNestRulesBook`
@@ -3463,7 +3539,7 @@ export function openAuditLog(client: WsRpcClient): AuditLogHandle {
 // The guardian-floor categories a piece of content triggers, for Guardian Notify
 // counting (`family-safety.md` § Guardian Notify) — the web twin of the shared
 // `guardian_enforced_categories`. Returns the subset of `nsfw|spam|phishing|
-// commercial` whose guardian floor bites on this item; the ward's own-threshold
+// commercial` whose guardian rule bites on this item; the ward's own-threshold
 // collapses are excluded (Notify is a lens on the guardian's policy), so this takes
 // only the guardian `contentPolicy`, never the viewer's thresholds. Same reduced
 // `labels` shape as [contentRenderVerdict].
@@ -3480,14 +3556,72 @@ export function notifyReportMinIntervalSecs(): number {
   return wasm().notifyReportMinIntervalSecs() as number;
 }
 
+// Does a region placeholder owe the sealed-item sentence (`region.sealed_note`)?
+// The shared rule (`fauna_core::obligation::region_sealed_note_owed_for`) over
+// the reduced inputs web holds — linux and tui read it off their engine
+// (`region-blocking.md` § Implementation status today). `regionDrove`: the
+// placeholder is the region's and the viewer's own report did not hide the
+// item; `verdict`: the render's verdict; `encryption`: the open thread's
+// `capabilities.encryption`; `notifyCounted`: Guardian Notify counted the item.
+export function regionSealedNote(
+  regionDrove: boolean,
+  verdict: string,
+  encryption: unknown,
+  notifyCounted: boolean,
+): boolean {
+  return wasm().regionSealedNote(regionDrove, verdict, encryption, notifyCounted) as boolean;
+}
+
 // The shared draft-autosave debounce window in milliseconds
 // (`fauna_client_drafts::AUTOSAVE_DEBOUNCE`), so web's composer coalesces
 // edits on the same cadence as every other app (priority #2 — one shared
 // constant, no per-app drift; `docs/goal/behavior/reserved-folders.md` §
 // Drafts Sync). Web's own e2e-mode override stays a deliberate test-mode
-// variation, layered on top by each rail's own `draftSaveDebounceMs()`.
+// variation, layered on top by `draftSaveDebounceMs()` below.
 export function autosaveDebounceMs(): number {
   return wasm().autosaveDebounceMs() as number;
+}
+
+/** How long one drafts rail's leave-flush may hold the sign-out door
+ *  (`fauna_client_drafts::LEAVE_FLUSH_BUDGET`, the bound tui's doors take).
+ *  `0` before the core chunk loads — a tab leave can fire that early, and no
+ *  rail can hold a draft to save until it has. */
+export function leaveFlushBudgetMs(): number {
+  return wasmModule?.leaveFlushBudgetMs() ?? 0;
+}
+
+/** Under the Playwright e2e agent, the drafts rails debounce far shorter, so a
+ *  restart round-trip test (`test_feed_draft_persistence.py` and its twins)
+ *  needn't wait the production window. */
+const DRAFT_SAVE_DEBOUNCE_E2E_MS = 150;
+
+/** The one debounce every drafts rail (`#lib/{feed,conversations,event-drafts}`)
+ *  schedules its save on: the shared window ({@link autosaveDebounceMs}) in a
+ *  shipped page; under the e2e agent, the harness's window seam when the run set
+ *  one (`e2eDraftsAutosaveWindowMs` — the `drafts_autosave_window_ms` marker,
+ *  which pushes the debounce out past a leave-flush witness so any save it sees
+ *  is the door's own), else the 150 ms test cadence. `windowSeam: false` is for
+ *  a non-draft save that only borrows the cadence (the MLS replica's), which the
+ *  drafts seam must not hold back. */
+export function draftSaveDebounceMs(opts: { windowSeam?: boolean } = {}): number {
+  const hasAgent =
+    __FAUNA_E2E_AUTOMATION__ &&
+    typeof window !== 'undefined' &&
+    (window as unknown as { __faunaTestAgent?: unknown }).__faunaTestAgent != null;
+  if (!hasAgent) return autosaveDebounceMs();
+  const seam =
+    opts.windowSeam === false
+      ? undefined
+      : (wasm().e2eDraftsAutosaveWindowMs() as number | undefined);
+  return seam ?? DRAFT_SAVE_DEBOUNCE_E2E_MS;
+}
+
+/** The events rail's FILL rule (`events.md` § Persistence, *A restore FILLS*):
+ *  what the live draft becomes when the launch restore lands — the restored one
+ *  when the user has not authored into `live`, else `live` untouched. One rule
+ *  for all 7 apps, in `fauna_client_caldav::drafts::EventDrafts::fill`. */
+export function fillEventDraft<T>(live: T | null, restored: T): T {
+  return wasm().fillEventDraft(live, restored) as T;
 }
 
 // The guardian's per-ward Guardian Notify readout line for one (category, count)
@@ -3609,6 +3743,10 @@ export interface CueTrackerHandle {
     wallNowMs: number,
   ): CueExposure[];
   drainAll(wallNowMs: number): CueExposure[];
+  /** An inline player's progress reading (seconds) — `CueTracker::note_played`. */
+  notePlayed(postId: string, position: number, duration: number): void;
+  /** Whether the post's inline player is engaged — `CueTracker::note_playing`. */
+  notePlaying(postId: string, playing: boolean): void;
   free(): void;
 }
 
@@ -3621,13 +3759,6 @@ export function newCueTracker(leaveModel: 'hold-unmeasured' | 'absence-is-leave'
 /** The shared sampling cadence (`CUE_SAMPLE_INTERVAL_MS`), never re-declared. */
 export function cueSampleIntervalMs(): number {
   return wasm().cueSampleIntervalMs();
-}
-
-/** A player's position through its media as the per-mille a cue row's
- *  `media_played_pm` carries — the shared clamp (`played_per_mille`), never
- *  re-derived here. `null` while the duration is unknown. */
-export function cuePlayedPerMille(position: number, duration: number): number | null {
-  return (wasm().cuePlayedPerMille(position, duration) ?? null) as number | null;
 }
 
 // A guardian-typed `"HH:MM"` window bound as minutes from local midnight, for
@@ -4392,7 +4523,8 @@ export function webDisabledReasonText(reason: SiteLinkDisabledReason | null): Lo
 // Shared recipient-input classification. `fauna_core::resolve::classify_recipient`
 // (over wasm) returns a flat `[kind, actorId, user, domain]` array; this wraps it in a
 // named, discriminated object so `resolve.ts` shares the 64-hex actor-id check + the
-// `user@domain` handle split with android/linux instead of re-implementing them.
+// `user@domain` handle split with android/linux instead of re-implementing them. A bare
+// localpart is a `handle` with an empty `domain`, which `findUser` reads as the home nest.
 export type RecipientClassification =
   | { kind: 'actor_id'; actorId: string }
   | { kind: 'handle'; user: string; domain: string }
@@ -5464,6 +5596,16 @@ export type NotificationText =
 // is the shared decision's to answer.
 export function notificationText(row: unknown): NotificationText {
   return wasm().notificationText(row) as NotificationText;
+}
+
+// `notificationText`, with a fauna-native row's sender named as the viewer calls
+// them (`fauna_client_notifications::notification_text_naming` over the overlay
+// projection `overlays` reads; `behavior/notifications.md` § Localized body →
+// *The sender arg*). The Notifications page paints this one.
+export function notificationTextNaming(row: unknown, overlays: OverlayFace): NotificationText {
+  // Every OverlayFace is a `WasmContactOverlays` underneath (`conversations.ts`,
+  // `contactOverlaysWithoutRuntime`): the face is only its TS shape.
+  return wasm().notificationTextNaming(row, overlays as unknown as WasmContactOverlays) as NotificationText;
 }
 
 // Whether a notification row's dismiss is greyed — a `security.notice` inside

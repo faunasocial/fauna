@@ -9,7 +9,9 @@ license.workspace = true
 name = "fauna-bridge-supervisor"
 path = "src/main.rs"
 
-[dependencies]
+# `main.rs` is `cfg(target_os = "macos")` throughout (a stub elsewhere), so every
+# dependency sits in the macOS table — off macOS Cargo reports them as unused.
+[target.'cfg(target_os = "macos")'.dependencies]
 fauna-mda-supervisor.workspace = true
 # `parse_dir_override` for the FAUNA_DATA_DIR env convention shared with
 # fauna-nest / fauna-nest-daemon — zero-dependency, already transitive via

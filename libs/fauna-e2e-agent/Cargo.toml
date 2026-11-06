@@ -22,6 +22,14 @@ license.workspace = true
 # and defence that no longer depends on what an optimizer chose to do.
 e2e-agent = []
 
+# The FlaUI bridge's stall-capture helper (e2e convention 11, the windows app's
+# stall stack): what holds a thread of ANOTHER process, by pid and tid. Test-only,
+# built by the e2e helper-binary registry, never shipped; a build without the
+# agent surface compiles to a refusal.
+[[bin]]
+name = "fauna-e2e-stall-capture"
+path = "src/stall_capture_main.rs"
+
 [dependencies]
 fauna-core = { path = "../fauna-core", default-features = false }
 # `connection_json` ships the offline-gate verdict beside the word, so the
@@ -38,6 +46,8 @@ tracing = { workspace = true }
 # both hosting apps already carry, so this adds no third-party code to the
 # workspace. The unwinder it calls (`_Unwind_Backtrace`) is libgcc, already
 # linked into every Rust binary, declared in an `extern` block rather than
-# pulled in as a crate.
+# pulled in as a crate. The Windows capture needs no line here at all: it calls
+# kernel32, ntdll and the OS's own `dbghelp.dll` through hand-written `extern`
+# blocks.
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = "0.2"

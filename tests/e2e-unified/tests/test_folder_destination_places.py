@@ -38,9 +38,9 @@ pytestmark = [
     pytest.mark.tui,
     pytest.mark.linux,
     pytest.mark.web,
-    # android landed the FFI face but its own e2e
-    # parametrization stays unverified — android tier_3 is host-emulator-gated,
-    # the standing constraint every android e2e leg carries.
+    # android: the attach select is a `TokenSelect` and the attached row reads as
+    # one text, so the select-by-destination-id and row-text legs run there.
+    pytest.mark.android,
     pytest.mark.macos,
     pytest.mark.ios,
     pytest.mark.windows,

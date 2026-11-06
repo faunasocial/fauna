@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import re
 
-from helpers.app_surface import skip_unbuilt
 from helpers.waiting import wait_until
 
 #: An actor id and a RecoveryKey secret both render as 64 hex characters.
@@ -237,7 +236,7 @@ def succeed_identity_from(app) -> tuple[str, str]:
         f"the Status page must render the seat's actor id; got {old_actor!r}, "
         f"error surface: {app.error_text()!r}"
     )
-    app.settings.open_recovery_kit_or_skip()
+    app.settings.open_recovery_kit()
     app.settings.create_recovery_kit()
     app.wait_for("recovery-kit-secret-display", timeout=30.0)
     held = app.settings.recovery_kit_secret()
@@ -292,20 +291,13 @@ def require_stolen_gate(app) -> None:
     def _revealed() -> bool:
         return app.driver.is_visible_scrolled("identity-stolen-confirm-field")
 
-    try:
-        wait_until(_revealed, STOLEN_GATE_REVEAL_S, diagnose=lambda: "")
-        return
-    except Exception:
-        pass
-    skip_unbuilt(
-        app.driver,
-        surface="identity-stolen-confirm-field",
-        detail=(
-            "settings.md § Recovery kit — the type-to-confirm gate on "
-            "identity-stolen-button; tui leads"
-        ),
-        tracked=(
-            "docs/goal/behavior/identity-succession.md "
-            "§ Implementation status today"
+    wait_until(
+        _revealed,
+        STOLEN_GATE_REVEAL_S,
+        diagnose=lambda: (
+            "identity-stolen-confirm-field never revealed — every app renders the "
+            "type-to-confirm gate on identity-stolen-button (settings.md § "
+            "Recovery kit), so this is a regression, not unbuilt debt:\n"
+            + app.driver.diagnose("identity-stolen-confirm-field")
         ),
     )

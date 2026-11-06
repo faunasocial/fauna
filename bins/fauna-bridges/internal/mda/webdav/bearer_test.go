@@ -41,6 +41,7 @@ type admitCall struct {
 	Proofs []string `cbor:"dpop_proofs"`
 	HTM    string   `cbor:"htm"`
 	HTU    string   `cbor:"htu"`
+	Source string   `cbor:"source_ip"`
 }
 
 // fakeNest answers the two kinds the bearer door's read path sends.
@@ -192,12 +193,29 @@ func TestBearerAdmittedReadListsAndOpens(t *testing.T) {
 	}
 
 	last := nest.admits[len(nest.admits)-1]
-	want := admitCall{Token: "the-token", Proofs: []string{"the-proof"}, HTM: "GET", HTU: "https://mda.example/webdav/u/7/notes.txt"}
+	want := admitCall{Token: "the-token", Proofs: []string{"the-proof"}, HTM: "GET", HTU: "https://mda.example/webdav/u/7/notes.txt", Source: "192.0.2.1"}
 	if fmt.Sprint(last) != fmt.Sprint(want) {
 		t.Fatalf("relayed %+v, want %+v", last, want)
 	}
 	if len(nest.admits) != 3 {
 		t.Fatalf("%d admissions for 3 requests: every request is admitted by the nest", len(nest.admits))
+	}
+}
+
+// The keys header is decoded once and then leaves the request: the handler
+// below the door never sees it (`webdav-server.md` rule (3)).
+func TestBearerDropsTheKeysHeaderOnceDecoded(t *testing.T) {
+	nest := &fakeNest{admit: admitted(true, true)}
+	var seen []string
+	next := http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		seen = r.Header.Values(folderKeysHeader)
+		if v := principalFromContext(r.Context()); v == nil || v.bundle == nil {
+			t.Fatalf("the door handed no keys to the handler")
+		}
+	})
+	serve(bearerMiddleware(next, nest, nil), bearerRequest(http.MethodGet, "/webdav/u/7/notes.txt", true))
+	if len(seen) != 0 {
+		t.Fatalf("the handler still sees the keys header: %q", seen)
 	}
 }
 

@@ -7,6 +7,9 @@ struct MacNotificationsView: View {
     /// The Post arm's destination seam — `pendingPostOpen` is the same
     /// cross-page deep-link slot a `search-result-item` activation uses.
     @Environment(FeedVM.self) private var feedVM
+    /// Owner of the private-overlay projection a knock / like row's sender is
+    /// named through (`notifications.md` § Localized body → *The sender arg*).
+    @Environment(ConversationsVM.self) private var conversationsVM
     @State private var vm = NotificationsVM()
 
     var body: some View {
@@ -19,11 +22,17 @@ struct MacNotificationsView: View {
                     // A row a muted word collapses paints the shared placeholder
                     // leaf instead (`notifications.md` § Muted words); its reveal
                     // swaps the full row in at the same index.
-                    Group {
-                        if vm.isCollapsed(notif) {
-                            NotificationMutedRow(item: notif) { vm.revealMuted(notif) }
-                        } else {
-                            row(notif)
+                    HStack(alignment: .top, spacing: 8) {
+                        Group {
+                            if vm.isCollapsed(notif) {
+                                NotificationMutedRow(item: notif) { vm.revealMuted(notif) }
+                            } else {
+                                row(notif)
+                            }
+                        }
+                        // Every loaded row, collapsed or not (§ Muted words rule 4).
+                        NotificationDismissButton(isRetained: vm.isRetained(notif)) {
+                            Task { await dismiss(notif) }
                         }
                     }
                     .padding(.vertical, 8)
@@ -53,6 +62,15 @@ struct MacNotificationsView: View {
                     .automationActivate(Ids.notificationMarkRead) {
                         Task { await markAllRead() }
                     }
+                    Button(action: { Task { await clearAll() } }) {
+                        Label(L.notifications.clearAll, systemImage: "trash")
+                    }
+                    .disabled(vm.notifications.isEmpty)
+                    .accessibilityIdentifier(Ids.notificationClear)
+                    .automationActivate(Ids.notificationClear,
+                                        isEnabled: { !vm.notifications.isEmpty }) {
+                        Task { await clearAll() }
+                    }
                 }
             }
         }
@@ -75,6 +93,8 @@ struct MacNotificationsView: View {
         .task(id: SessionKey(client)) { await loadNotifications() }
         // Re-pull notifications on WS-RPC reconnect (mirrors linux).
         .onReconnect { await loadNotifications() }
+        // A nickname saved (or a sibling device's) renames the rows already listed.
+        .onChange(of: conversationsVM.overlayRevision) { Task { await loadNotifications() } }
         // Re-pull live on a `fauna.notification` push — grows a new row with no
         // navigation (mirrors android's `notificationTick`; `transport.md` § Push events).
         .onPushNotification { await loadNotifications() }
@@ -158,7 +178,18 @@ struct MacNotificationsView: View {
             vm.reset()
             return
         }
-        await vm.loadNotifications(client: client, actorId: appState.session.actorId)
+        await vm.loadNotifications(client: client, actorId: appState.session.actorId,
+                                    overlays: conversationsVM.contactOverlays)
+        appState.notificationsUnreadCount = vm.unreadCount
+    }
+
+    private func dismiss(_ notif: NotificationItem) async {
+        await vm.dismiss(notif)
+        appState.notificationsUnreadCount = vm.unreadCount
+    }
+
+    private func clearAll() async {
+        await vm.clearAll()
         appState.notificationsUnreadCount = vm.unreadCount
     }
 

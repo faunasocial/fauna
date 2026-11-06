@@ -67,6 +67,7 @@ static ACTIVE_SESSION: Mutex<ActiveSession> = Mutex::new(ActiveSession {
     succession_witness: None,
     peer_anchor_harvest: None,
     oracle_door: None,
+    archive_links: None,
 });
 
 struct ActiveSession {
@@ -88,6 +89,11 @@ struct ActiveSession {
     /// the next login and dropped at sign-out ([`stop_oracle_door`]), which
     /// gives the door up for the account's next app.
     oracle_door: Option<fauna_client_account_runtime::conversations_door::ConversationsDoor>,
+    /// Phase two's links this login wired (`archive-import.md` § Linking and
+    /// merging) — what the Contacts rows' gestures call and what an archive
+    /// import attaches before its run. `None` before login, or when the login
+    /// had no archive seam or no parsable identity.
+    archive_links: Option<Arc<fauna_archive_import_machine::link::ArchiveLinks>>,
 }
 
 /// Give the conversations oracle's door up — the sign-out's leave step, so
@@ -437,7 +443,7 @@ pub fn start_conversations_session(
             &keypair,
             mls_predecessors,
             mls_predecessor_actors,
-            tx,
+            tx.clone(),
         ))
     });
     match &mls_sync {
@@ -513,6 +519,63 @@ pub fn start_conversations_session(
         Some(log)
     };
 
+    // The `Archive` rail (`archive-import.md` § What each category becomes):
+    // the imported archives' message threads, read from their sealed folders
+    // through the archive machine's own seam and projected read-only by the
+    // manager. Needs this device's sync id (the folder reader's chunk store);
+    // without one the rail simply lists nothing. Read once now, and again on
+    // every visit to the conversations page ([`refresh_archive_threads`]), so
+    // a finished import shows up without a re-login — tui's `conv_backend`.
+    let mut archive_links = None;
+    match crate::archive_glue::build_archive_nest(
+        Arc::clone(&nest),
+        &fauna_core::hex32::encode(&self_actor.0),
+    ) {
+        Ok(archive) => {
+            // Phase two's sink (`archive-import.md` § Linking and merging,
+            // ruling 2), over the same seam, registered beside the custody
+            // sink above; its one tick task drives it now (ruling 4: pending
+            // sends re-driven at session start) and again whenever the sink
+            // leaves work owed — tui's `conv_backend` + `archive_links_tick`.
+            archive_links = keypair_from_hex(secret_hex).map(|keypair| {
+                let links = crate::archive_glue::wire_archive_links(
+                    &session,
+                    Arc::clone(&archive),
+                    &keypair,
+                );
+                crate::archive_glue::spawn_links_tick(&links, runtime, tx.clone());
+                links
+            });
+            // The folded archive comments (`archive-import.md` § *Placement
+            // under the owner's own post*): the same seam, read by the feed
+            // manager for the owner's imported posts — tui's
+            // `feed::wire_archive_comments`. Re-read per visit to the feed
+            // ([`refresh_archive_comments`]).
+            if let Some(feed_manager) = crate::feed::host::manager() {
+                fauna_archive_import_machine::comments::register_archive_comments(
+                    &feed_manager,
+                    Arc::clone(&archive),
+                );
+                runtime.spawn(async move {
+                    if let Err(e) = feed_manager.refresh_archive_comments().await {
+                        tracing::warn!("conv-backend: archive comments: {e}");
+                    }
+                });
+            }
+            fauna_archive_import_machine::threads::register_archive_threads(
+                &session.manager(),
+                archive,
+            );
+            let session = Arc::clone(&session);
+            runtime.spawn(async move {
+                if let Err(e) = session.manager().refresh_archive_threads().await {
+                    tracing::warn!("conv-backend: archive threads: {e}");
+                }
+            });
+        }
+        Err(e) => tracing::warn!("conv-backend: no archive thread source: {e}"),
+    }
+
     // Publish the session before starting the loop so its liveness `Weak` stays
     // upgradeable; dropping any prior session here stops that login's loop.
     {
@@ -523,6 +586,7 @@ pub fn start_conversations_session(
         g.succession_witness = witness;
         g.peer_anchor_harvest = harvest_log;
         g.oracle_door = oracle_door;
+        g.archive_links = archive_links;
     }
 
     // Owned captures for the launch-time folder removal recovery below: the login
@@ -570,8 +634,13 @@ pub fn start_conversations_session(
 /// through the durable manager surface — mint on the session `MlsEngine` and
 /// `notify()` the replica autosave, the SAME path login
 /// (`ConversationsSession::start_receive_loop`) and web
-/// (`manager.ensureKeypackages`) drive. Fire-and-forget from the GTK thread onto
-/// the login session's runtime.
+/// (`manager.ensureKeypackages`) drive. Spawned from the GTK thread onto the
+/// login session's runtime; the returned receiver yields once the publish has
+/// landed (or failed), so a caller that re-reads the count awaits it first —
+/// a read fired beside the spawn races the upload and states the old count.
+/// A channel rather than the task's `JoinHandle`: the GTK side may await only
+/// an `async_channel` receive inside `spawn_future_local` (the GTK main thread
+/// holds no tokio enter-guard).
 ///
 /// This is the ONLY correct native replenish path. A raw
 /// `MlsManager::generate_key_packages` + `client.publish_key_packages_real` mints
@@ -583,18 +652,19 @@ pub fn start_conversations_session(
 /// `keypackage_minted_via_ensure_keypackages_survives_a_provider_swap`). No-op
 /// before login (no session runtime yet) or on a client with no FaunaMls backend
 /// registered (`ensure_keypackages` returns `Ok(0)`).
-pub fn replenish_key_packages() {
-    let Some(runtime) = ACTIVE_SESSION.lock().unwrap().runtime.clone() else {
-        return;
-    };
+pub fn replenish_key_packages() -> Option<async_channel::Receiver<()>> {
+    let runtime = ACTIVE_SESSION.lock().unwrap().runtime.clone()?;
     let manager = crate::conversations::host::manager();
+    let (done_tx, done_rx) = async_channel::bounded(1);
     runtime.spawn(async move {
         match manager.ensure_keypackages(KEYPACKAGE_TARGET).await {
             Ok(n) if n > 0 => tracing::info!("replenished {n} key packages"),
             Ok(_) => {}
             Err(e) => tracing::error!("ensure_keypackages: {e}"),
         }
+        let _ = done_tx.send(()).await;
     });
+    Some(done_rx)
 }
 
 /// Decode a 32-byte hex identity seed into an [`ActorKeypair`] (mirrors
@@ -837,6 +907,54 @@ pub fn active_session() -> Option<Arc<ConversationsSession>> {
     ACTIVE_SESSION.lock().unwrap().session.clone()
 }
 
+/// This login's archive links and the runtime to drive them on — `None`
+/// before login, or when the login wired none (no archive seam, or an
+/// unparsable identity).
+pub fn archive_links() -> Option<(
+    Arc<fauna_archive_import_machine::link::ArchiveLinks>,
+    tokio::runtime::Handle,
+)> {
+    let g = ACTIVE_SESSION.lock().unwrap();
+    Some((g.archive_links.clone()?, g.runtime.clone()?))
+}
+
+/// Re-read the `Archive` rail's imported threads — fired on every visit to the
+/// conversations page, so an import finished since login shows up there (tui's
+/// `App::set_page`). A no-op before login, or when the login registered no
+/// archive source.
+pub fn refresh_archive_threads() {
+    let (session, runtime) = {
+        let g = ACTIVE_SESSION.lock().unwrap();
+        (g.session.clone(), g.runtime.clone())
+    };
+    let (Some(session), Some(runtime)) = (session, runtime) else {
+        return;
+    };
+    runtime.spawn(async move {
+        if let Err(e) = session.manager().refresh_archive_threads().await {
+            tracing::warn!("conv-backend: archive threads: {e}");
+        }
+    });
+}
+
+/// Re-read the folded archive comments under the owner's imported posts —
+/// fired whenever the feed becomes visible, so an import finished since login
+/// shows its comments (tui's `App::set_page`). A no-op before login, or when
+/// the login registered no comment source.
+pub fn refresh_archive_comments() {
+    let (Some(feed_manager), Some(runtime)) = (
+        crate::feed::host::manager(),
+        ACTIVE_SESSION.lock().unwrap().runtime.clone(),
+    ) else {
+        return;
+    };
+    runtime.spawn(async move {
+        if let Err(e) = feed_manager.refresh_archive_comments().await {
+            tracing::warn!("conv-backend: archive comments: {e}");
+        }
+    });
+}
+
 /// The member side of a succession as a driver reads it — the field reads that
 /// feed the shared renderer (`fauna_client_recovery::witness::state_json`,
 /// which owns the shape and the reading order). The tui `witness_state_json`
@@ -921,6 +1039,11 @@ pub fn e2e_accept_recipient() -> bool {
 /// the new thread id.
 pub fn e2e_resolve_send_new(recipient: &str, body: &str) -> Result<Option<String>, String> {
     let m = crate::conversations::manager();
+    // A NEW conversation with exactly `recipient`: discard any stashed new-thread
+    // draft first — `start_new_conversation` keeps one by design, so an earlier
+    // test's seeded chip would otherwise ride into this send (tui's
+    // `e2e_resolve_send_new` has the full reason).
+    m.cancel_new_conversation();
     m.start_new_conversation();
     m.set_new_thread_recipient_input(recipient.to_string());
 

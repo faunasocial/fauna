@@ -399,7 +399,10 @@ async fn mailbox_less_attendee_receives_and_rsvps_over_the_scheduling_rail_same_
     );
 
     let page = bob_caldav
-        .query_events_decoded(query(&bob_id.0), &DavRecipientKeys::derive(&BOB_MSEK))
+        .query_events_decoded(
+            query(&bob_id.0),
+            &DavRecipientKeys::derive(fauna_client_caldav::DavKind::Calendar, &BOB_MSEK),
+        )
         .await
         .expect("bob query ok");
     let bob_events = match page {
@@ -490,7 +493,10 @@ async fn mailbox_less_attendee_receives_and_rsvps_over_the_scheduling_rail_same_
     // the stored (re-sealed) event — exactly what an Apple Calendar reading the
     // same store would render.
     let page = alice_caldav
-        .query_events_decoded(query(&alice_id.0), &DavRecipientKeys::derive(&ALICE_MSEK))
+        .query_events_decoded(
+            query(&alice_id.0),
+            &DavRecipientKeys::derive(fauna_client_caldav::DavKind::Calendar, &ALICE_MSEK),
+        )
         .await
         .expect("alice query ok");
     let events = match page {
@@ -655,7 +661,10 @@ async fn ephemeral_mls_sender_scheduling_delivery_is_received_and_applied() {
         "the ephemeral-delivered REQUEST materializes a new event, got {outcome:?}"
     );
     let page = bob_caldav
-        .query_events_decoded(query(&bob_id.0), &DavRecipientKeys::derive(&BOB_MSEK))
+        .query_events_decoded(
+            query(&bob_id.0),
+            &DavRecipientKeys::derive(fauna_client_caldav::DavKind::Calendar, &BOB_MSEK),
+        )
         .await
         .expect("bob query ok");
     let bob_events = match page {
@@ -755,7 +764,10 @@ async fn receive_into(
 async fn events_of(seat: &Seat, msek: &[u8; 32]) -> usize {
     match seat
         .caldav
-        .query_events_decoded(query(&seat.id.0), &DavRecipientKeys::derive(msek))
+        .query_events_decoded(
+            query(&seat.id.0),
+            &DavRecipientKeys::derive(fauna_client_caldav::DavKind::Calendar, msek),
+        )
         .await
         .expect("query ok")
     {

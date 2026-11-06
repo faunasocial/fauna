@@ -535,7 +535,7 @@ class PersonalizationContentTest {
         assertTrue(note, "seen" in note)
         assertTrue(note, "3" in note)
         assertTrue(note, "less like this" in note)
-        assertTrue(note, "anonym" in note)
+        assertTrue(note, "without your name or account" in note)
         assertTrue(note, "4 public examples" in note)
         assertTrue(note, "6 marked posts" in note)
     }

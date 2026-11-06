@@ -87,6 +87,36 @@ pub const KIND_GROUP_GENERATION_SHRED: &str = "fauna.group.generation-shred";
 /// join and the ruling). **Frozen.**
 pub const KIND_GROUP_AUTHORITY_REVOCATION: &str = "fauna.group.authority-revocation";
 
+/// Class-2 kind: a **group set's path state** — one cell per path, logical
+/// key = the set's keyed path hash hex, value
+/// `fauna_core::group_file::GroupFileRecord` (sealed path, the manifest or
+/// the delete, the content generation id, and the author device's signed
+/// carriage — `p2p-shared-set-build.md` § Build design — the group set,
+/// decision 2). A delete is a value phase, never a tombstone. **Frozen.**
+pub const KIND_GROUP_FILE: &str = "fauna.group.file";
+
+/// Class-2 kind: the set's **display name**, one cell at [`GROUP_NAME_KEY`],
+/// value `fauna_core::group_name::GroupNameRecord` (the UTF-8 name, signed
+/// by an authority device under its carried `DeviceAuthorization`, checked
+/// against the authority line at the walk and in the fold); a nameless set
+/// keeps its short id. **Frozen.**
+pub const KIND_GROUP_NAME: &str = "fauna.group.name";
+
+/// The logical key of a scope's single [`KIND_GROUP_NAME`] cell.
+pub const GROUP_NAME_KEY: &str = "self";
+
+/// Class-2 kind: a member device's **dial targets** for the scope, one cell
+/// per writer device (logical key = the device id hex), value
+/// `fauna_core::group_endpoints::GroupEndpointsRecord` (the
+/// `DeviceEndpointsEntry` naming the writer's own actor, signed by the
+/// writer device under its carried `DeviceAuthorization`, checked against
+/// the authority line and the live roster at the walk and in the pump's
+/// read — the group twin of `fauna.state.share-endpoints`, with the file
+/// row's carriage). Machinery-sealed: a member must
+/// dial before it holds any generation key, and a custodian serving the
+/// scope must route it. **Frozen.**
+pub const KIND_GROUP_ENDPOINTS: &str = "fauna.group.endpoints";
+
 /// Which **key material seals** a group kind's entries — the group plane's
 /// third-column sibling of `crate::merge_policy::SealingEpoch`, with the T20
 /// sealing ruling's two strata (`key-material-hierarchy.md` § Audience: a
@@ -100,9 +130,9 @@ pub enum GroupSealing {
     /// whole roster and mint DAG before holding any generation key.
     MachineryRoot,
     /// Seals under the current admissible, roster-covered group generation
-    /// tip (`fauna_core::group_generation::resolve_admissible_group_tip`) —
-    /// content kinds only; none is registered yet (they land with the
-    /// `p2p-share` data plane).
+    /// tip (`fauna_core::group_generation::resolve_admissible_group_tip`)
+    /// through the content branch (`fauna_core::crypto::GroupContentSchedule`),
+    /// in the v2 envelope that names the generation — content kinds only.
     GenerationTip,
 }
 
@@ -161,6 +191,25 @@ const GROUP_POLICIES: &[(&str, MergePolicy, GroupSealing)] = &[
         // revoked set only grows); decode-or-fail join, first-contact strictness in
         // the adoption arm — the wrap kind's split.
         MergePolicy::CrdtPerField,
+        GroupSealing::MachineryRoot,
+    ),
+    (
+        KIND_GROUP_FILE,
+        // One value per path, ordered by the author's signed stamp; a delete
+        // is a value phase. Content: severed by the next generation.
+        MergePolicy::LatestWins,
+        GroupSealing::GenerationTip,
+    ),
+    (
+        KIND_GROUP_NAME,
+        // One cell, the authority's latest name.
+        MergePolicy::LatestWins,
+        GroupSealing::GenerationTip,
+    ),
+    (
+        KIND_GROUP_ENDPOINTS,
+        // Per-device cells, each device's latest advertisement.
+        MergePolicy::LatestWins,
         GroupSealing::MachineryRoot,
     ),
 ];
@@ -225,15 +274,38 @@ mod tests {
         }
     }
 
-    /// Every machinery kind seals under the root; no content kind is
-    /// registered yet — when one lands, this test is the reminder that it
-    /// carries the `GenerationTip` stratum, never the root.
+    /// The stratum of every registered kind, pinned by name: the content
+    /// kinds — a set's path state and its name — seal under the tip, so a
+    /// removal severs them; the machinery a member needs before it holds any
+    /// generation key (dial targets included) seals under the root. A new
+    /// kind fails here until someone states its stratum.
     #[test]
-    fn all_registered_kinds_are_machinery_root_sealed_today() {
+    fn every_kind_seals_under_its_stated_stratum() {
+        let content = [KIND_GROUP_FILE, KIND_GROUP_NAME];
         for kind in group_kinds() {
+            let want = if content.contains(&kind) {
+                GroupSealing::GenerationTip
+            } else {
+                GroupSealing::MachineryRoot
+            };
+            assert_eq!(group_sealing(kind), Some(want), "{kind}");
+        }
+        assert_eq!(
+            group_kinds().count(),
+            10,
+            "a kind landed without a stratum line here"
+        );
+    }
+
+    /// The group set's three kinds order by the author's stamp: a
+    /// stampless write is refused at first contact, like every LatestWins
+    /// kind's.
+    #[test]
+    fn the_group_set_kinds_merge_latest_wins() {
+        for kind in [KIND_GROUP_FILE, KIND_GROUP_NAME, KIND_GROUP_ENDPOINTS] {
             assert_eq!(
-                group_sealing(kind),
-                Some(GroupSealing::MachineryRoot),
+                group_merge_policy(kind),
+                Some(MergePolicy::LatestWins),
                 "{kind}"
             );
         }

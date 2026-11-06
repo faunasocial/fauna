@@ -191,7 +191,7 @@ def test_macos_agent_uploads_bound_folder_file(folder_share_owner_app, tmp_path)
     windows.
 
     ``real_sync_agent`` is needed because macOS' PRODUCTION spawner is
-    launchd (``LaunchdSyncAgentSpawner``), which an e2e launch must not
+    launchd (``FfiLaunchdAgentSpawner``), which an e2e launch must not
     bootstrap; the marker sets ``FAUNA_E2E_REAL_SYNC_AGENT``, under which the
     app constructs the shared ``FfiChildAgentSpawner`` instead
     (``libs/fauna-ffi/src/sync_agent_provisioning.rs``). ``isolated_sync_agent``
@@ -325,7 +325,7 @@ def _writer_member_decrypts_owner_upload(
     deadline = time.monotonic() + 90
     seen: list[str] = []
     while time.monotonic() < deadline:
-        seen = [mb.folder_title(i) for i in range(mb.folder_count())]
+        seen = mb.folder_titles()
         if any(set_name in t for t in seen):
             break
         time.sleep(1.0)  # sleep-ok: poll cadence of a deadline poll

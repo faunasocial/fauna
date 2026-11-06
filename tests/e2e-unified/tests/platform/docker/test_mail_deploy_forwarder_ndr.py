@@ -84,8 +84,10 @@ from .helpers import (
     find_free_ports,
     get_repo_root,
     imap_fetch_only_inbox_message,
+    imap_wait_for_message_containing,
     provision_admin_mailbox,
     publish_passing_mail_dns,
+    put_auth_policy,
     read_stub_mx_message,
     remove_container,
     remove_network,
@@ -94,6 +96,7 @@ from .helpers import (
     start_fake_scanner_sidecars,
     start_stub_mx_sidecar,
     wait_for_health,
+    write_dns_records,
 )
 
 try:
@@ -115,6 +118,7 @@ CLAIM_CODE = "FWDNDR"
 ADMIN_MAILBOX_LOCAL = "fwdadmin"   # the admin's IMAP mailbox (distinct from its "admin" handle)
 ADMIN_MAILBOX_PASSWORD = "forwarder-ndr-password-1"
 FORWARD_PATTERN = "forwardme"      # the inbound address that resolves to the admin forwarder
+SPF_FAIL_DOMAIN = "spf-fail.test"  # publishes `v=spf1 -all` and no DMARC: its SPF hard-fails
 
 
 # ── Fixtures ──────────────────────────────────────────────────────────
@@ -328,3 +332,113 @@ def test_mail_deploy_forwarder_ndr_seals_locally_no_hairpin(forwarder_ndr_nest, 
         "containerized SRS0 hairpin is back) — it must be sealed locally instead. "
         f"Captured at the stub:\n{(leaked or b'')[:600]!r}\n\n"
         f"── bridge diagnostics ──\n{bridge_diag(name)}")
+
+
+def _forwarder_bounces_once_one_carries(nest, token: str) -> list[bytes]:
+    """Every bounce in the admin forwarder's INBOX once one embeds ``token``. The
+    admin forwarder keeps no local copy, so its INBOX holds bounces only."""
+    try:
+        return imap_wait_for_message_containing(
+            "127.0.0.1", nest["mail_ports"][993], DOMAIN,
+            f"{ADMIN_MAILBOX_LOCAL}@{DOMAIN}", ADMIN_MAILBOX_PASSWORD, token)
+    except TimeoutError as e:
+        raise AssertionError(
+            f"no forwarder bounce embedding {token!r} reached the admin's INBOX: {e}\n\n"
+            f"── bridge diagnostics ──\n{bridge_diag(nest['name'])}") from e
+
+
+@pytest.mark.feature("admin-mail-policy")
+def test_backscatter_suppression_withholds_the_bounce_for_a_failing_sender(
+        forwarder_ndr_nest, run_seal_helper):
+    """`admin-mail-policy` 29: with backscatter suppression on, a forward of mail
+    whose sender hard-failed SPF on the way in earns no bounce when its delivery
+    fails for good; a passing sender's forward bounces as usual (the control);
+    switched off, the failing sender's bounce is sent too.
+
+    Spec: `docs/goal/behavior/mail-policy-config.md` § Outbound delivery (the two
+    `mail.outbound.suppress_ndr_*` switches, default on); which bounces they
+    decide — only a forward's — `docs/goal/behavior/smtp-server.md` § Backscatter
+    suppression; the forwarder's bounce is sealed into the forwarder's INBOX, never
+    relayed (`docs/goal/behavior/mail-forwarding.md` § NDR routing, § Suppression).
+
+    The SPF-failing message is accepted because the admin has switched the
+    inbound SPF hard-fail refusal off — the one way such mail reaches a forward.
+
+    **Causal anchor for the absence** (convention 14): the outbound worker
+    handles one due row at a time, in `next_attempt_at` order, and reports each
+    permanent failure synchronously — the nest decides that row's bounce before
+    the report returns. The failing sender's forward is queued before its SMTP
+    `250` (the forward rides `forward_message` inside DATA), and the control is
+    sent only once the clock has moved past that second, so its row is due
+    strictly later. So when the control's bounce is in the INBOX, the failing
+    sender's bounce has already been decided: its absence then is a fact, not a
+    settle window."""
+    nest = forwarder_ndr_nest
+    name = nest["name"]
+    token = f"bscat-{int(time.time() * 1000)}"
+    forwarder_addr = f"{FORWARD_PATTERN}@{DOMAIN}"
+
+    enforce_mail_perimeter(nest, domain=DOMAIN)
+    # Accept the SPF hard fail so it can be forwarded at all; DMARC stays enforced.
+    put_auth_policy(nest, enforce_dmarc=True, log_only=False, enforce_spf_hardfail=False)
+    provision_admin_mailbox(
+        nest, run_seal_helper, domain=DOMAIN, local_part=ADMIN_MAILBOX_LOCAL,
+        password=ADMIN_MAILBOX_PASSWORD,
+    )
+    with admin_ws(nest) as admin:
+        # Local part `nonexistent…` → the stub MX 550s every forward at RCPT.
+        admin.call("fauna.bridges.create_forwarder",
+                   {"local_domain": DOMAIN, "pattern": FORWARD_PATTERN,
+                    "forward_target": f"nonexistent-bounce-{token}@{EXTERNAL_DOMAIN}"})
+        # The whole outbound group back to its defaults: both suppressors on.
+        assert admin.call("fauna.bridges.put_outbound_policy", {}).get("ok") is True
+
+    # One atomic write: the control sender passes SPF + DMARC from the loopback;
+    # the failing sender's SPF authorizes nobody and it publishes no DMARC, so
+    # SPF alone decides — a hard fail.
+    write_dns_records(
+        nest["records_dir"],
+        a={EXTERNAL_DOMAIN: "127.0.0.1"},
+        mx={EXTERNAL_DOMAIN: f"0 {EXTERNAL_DOMAIN}"},
+        txt={EXTERNAL_DOMAIN: "v=spf1 ip4:127.0.0.1 -all",
+             f"_dmarc.{EXTERNAL_DOMAIN}": "v=DMARC1; p=reject",
+             SPF_FAIL_DOMAIN: "v=spf1 -all"},
+    )
+
+    bring_bridges_to_serving(name, nest, nest["mail_ports"], DOMAIN)
+
+    def forward_from(sender_domain: str, tok: str) -> None:
+        deliver_inbound_loopback_curl(
+            name, mail_from=f"probe-{tok}@{sender_domain}", rcpt_to=forwarder_addr,
+            subject=f"backscatter probe {tok}",
+            body_text=f"Forward me to a dead downstream ({tok}).\n")
+
+    # ── Suppression on ──
+    failing_on, control = f"{token}-fail-on", f"{token}-pass"
+    forward_from(SPF_FAIL_DOMAIN, failing_on)
+    queued_at = int(time.time())
+    while int(time.time()) <= queued_at:
+        time.sleep(0.05)  # sleep-ok: waits for the clock's second to turn (the control's row must be due strictly after the failing one's), not for any work to settle
+    forward_from(EXTERNAL_DOMAIN, control)
+
+    bounces = _forwarder_bounces_once_one_carries(nest, control)
+    assert not any(failing_on.encode() in b for b in bounces), (
+        "with backscatter suppression on, the forward of a sender that hard-failed "
+        "SPF must earn no bounce — but one reached the forwarder's INBOX\n\n"
+        f"── bridge diagnostics ──\n{bridge_diag(name)}")
+    assert len(bounces) == 1, (
+        f"exactly the control's bounce is expected; the INBOX holds {len(bounces)}")
+    text = bounces[0].decode("utf-8", errors="replace")
+    assert "multipart/report" in text, (
+        f"the control's bounce must be an RFC 3464 report; got first 600B: {text[:600]!r}")
+
+    # ── Suppression off ──
+    with admin_ws(nest) as admin:
+        assert admin.call("fauna.bridges.put_outbound_policy",
+                          {"suppress_ndr_spf_hardfail": False}).get("ok") is True
+    failing_off = f"{token}-fail-off"
+    forward_from(SPF_FAIL_DOMAIN, failing_off)
+    bounces = _forwarder_bounces_once_one_carries(nest, failing_off)
+    assert len(bounces) == 2 and not any(failing_on.encode() in b for b in bounces), (
+        "switched off, the failing sender's bounce is sent — and only that one is "
+        f"added; the INBOX holds {len(bounces)}")

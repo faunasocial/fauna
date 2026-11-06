@@ -68,9 +68,10 @@ import fauna_ffi
 from common.auth import (
     mark_tls_nest,
     open_registration,
-    register_handled_actor,
     unmark_tls_nest,
 )
+
+from helpers.admin_wire import admit_adult
 
 from tests.api.test_web_folder_audience import DEVICE_ID, _seed_public_file
 from tests.api.test_web_host_routing import _get
@@ -196,7 +197,7 @@ def test_a_user_site_never_shadows_the_mounted_spa_at_app(site_nest):
     """
     nest = site_nest
     url, port = nest["url"], nest["port"]
-    actor = register_handled_actor(port, handle=HANDLE, domain=DOMAIN, base_url=url)
+    actor = admit_adult(nest, HANDLE, domain=DOMAIN, token=True)
     fqdn = f"{HANDLE}.{DOMAIN}"
 
     # ── A born-public website folder with a write-capable seed device, and the

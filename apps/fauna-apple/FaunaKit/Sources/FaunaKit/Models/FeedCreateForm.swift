@@ -33,10 +33,15 @@ public struct FeedCreateForm {
     /// shared `fauna_client_feed::builtin_factor_options` catalog (feed.md §
     /// Where logic lives → Feed factor-picker built-ins) — never a Swift
     /// literal, so a new built-in reaches this picker with no app change.
-    /// Growing the picker with the caller's subscribed labeler factors is
-    /// future work for whichever session lands apple's Community-labelers
-    /// catalog.
     public static let builtinFactors: [FfiFactorOption] = builtinFactorOptions()
+
+    /// The picker's second source: the caller's subscribed community-labeler
+    /// factors (`labeler:<hex>`), read once from the labeler catalog machine
+    /// by `FeedVM.subscribedLabelerFactors()` and staged here between the
+    /// built-ins and the trained topics (content-moderation-and-ranking.md §
+    /// Tier-3 community models; tui, windows and web do the same). A labeler
+    /// has no display name anywhere, so its key is also its label.
+    public var subscribedLabelerOptions: [TrainedFactorOption] = []
 
     /// The `feed-factor-select` picker's third source (topic-factors.md §
     /// Authoring surface & picker): the user's trained-topic factors, fetched
@@ -53,12 +58,14 @@ public struct FeedCreateForm {
     /// the `topic:<hex>` keys the composition stores (topic-factors.md §
     /// Authoring surface & picker).
     public var factorOptionLabels: [String] {
-        Self.builtinFactors.map { renderLocalizedText($0.label) } + trainedFactorOptions.map(\.label)
+        Self.builtinFactors.map { renderLocalizedText($0.label) }
+            + subscribedLabelerOptions.map(\.label) + trainedFactorOptions.map(\.label)
     }
 
     /// The stable keys behind `factorOptionLabels`, index for index.
     public var factorOptionKeys: [String] {
-        Self.builtinFactors.map(\.value) + trainedFactorOptions.map(\.key)
+        Self.builtinFactors.map(\.value)
+            + subscribedLabelerOptions.map(\.key) + trainedFactorOptions.map(\.key)
     }
 
     /// Select by a stable key, or by the label the picker paints for one.

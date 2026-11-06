@@ -735,7 +735,10 @@ impl MailImportSnapshot {
             self.started_at,
             self.last_progress_at,
             self.session_state == Some(ImportSessionState::Running),
-            self.imported_count + self.skipped_count + self.errored_count,
+            // Saturating: the counters are the nest's (`apply_session`).
+            self.imported_count
+                .saturating_add(self.skipped_count)
+                .saturating_add(self.errored_count),
             self.total_count,
             now_secs,
         )
@@ -1933,6 +1936,19 @@ pub struct MailImportMachine {
     view_epoch: std::sync::atomic::AtomicU64,
 }
 
+/// Clears `run_active` on drop — the panic path of a walk that never reached
+/// `end_run`. Idempotent after a normal `end_run`.
+struct RunActiveGuard<'a>(&'a MailImportMachine);
+
+impl Drop for RunActiveGuard<'_> {
+    fn drop(&mut self) {
+        // A poisoned lock still guards a plain bool: clear it regardless.
+        let stop = self.0.stop.lock().unwrap_or_else(|e| e.into_inner());
+        *self.0.run_active.lock().unwrap_or_else(|e| e.into_inner()) = false;
+        drop(stop);
+    }
+}
+
 impl MailImportMachine {
     pub fn new(
         nest: Arc<dyn MailImportNest>,
@@ -3116,13 +3132,13 @@ impl MailImportMachine {
                 }
             }
         }
-        snap.imported_count += imported;
-        snap.skipped_count += skipped;
-        snap.errored_count += errored;
+        snap.imported_count = snap.imported_count.saturating_add(imported);
+        snap.skipped_count = snap.skipped_count.saturating_add(skipped);
+        snap.errored_count = snap.errored_count.saturating_add(errored);
         if let Some(row) = snap.mailbox_row(mailbox) {
-            row.imported += imported;
-            row.skipped += skipped;
-            row.errored += errored;
+            row.imported = row.imported.saturating_add(imported);
+            row.skipped = row.skipped.saturating_add(skipped);
+            row.errored = row.errored.saturating_add(errored);
         }
         Ok(sent)
     }
@@ -3433,11 +3449,11 @@ impl MailImportMachine {
                     match recorded {
                         Ok(_) => {
                             let mut snap = self.inner.lock().expect("snapshot mutex");
-                            snap.skipped_count += skipped;
-                            snap.errored_count += errored;
+                            snap.skipped_count = snap.skipped_count.saturating_add(skipped);
+                            snap.errored_count = snap.errored_count.saturating_add(errored);
                             if let Some(row) = snap.mailbox_row(&mailbox) {
-                                row.skipped += skipped;
-                                row.errored += errored;
+                                row.skipped = row.skipped.saturating_add(skipped);
+                                row.errored = row.errored.saturating_add(errored);
                             }
                             let mut budget = self.error_budget.lock().expect("error budget mutex");
                             for _ in 0..skipped {
@@ -3647,7 +3663,9 @@ impl MailImportMachine {
                             snap.skipped_count = counters.skipped_count;
                             snap.errored_count = counters.errored_count;
                             if let Some(row) = snap.mailbox_row(&mailbox) {
-                                row.skipped += newly;
+                                // Saturating: a hostile nest's counter must
+                                // not panic under the snapshot lock.
+                                row.skipped = row.skipped.saturating_add(newly);
                             }
                         }
                         // Unrecorded, so the cursor stays: the Resume walks
@@ -3776,6 +3794,9 @@ impl MailImportMachine {
             let _stop = self.stop.lock().expect("stop mutex");
             *self.run_active.lock().expect("run mutex") = true;
         }
+        // Clears `run_active` even if the walk panics, so Pause and Cancel
+        // never wait on a loop that is gone.
+        let _run_guard = RunActiveGuard(self);
         let result = self.run_import_inner().await;
         self.end_run();
         if let Err(ref e) = result {
@@ -3878,6 +3899,11 @@ mod tests {
         /// `entered`, and waits for `release` before returning it — a stale
         /// listing in flight while the test moves the machine's view.
         list_gate: StdMutex<Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>>,
+        /// Answers for `record_client_outcomes`'s `skipped_count`, one per
+        /// call, in place of the honest fold — a hostile nest's counters.
+        skipped_count_answers: StdMutex<VecDeque<u64>>,
+        /// `send_unit` panics — a walk that dies without reaching `end_run`.
+        send_panics: std::sync::atomic::AtomicBool,
     }
 
     impl FakeNest {
@@ -3895,6 +3921,8 @@ mod tests {
                 registration: StdMutex::new(None),
                 listing: StdMutex::new(None),
                 list_gate: StdMutex::new(None),
+                skipped_count_answers: StdMutex::new(VecDeque::new()),
+                send_panics: std::sync::atomic::AtomicBool::new(false),
             }
         }
 
@@ -4119,6 +4147,9 @@ mod tests {
                 ImportUnit::Single(item) => vec![item.as_ref()],
             };
             self.record("send_unit", (&_session_id, &wire, revised_total_count));
+            if self.send_panics.load(std::sync::atomic::Ordering::SeqCst) {
+                panic!("a seam call that panics mid-walk");
+            }
             if let Some(e) = self.send_errors.lock().unwrap().pop_front() {
                 return Err(e);
             }
@@ -4213,6 +4244,9 @@ mod tests {
                 reply.imported_count = s.imported_count;
                 reply.skipped_count = s.skipped_count;
                 reply.errored_count = s.errored_count;
+            }
+            if let Some(n) = self.skipped_count_answers.lock().unwrap().pop_front() {
+                reply.skipped_count = n;
             }
             self.recorded.lock().unwrap().push((mailbox, outcomes));
             Ok(reply)
@@ -4546,7 +4580,7 @@ mod tests {
                 reached.notify_one();
                 release.notified().await;
             }
-            let from = cursor.map_or(1, |c| c.last_processed_source_uid + 1);
+            let after = cursor.map_or(0, |c| c.last_processed_source_uid);
             // The body's length stands in for `RFC822.SIZE`, as the real
             // seam's enumeration reports it, dated like the real one.
             let (too_large, wanted): (Vec<FetchedMessage>, Vec<FetchedMessage>) = self
@@ -4555,7 +4589,7 @@ mod tests {
                 .cloned()
                 .unwrap_or_default()
                 .into_iter()
-                .filter(|m| m.uid >= from)
+                .filter(|m| m.uid > after)
                 .take(max)
                 .partition(|m| m.body.len() as u64 > max_size_bytes);
             let outcomes = wanted
@@ -4591,14 +4625,14 @@ mod tests {
             max: usize,
         ) -> Result<Vec<UidEntry>, NestError> {
             self.enumerated.lock().unwrap().push(mailbox.to_string());
-            let from = cursor.map_or(1, |c| c.last_processed_source_uid + 1);
+            let after = cursor.map_or(0, |c| c.last_processed_source_uid);
             Ok(self
                 .messages
                 .get(mailbox)
                 .cloned()
                 .unwrap_or_default()
                 .into_iter()
-                .filter(|m| m.uid >= from)
+                .filter(|m| m.uid > after)
                 .take(max)
                 .map(|m| UidEntry {
                     uid: m.uid,
@@ -6403,6 +6437,84 @@ mod tests {
         );
         assert_eq!(snap.imported_count, 4);
         assert_eq!(snap.pause_reason, None);
+    }
+
+    /// `u32::MAX` is a legal IMAP UID: a source answering it must finish its
+    /// mailbox, never overflow the cursor on the next window.
+    #[tokio::test]
+    async fn a_source_uid_of_u32_max_finishes_the_mailbox_without_overflow() {
+        let nest = Arc::new(FakeNest::new());
+        let source = Arc::new(
+            FakeSource::new(&[("INBOX", true, 2)])
+                .with_dated_messages("INBOX", &[(1, 0), (u32::MAX, 0)]),
+        );
+        let m = started_with_source(nest.clone(), source, Arc::new(FakeClock::new())).await;
+        m.run_import().await.unwrap();
+        assert_eq!(
+            nest.sent_uids.lock().unwrap().clone(),
+            vec![1, u32::MAX],
+            "both messages handed over, once each"
+        );
+        assert_eq!(
+            nest.session.lock().unwrap().as_ref().unwrap().state,
+            ImportSessionState::Completed
+        );
+        assert!(!*m.run_active.lock().unwrap(), "no run left in flight");
+    }
+
+    /// The counters are the nest's: absurd ones must not panic the progress
+    /// step's timing getter.
+    #[test]
+    fn timing_survives_a_hostile_nests_counters() {
+        let mut snap = MailImportSnapshot::empty();
+        snap.started_at = 1;
+        snap.imported_count = u64::MAX;
+        snap.skipped_count = u64::MAX;
+        snap.errored_count = 1;
+        snap.total_count = u64::MAX;
+        let _ = snap.timing(10);
+    }
+
+    /// A walk that panics never reaches `end_run`: the drop guard still clears
+    /// `run_active`, so Pause and Cancel never wait on a loop that is gone.
+    #[tokio::test]
+    async fn a_panicking_walk_still_clears_run_active() {
+        use futures_util::FutureExt as _;
+        let nest = Arc::new(FakeNest::new());
+        let source = Arc::new(FakeSource::new(&[("INBOX", true, 3)]).with_messages("INBOX", 3));
+        let m = started_with_source(nest.clone(), source, Arc::new(FakeClock::new())).await;
+        nest.send_panics
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let walk = std::panic::AssertUnwindSafe(m.run_import())
+            .catch_unwind()
+            .await;
+        assert!(walk.is_err(), "the seam's panic reached the walk");
+        assert!(
+            !*m.run_active.lock().unwrap_or_else(|e| e.into_inner()),
+            "run_active cleared on the panic path"
+        );
+    }
+
+    /// A nest answering absurd skip counters must not panic the skip walk
+    /// under the snapshot lock (which would poison it for good).
+    #[tokio::test]
+    async fn a_hostile_skip_counter_leaves_the_snapshot_usable() {
+        let total = FETCH_WINDOW_SIZE as u32 + 8;
+        let nest = Arc::new(FakeNest::new().with_quota_uids(5..=total));
+        let source =
+            Arc::new(FakeSource::new(&[("INBOX", true, total)]).with_messages("INBOX", total));
+        let m = started_with_source(nest.clone(), source, Arc::new(FakeClock::new())).await;
+        m.run_import().await.unwrap();
+        m.dispatch(MailImportAction::SkipRest).await.unwrap();
+        *nest.skipped_count_answers.lock().unwrap() = VecDeque::from([1, u64::MAX]);
+        m.run_import().await.unwrap();
+        assert!(
+            nest.skipped_count_answers.lock().unwrap().is_empty(),
+            "the hostile counters were actually read"
+        );
+        // Would panic with "snapshot mutex" had a panic poisoned it.
+        let _ = m.snapshot();
+        m.dispatch(MailImportAction::Refresh).await.unwrap();
     }
 
     /// Skip the rest is a way on from a pause; a running import refuses it.

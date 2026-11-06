@@ -958,11 +958,13 @@ async fn the_choose_winner_head_row_carries_the_choosers_verified_signature() {
         change_type: "modify".into(),
         size_bytes: size,
         content_key_version: Some(2),
+        content_generation: None,
         path_sealed: Some(seal.clone()),
         thumbnail_hash: None,
         derived_through: None,
         is_resolution: false,
         is_retention: false,
+        deposited_by: None,
     };
     let resolve = |sig: [u8; 64]| ConflictResolveRequest {
         id: conflict_id,
@@ -1043,6 +1045,8 @@ async fn the_resolved_reports_winner_row_carries_the_reporters_verified_signatur
     let actor = account.actor_id().0;
     create_set(&router, &state, &account, SET, Some(NONCE)).await;
     let reporter = [0x3a; 32];
+    // The report door binds `device_id` to the caller's own devices.
+    register_device(&router, &state, &account, &hex::encode(reporter)).await;
     let merged = [0x66; 32];
     let seal = b"report-seal".to_vec();
     let path = "notes.txt";
@@ -1056,11 +1060,13 @@ async fn the_resolved_reports_winner_row_carries_the_reporters_verified_signatur
         change_type: "modify".into(),
         size_bytes: 15,
         content_key_version: Some(4),
+        content_generation: None,
         path_sealed: Some(seal.clone()),
         thumbnail_hash: None,
         derived_through: Some(derived_through),
         is_resolution,
         is_retention: false,
+        deposited_by: None,
     };
     // The retention row the nest mints for the reporter's own losing
     // candidate (0x11): its device, manifest and size, the request's path hash
@@ -1074,11 +1080,13 @@ async fn the_resolved_reports_winner_row_carries_the_reporters_verified_signatur
         change_type: "modify".into(),
         size_bytes: 10,
         content_key_version: None,
+        content_generation: None,
         path_sealed: Some(seal.clone()),
         thumbnail_hash: None,
         derived_through: Some(3),
         is_resolution: false,
         is_retention,
+        deposited_by: None,
     };
     let loser_sig = loser_statement(true).sign(account.signing_key());
     let report = |sig: [u8; 64]| ConflictReportRequest {
@@ -1523,6 +1531,109 @@ async fn every_listed_version_carries_its_rows_signed_statement() {
         fauna_protocol::sync_writer_sig::verify_row(&row, NONCE, &certs, |_| true)
             .expect("every version verifies");
     }
+}
+
+/// `folder-deposit.md` ruling 3: the change row the owner's device records
+/// when it adopts a deposit carries the depositor inside the signed statement.
+/// The nest verifies it as part of the statement (a depositor the signature
+/// does not cover is refused, as is one that is not 32-byte hex), stores it,
+/// and echoes it on every projection that carries the statement — the change
+/// feed, the version history and the media head — where a reader still
+/// verifies the row.
+#[tokio::test]
+async fn an_adopted_rows_depositor_is_verified_stored_and_echoed() {
+    use fauna_protocol::files::{FilesVersionsListReply, FilesVersionsListRequest};
+    use fauna_protocol::media::{MEDIA_LIST_CURSOR_V2, MediaListReply, MediaListRequest};
+    let (router, state, account) = nest().await;
+    create_set(&router, &state, &account, SET, Some(NONCE)).await;
+    let device_hex = fauna_core::hex32::encode(&[0x11; 32]);
+    register_device(&router, &state, &account, &device_hex).await;
+    let depositor = hex::encode([0x5d; 32]);
+
+    // The depositor added after signing: not the statement the writer signed.
+    let mut forged = sign(
+        record(&device_hex, "drop.txt", 0xd1, 12),
+        &account,
+        NONCE,
+        account.signing_key(),
+    );
+    forged.deposited_by = Some(depositor.clone());
+    assert_code(
+        record_as(&router, &state, &account, forged)
+            .await
+            .unwrap_err(),
+        "signature_invalid",
+        "a depositor outside the signature",
+    );
+    let mut malformed = record(&device_hex, "drop.txt", 0xd1, 12);
+    malformed.deposited_by = Some("not hex".into());
+    malformed.signature = Some(ByteBuf::from(vec![0; 64]));
+    malformed.signer_key = Some(ByteBuf::from(account.actor_id().0.to_vec()));
+    assert_code(
+        record_as(&router, &state, &account, malformed)
+            .await
+            .unwrap_err(),
+        "invalid_request",
+        "a depositor that is not 32-byte hex",
+    );
+
+    let mut adopted = record(&device_hex, "drop.txt", 0xd1, 12);
+    adopted.deposited_by = Some(depositor.clone());
+    let adopted = sign(adopted, &account, NONCE, account.signing_key());
+    record_as(&router, &state, &account, adopted)
+        .await
+        .expect("a signed depositor verifies");
+
+    let certs = fauna_protocol::sync_writer_sig::SignerCertCache::new();
+    let page = list(&router, &state, &account).await;
+    assert_eq!(page.changes.len(), 1);
+    assert_eq!(
+        page.changes[0].deposited_by,
+        Some(depositor.clone()),
+        "the change feed echoes the depositor"
+    );
+    fauna_protocol::sync_writer_sig::verify_row(&page.changes[0], NONCE, &certs, |_| true)
+        .expect("a reader verifies the served row with its depositor");
+
+    let versions: FilesVersionsListReply = call(
+        &router,
+        &state,
+        account.actor_id().0,
+        "fauna.files.versions.list",
+        FilesVersionsListRequest {
+            path_hash: ByteBuf::from(fauna_core::sync::path_hash("drop.txt").to_vec()),
+            folder: Some(SET.into()),
+            include_pruned: None,
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("versions.list");
+    assert_eq!(versions.versions.len(), 1);
+    assert_eq!(versions.versions[0].deposited_by, Some(depositor.clone()));
+    let row = versions.versions[0]
+        .as_change_row()
+        .expect("the statement rides");
+    fauna_protocol::sync_writer_sig::verify_row(&row, NONCE, &certs, |_| true)
+        .expect("the version verifies with its depositor");
+
+    let media: MediaListReply = call(
+        &router,
+        &state,
+        account.actor_id().0,
+        "fauna.media.list",
+        MediaListRequest {
+            cursor_version: MEDIA_LIST_CURSOR_V2,
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("media.list");
+    assert_eq!(media.items.len(), 1);
+    assert_eq!(media.items[0].deposited_by, Some(depositor));
+    let row = media.items[0].as_change_row().expect("the statement rides");
+    fauna_protocol::sync_writer_sig::verify_row(&row, NONCE, &certs, |_| true)
+        .expect("the media head verifies with its depositor");
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -2748,11 +2859,13 @@ async fn a_choose_winner_over_the_heads_own_manifest_transfers_the_charge() {
         change_type: "modify".into(),
         size_bytes: S,
         content_key_version: None,
+        content_generation: None,
         path_sealed: Some(seal),
         thumbnail_hash: None,
         derived_through: None,
         is_resolution: false,
         is_retention: false,
+        deposited_by: None,
     }
     .sign(owner.signing_key());
 
@@ -2817,6 +2930,8 @@ async fn a_resolved_report_whose_winner_is_the_head_charges_only_the_loser() {
     let remote_hex = hex::encode(remote);
     register_device(&router, &state, &owner, &remote_hex).await;
     let reporter = [0x3a; 32];
+    // The report door binds `device_id` to the caller's own devices.
+    register_device(&router, &state, &owner, &hex::encode(reporter)).await;
     let path = "notes.txt";
     let seal = b"report-seal".to_vec();
 
@@ -2834,11 +2949,13 @@ async fn a_resolved_report_whose_winner_is_the_head_charges_only_the_loser() {
         change_type: "modify".into(),
         size_bytes: size,
         content_key_version: None,
+        content_generation: None,
         path_sealed: Some(seal.clone()),
         thumbnail_hash: None,
         derived_through: Some(w),
         is_resolution: !retention,
         is_retention: retention,
+        deposited_by: None,
     };
     let winner_sig = row(remote, 0x22, HEAD, x1, false).sign(owner.signing_key());
     let loser_sig = row(reporter, 0x11, LOSER, 0, true).sign(owner.signing_key());

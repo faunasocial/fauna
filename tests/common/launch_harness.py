@@ -90,7 +90,16 @@ def reached_authenticated_app(driver, timeout: float = 30) -> None:
     up" — and on web that is legitimately reachable from cache alone with the
     nest unreachable, so the shell wait stays the right signal here. Don't
     "unify" the two: swapping this to the flag would make every offline-shell
-    relaunch time out."""
+    relaunch time out.
+
+    **iOS is web's case on a native app (2026-10-28).** It mounts its shell
+    optimistically off the stored session before the launch machine's verdict, and
+    stays on it through a transient offline verdict, so it too publishes the
+    stricter verified-this-load ``session.authenticated``. This helper reads its
+    weaker "a shell is up" off ``nav`` instead (:func:`_ios_shell_mounted`). So on
+    iOS and web, a return from here does NOT mean the launch verdict has landed: a
+    caller about to read what the login graduation records (the nest-identity pin,
+    a bearer) awaits ``helpers.waiting.await_session_actor``."""
     if driver.is_web():
         anchors = (FEED_TAB, *SHELL_SWAP_ANCHORS)
         deadline = time.monotonic() + timeout
@@ -106,21 +115,91 @@ def reached_authenticated_app(driver, timeout: float = 30) -> None:
                     "(driver.console_log()) to tell those apart."
                 )
             time.sleep(_POLL_INTERVAL_S)
+    elif driver.is_ios():
+        driver.wait_for_state(_ios_shell_mounted, timeout=timeout)
     else:
         driver.wait_for_state(
             lambda s: bool(s.get("session", {}).get("authenticated")), timeout=timeout
         )
 
 
+def _ios_shell_mounted(state) -> bool:
+    """iOS's "a shell is up" fact, read off ``nav``: the app reports the launch
+    surface (``welcome``) exactly while its authenticated shell is NOT mounted —
+    the wizard, the launch spinner, and the blocking needs-update / sign-in-refused
+    / locked surfaces (``FaunaApp.serializeState``'s ``nav`` branch, the same flags
+    its mounted-shell probe reads). Its ``session.authenticated`` is the stricter
+    verified-on-this-load fact, as web's is (see :func:`reached_authenticated_app`)."""
+    stack = ((state or {}).get("nav") or {}).get("stack") or []
+    return bool(stack) and (stack[0] or {}).get("view") != "welcome"
+
+
 def in_authenticated_app(driver) -> bool:
     """One non-blocking read of :func:`reached_authenticated_app`'s signal — for
     a caller that polls it beside other work (a wizard it is still stepping
     through). Native: ``session.authenticated``; web: one of the authenticated
-    shells rendered, never web's stricter verified-this-load flag (the reason is
+    shells rendered; iOS: its ``nav`` off the launch surface — never web's or
+    iOS's stricter verified-this-load flag (the reason is
     :func:`reached_authenticated_app`'s)."""
     if driver.is_web():
         return any(driver.is_visible(a) for a in (FEED_TAB, *SHELL_SWAP_ANCHORS))
+    if driver.is_ios():
+        return _ios_shell_mounted(driver.get_state())
     return bool(driver.get_state("session.authenticated"))
+
+
+def sign_in_through_the_wizard(driver, actor, nest) -> None:
+    """A real sign-in of an already-registered actor: import its key, the real
+    handle check against the live nest, Continue, through to the authenticated
+    app (lifted 2026-10-28 from ``test_identity_key_stays_on_the_device.py`` so
+    the sealed-store journeys sign in the same way).
+
+    ``actor`` is a :func:`common.auth.register_handled_actor` result and
+    ``nest`` a nest whose real handle check resolves and dials it (the
+    ``smoke_handled_nest`` shape). A terminal wizard step may stand between
+    Continue and the app (the NAT-mode confirm, a launch retry): clicking
+    through is the person's own next action; the loop exits on arrival.
+    Everything the sign-in sends — the device registration, the writer key,
+    the principal bundle — has been sent once the account runtime is up."""
+    from actions import ActionLayer
+
+    secret = bytes(actor["signing_key"])
+    app = ActionLayer(driver)
+    app.onboarding.navigate_to_status()
+    app.onboarding.import_key(secret.hex())
+    finish_sign_in_from_handle_entry(driver, actor, nest)
+
+
+def finish_sign_in_from_handle_entry(driver, actor, nest) -> None:
+    """The back half of :func:`sign_in_through_the_wizard`, from a wizard that
+    already holds ``actor``'s key and stands on (or is heading to) handle entry
+    — the landing of a relaunch that resumed a half-finished import."""
+    import pytest
+
+    from actions import ActionLayer
+    from helpers.waiting import await_account_runtime_assembled
+
+    app = ActionLayer(driver)
+    driver.wait_for("handle-input", timeout=60)
+    app.onboarding.fill_handle(f"{actor['handle']}@{nest['authority']}")
+    app.onboarding.run_handle_check(timeout=45)
+    app.onboarding.submit_handle()
+    deadline = time.monotonic() + 120
+    while True:
+        try:
+            reached_authenticated_app(driver, timeout=2)
+            break
+        except Exception:
+            if time.monotonic() > deadline:
+                pytest.fail(
+                    "a real sign-in never reached the main app; "
+                    f"error={app.error_text()!r}"
+                )
+        for btn in ("nat-mode-confirm-button", "launch-retry-button"):
+            with contextlib.suppress(Exception):
+                if driver.is_visible(btn):
+                    driver.click(btn)
+    await_account_runtime_assembled(driver)
 
 
 class LaunchHarness:
@@ -214,7 +293,7 @@ class NativeLaunchHarness(LaunchHarness):
         # contract every other backend would then have to carry and ignore:
         # iOS's `udid` (drivers/ios.py `launch()` requires it alongside
         # `app_path`, and no store carries a simulator identity), and the
-        # tray-residency case's `{"args": "--autostart"}`, whose whole subject is
+        # tray-residency case's `{"app_args": "--autostart"}`, whose whole subject is
         # HOW the binary was invoked rather than what was stored before it.
         self._extra_launch_config = extra_launch_config or {}
 
@@ -519,7 +598,7 @@ def make_launch_harness(
     ``extra_launch_config`` is merged into every ``launch_config()`` this harness
     hands the driver, for the cases whose subject is *how the binary was invoked*
     rather than what was stored before it — the tray-residency case passes
-    ``{"args": "--autostart"}``. It goes here rather than into the ``CredStore``
+    ``{"app_args": "--autostart"}``. It goes here rather than into the ``CredStore``
     contract on purpose: a store describes persisted identity, and every backend
     would have to carry and ignore a field about command lines (the same
     reasoning that put ios's ``udid`` on this seam).

@@ -51,6 +51,7 @@ public sealed partial class OnboardingPage : Page
     private readonly IdentityImportView         _identityImportView;
     private readonly RecoveryKitView            _recoveryKitView;
     private readonly RecoveryEntryView          _recoveryEntryView;
+    private readonly EmergencyLockoutEntryView  _emergencyLockoutEntryView;
     private readonly HandleEntryView            _handleEntryView;
     private readonly DnsConfigView              _dnsConfigView;
     private readonly VpsConfigView              _vpsConfigView;
@@ -89,6 +90,7 @@ public sealed partial class OnboardingPage : Page
         _identityImportView         = new IdentityImportView(ViewModel);
         _recoveryKitView            = new RecoveryKitView(ViewModel);
         _recoveryEntryView          = new RecoveryEntryView(ViewModel);
+        _emergencyLockoutEntryView  = new EmergencyLockoutEntryView(ViewModel);
         _handleEntryView            = new HandleEntryView(ViewModel);
         _dnsConfigView              = new DnsConfigView(ViewModel);
         _vpsConfigView              = new VpsConfigView(ViewModel);
@@ -326,12 +328,9 @@ public sealed partial class OnboardingPage : Page
             // phrase-only restore (restore-from-recovery-kit-button).
             OnboardingStep.RecoveryKit           => _recoveryKitView,
             OnboardingStep.RecoveryEntry         => _recoveryEntryView,
-            // The signed-out lock door (ui/sessions.md § The signed-out door) is
-            // unbuilt on windows: nothing renders emergency-lockout-entry-button,
-            // so the machine never enters this step here. Mapped to the choice
-            // page so this throwing switch stays exhaustive until the batched
-            // trickle-down lands the screen.
-            OnboardingStep.EmergencyLockoutEntry => _identityChoiceView,
+            // The signed-out lock door (ui/sessions.md § The signed-out door),
+            // reached from identity_choice's emergency-lockout-entry-button.
+            OnboardingStep.EmergencyLockoutEntry => _emergencyLockoutEntryView,
             OnboardingStep.HandleEntry           => _handleEntryView,
             OnboardingStep.DnsConfig             => _dnsConfigView,
             OnboardingStep.VpsConfig             => _vpsConfigView,

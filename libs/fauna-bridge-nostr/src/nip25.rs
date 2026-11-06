@@ -20,7 +20,11 @@ pub fn build_reaction_event(
     }
 }
 
-/// Parse a kind-7 reaction event. Returns (target_event_id, emoji).
+/// Parse a kind-7 reaction event. Returns (target_event_id, emoji). `None`
+/// for a reaction whose content fails [`fauna_core::data::is_reaction_emoji`]
+/// — the one rule the nest's `react` link shares (`ui/feed.md` § Layout &
+/// flow → *Reaction posts count and paint*, ruling 2) — so a kind-7 carrying
+/// a sentence or an oversized string is never a `React` reference.
 pub fn parse_reaction(event: &Event) -> Option<(String, String)> {
     if event.kind != kind::REACTION {
         return None;
@@ -38,6 +42,9 @@ pub fn parse_reaction(event: &Event) -> Option<(String, String)> {
     } else {
         event.content.clone()
     };
+    if !fauna_core::data::is_reaction_emoji(&emoji) {
+        return None;
+    }
 
     Some((target_id, emoji))
 }
@@ -98,6 +105,24 @@ mod tests {
         };
         let (_, emoji) = parse_reaction(&event).unwrap();
         assert_eq!(emoji, "+");
+    }
+
+    #[test]
+    fn parse_reaction_refuses_content_that_is_not_one_emoji() {
+        let mk = |content: String| Event {
+            id: "x".repeat(64),
+            pubkey: "y".repeat(64),
+            created_at: 1000,
+            kind: kind::REACTION,
+            tags: vec![Tag::new(vec!["e".into(), "target123".into()])],
+            content,
+            sig: "s".repeat(128),
+        };
+        assert!(parse_reaction(&mk("great post!".into())).is_none());
+        assert!(parse_reaction(&mk("🔥".repeat(40))).is_none());
+        assert!(parse_reaction(&mk(format!(":{}:", "a".repeat(80)))).is_none());
+        let (_, emoji) = parse_reaction(&mk(":blobcat:".into())).unwrap();
+        assert_eq!(emoji, ":blobcat:");
     }
 
     #[test]

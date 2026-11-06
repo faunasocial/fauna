@@ -155,6 +155,81 @@ impl ReadMarkerStateView {
     };
 }
 
+/// Where one of this replica's `fauna.state.escrow-wrap` rows sits on the
+/// fleet feed: its logical key (`<generation-hex>/<actor-id-hex>`), the
+/// blinded item key the nest knows it by, and every writer whose relay copy
+/// this replica holds at that item key. The kind is gen-0 (form v1), so the
+/// item key derives from the plane's own schedule
+/// ([`AccountStatePlane::gen0_item_key`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct EscrowWrapCoordinate {
+    pub key: String,
+    pub item_key_hex: String,
+    pub writers_hex: Vec<String>,
+}
+
+/// Every live `fauna.state.escrow-wrap` row of this replica's merged state,
+/// with its coordinates ([`EscrowWrapCoordinate`]) — the store-thread half of
+/// [`AccountStoreHandle::escrow_wrap_coordinates`]. Coordinates only: the
+/// wrap bytes never leave the store.
+pub(crate) async fn escrow_wrap_coordinates<B, R>(
+    store: &fauna_account_store::store::AccountStore<B>,
+    fleet: &crate::account_state_plane::AccountStatePlane<'_, B, R>,
+) -> anyhow::Result<Vec<EscrowWrapCoordinate>>
+where
+    B: fauna_account_store::backend::StoreBackend,
+    R: fauna_protocol::RpcRequester,
+{
+    use fauna_protocol::merge_policy::KIND_ESCROW_WRAP;
+    let mut out = Vec::new();
+    for row in store.states_of_kind(KIND_ESCROW_WRAP).await? {
+        let Some(item_key) = fleet.gen0_item_key(KIND_ESCROW_WRAP, &row.key) else {
+            continue;
+        };
+        let writers_hex = fleet
+            .relay_rows_at(&item_key)
+            .await?
+            .iter()
+            .map(|r| fauna_core::hex32::encode(&r.writer.0))
+            .collect();
+        out.push(EscrowWrapCoordinate {
+            key: row.key,
+            item_key_hex: fauna_core::hex32::encode(&item_key),
+            writers_hex,
+        });
+    }
+    Ok(out)
+}
+
+/// [`AccountStoreHandle::escrow_wrap_coordinates`] as the e2e command answers
+/// it — `{"found": true, "rows": [...]}`, or `{"found": false}` with no
+/// handle or a failed read.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct EscrowWrapCoordinatesView {
+    pub found: bool,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub rows: Vec<EscrowWrapCoordinate>,
+}
+
+/// The on-demand reader over [`AccountStoreHandle::escrow_wrap_coordinates`];
+/// the hosting app calls it from its async command dispatcher, like
+/// [`device_set_state`].
+pub async fn escrow_wrap_coordinates_view(
+    handle: Option<&AccountStoreHandle>,
+) -> EscrowWrapCoordinatesView {
+    let not_found = EscrowWrapCoordinatesView {
+        found: false,
+        rows: Vec::new(),
+    };
+    let Some(handle) = handle else {
+        return not_found;
+    };
+    match handle.escrow_wrap_coordinates().await {
+        Ok(rows) => EscrowWrapCoordinatesView { found: true, rows },
+        Err(_) => not_found,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

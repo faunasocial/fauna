@@ -25,6 +25,8 @@ internal sealed class FakeMailPolicyMachine : MailPolicyMachineFakeBase
     public override Task Hydrate()
     {
         HydrateCalls++;
+        // A re-read disarms the shared confirm (as the real machine does).
+        NextSnapshot = NextSnapshot with { armed = null };
         if (NextError is not null) throw new InvalidOperationException(NextError);
         return Task.CompletedTask;
     }
@@ -32,6 +34,12 @@ internal sealed class FakeMailPolicyMachine : MailPolicyMachineFakeBase
     public override Task Dispatch(MailPolicyAction action)
     {
         Dispatched.Add(action);
+        // Mirror the shared machine's arm: a Press arms the button when it is not the
+        // armed one, else disarms and runs; any other action disarms.
+        NextSnapshot = NextSnapshot with
+        {
+            armed = action is MailPolicyAction.Press { button: var b } && NextSnapshot.armed != b ? b : null,
+        };
         if (NextError is not null) throw new InvalidOperationException(NextError);
         return Task.CompletedTask;
     }
@@ -56,7 +64,10 @@ internal sealed class FakeMailPolicyMachine : MailPolicyMachineFakeBase
         BaselinePublishView? baselinePublishResult = null,
         BaselineStateView? baselineState = null,
         MailHealthView? mailHealth = null,
-        string? error = null) =>
+        string? error = null,
+        DmarcPolicyView? dmarc = null,
+        MicrosoftRegistrationView? microsoft = null,
+        bool mailUnavailableHere = false) =>
         new(
             mailEnabled,
             autoEnableMailForNewUsers,
@@ -66,15 +77,16 @@ internal sealed class FakeMailPolicyMachine : MailPolicyMachineFakeBase
             imap ?? DefaultImap(),
             outbound ?? DefaultOutbound(),
             alias ?? DefaultAlias(),
-            DefaultDmarc(),
-            new MicrosoftRegistrationView("", "", true),
+            dmarc ?? DefaultDmarc(),
+            microsoft ?? new MicrosoftRegistrationView("", "", true),
             MailPolicyStatus.Idle,
             baselinePublishResult,
             baselineState,
             mailHealth,
             error,
-            null,
-            null);
+            mailUnavailableHere: mailUnavailableHere,
+            armed: null,
+            secretRotation: null);
 
     public static DmarcPolicyView DefaultDmarc() => new(
         @policyMode: "reject",
@@ -88,7 +100,8 @@ internal sealed class FakeMailPolicyMachine : MailPolicyMachineFakeBase
         @foMode: "0",
         @riSeconds: 86400,
         @aggregateRetentionDays: 90,
-        @forensicRetentionDays: 30);
+        @forensicRetentionDays: 30,
+        @outboundAggregateEnabled: true);
 
     public static SpamPolicyView DefaultSpam() => new(
         @maxScoreBeforeSpamFolder: 5,
@@ -256,6 +269,89 @@ public class AdminMailViewModelTests
         Assert.False(vm.AutoEnableMailForNewUsers);
     }
 
+    [Theory]
+    // (mail on, box can't run mail) → (enable refused, the toggle's `state` attr).
+    // Mail already on keeps its toggle live so the admin can still turn it off
+    // (admin.md § 6 Mail; the shared snapshot's bool is read, never re-derived).
+    [InlineData(false, true, true, "unavailable")]
+    [InlineData(false, false, false, "off")]
+    [InlineData(true, true, false, "on")]
+    [InlineData(true, false, false, "on")]
+    public async Task Load_ProjectsTheMailUnavailableHereState(
+        bool mailEnabled, bool unavailableHere, bool refused, string state)
+    {
+        var fake = new FakeMailPolicyMachine
+        {
+            NextSnapshot = FakeMailPolicyMachine.Snap(
+                mailEnabled: mailEnabled, mailUnavailableHere: unavailableHere),
+        };
+        var vm = new AdminMailViewModel(fake);
+
+        await vm.LoadCommand.ExecuteAsync(null);
+
+        Assert.Equal(unavailableHere, vm.MailUnavailableHere);
+        Assert.Equal(refused, vm.MailEnableRefused);
+        Assert.Equal(state, vm.MailEnabledToggleState);
+    }
+
+    [Fact]
+    public async Task Load_ProjectsTheMicrosoftRegistrationAndDmarcGroups()
+    {
+        var fake = new FakeMailPolicyMachine
+        {
+            NextSnapshot = FakeMailPolicyMachine.Snap(
+                microsoft: new MicrosoftRegistrationView("0b5c1a2e-3f4d-4e5a-8b6c-7d8e9f0a1b2c", "contoso.example", false),
+                dmarc: FakeMailPolicyMachine.DefaultDmarc() with { @rufPublish = true, @foMode = "1", @forensicRetentionDays = 60 }),
+        };
+        var vm = new AdminMailViewModel(fake);
+
+        await vm.LoadCommand.ExecuteAsync(null);
+
+        Assert.Equal("contoso.example", vm.Microsoft.Tenant);
+        Assert.False(vm.Microsoft.IsDefault);
+        Assert.True(vm.Dmarc.RufPublish);
+        Assert.Equal("1", vm.Dmarc.FoMode);
+        Assert.Equal(60u, vm.Dmarc.ForensicRetentionDays);
+    }
+
+    [Fact]
+    public async Task SetMicrosoftRegistration_DispatchesTheTwoDraftsAsTyped()
+    {
+        var fake = new FakeMailPolicyMachine();
+        var vm = new AdminMailViewModel(fake);
+        await vm.LoadCommand.ExecuteAsync(null);
+
+        await vm.SetMicrosoftRegistrationAsync("0B5C1A2E-3F4D-4E5A-8B6C-7D8E9F0A1B2C", "contoso.example");
+
+        Assert.Contains(fake.Dispatched, a => a is MailPolicyAction.SetMicrosoftRegistration
+        {
+            clientId: "0B5C1A2E-3F4D-4E5A-8B6C-7D8E9F0A1B2C",
+            tenant: "contoso.example",
+        });
+    }
+
+    [Fact]
+    public async Task SaveDmarc_CarriesEveryUneditedTagThrough()
+    {
+        var fake = new FakeMailPolicyMachine
+        {
+            NextSnapshot = FakeMailPolicyMachine.Snap(
+                dmarc: FakeMailPolicyMachine.DefaultDmarc() with { @policyMode = "quarantine", @pct = 50, @ruaDestination = "mailto:rua@example.test" }),
+        };
+        var vm = new AdminMailViewModel(fake);
+        await vm.LoadCommand.ExecuteAsync(null);
+
+        await vm.SaveDmarcAsync(vm.Dmarc with { RufPublish = true, FoMode = "d", ForensicRetentionDays = 45 });
+
+        var saved = fake.Dispatched.OfType<MailPolicyAction.SaveDmarc>().Single().policy;
+        Assert.True(saved.rufPublish);
+        Assert.Equal("d", saved.foMode);
+        Assert.Equal(45u, saved.forensicRetentionDays);
+        Assert.Equal("quarantine", saved.policyMode);
+        Assert.Equal((byte)50, saved.pct);
+        Assert.Equal("mailto:rua@example.test", saved.ruaDestination);
+    }
+
     private static MailHealthView SampleHealth(string? delistUrl = null) => new(
         @state: "blocklisted",
         @checks: Enumerable.Range(0, 7)
@@ -335,11 +431,11 @@ public class AdminMailViewModelTests
         // First press arms and dispatches nothing.
         Assert.False(await vm.PressWarmupResetAsync());
         Assert.True(vm.WarmupResetArmed);
-        Assert.DoesNotContain(fake.Dispatched, a => a is MailPolicyAction.ResetWarmup);
 
         // Second press dispatches, and the re-read disarms.
         Assert.True(await vm.PressWarmupResetAsync());
-        Assert.Contains(fake.Dispatched, a => a is MailPolicyAction.ResetWarmup);
+        Assert.Equal(2, fake.Dispatched.Count(a =>
+            a is MailPolicyAction.Press { button: MailPolicyConfirm.ResetWarmup }));
         Assert.False(vm.WarmupResetArmed);
     }
 
@@ -354,7 +450,6 @@ public class AdminMailViewModelTests
         await vm.LoadCommand.ExecuteAsync(null);
 
         Assert.False(vm.WarmupResetArmed);
-        Assert.DoesNotContain(fake.Dispatched, a => a is MailPolicyAction.ResetWarmup);
     }
 
     [Fact]
@@ -445,6 +540,103 @@ public class AdminMailViewModelTests
             && p.@fcrdnsMode == "enforce");    // untouched field survives, not clobbered
     }
 
+    /// <summary>The page's gesture: two presses of the same button.</summary>
+    private static async Task PublishBaselineAsync(AdminMailViewModel vm)
+    {
+        Assert.False(await vm.PressPublishSpamBaselineAsync());
+        Assert.True(await vm.PressPublishSpamBaselineAsync());
+    }
+
+    [Fact]
+    public async Task PublishSpamBaseline_IsASameButtonTwoPressThatArmsFirst()
+    {
+        var fake = new FakeMailPolicyMachine();
+        var vm = new AdminMailViewModel(fake);
+        await vm.LoadCommand.ExecuteAsync(null);
+
+        // First press arms the shared confirm; the page relabels the button.
+        Assert.False(await vm.PressPublishSpamBaselineAsync());
+        Assert.True(vm.PublishSpamBaselineArmed);
+        Assert.False(vm.WarmupResetArmed);
+
+        // Pressing the other confirm button moves the arm to it.
+        Assert.False(await vm.PressWarmupResetAsync());
+        Assert.False(vm.PublishSpamBaselineArmed);
+        Assert.True(vm.WarmupResetArmed);
+
+        // The second press of the same button runs it and disarms.
+        Assert.True(await vm.PressWarmupResetAsync());
+        Assert.Null(vm.Armed);
+    }
+
+    [Fact]
+    public async Task SecretRotate_EachButtonIsASameButtonTwoPressOverTheSharedArm()
+    {
+        var fake = new FakeMailPolicyMachine();
+        var vm = new AdminMailViewModel(fake);
+        await vm.LoadCommand.ExecuteAsync(null);
+
+        // First press of the unsubscribe-secret button arms it and rotates nothing.
+        Assert.False(await vm.PressListUnsubscribeSecretRotateAsync());
+        Assert.True(vm.ListUnsubscribeSecretRotateArmed);
+        Assert.False(vm.ForwardSrsSecretRotateArmed);
+
+        // Pressing the forwarding-secret button moves the arm to it.
+        Assert.False(await vm.PressForwardSrsSecretRotateAsync());
+        Assert.False(vm.ListUnsubscribeSecretRotateArmed);
+        Assert.True(vm.ForwardSrsSecretRotateArmed);
+
+        // Its second press dispatches and disarms; every press went through the shared Press.
+        Assert.True(await vm.PressForwardSrsSecretRotateAsync());
+        Assert.Null(vm.Armed);
+        Assert.Equal(1, fake.Dispatched.Count(a =>
+            a is MailPolicyAction.Press { button: MailPolicyConfirm.RotateListUnsubscribeSecret }));
+        Assert.Equal(2, fake.Dispatched.Count(a =>
+            a is MailPolicyAction.Press { button: MailPolicyConfirm.RotateSrsSecret }));
+        Assert.All(fake.Dispatched, a => Assert.IsType<MailPolicyAction.Press>(a));
+    }
+
+    [Fact]
+    public async Task SecretRotate_ArmedPressIsDisarmedByAnyReRead()
+    {
+        var fake = new FakeMailPolicyMachine();
+        var vm = new AdminMailViewModel(fake);
+        await vm.LoadCommand.ExecuteAsync(null);
+        await vm.PressListUnsubscribeSecretRotateAsync();
+
+        await vm.LoadCommand.ExecuteAsync(null);
+
+        Assert.False(vm.ListUnsubscribeSecretRotateArmed);
+        Assert.Null(vm.Armed);
+    }
+
+    [Fact]
+    public async Task SecretRotate_OutcomeLineIsTheSharedSecretRotationText()
+    {
+        var fake = new FakeMailPolicyMachine();
+        var vm = new AdminMailViewModel(fake);
+        await vm.LoadCommand.ExecuteAsync(null);
+        Assert.Null(vm.SecretRotationLine);
+
+        // The machine re-projects the rotation's outcome into the snapshot; the VM words
+        // it through the shared secret_rotation_text (its key, whatever the localizer).
+        fake.NextSnapshot = FakeMailPolicyMachine.Snap() with
+        {
+            secretRotation = new SecretRotationView.ListUnsubscribe(@membersRetokenized: 7),
+        };
+        Assert.False(await vm.PressListUnsubscribeSecretRotateAsync());
+        Assert.True(await vm.PressListUnsubscribeSecretRotateAsync());
+        Assert.Contains("list_unsubscribe_secret_rotated", vm.SecretRotationLine);
+
+        fake.NextSnapshot = fake.NextSnapshot with
+        {
+            secretRotation = new SecretRotationView.Srs(@rotatedAt: 1_700_000_000),
+        };
+        Assert.False(await vm.PressForwardSrsSecretRotateAsync());
+        Assert.True(await vm.PressForwardSrsSecretRotateAsync());
+        Assert.Contains("forward_srs_secret_rotated", vm.SecretRotationLine);
+    }
+
     [Fact]
     public async Task PublishSpamBaseline_DispatchesAndProjectsAggregate()
     {
@@ -457,9 +649,10 @@ public class AdminMailViewModelTests
             baselinePublishResult: new BaselinePublishView(
                 @published: true, @contributors: 3, @sampleCount: 42, @skippedContributors: 0, @deferred: false));
 
-        await vm.PublishSpamBaselineAsync();
+        await PublishBaselineAsync(vm);
 
-        Assert.Contains(fake.Dispatched, a => a is MailPolicyAction.PublishSpamBaseline);
+        Assert.Contains(fake.Dispatched, a =>
+            a is MailPolicyAction.Press { button: MailPolicyConfirm.PublishSpamBaseline });
         Assert.NotNull(vm.BaselinePublish);
         Assert.True(vm.BaselinePublish!.Published);
         Assert.Equal(3u, vm.BaselinePublish.Contributors);
@@ -481,7 +674,7 @@ public class AdminMailViewModelTests
             baselinePublishResult: new BaselinePublishView(
                 @published: true, @contributors: 3, @sampleCount: 42, @skippedContributors: 2, @deferred: false));
 
-        await vm.PublishSpamBaselineAsync();
+        await PublishBaselineAsync(vm);
 
         Assert.NotNull(vm.BaselinePublish);
         Assert.Equal(2u, vm.BaselinePublish!.SkippedContributors);
@@ -498,7 +691,7 @@ public class AdminMailViewModelTests
             baselinePublishResult: new BaselinePublishView(
                 @published: false, @contributors: 2, @sampleCount: 0, @skippedContributors: 0, @deferred: false));
 
-        await vm.PublishSpamBaselineAsync();
+        await PublishBaselineAsync(vm);
 
         Assert.NotNull(vm.BaselinePublish);
         Assert.False(vm.BaselinePublish!.Published);
@@ -518,7 +711,7 @@ public class AdminMailViewModelTests
             baselinePublishResult: new BaselinePublishView(
                 @published: false, @contributors: 3, @sampleCount: 0, @skippedContributors: 0, @deferred: true));
 
-        await vm.PublishSpamBaselineAsync();
+        await PublishBaselineAsync(vm);
 
         Assert.NotNull(vm.BaselinePublish);
         Assert.True(vm.BaselinePublish!.Deferred);

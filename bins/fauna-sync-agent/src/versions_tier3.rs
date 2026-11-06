@@ -360,6 +360,7 @@ async fn restore_end_to_end_against_a_real_nest() {
         None,
         &ReaderSeat::default(),
         &crate::versions::NeverReseals,
+        &|_| Ok(()),
     )
     .await
     .expect("restore version 1 against a real nest");
@@ -436,7 +437,7 @@ async fn restore_end_to_end_against_a_real_nest() {
             1_700_000_000,
             200,
             1,
-            Some(6),
+            Some(fauna_core::blob_seal::SealStamp::Version(6)),
         )
         .expect("seed the pre-restore head row");
     }
@@ -469,7 +470,12 @@ async fn restore_end_to_end_against_a_real_nest() {
          serves v1's bytes"
     );
     assert_eq!(entry.size_bytes, restored.size_bytes);
-    assert_eq!(entry.content_key_version, restored.content_key_version);
+    assert_eq!(
+        entry.content_stamp,
+        restored
+            .content_key_version
+            .map(fauna_core::blob_seal::SealStamp::Version)
+    );
     assert_eq!(
         entry.state,
         SyncState::Placeholder,

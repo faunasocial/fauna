@@ -17,6 +17,7 @@ import android.app.Activity
 import androidx.compose.ui.platform.LocalContext
 import com.fauna.app.age.findActivity
 import com.fauna.app.core.OnboardingHost
+import com.fauna.app.core.RegionPlaneHost
 import com.fauna.app.ui.util.localizedNested
 import com.fauna.app.ui.util.stringResourceFmt
 import com.fauna.ffi.onboarding.InviteRequestState
@@ -264,6 +265,11 @@ fun InviteRequestScreen(
 
         Spacer(Modifier.weight(1f))
 
+        // Joining is acceptance: the nest's rules directly above the terms
+        // notice, once the machine's verified read has landed
+        // (nest-rules.md § Acceptance at joining).
+        val rules = remember(tick) { vm.host.machine.joiningNestRules(RegionPlaneHost.UI_LANG) }
+        rules?.let { NestRulesJoining(it) }
         TermsNotice()
 
         Row(

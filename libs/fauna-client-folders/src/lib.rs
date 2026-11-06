@@ -20,7 +20,6 @@
 //! `FoldersClient<R: RpcRequester>`, one async method per kind, no state
 //! machine, wasm-clean (no `fauna-client` dependency).
 
-use fauna_protocol::RpcRequester;
 use fauna_protocol::folders::{
     ActorMembersListRemoteRequest, ActorMembersListReply, ActorMembersListRequest,
     ContentKeyGetReply, ContentKeyGetRequest, ContentKeyPutReply, ContentKeyPutRequest,
@@ -40,6 +39,7 @@ use fauna_protocol::folders::{
     MembersListRequest, PlaceFlags, PlacesSetReply, PlacesSetRequest, ReadTokenGetReply,
     ReadTokenGetRequest, WriteTokenGetReply, WriteTokenGetRequest,
 };
+use fauna_protocol::{RpcErrorClass, RpcRequester};
 
 pub use fauna_protocol::folders;
 
@@ -280,6 +280,49 @@ pub struct FoldersClient<R: RpcRequester> {
     /// **attesting** declassify. `None` on a client built without
     /// [`Self::with_audience_attestor`].
     attestor: Option<std::sync::Arc<fauna_core::identity::ActorKeypair>>,
+}
+
+/// What a folder row reads, with the two refusals that are an answer and not a
+/// failure already folded, so a row paints an empty section and no app decides
+/// that again (`ui/folders.md` § Errors & edge cases).
+impl<R: RpcRequester> FoldersClient<R>
+where
+    R::Error: RpcErrorClass,
+{
+    /// [`Self::actor_members_list`]'s members. An owner-only set answers
+    /// `fauna.folders.not_shared`, which is an empty roster.
+    pub async fn row_actor_members(
+        &self,
+        name: impl Into<String>,
+    ) -> Result<Vec<fauna_protocol::folders::FolderActorMember>, R::Error> {
+        let refused = |e: &R::Error| {
+            e.as_rpc_error()
+                .is_some_and(|r| r.code == "fauna.folders.not_shared")
+        };
+        match self.actor_members_list(name).await {
+            Ok(reply) => Ok(reply.members),
+            Err(e) if refused(&e) => Ok(Vec::new()),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// [`Self::members_list`]'s members. A member's own bound set holds no row
+    /// in the single-owner roster and answers `fauna.folders.not_found`, which
+    /// is an empty roster.
+    pub async fn row_device_members(
+        &self,
+        name: impl Into<String>,
+    ) -> Result<Vec<fauna_protocol::folders::FolderMember>, R::Error> {
+        let refused = |e: &R::Error| {
+            e.as_rpc_error()
+                .is_some_and(|r| r.code == "fauna.folders.not_found")
+        };
+        match self.members_list(name).await {
+            Ok(reply) => Ok(reply.members),
+            Err(e) if refused(&e) => Ok(Vec::new()),
+            Err(e) => Err(e),
+        }
+    }
 }
 
 impl<R: RpcRequester> FoldersClient<R> {
@@ -1148,25 +1191,38 @@ impl<R: RpcRequester> FoldersClient<R> {
     /// The set's change rows exactly as the nest serves them —
     /// `fauna.sync.changes.list` from the start, unverified: the served-era
     /// adoption's sweep reads the rows readers exempt while the set is served
-    /// (`writer-signed-change-records.md` ruling (7)(b)). Owner-scoped; one
-    /// reply carries the whole log. Addressed by the set's hash like every
+    /// (`writer-signed-change-records.md` ruling (7)(b)). Owner-scoped.
+    /// Every page, walked by `since` until one comes back empty: the nest cuts
+    /// each reply at the WS frame budget (`transport.md` § Max frame), so one
+    /// reply is never the whole log. Addressed by the set's hash like every
     /// other set request — the nest holds no plaintext name for a sealed set.
     pub async fn changes_raw(
         &self,
         name: &str,
     ) -> Result<Vec<fauna_protocol::sync::SyncChange>, R::Error> {
-        let reply: fauna_protocol::sync::SyncChangesListReply = self
-            .nest
-            .request(
-                "fauna.sync.changes.list",
-                addressed(fauna_protocol::sync::SyncChangesListRequest {
-                    folder: Some(name.to_string()),
-                    since: 0,
-                    ..Default::default()
-                }),
-            )
-            .await?;
-        Ok(reply.changes)
+        let mut rows = Vec::new();
+        let mut since = 0i64;
+        loop {
+            let reply: fauna_protocol::sync::SyncChangesListReply = self
+                .nest
+                .request(
+                    "fauna.sync.changes.list",
+                    addressed(fauna_protocol::sync::SyncChangesListRequest {
+                        folder: Some(name.to_string()),
+                        since,
+                        ..Default::default()
+                    }),
+                )
+                .await?;
+            // A page that does not advance the cursor ends the walk rather
+            // than spinning on it; the nest serves `seq > since` in order.
+            match reply.changes.iter().map(|c| c.seq).max() {
+                Some(top) if top > since => since = top,
+                _ => break,
+            }
+            rows.extend(reply.changes);
+        }
+        Ok(rows)
     }
 
     /// `fauna.folders.served_rows.adopt` — one page of the owner's in-place
@@ -2127,6 +2183,67 @@ mod tests {
             &req, "photos"
         ));
         assert_eq!(req.group_id, "ab".repeat(8));
+    }
+
+    /// A nest that refuses every request with one error.
+    struct Refusing(Option<fauna_protocol::RpcError>);
+    #[derive(Debug)]
+    struct Refused(Option<fauna_protocol::RpcError>);
+    impl std::fmt::Display for Refused {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "refused")
+        }
+    }
+    impl RpcErrorClass for Refused {
+        fn as_rpc_error(&self) -> Option<&fauna_protocol::RpcError> {
+            self.0.as_ref()
+        }
+        fn is_rejection(&self) -> bool {
+            self.0.is_some()
+        }
+        fn is_subprotocol_mismatch(&self) -> bool {
+            false
+        }
+    }
+    impl RpcRequester for Refusing {
+        type Error = Refused;
+        async fn request<Req, Reply>(&self, _: &'static str, _: Req) -> Result<Reply, Refused>
+        where
+            Req: serde::Serialize,
+            Reply: serde::de::DeserializeOwned,
+        {
+            Err(Refused(self.0.clone()))
+        }
+    }
+    fn refused_with(code: &str) -> FoldersClient<Refusing> {
+        FoldersClient::new(Refusing(Some(fauna_protocol::RpcError::new(code, "e"))))
+    }
+
+    #[test]
+    fn a_rows_rosters_read_their_answering_refusals_as_empty() {
+        let actors = refused_with("fauna.folders.not_shared");
+        assert!(
+            block_on(actors.row_actor_members("docs"))
+                .unwrap()
+                .is_empty()
+        );
+        let devices = refused_with("fauna.folders.not_found");
+        assert!(
+            block_on(devices.row_device_members("docs"))
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_rows_rosters_still_fail_on_anything_else() {
+        let cross = refused_with("fauna.folders.not_found");
+        assert!(block_on(cross.row_actor_members("docs")).is_err());
+        let cross = refused_with("fauna.folders.not_shared");
+        assert!(block_on(cross.row_device_members("docs")).is_err());
+        let down = FoldersClient::new(Refusing(None));
+        assert!(block_on(down.row_actor_members("docs")).is_err());
+        assert!(block_on(down.row_device_members("docs")).is_err());
     }
 
     /// Every by-name request leaves with its hash address beside the name

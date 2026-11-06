@@ -191,7 +191,7 @@ fn the_oracle_summary_counts_then_names_the_newest_operation() {
     let lines = text(&r);
     assert_eq!(
         lines[1],
-        "Your nest used your keys for this app once in the current window · 5 requests answered in all"
+        "Fauna acted for this app once in the current window · 5 requests answered in all"
     );
     assert!(
         lines[2].ends_with(": Sign an event — kind 1"),
@@ -265,6 +265,18 @@ fn a_key_replacing_request_says_what_the_approve_ends_last() {
         lookup("connected_apps.consent_ends_holder")
     );
     assert_eq!(card_text(&card()).len(), lines.len() - 1);
+}
+
+#[test]
+fn the_clis_card_says_what_it_grants_reaches_the_assistant_and_no_other_does() {
+    let reach = lookup("connected_apps.consent_assistant_reach").unwrap();
+    let mut c = card();
+    c.client_id = fauna_protocol::principals::CLI_CLIENT_ID.into();
+    c.ends = Some(LocalizedText::key("connected_apps.consent_ends_holder"));
+    let lines = card_text(&c);
+    // After the scope lines, before the key replacement's line, which stays last.
+    assert_eq!(lines[lines.len() - 2], reach);
+    assert!(!card_text(&card()).iter().any(|l| l == reach));
 }
 
 fn install_card(development: bool) -> ConsentCardRow {

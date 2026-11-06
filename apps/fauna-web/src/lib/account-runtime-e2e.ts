@@ -2,7 +2,8 @@
 // (`fauna_e2e_agent::ACCOUNT_PUMP_NOW`, convention 14's run-now for the
 // account pump), the `account_pump_cycles` accessor its barrier reads
 // (`fauna_e2e_agent::ACCOUNT_PUMP_CYCLES_KEY`), and the `device_set_state`
-// plane reader (`tests/e2e-unified/helpers/fleet.py`). Each is one line over
+// plane reader (`tests/e2e-unified/helpers/fleet.py`), with its siblings
+// `read_marker_state` and `escrow_wrap_coordinates`. Each is one line over
 // `fauna-wasm`'s `account_runtime` module, so the pass poked is the
 // production pass, the counters are the shared `PumpCyclesView` every hosting
 // app publishes, and the reader is the shared
@@ -14,6 +15,7 @@
 
 import {
   accountDeviceSetState,
+  accountEscrowWrapCoordinates,
   accountPumpCycles,
   accountPumpNow,
   accountReadMarkerState,
@@ -24,6 +26,7 @@ const ACCOUNT_RUNTIME_COMMANDS = [
   'account_pump_now',
   'device_set_state',
   'read_marker_state',
+  'escrow_wrap_coordinates',
 ] as const;
 
 /** Register the account runtime's commands and install the
@@ -50,6 +53,11 @@ export function registerAccountRuntimeCommands(): void {
         throw new Error('read_marker_state needs a `channel_id_hex` string');
       }
       return accountReadMarkerState(id);
+    }
+    if (action === 'escrow_wrap_coordinates') {
+      // Same reader shape, no payload: the recovery-kit let-go journey's
+      // staging read (`fleet-scope-reclamation.md` clause (3)(j)).
+      return accountEscrowWrapCoordinates();
     }
     // Fire-and-forget by contract: the barrier is `account_pump_cycles`,
     // never this ack (the pass itself may outlast a command's budget).

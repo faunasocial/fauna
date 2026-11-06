@@ -108,18 +108,24 @@ public partial class FamilyViewModel : ObservableObject
     /// <c>unknown_peer_dm_edited</c>.</summary>
     [ObservableProperty] private bool _policyUnknownPeerDmEdited;
 
-    // ── Content policy (family-safety.md § Content policy) ───────────────
-    // The guardian's per-category render floor over the four negative canonical
-    // categories, each `inherit` | `collapse` | `block` from the shared
-    // ContentFloorOptions() catalog. `inherit` is the default — the ward's own
-    // preferences decide, which is also what an ABSENT wire content_policy
-    // means. Plus the Guardian Notify knob (§ Guardian Notify): category +
-    // count only, never content.
-    [ObservableProperty] private string _policyContentNsfw = "inherit";
-    [ObservableProperty] private string _policyContentSpam = "inherit";
-    [ObservableProperty] private string _policyContentPhishing = "inherit";
-    [ObservableProperty] private string _policyContentCommercial = "inherit";
+    // ── Content policy (family-safety.md § App surface → Content rules) ──
+    // The guardian's content rules are the shared rule editor's
+    // (`family-policy-rules-section`, saved by its own button through
+    // SaveContentRulesAsync); this form keeps only the Guardian Notify knob
+    // (§ Guardian Notify): category + count only, never content.
     [ObservableProperty] private bool _policyContentNotify;
+
+    /// <summary>The selected ward's stored content policy — its rule
+    /// document the page's guardian editor opens over (<c>FfiRuleEditor.ForGuardian</c>);
+    /// <c>null</c> when the ward has none. Set by <see cref="LoadPolicyFromWard"/>
+    /// before <see cref="SelectedWardActorId"/>, so the page reads it on that
+    /// property's change.</summary>
+    internal FfiContentPolicy? SelectedWardContentPolicy { get; private set; }
+
+    /// <summary>Which (ward, stored content policy) is selected, as one comparable
+    /// key — the page opens a fresh rule editor only when it changes, so a re-read
+    /// that changed nothing keeps the editor being edited. <c>null</c>: no ward.</summary>
+    internal string? SelectedWardRulesKey { get; private set; }
 
     // ── Screen time (family-safety.md § Screen time) ─────────────────────
     // Typed HH:MM / whole minutes (never raw local-minutes) — parsed through
@@ -201,8 +207,10 @@ public partial class FamilyViewModel : ObservableObject
             // present), which is a strict improvement, not a regression.
             if (status.@policy is { } p)
             {
+                // A line a guardian rule makes carries that rule's reason
+                // (SummaryLineText).
                 var lines = FaunaFfiMethods.ReachPolicySummary(p)
-                    .Select(l => $"{Strings.Resolve(l.label)}: {Strings.Resolve(l.value)}")
+                    .Select(SummaryLineText)
                     .ToList();
                 // Screen time (§ Screen time — the transparency rule): the ward's
                 // own usage figure, folded into this same read-only summary rather
@@ -275,13 +283,11 @@ public partial class FamilyViewModel : ObservableObject
         PolicyFeedSources = NormalizeFeedSourcesWire(ward.FeedSources);
         PolicyUnknownPeerDm = NormalizeUnknownPeerDmWire(ward.UnknownPeerDm);
         PolicyUnknownPeerDmEdited = false;
-        // Same fail-closed normalization as the reach knobs above — a floor value
-        // this build cannot name renders (and re-saves) as `block`, never the
-        // permissive `inherit` (family-safety.md § Content policy).
-        PolicyContentNsfw = NormalizeContentFloorWire(ward.ContentNsfw);
-        PolicyContentSpam = NormalizeContentFloorWire(ward.ContentSpam);
-        PolicyContentPhishing = NormalizeContentFloorWire(ward.ContentPhishing);
-        PolicyContentCommercial = NormalizeContentFloorWire(ward.ContentCommercial);
+        // The content rules: the guardian editor opens over the stored policy as
+        // it stands (unreadable bytes fail closed in shared
+        // Rust, `RuleEditor::load_guardian`).
+        SelectedWardContentPolicy = ward.ContentPolicy;
+        SelectedWardRulesKey = RulesKey(ward.ActorId, ward.ContentPolicy);
         PolicyContentNotify = ward.ContentNotify;
         // Screen time: minutes-from-midnight -> "HH:MM" through the SAME
         // shared formatter the parser at Save time inverts — never a local
@@ -311,6 +317,8 @@ public partial class FamilyViewModel : ObservableObject
 
     private void ClearSelectedWard()
     {
+        SelectedWardContentPolicy = null;
+        SelectedWardRulesKey = null;
         SelectedWardActorId = null;
         SelectedWardHandle = null;
         PendingTransferGuardianHandle = null;
@@ -375,19 +383,22 @@ public partial class FamilyViewModel : ObservableObject
         if (SelectedWardActorId is not { } id) return;
         ActionError = null;
         // Screen time (§ Screen time): typed "HH:MM"/whole-minutes text, parsed
-        // through the shared fauna_core::screen_time parser BEFORE the RPC — a
+        // through the shared fauna_core::screen_time parsers BEFORE the RPC — a
         // syntax error ("9:5", "24:00") surfaces on error-message locally
-        // instead of as a generic transport failure. The nest's own
-        // ScreenTimePolicy::validate then catches the semantic refusals
-        // (half-set bounds, start == end, out-of-range budget) via the normal
-        // catch below — this client pre-validates only the "HH:MM"/digits shape,
-        // never re-implementing the nest's own rules.
-        ushort? screenWindowStart, screenWindowEnd, screenDailyMinutes;
+        // instead of as a generic transport failure. The parsers judge one field
+        // each; the shared ScreenTimePolicy::validate (ValidateScreenTime) then
+        // judges the three together — a half-set window, start == end, an
+        // out-of-range budget — so this editor refuses exactly what the nest's
+        // policy.update would, with the rule's own reason (family-safety.md
+        // § Where logic lives → Write validation).
+        FfiScreenTimePolicy screenTime;
         try
         {
-            screenWindowStart = FaunaFfiMethods.ParseTimeOfDay(PolicyScreenWindowStart.Trim());
-            screenWindowEnd = FaunaFfiMethods.ParseTimeOfDay(PolicyScreenWindowEnd.Trim());
-            screenDailyMinutes = FaunaFfiMethods.ParseDailyMinutes(PolicyScreenDailyMinutes.Trim());
+            screenTime = new FfiScreenTimePolicy(
+                FaunaFfiMethods.ParseTimeOfDay(PolicyScreenWindowStart.Trim()),
+                FaunaFfiMethods.ParseTimeOfDay(PolicyScreenWindowEnd.Trim()),
+                FaunaFfiMethods.ParseDailyMinutes(PolicyScreenDailyMinutes.Trim()));
+            FaunaFfiMethods.ValidateScreenTime(screenTime);
         }
         catch (FfiException.General g)
         {
@@ -396,20 +407,23 @@ public partial class FamilyViewModel : ObservableObject
         }
         try
         {
-            // content_policy + content_notify + screen_time are PRESENT: this
-            // editor builds all three pillars, so it sends them (replace
-            // semantics — an all-`inherit`/all-empty policy is a valid no-op,
-            // and an all-empty screen_time really does clear every limit; "None
-            // = leave unchanged" would make an all-empty save unable to clear
-            // one). unknownPeerDm (the bridge-DM gate) is the one field that IS
+            // The content pillar is the rule editor's own save
+            // (SaveContentRulesAsync → FfiFamilyClient.SaveContentRules), so this
+            // form sends it ABSENT — "leave unchanged" — and never overwrites the
+            // guardian's rule document (tui's, web's, android's and
+            // apple's twin). content_notify + screen_time are PRESENT: this
+            // editor builds both, so it sends them (replace semantics — an
+            // all-empty screen_time really does clear every limit; "None = leave
+            // unchanged" would make an all-empty save unable to clear one).
+            // unknownPeerDm (the bridge-DM gate) is the one reach field that IS
             // "None = leave unchanged" (§ Policy-update compatibility) — sent
             // only once PolicyUnknownPeerDmEdited says the guardian actually
             // touched the select this session, never merely because this render
             // happens to show a value.
             var policy = new FfiReachPolicy(
                 PolicyContactApproval, PolicyUnknownSenderMail, PolicyFederationContact, PolicyFeedSources,
-                new FfiContentPolicy(PolicyContentNsfw, PolicyContentSpam, PolicyContentPhishing, PolicyContentCommercial),
-                new FfiScreenTimePolicy(screenWindowStart, screenWindowEnd, screenDailyMinutes),
+                null,
+                screenTime,
                 PolicyContentNotify, PolicyUnknownPeerDmEdited ? PolicyUnknownPeerDm : null);
             await _rpc.FamilyPolicyUpdateAsync(id, policy);
             await LoadAsync();
@@ -418,6 +432,58 @@ public partial class FamilyViewModel : ObservableObject
         {
             ActionError = Strings.Error(ex);
         }
+    }
+
+    /// <summary>
+    /// <c>rule-editor-save-button</c> in <c>family-policy-rules-section</c> — the shared
+    /// <c>FfiFamilyClient.SaveContentRules</c> for the selected ward (it re-reads the
+    /// ward and writes the reach knobs as reported plus the content pillar), then a
+    /// re-read, so what paints after the save is what the nest stored. Answers the
+    /// editor's status line: <c>rule_editor.saved</c>; nothing when the caller no
+    /// longer guards the ward (nothing was written, and the re-read drops it from the
+    /// list — android's, apple's and web's twin); the failure's own words otherwise.
+    /// </summary>
+    internal async Task<string?> SaveContentRulesAsync(byte[] document)
+    {
+        if (SelectedWardActorId is not { } id) return null;
+        FfiFamilyWardInfo? entry;
+        try
+        {
+            entry = await _rpc.FamilySaveContentRulesAsync(id, document);
+        }
+        catch (Exception ex)
+        {
+            return Strings.Error(ex);
+        }
+        await LoadAsync();
+        return entry is null ? null : Strings.Get("rule_editor/saved");
+    }
+
+    /// <summary>The (ward, stored content policy) key behind
+    /// <see cref="SelectedWardRulesKey"/>: the document's bytes, so a save that
+    /// changed what the nest stored opens a fresh editor over it.</summary>
+    internal static string RulesKey(byte[] ward, FfiContentPolicy? policy) =>
+        policy is null
+            ? Convert.ToHexString(ward)
+            : string.Join("|",
+                Convert.ToHexString(ward),
+                policy.document is { } doc ? Convert.ToHexString(doc) : "-");
+
+    /// <summary>One line of the ward's read-only <c>family-policy-summary</c>:
+    /// "{label}: {value}", with the guardian rule's reason appended verbatim —
+    /// "{label}: {value} — {reason}" — when a rule of the guardian's document makes
+    /// the line (<c>nest-rules.md</c> § The shared rule editor → <i>The reason is the
+    /// member's to read</i>). <c>PolicySummaryLine::reason_text</c> is not exported, so
+    /// its pick is made off the record as web and android make it: the UI language's
+    /// entry, else the required <c>default</c>.</summary>
+    internal static string SummaryLineText(uniffi.fauna_core.PolicySummaryLine line)
+    {
+        var text = $"{Strings.Resolve(line.label)}: {Strings.Resolve(line.value)}";
+        string? reason = null;
+        if (line.reason is { } reasons
+            && !reasons.TryGetValue(RegionPlaneHost.UiLang, out reason))
+            reasons.TryGetValue("default", out reason);
+        return string.IsNullOrEmpty(reason) ? text : $"{text} — {reason}";
     }
 
     /// <summary><c>fauna.family.approvals.decide</c> — approve/deny one queue item.</summary>
@@ -591,19 +657,6 @@ public partial class FamilyViewModel : ObservableObject
         return FaunaFfiMethods.UnknownPeerDmOptions().FirstOrDefault(o => o.label.key == resolvedKey)?.value ?? wire;
     }
 
-    /// <summary>The content-floor twin of the two above (family-safety.md
-    /// § Content policy — <i>"a floor value the client cannot parse renders
-    /// fail-closed (<c>block</c>)"</i>). Same reverse-lookup idiom, over
-    /// <c>ContentFloorLabel</c>/<c>ContentFloorOptions</c>: no local knowledge of
-    /// WHICH option is the fail-closed one, so a newer nest's unnameable floor
-    /// degrades exactly as a garbage string does — and never as
-    /// <c>inherit</c>, which would show the guardian a weaker policy than the one
-    /// enforced and then persist that downgrade on the next save.</summary>
-    internal static string NormalizeContentFloorWire(string wire)
-    {
-        var resolvedKey = FaunaFfiMethods.ContentFloorLabel(wire).key;
-        return FaunaFfiMethods.ContentFloorOptions().FirstOrDefault(o => o.label.key == resolvedKey)?.value ?? wire;
-    }
 }
 
 /// <summary>A ward row (<c>family-ward-item</c> / <c>family-ward-handle</c>) —
@@ -626,17 +679,13 @@ public sealed class FamilyWardRow
     /// no outstanding transfer proposal (family-safety.md § Graduation & transfer).</summary>
     public string? PendingTransferGuardianHandle { get; init; }
 
-    // ── Content policy (family-safety.md § Content policy) ───────────────
-    // The four per-category floors as stored on the wire, NOT yet normalized —
-    // FamilyViewModel.LoadPolicyFromWard runs NormalizeContentFloorWire over each
-    // (the same place the reach knobs are normalized). An ABSENT content_policy
-    // (a guardian who never set a floor) is the all-`inherit`
-    // default, and an absent contentNotify is off — both the
-    // unsupervised-equivalent no-op, so neither is `required`.
-    public string ContentNsfw { get; init; } = "inherit";
-    public string ContentSpam { get; init; } = "inherit";
-    public string ContentPhishing { get; init; } = "inherit";
-    public string ContentCommercial { get; init; } = "inherit";
+    // ── Content policy (family-safety.md § App surface → Content rules) ──
+    // The ward's stored content policy as the wire carries it — the guardian's
+    // rule document the shared rule editor opens over
+    // (FfiRuleEditor.ForGuardian). `null` (a guardian who never set one) and an
+    // absent contentNotify (off) are both the unsupervised-equivalent no-op, so
+    // neither is `required`. Internal: the UniFFI record is.
+    internal FfiContentPolicy? ContentPolicy { get; init; }
     public bool ContentNotify { get; init; }
 
     // ── Screen time (family-safety.md § Screen time) ─────────────────────
@@ -714,10 +763,7 @@ public sealed class FamilyWardRow
         FeedSources = w.@policy.@feedSources,
         UnknownPeerDm = w.@policy.@unknownPeerDm,
         PendingTransferGuardianHandle = w.@pendingTransfer?.@proposedGuardianHandle,
-        ContentNsfw = w.@policy.@contentPolicy?.@nsfw ?? "inherit",
-        ContentSpam = w.@policy.@contentPolicy?.@spam ?? "inherit",
-        ContentPhishing = w.@policy.@contentPolicy?.@phishing ?? "inherit",
-        ContentCommercial = w.@policy.@contentPolicy?.@commercial ?? "inherit",
+        ContentPolicy = w.policy.contentPolicy,
         ContentNotify = w.@policy.@contentNotify ?? false,
         ScreenWindowStart = w.@policy.@screenTime?.@windowStart,
         ScreenWindowEnd = w.@policy.@screenTime?.@windowEnd,

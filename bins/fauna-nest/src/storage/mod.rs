@@ -1483,9 +1483,10 @@ mod tests {
         ),
         (
             "profile_handlers.rs",
-            "ingest_profile_core",
+            "ingest_profile_write",
             CreatedAt::Unbounded(
-                "the author's own signed `profile` row, which gets no `content_meta` row",
+                "the author's own signed `profile` row, which gets no `content_meta` row \
+                 (its `created_at` is this nest's clock, never a remote-asserted value)",
             ),
         ),
         (

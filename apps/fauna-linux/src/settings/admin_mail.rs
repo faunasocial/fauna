@@ -155,6 +155,7 @@ struct MailWidgets {
     dmarc_fo_mode: gtk::DropDown,
     dmarc_aggregate_retention: gtk::Entry,
     dmarc_forensic_retention: gtk::Entry,
+    dmarc_outbound_aggregate: gtk::Switch,
 
     // ── Microsoft registration for the Outlook import (set_microsoft_registration) ──
     microsoft_status: gtk::Label,
@@ -968,6 +969,13 @@ pub fn build_admin_mail_page() -> adw::PreferencesPage {
             );
         });
     }
+    // admin-mail-dmarc-outbound-aggregate-toggle — last control before Save.
+    let dmarc_outbound_aggregate = super::switch_row(
+        &dmarc_group,
+        S::DMARC_OUTBOUND_AGGREGATE_LABEL,
+        "",
+        "admin-mail-dmarc-outbound-aggregate-toggle",
+    );
     let dmarc_save = gtk::Button::builder()
         .label(S::DMARC_SAVE)
         .valign(gtk::Align::Center)
@@ -1141,6 +1149,7 @@ pub fn build_admin_mail_page() -> adw::PreferencesPage {
         dmarc_fo_mode,
         dmarc_aggregate_retention,
         dmarc_forensic_retention,
+        dmarc_outbound_aggregate,
         microsoft_status,
         microsoft_client_id,
         microsoft_tenant,
@@ -1685,6 +1694,8 @@ fn render(ctx: &Rc<MailCtx>, snap: &MailPolicySnapshot) {
         .set_selected(DmarcForensicMode::index_of_wire(&dm.fo_mode) as u32);
     set_u32(&w.dmarc_aggregate_retention, dm.aggregate_retention_days);
     set_u32(&w.dmarc_forensic_retention, dm.forensic_retention_days);
+    w.dmarc_outbound_aggregate
+        .set_active(dm.outbound_aggregate_enabled);
 
     // Microsoft registration (read back via fauna.setup.status).
     let ms = &snap.microsoft_registration;
@@ -1913,6 +1924,7 @@ fn gather_dmarc(ctx: &Rc<MailCtx>) -> DmarcPolicyView {
             &w.dmarc_forensic_retention,
             base.forensic_retention_days,
         ),
+        outbound_aggregate_enabled: w.dmarc_outbound_aggregate.is_active(),
         ..base
     }
 }

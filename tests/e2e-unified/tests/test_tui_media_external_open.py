@@ -33,6 +33,7 @@ where the handoff dir lives) must be in the binary's environment at spawn.
 
 import os
 import stat
+import sys
 import time
 
 import pytest
@@ -41,6 +42,7 @@ import fauna_ffi
 
 from conftest import _make_user, _seed_cross_set_media, _seeded_environment, get_available_apps
 from drivers import create_driver
+from helpers.e2e_session import e2e_login_device_id
 
 pytestmark = [pytest.mark.tier_3, pytest.mark.tui]
 
@@ -53,8 +55,8 @@ CANCEL = "media-external-open-cancel-button"
 # handed-off file must contain after seal → POST → fetch → decrypt.
 CLIP_BYTES = b"RIFF-fake-video-payload " * 64
 
-# The same device id the shared login patch uses (conftest _E2E_LOGIN_DEVICE_ID).
-_DEVICE_ID = "0123456789abcdef" * 4
+# The same device id the shared login patch gives tui.
+_DEVICE_ID = e2e_login_device_id("tui")
 
 
 @pytest.fixture(params=["tui"])
@@ -88,9 +90,16 @@ def opened_app(launch_client, tui_app_path, nest_instance, tmp_path, request):
     record_file = tmp_path / "opener-record.txt"
     runtime_dir = tmp_path / "runtime"
     runtime_dir.mkdir(mode=0o700)
-    opener = tmp_path / "fake-opener.sh"
-    opener.write_text(f'#!/bin/sh\nprintf \'%s\\n\' "$1" >> "{record_file}"\n')
-    opener.chmod(0o755)
+    if sys.platform == "win32":
+        # Windows cannot spawn a shell script as a process; `Command::new` runs a
+        # `.cmd` through cmd.exe. The redirect leads the line so a path ending in
+        # a digit (`song.mp3`) is never read as a `3>>` handle redirect.
+        opener = tmp_path / "fake-opener.cmd"
+        opener.write_text(f'@echo off\r\n>>"{record_file}" echo %~1\r\n')
+    else:
+        opener = tmp_path / "fake-opener.sh"
+        opener.write_text(f'#!/bin/sh\nprintf \'%s\\n\' "$1" >> "{record_file}"\n')
+        opener.chmod(0o755)
 
     driver = create_driver("tui")
     driver.launch(
@@ -107,6 +116,9 @@ def opened_app(launch_client, tui_app_path, nest_instance, tmp_path, request):
                 # OS and the assertions below stay OS-branch-free.
                 "XDG_RUNTIME_DIR": str(runtime_dir),
                 "TMPDIR": str(runtime_dir),
+                # Windows resolves `std::env::temp_dir()` from TMP / TEMP.
+                "TMP": str(runtime_dir),
+                "TEMP": str(runtime_dir),
             },
         }
     )
@@ -156,12 +168,25 @@ def _upload_and_open_detail(driver, tmp_path, name: str, data: bytes) -> None:
     media = MediaActions(driver)
     src = tmp_path / name
     src.write_bytes(data)
-    # The seeded item arrives with the page's first list read; a `before` taken
-    # earlier reads 0 and that load alone would satisfy `before + 1`.
+    # Wait for the seeded item itself, not just a loaded page: right after
+    # sign-in the folder's rows cannot be verified until the account runtime's
+    # custody reads, so the first listing can come back empty, and that empty
+    # page already reads as loaded. An upload pressed then is refused with
+    # `media.error_no_set` (no folder listed to upload into), and a `before`
+    # read then counts 0, so the seed turning up later satisfies `before + 1`
+    # (the race `test_tui_media_graphics_protocol.py` lost on Windows).
     media.ensure_loaded()
-    before = media.item_count()
+    before = media.wait_for_item_count(1)
+    assert before == 1, (
+        f"the seeded folder should list its one item before the upload, got {before}; "
+        f"error={media.driver.diagnose('error-message')}"
+    )
     media.upload_file(str(src))
-    media.wait_for_item_count(before + 1)
+    after = media.wait_for_item_count(before + 1)
+    assert after == before + 1, (
+        f"the upload of {name!r} should add one item ({before} -> {before + 1}), got "
+        f"{after}; error={media.driver.diagnose('error-message')}"
+    )
     media.open_item_detail(media.index_of(name))
     got = media.wait_for_version_count(1)
     assert got == 1, f"the uploaded item's version rows never loaded (got {got})"
@@ -196,14 +221,17 @@ def test_ask_confirm_downloads_decrypts_and_hands_off(opened_app, tmp_path):
 
     # The ratified materialization shape (apps/tui.md § External media handoff).
     expected_dir = str(runtime_dir / "fauna-tui" / "media")
-    assert os.path.dirname(handed) == expected_dir, (
+    assert os.path.normcase(os.path.dirname(handed)) == os.path.normcase(expected_dir), (
         f"the clip must rest under the runtime handoff dir: {handed}"
     )
     assert handed.endswith(".mp4"), (
         f"the real extension is what the OS resolves the handler by: {handed}"
     )
-    mode = stat.S_IMODE(os.stat(handed).st_mode)
-    assert mode == 0o600, f"owner-only file, got {oct(mode)}"
+    if sys.platform != "win32":
+        # POSIX mode bits only: Windows reports a synthetic mode from `os.stat`
+        # (the file inherits the per-user %TEMP% ACL there instead).
+        mode = stat.S_IMODE(os.stat(handed).st_mode)
+        assert mode == 0o600, f"owner-only file, got {oct(mode)}"
 
     # The crypto round trip: seal → POST → fetch → verify → decrypt returned
     # exactly the plaintext the user uploaded.
@@ -385,7 +413,7 @@ def test_a_followed_folders_file_on_another_nest_opens_with_no_account_there(
     import secrets
 
     from actions.media import MediaActions
-    from common.auth import register_handled_actor
+    from helpers.admin_wire import admit_adult
 
     from tests.api.test_public_folder_fetch import DEVICE_ID, _record, _set_audience
     from tests.api.test_web_paywall_folder import _actor_client
@@ -395,11 +423,8 @@ def test_a_followed_folders_file_on_another_nest_opens_with_no_account_there(
     home_url, home_port = home["url"], home["port"]
 
     # ── Fixture: an owner on H publishes a folder holding one clip. ──
-    owner = register_handled_actor(
-        home_port,
-        handle="xnpub" + secrets.token_hex(3),
-        domain=home["authority"],
-        base_url=home_url,
+    owner = admit_adult(
+        home, "xnpub" + secrets.token_hex(3), domain=home["authority"], token=True,
     )
     folder = f"xnest-pub-{secrets.token_hex(3)}"
     with _actor_client(home_url, owner) as ws:

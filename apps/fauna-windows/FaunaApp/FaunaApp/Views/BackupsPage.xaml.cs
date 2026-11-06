@@ -1,4 +1,5 @@
 using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Navigation;
 using FaunaApp.Core.Models;
@@ -31,8 +32,12 @@ public sealed partial class BackupsPage : Page
     /// command (linux's <c>set_rerun_hook</c>/<c>poke_rerun</c> idiom, adapted: the
     /// page installs itself while live and clears on navigate-away, so a command
     /// with no page mounted fails loudly instead of silently dropping — convention
-    /// 11). Mirrors <c>ConversationsPage.Current</c>/<c>ProfilePage.Current</c>.</summary>
+    /// 11). Mirrors <c>ConversationsPage.Current</c>/<c>ProfilePage.Current</c>. The
+    /// agent is its only reader, so it compiles out of Release with it (convention
+    /// 15).</summary>
+#if DEBUG || FAUNA_E2E_AGENT
     internal static BackupsPage? Current { get; private set; }
+#endif
 
     private BackupsViewModel? _viewModel;
 
@@ -119,8 +124,11 @@ public sealed partial class BackupsPage : Page
         RestoreLocalHeader.Text = S.Get("backups/restore_local_title");
         RestoreSourceSelect.PlaceholderText = S.Get("backups/backup_destinations_empty");
         RestoreSnapshotSelect.PlaceholderText = S.Get("backups/restore_no_snapshots");
-        RestoreKindMail.Content = S.Get("backups/restore_kinds_mail");
-        RestoreKindCalendar.Content = S.Get("backups/restore_kinds_calendar");
+        // The five restore-kind boxes, labelled from the VM's one table (paint order
+        // = BackupsViewModel.RestoreKinds; each box's Tag is its index there).
+        var kindBoxes = RestoreKindBoxes();
+        for (var i = 0; i < kindBoxes.Length; i++)
+            kindBoxes[i].Content = S.Get(BackupsViewModel.RestoreKinds[i].LabelKey);
         RestoreConfirmInput.PlaceholderText = S.Get("backups/restore_confirm_placeholder");
         RestoreConfirmButton.Content = S.Get("backups/restore_confirm_button");
         RestoreProgress.Text = S.Get("backups/restore_progress_idle");
@@ -180,8 +188,15 @@ public sealed partial class BackupsPage : Page
                 // The covered-folder audit's population anchor: the agent's own
                 // replica of each bound folder (windows runs no in-app engine).
                 syncStateDir: Core.Services.AccountStateDir.SyncAgentStateDir(actorIdHex));
+            // A fresh VM starts all-ticked; carry over any box the page already shows
+            // unticked, so the gate and the boxes never disagree.
+            var kindBoxes = RestoreKindBoxes();
+            for (var i = 0; i < kindBoxes.Length; i++)
+                _viewModel.SetRestoreKindTicked(i, kindBoxes[i].IsChecked == true);
             _viewModel.PropertyChanged += ViewModel_PropertyChanged;
+#if DEBUG || FAUNA_E2E_AGENT
             Current = this;
+#endif
         }
     }
 
@@ -192,8 +207,11 @@ public sealed partial class BackupsPage : Page
         {
             _viewModel.CleanupStoreChange();
             _viewModel.StoreResynced -= OnStoreResynced;
+            _viewModel.RestoreSnapshotsReread -= SyncRestoreSnapshotSelection;
         }
+#if DEBUG || FAUNA_E2E_AGENT
         if (ReferenceEquals(Current, this)) Current = null;
+#endif
     }
 
     /// <summary>e2e-only: apply an audit clock offset, force a re-pass, and
@@ -251,8 +269,9 @@ public sealed partial class BackupsPage : Page
         await _viewModel.LoadRestoreAsync();
         RenderRestoreHistory();
         RestoreSnapshotSelect.ItemsSource = _viewModel.RestoreSnapshots;
-        if (_viewModel.RestoreSnapshots.Count > 0)
-            RestoreSnapshotSelect.SelectedIndex = 0;
+        SyncRestoreSnapshotSelection();
+        _viewModel.RestoreSnapshotsReread -= SyncRestoreSnapshotSelection;
+        _viewModel.RestoreSnapshotsReread += SyncRestoreSnapshotSelection;
         RestoreSourceSelect.IsEnabled = _viewModel.HasDestinations;
         RestoreProgress.Text = _viewModel.RestoreProgressText;
 
@@ -295,6 +314,14 @@ public sealed partial class BackupsPage : Page
                 break;
             case nameof(BackupsViewModel.OpenSnapshotId):
                 UpdateFileList();
+                break;
+            case nameof(BackupsViewModel.SnapshotRestoreVisible):
+            case nameof(BackupsViewModel.CanRestoreSnapshot):
+            case nameof(BackupsViewModel.SnapshotRestoreRunning):
+            case nameof(BackupsViewModel.SnapshotRestoreProgressText):
+            case nameof(BackupsViewModel.SnapshotRestoreResultText):
+                RenderSnapshotRestore(
+                    revealResult: e.PropertyName == nameof(BackupsViewModel.SnapshotRestoreResultText));
                 break;
             case nameof(BackupsViewModel.ReseedResultText):
             case nameof(BackupsViewModel.ReseedRunning):
@@ -378,10 +405,18 @@ public sealed partial class BackupsPage : Page
     private void UpdateFileList()
     {
         if (_viewModel is null) return;
-        if (_viewModel.OpenSnapshotId is not null)
+        if (_viewModel.OpenSnapshotId is { } openId)
         {
-            DetailHeader.Text = S.Get("backups/file_count")
-                .Replace("{count}", _viewModel.DetailFiles.Count.ToString());
+            // A kind entry's snapshot holds messages, not files: the header names
+            // the snapshot rather than counting files, and one line inside
+            // `snapshot-detail-files` says where it restores from — never an empty
+            // list without a reason (§ Snapshot-list shape → *Kind entries*).
+            DetailHeader.Text = _viewModel.DetailNoticeText is null
+                ? S.Get("backups/file_count").Replace("{count}", _viewModel.DetailFiles.Count.ToString())
+                : S.Get("backups/snapshot").Replace("{id}", openId.ToString());
+            KindDetailNotice.Text = _viewModel.DetailNoticeText ?? "";
+            KindDetailNotice.Visibility = _viewModel.DetailNoticeText is null
+                ? Visibility.Collapsed : Visibility.Visible;
             FileList.Visibility = Visibility.Visible;
             NoFilesText.Visibility = Visibility.Collapsed;
             // The right column's Auto rows above (restore history + local restore)
@@ -392,6 +427,7 @@ public sealed partial class BackupsPage : Page
         else
         {
             DetailHeader.Text = S.Get("backups/select_snapshot");
+            KindDetailNotice.Visibility = Visibility.Collapsed;
             FileList.Visibility = Visibility.Collapsed;
             NoFilesText.Visibility = Visibility.Visible;
         }
@@ -582,12 +618,8 @@ public sealed partial class BackupsPage : Page
             if (!FolderOptionsMatchViewModel())
             {
                 FolderSelector.Items.Clear();
-                foreach (var name in _viewModel.FolderNames)
-                {
-                    var item = new ComboBoxItem { Content = name, Tag = name };
-                    Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(item, name);
-                    FolderSelector.Items.Add(item);
-                }
+                foreach (var option in _viewModel.FolderOptions)
+                    FolderSelector.Items.Add(FolderOption(option));
             }
             SelectFolderOption(_viewModel.SelectedFolder);
         }
@@ -597,16 +629,32 @@ public sealed partial class BackupsPage : Page
         }
     }
 
-    /// <summary>True when the picker already offers exactly the VM's folders, in
+    /// <summary>One <c>backup-folder-selector</c> option. Its Name is the label it
+    /// paints — what a screen reader reads, and what the bridge's <c>options</c>
+    /// attribute answers, so a kind entry lists as "Mail", never
+    /// <c>backups.reseed_set_mail</c> (§ Snapshot-list shape → *Kind entries*). The
+    /// row's <c>name</c> is its Tag (what the machine is handed back) and its
+    /// AutomationId, which the bridge's <c>Select</c> matches as well as the Name,
+    /// so <c>driver.select</c> names the locale-stable key exactly as on every other
+    /// app (the <c>feed-factor-select</c> shape, <c>FeedPage.FactorOption</c>).</summary>
+    private static ComboBoxItem FolderOption(BackupFolderOption option)
+    {
+        var item = new ComboBoxItem { Content = option.Label, Tag = option.Name };
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(item, option.Label);
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetAutomationId(item, option.Name);
+        return item;
+    }
+
+    /// <summary>True when the picker already offers exactly the VM's options, in
     /// order — the predicate that decides whether a teardown is owed at all.</summary>
     private bool FolderOptionsMatchViewModel()
     {
-        var want = _viewModel!.FolderNames;
+        var want = _viewModel!.FolderOptions;
         if (FolderSelector.Items.Count != want.Count) return false;
         for (int i = 0; i < want.Count; i++)
         {
-            if (FolderSelector.Items[i] is not ComboBoxItem { Tag: string tag }
-                || tag != want[i])
+            if (FolderSelector.Items[i] is not ComboBoxItem { Tag: string tag, Content: string label }
+                || tag != want[i].Name || label != want[i].Label)
                 return false;
         }
         return true;
@@ -668,6 +716,66 @@ public sealed partial class BackupsPage : Page
         UpdateActionButtons();
         RenderPrunePreview();
         UpdateFileList();
+        RenderSnapshotRestore(revealResult: false);
+    }
+
+    /// <summary>Paint the whole-snapshot restore panel off the VM
+    /// (ui/backups.md § Whole-snapshot restore): shown for an open folder
+    /// snapshot, the button armed by the VM's one predicate, the progress line
+    /// only while a walk runs and the result line only after. A result that
+    /// just appeared is scrolled into view — the user's own click produced it,
+    /// and the right column's Auto rows can leave it below the fold.</summary>
+    private void RenderSnapshotRestore(bool revealResult)
+    {
+        if (_viewModel is null) return;
+        SnapshotRestorePanel.Visibility = _viewModel.SnapshotRestoreVisible
+            ? Visibility.Visible : Visibility.Collapsed;
+        SnapshotRestoreButton.IsEnabled = _viewModel.CanRestoreSnapshot;
+        SnapshotRestoreChooseButton.IsEnabled = !_viewModel.SnapshotRestoreRunning;
+        SnapshotRestoreProgress.Text = _viewModel.SnapshotRestoreProgressText ?? "";
+        SnapshotRestoreProgressRow.Visibility = _viewModel.SnapshotRestoreProgressText is null
+            ? Visibility.Collapsed : Visibility.Visible;
+        SnapshotRestoreResult.Text = _viewModel.SnapshotRestoreResultText ?? "";
+        SnapshotRestoreResult.Visibility = _viewModel.SnapshotRestoreResultText is null
+            ? Visibility.Collapsed : Visibility.Visible;
+        if (revealResult && _viewModel.SnapshotRestoreResultText is not null)
+            BringIntoViewAfterLayout(SnapshotRestoreResult);
+    }
+
+    private void SnapshotRestoreDestination_TextChanged(object sender, TextChangedEventArgs e)
+    {
+        if (_viewModel is null) return;
+        _viewModel.SnapshotRestoreDestination = SnapshotRestoreDestinationBox.Text;
+    }
+
+    /// <summary>The untagged <i>Choose…</i> button: a FolderPicker fills the typed
+    /// destination (the picker itself is not e2e-driveable — the test types).
+    /// Mirrors <c>FoldersPage</c>'s browse handler.</summary>
+    private async void SnapshotRestoreChoose_Click(object sender, RoutedEventArgs e)
+    {
+        if (App.MainWindow is null) return;
+        try
+        {
+            var picker = new Windows.Storage.Pickers.FolderPicker();
+            picker.SuggestedStartLocation = Windows.Storage.Pickers.PickerLocationId.Desktop;
+            picker.FileTypeFilter.Add("*");
+
+            var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(App.MainWindow);
+            WinRT.Interop.InitializeWithWindow.Initialize(picker, hwnd);
+
+            var folder = await picker.PickSingleFolderAsync();
+            if (folder is not null) SnapshotRestoreDestinationBox.Text = folder.Path;
+        }
+        catch (Exception ex)
+        {
+            Core.Logs.ShellLog.Warn("BackupsPage", $"restore destination pick failed: {ex.Message}");
+        }
+    }
+
+    private async void SnapshotRestore_Click(object sender, RoutedEventArgs e)
+    {
+        if (_viewModel is null) return;
+        await _viewModel.RestoreSnapshotCommand.ExecuteAsync(null);
     }
 
     /// Single-flight, one predicate: every set-scoped mutating control is armed
@@ -680,7 +788,7 @@ public sealed partial class BackupsPage : Page
         BackupNowButton.IsEnabled = armed;
         PruneButton.IsEnabled = armed;
         CheckButton.IsEnabled = armed;
-        FolderSelector.IsEnabled = _viewModel.FolderNames.Count > 0 && !_viewModel.IsBusy;
+        FolderSelector.IsEnabled = _viewModel.FolderOptions.Count > 0 && !_viewModel.IsBusy;
     }
 
     /// The prune dry-run surface. Execute is offered ONLY from here, and only when
@@ -700,6 +808,13 @@ public sealed partial class BackupsPage : Page
                 Opacity = 0.8,
             });
         }
+        // The panel's UIA name carries "<title>  <verdict>" (as tui/linux/android do),
+        // so get_text says which kind of nothing stands. The XAML keeps a non-empty
+        // Name for windows-name-lint; this overrides it once a preview is standing.
+        AutomationProperties.SetName(PrunePreviewPanel,
+            _viewModel.PrunePreviewVerdict.Length > 0
+                ? $"{PrunePreviewTitle.Text}  {_viewModel.PrunePreviewVerdict}"
+                : "snapshot-prune-preview");
         PrunePreviewPanel.Visibility = _viewModel.HasPrunePreview
             ? Visibility.Visible : Visibility.Collapsed;
         PruneExecuteButton.Visibility = _viewModel.PruneExecutable
@@ -751,7 +866,9 @@ public sealed partial class BackupsPage : Page
                 _destinationRowIds.Add(d.Id);
             }
         }
-        DestinationsEmpty.Visibility = wanted.Count == 0
+        // A refused load (the first-listing gate) says why on error-message and
+        // paints no empty state: an empty list would read as the account's own.
+        DestinationsEmpty.Visibility = wanted.Count == 0 && !_viewModel.DestinationsLoadRefused
             ? Visibility.Visible : Visibility.Collapsed;
         // The standing "every copy you have is on one of your own devices"
         // warning — the shared predicate decides, never a re-derived local count
@@ -812,7 +929,7 @@ public sealed partial class BackupsPage : Page
         {
             // The banner is a container so a recover button can sit INSIDE it
             // (scoped `backup-audit-alert[i]` → `backup-audit-recover-button`);
-            // get_text on it scrapes the child TextBlock.
+            // get_text on it reads the Name set below, which is the reason's text.
             var banner = new StackPanel { Spacing = 4 };
             banner.Children.Add(new TextBlock
             {
@@ -833,6 +950,11 @@ public sealed partial class BackupsPage : Page
                 banner.Children.Add(recover);
             }
             Microsoft.UI.Xaml.Automation.AutomationProperties.SetAutomationId(banner, Ids.BackupAuditAlert);
+            // A panel with no Name stays out of the UIA content view, so FlaUI
+            // counted no banner at all once it became a container. The Name keeps
+            // it there (BuildDestinationRow's idiom) and is the banner's own text,
+            // rebuilt on every render.
+            Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(banner, alert.Text);
             DestinationsAuditAlerts.Children.Add(banner);
         }
     }
@@ -1031,9 +1153,9 @@ public sealed partial class BackupsPage : Page
         row.Children.Add(info);
 
         // backup-destination-reseed-button — this device's own custodian row
-        // only, as the shared backup_reseed_rows decides (backups.md § Restore
-        // after losing the nest). Built on every row and toggled by
-        // ApplyReseed, so an in-place reconcile can move it.
+        // and a surviving nest's row, as the shared backup_reseed_rows decides
+        // (backups.md § Restore after losing the nest). Built on every row and
+        // toggled by ApplyReseed, so an in-place reconcile can move it.
         var reseed = new Button
         {
             Content = S.Get("backups/backup_destination_reseed_button"),
@@ -1070,9 +1192,11 @@ public sealed partial class BackupsPage : Page
 
     /// <summary>Paint a row's <c>backup-destination-reseed-button</c> iff the
     /// VM's shared-Rust placement names the row, Collapsed (absent to UIA)
-    /// otherwise; disabled while a restore runs.</summary>
+    /// otherwise; disabled while a restore runs. Its <c>Tag</c> is the row's
+    /// destination id — the source the confirm restores from.</summary>
     private void ApplyReseed(Button reseed, string destinationId)
     {
+        reseed.Tag = destinationId;
         reseed.Visibility = _viewModel!.ReseedOnRow(destinationId)
             ? Visibility.Visible : Visibility.Collapsed;
         reseed.IsEnabled = !_viewModel.ReseedRunning;
@@ -1376,14 +1500,21 @@ public sealed partial class BackupsPage : Page
             elements.ReseedButton.IsEnabled = !_viewModel.ReseedRunning;
     }
 
+    /// <summary>The pressed <c>backup-destination-reseed-button</c>'s source —
+    /// its row's destination id, or <c>null</c> for the orphaned-store row's —
+    /// carried from the press to the confirm.</summary>
+    private string? _reseedSource;
+
     /// <summary><c>backup-destination-reseed-button</c> (on the orphaned-store
-    /// row or this device's own custodian row) — opens the plain confirm; it
-    /// never runs the ceremony itself.</summary>
+    /// row, this device's own custodian row, or a surviving nest's row) — opens
+    /// the plain confirm, naming the nest when it pulls back from one; it never
+    /// runs the restore itself.</summary>
     private async void DestinationReseed_Click(object sender, RoutedEventArgs e)
     {
         if (_viewModel is null || _viewModel.ReseedRunning) return;
-        ReseedConfirmTitle.Text = S.Get("backups/backup_reseed_confirm_title");
-        ReseedConfirmBody.Text = S.Get("backups/backup_reseed_confirm_body");
+        _reseedSource = (sender as Button)?.Tag as string;
+        ReseedConfirmTitle.Text = _viewModel.ReseedConfirmTitle(_reseedSource);
+        ReseedConfirmBody.Text = _viewModel.ReseedConfirmBody(_reseedSource);
         ReseedCancelButton.Content = S.Get("backups/backup_reseed_cancel_button");
         ReseedConfirmButton.Content = S.Get("backups/backup_reseed_confirm_button");
         ReseedConfirmDialog.XamlRoot = this.XamlRoot;
@@ -1394,14 +1525,15 @@ public sealed partial class BackupsPage : Page
         ReseedConfirmDialog.Hide();
 
     /// <summary><c>backup-destination-reseed-confirm-button</c> — the confirmed
-    /// restore. The agent's FFI face runs the ceremony and its re-enrollment; the
-    /// VM paints how it ended (result view, or a stop on <c>error-message</c>),
-    /// and the re-list afterwards moves the rows.</summary>
+    /// restore from the pressed source. The agent's FFI face runs the ceremony,
+    /// or the shared pull-back host runs in this process, each with its
+    /// re-enrollment; the VM paints how it ended (result view, or a stop on
+    /// <c>error-message</c>), and the re-list afterwards moves the rows.</summary>
     private async void ReseedConfirm_Click(object sender, RoutedEventArgs e)
     {
         ReseedConfirmDialog.Hide();
         if (_viewModel is null) return;
-        await _viewModel.ReseedAsync();
+        await _viewModel.ReseedAsync(_reseedSource);
         RenderDestinations();
     }
 
@@ -1469,11 +1601,38 @@ public sealed partial class BackupsPage : Page
     private void DivergenceClose_Click(object sender, RoutedEventArgs e) =>
         DivergenceOverlay.Visibility = Visibility.Collapsed;
 
+    /// <summary>Point <c>restore-snapshot-select</c> at the VM's pick — on page
+    /// entry, and after every mutating snapshot gesture re-read the list (the
+    /// refill empties the picker's selection, and may have moved the pick). The
+    /// VM always holds an instance from the list itself, which is what the
+    /// picker matches. Before the page bound the list there is nothing to
+    /// point.</summary>
+    private void SyncRestoreSnapshotSelection()
+    {
+        if (_viewModel is null || RestoreSnapshotSelect.ItemsSource is null) return;
+        RestoreSnapshotSelect.SelectedItem = _viewModel.SelectedRestoreSnapshot;
+    }
+
     private void RestoreSnapshotSelect_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
         if (_viewModel is null) return;
         if (RestoreSnapshotSelect.SelectedItem is RestoreSnapshotOption opt)
             _viewModel.SelectedRestoreSnapshot = opt;
+    }
+
+    private CheckBox[] RestoreKindBoxes() => new[]
+    {
+        RestoreKindMail, RestoreKindCalendar, RestoreKindContacts, RestoreKindPosts,
+        RestoreKindConversations,
+    };
+
+    /// A restore-kind box ticked or unticked: the VM re-decides whether the picked
+    /// snapshot may arm restore-confirm-button.
+    private void RestoreKind_Toggled(object sender, RoutedEventArgs e)
+    {
+        if (_viewModel is null || sender is not CheckBox box || box.Tag is not string tag) return;
+        if (int.TryParse(tag, out var index))
+            _viewModel.SetRestoreKindTicked(index, box.IsChecked == true);
     }
 
     private void RestoreConfirmInput_TextChanged(object sender, TextChangedEventArgs e)

@@ -20,7 +20,9 @@ anything except "what did we last see" — the code and the tests remain the act
       "duration_s": 123.4,
       "counts": {"passed": 500, "failed": 3, "skipped": 40, "xfailed": 2, "error": 0},
       "tests": {
-        "tests/test_foo.py::test_bar": {"outcome": "passed", "duration": 0.52}
+        "tests/test_foo.py::test_bar": {"outcome": "passed", "duration": 0.52},
+        "tests/test_foo.py::test_baz": {"outcome": "skipped", "duration": 0.0,
+                                        "reason": "macos has not built …"}
       }
     },
     "ios": { "...": "same shape" }
@@ -28,7 +30,18 @@ anything except "what did we last see" — the code and the tests remain the act
 }
 ```
 
-`outcome` is one of `passed`, `failed`, `skipped`, `xfailed`, `xpassed`, `error`.
+`outcome` is one of `passed`, `failed`, `skipped`, `xfailed`, `xpassed`, `error`; a
+`skipped` entry also carries the skip's `reason` (pytest hides a fixture's output for a
+skip, so without it a whole leg skipping says nothing about why).
+
+The hook's own payload also carries `app_legs` — `{app: "ok" | "failed: <memo key>: <error>" |
+"lost mid-run: <nodeid>: <error>"}` for every app whose session setup the process attempted
+(its build, and for ios the simulator); `lost mid-run` names the first test whose launch found
+the app's built artifact gone after setup succeeded (the drivers' `AppArtifactMissing`). The
+script does not write it to the baseline: it reads it, and **refuses to write a baseline for a
+client whose leg no pass set up, any pass failed to, or any pass lost mid-run** (exit 2, the
+checked-in file untouched) — the rule is apple-e2e-automation.md § Baseline discipline's. A
+dead leg records every app test as skipped or errored, which written down reads as covered.
 
 The per-app `tests` map is produced by a pytest plugin hook in `conftest.py`
 (`pytest_addoption`'s `--baseline-json`, `pytest_runtest_logreport`,

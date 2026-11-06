@@ -324,6 +324,22 @@ fn stand_up_with(
     folder_ref: fauna_core::folder_keys::FolderRef,
     backup_key: Option<fauna_core::crypto::OwnerSealKey>,
 ) -> Harness {
+    stand_up_naming(folder_ref, backup_key, true)
+}
+
+/// [`stand_up_bound`] over an engine that names its row with
+/// `SyncEngine::with_folder_ref` alone and carries NO binding edge — the
+/// engine `engine_lifecycle::build_engine` hands the File Provider host, which
+/// drives its rebuild edge itself (`file_provider_host.rs`'s `Resident`).
+fn stand_up_unedged(folder_ref: fauna_core::folder_keys::FolderRef) -> Harness {
+    stand_up_naming(folder_ref, None, false)
+}
+
+fn stand_up_naming(
+    folder_ref: fauna_core::folder_keys::FolderRef,
+    backup_key: Option<fauna_core::crypto::OwnerSealKey>,
+    edged: bool,
+) -> Harness {
     let double = NestDouble::new();
     let watch_dir = tempfile::tempdir().unwrap();
 
@@ -387,20 +403,22 @@ fn stand_up_with(
     // `SyncEngine` is `!Sync` (its `SyncDb` wraps a raw `rusqlite::Connection`);
     // the harness's loop future is deliberately `!Send` and raced in-task
     // (never spawned), so this `Arc` never crosses a thread boundary.
+    let engine = test_engine_with_nest_client_keyed(
+        watch_dir.path().to_path_buf(),
+        FOLDER,
+        Arc::clone(&client),
+        backup_key,
+    );
     #[allow(clippy::arc_with_non_send_sync)]
-    let engine = Arc::new(
-        test_engine_with_nest_client_keyed(
-            watch_dir.path().to_path_buf(),
-            FOLDER,
-            Arc::clone(&client),
-            backup_key,
-        )
-        .with_binding_edge(crate::binding_edge::BindingEdge {
+    let engine = Arc::new(if edged {
+        engine.with_binding_edge(crate::binding_edge::BindingEdge {
             folder_ref,
             basis: crate::binding_edge::BindingBasis::of(&served_folder()),
             on_rebuild: Arc::new(|| {}),
-        }),
-    );
+        })
+    } else {
+        engine.with_folder_ref(folder_ref)
+    });
     *double.device_id_hex.lock().unwrap() = engine.device_id_hex().to_string();
 
     Harness {
@@ -1110,6 +1128,10 @@ async fn a_seat_whose_ref_the_list_does_not_carry_reads_sealed_and_disarms() {
     h.double.serve_folders(vec![own_public.clone()]);
     h.engine.refresh_sync_mode().await;
     assert!(h.engine.is_public_audience(), "armed on its own row");
+    assert!(
+        crate::provider_face::ProviderEngine::shares_links(&*h.engine),
+        "an armed set of this nest's own shares links (Finder's Share entry)"
+    );
 
     // Its row is gone; a same-named public row of another id is listed.
     let mut namesake = public_served_folder(Some(&seat_keypair()), 2_000);
@@ -1132,6 +1154,37 @@ async fn a_seat_whose_ref_the_list_does_not_carry_reads_sealed_and_disarms() {
         !h.engine.is_public_audience(),
         "so the armed seat disarms rather than keeping its posture"
     );
+    assert!(
+        !crate::provider_face::ProviderEngine::shares_links(&*h.engine),
+        "a disarmed set shares no links"
+    );
+
+    h.server_task.abort();
+}
+
+/// The per-tick row read keys on the row the engine was built for, not on
+/// whether a host installed a binding edge: the File Provider host's engine
+/// (`build_engine`, named by `with_folder_ref` alone) reads its own row at
+/// every refresh. Keyed on the edge, it read no row — the sealed direction for
+/// every posture riding the read — so a metadata-only folder flipped to full
+/// residency at the extension's first refresh, and the seat sent the nest the
+/// bytes the owner had kept off it (`file-sync.md` § Content residency).
+#[tokio::test]
+async fn an_engine_named_without_a_binding_edge_reads_its_own_row() {
+    use fauna_core::folder_keys::FolderRef;
+
+    let h = stand_up_unedged(FolderRef::Local(served_folder().id));
+    until_connected(&h.engine).await;
+    h.double.serving.store(true, Ordering::SeqCst);
+    let mut row = served_folder();
+    row.residency = fauna_protocol::folders::RESIDENCY_METADATA_ONLY.to_string();
+    h.double.serve_folder(row);
+
+    h.engine.refresh_sync_mode().await;
+    assert!(
+        h.engine.is_metadata_only_residency(),
+        "the refresh found the engine's own row and kept its residency"
+    );
 
     h.server_task.abort();
 }
@@ -1149,4 +1202,84 @@ async fn race<L: std::future::Future<Output = ()>>(
         _ = loop_fut.as_mut() => panic!("the resident loop exited on its own"),
         () = waiter => {}
     }
+}
+
+// ── An engine's first pass reads the folder row first ────────────────────────
+
+/// A seat with `excluded/secret.txt` and `visible.txt` on disk, connected, its
+/// folder row excluding `excluded`.
+async fn seat_with_an_excluded_file_on_disk() -> Harness {
+    let h = stand_up();
+    h.double.serve_folder(FolderSummary {
+        exclude_paths: Some(vec!["excluded".to_string()]),
+        ..served_folder()
+    });
+    std::fs::create_dir(h.watch_dir.path().join("excluded")).unwrap();
+    std::fs::write(h.watch_dir.path().join("excluded/secret.txt"), b"held back").unwrap();
+    std::fs::write(h.watch_dir.path().join("visible.txt"), b"let through").unwrap();
+    until("the plane to connect", || {
+        matches!(*h.state_tx.borrow(), ConnectionState::Connected)
+    })
+    .await;
+    h
+}
+
+/// **The first converge of an engine's life honours the folder's exclusions.**
+///
+/// `local-folder-sync` outcome 10, measured 2026-10-30 on the macOS leg: a
+/// content-key re-key rebuilt the owner's engine, and the rebuilt engine's
+/// start-up converge took up a file the running engine had held back for
+/// minutes, because a new matcher is empty until the row's first read
+/// (`file-sync.md` § Status). Every engine start opens that window: a first
+/// bind, an agent restart, a re-key.
+#[tokio::test]
+async fn an_engines_first_converge_honours_the_folders_exclusions() {
+    let h = seat_with_an_excluded_file_on_disk().await;
+    h.double.serving.store(true, Ordering::SeqCst);
+
+    crate::always_resident::LocalWriteHost::converge(&*h.engine, FOLDER).await;
+
+    assert!(
+        h.engine.db().get_entry("visible.txt").unwrap().is_some(),
+        "the pass must have scanned the folder, or the absence below proves nothing"
+    );
+    assert!(
+        h.engine
+            .db()
+            .get_entry("excluded/secret.txt")
+            .unwrap()
+            .is_none(),
+        "an excluded path must never be taken up, on an engine's first pass included"
+    );
+}
+
+/// **A row this engine has never read holds its first pass.** An unread list
+/// is not an empty one: the pass waits for a read rather than scan with a
+/// matcher that excludes nothing, and the next pass takes the row up as usual.
+#[tokio::test]
+async fn an_engine_that_cannot_read_its_row_holds_its_first_pass() {
+    let h = seat_with_an_excluded_file_on_disk().await;
+
+    crate::always_resident::LocalWriteHost::converge(&*h.engine, FOLDER).await;
+    assert!(
+        h.engine.db().get_entry("visible.txt").unwrap().is_none()
+            && h.engine
+                .db()
+                .get_entry("excluded/secret.txt")
+                .unwrap()
+                .is_none(),
+        "a pass over an unread row must take nothing up"
+    );
+
+    h.double.serving.store(true, Ordering::SeqCst);
+    crate::always_resident::LocalWriteHost::converge(&*h.engine, FOLDER).await;
+    assert!(
+        h.engine.db().get_entry("visible.txt").unwrap().is_some()
+            && h.engine
+                .db()
+                .get_entry("excluded/secret.txt")
+                .unwrap()
+                .is_none(),
+        "the pass after the row became readable converges, exclusion armed"
+    );
 }

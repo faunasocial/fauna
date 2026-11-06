@@ -46,9 +46,10 @@ use fauna_nest::routes::AppState;
 use fauna_nest::rpc_router::RpcRouter;
 use fauna_nest::state::NostrState;
 use fauna_protocol::bridged_conversations::{
-    BridgedRoomInfo, InboxFetchReply, InboxFetchRequest, KIND_INBOX_FETCH, KIND_ROOMS_LIST,
-    KIND_ROOMS_OPEN, KIND_SEND, RoomsListReply, RoomsListRequest, RoomsOpenReply, RoomsOpenRequest,
-    SendReply, SendRequest,
+    BridgedRoomInfo, InboxFetchReply, InboxFetchRequest, KIND_INBOX_FETCH, KIND_MESSAGES_REMOVE,
+    KIND_ROOMS_LIST, KIND_ROOMS_OPEN, KIND_ROOMS_REMOVE, KIND_SEND, MessagesRemoveRequest,
+    RemoveReply, RoomsListReply, RoomsListRequest, RoomsOpenReply, RoomsOpenRequest,
+    RoomsRemoveRequest, SendReply, SendRequest,
 };
 use fauna_protocol::family::{
     FamilyApprovalDecideRequest, FamilyApprovalsListReply, FamilyApprovalsListRequest,
@@ -345,6 +346,87 @@ async fn a_cold_peer_is_held_and_queued_then_approve_releases_it() {
     // standing verdict, not a one-message pass.
     seed_inbound(&st, &peer, "hi again", 200).await;
     assert_eq!(ward_marker(&r, &st, &peer).await, None);
+}
+
+/// The ward's **local remove never takes an entry off the guardian's queue**
+/// (§ The bridge-DM gate, honest bound (a): "the guardian always sees the
+/// queue entry"; `bridged-adapter.md` § Removing bridged rows). Hold-ness is
+/// `(knob, verdict row)` over the room's far participants, and a removed room
+/// keeps its row and its participants — so neither `rooms.remove` nor
+/// `messages.remove` of every live row writes a verdict, and the held peer
+/// stays queued until the guardian decides.
+#[tokio::test]
+async fn a_wards_remove_keeps_the_held_peer_on_the_guardians_queue() {
+    let (r, st, _rx) = harness().await;
+    let by_room = hex::encode([0x51u8; 32]);
+    let by_rows = hex::encode([0x52u8; 32]);
+    set_knob(&st, "hold").await;
+    seed_inbound(&st, &by_room, "hi kid", 100).await;
+    seed_inbound(&st, &by_rows, "hello", 110).await;
+    seed_inbound(&st, &by_rows, "still there?", 120).await;
+    assert_eq!(dm_holds(&r, &st).await.len(), 2);
+
+    // Arm 1: the ward removes the whole room.
+    let room = ward_room(&r, &st, &by_room).await;
+    let removed: RemoveReply = decode(
+        &dispatch(
+            &r,
+            st.clone(),
+            WARD,
+            KIND_ROOMS_REMOVE,
+            encode(&RoomsRemoveRequest {
+                room_id: room.room_id.clone(),
+                extra: Default::default(),
+            }),
+        )
+        .await
+        .expect("rooms.remove ok"),
+    )
+    .expect("decode rooms.remove");
+    assert_eq!(removed.removed, 1);
+
+    // Arm 2: the ward removes every live row of the other room.
+    let ids: Vec<i64> = ward_inbox(&r, &st, &by_rows)
+        .await
+        .messages
+        .iter()
+        .map(|m| m.id)
+        .collect();
+    assert_eq!(ids.len(), 2);
+    let room = ward_room(&r, &st, &by_rows).await;
+    let removed: RemoveReply = decode(
+        &dispatch(
+            &r,
+            st.clone(),
+            WARD,
+            KIND_MESSAGES_REMOVE,
+            encode(&MessagesRemoveRequest {
+                room_id: room.room_id.clone(),
+                ids,
+                extra: Default::default(),
+            }),
+        )
+        .await
+        .expect("messages.remove ok"),
+    )
+    .expect("decode messages.remove");
+    assert_eq!(removed.removed, 2);
+
+    // Both held peers are still queued for the guardian.
+    let mut holds = dm_holds(&r, &st).await;
+    holds.sort();
+    assert_eq!(
+        holds,
+        vec![
+            ("nostr".into(), by_room.clone()),
+            ("nostr".into(), by_rows.clone())
+        ],
+        "a ward's local remove must not release a held peer"
+    );
+
+    // The guardian's decision still drains it, exactly as before the remove.
+    decide(&r, &st, &by_room, true).await;
+    assert_eq!(dm_holds(&r, &st).await, vec![("nostr".into(), by_rows)]);
 }
 
 /// **Deny** blocks new arrivals but never destroys stored rows — refusing new

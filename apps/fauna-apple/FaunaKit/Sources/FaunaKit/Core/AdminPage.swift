@@ -16,7 +16,8 @@ public enum AdminPage: String, CaseIterable, Identifiable {
     case nest       // nav id "admin-nest"
     #if !FAUNA_KIDS
     case mail       // nav id "admin-mail"
-    case calendar   // nav id "admin-calendar" (CalDAV-enable toggle; sibling of admin-mail)
+    case mailReports  // nav id "admin-mail-reports" (DMARC aggregate reports peers send about our domains)
+    case calendar  // nav id "admin-calendar" (CalDAV-enable toggle; sibling of admin-mail)
     case contacts   // nav id "admin-contacts" (CardDAV-enable toggle; contacts sibling of admin-calendar)
     case files      // nav id "admin-files" (WebDAV-enable toggle; files sibling of admin-contacts)
     case aliases    // nav id "admin-aliases"
@@ -38,6 +39,7 @@ public enum AdminPage: String, CaseIterable, Identifiable {
         case .nest: "admin-nest"
         #if !FAUNA_KIDS
         case .mail: "admin-mail"
+        case .mailReports: "admin-mail-reports"
         case .calendar: "admin-calendar"
         case .contacts: "admin-contacts"
         case .files: "admin-files"
@@ -51,6 +53,23 @@ public enum AdminPage: String, CaseIterable, Identifiable {
         }
     }
 
+    /// The ui.yaml page key the admin rail row opens (`navigation.sub_page_nav_rows`):
+    /// `navId` for the pages that carry the `admin-` prefix already, the prefixed
+    /// page key for the three whose nav id is bare (`dashboard`, `users`, `settings`).
+    public var pageKey: String {
+        switch self {
+        case .dashboard: "admin-dashboard"
+        case .users: "admin-users"
+        case .tiers: "admin-settings"
+        default: navId
+        }
+    }
+
+    /// The rail row's element id, `admin-nav-row[<page key>]` (ui.yaml
+    /// `navigation.sub_page_nav_rows`), so a gesture-bound test reaches any admin
+    /// sub-page by clicks.
+    public var navRowId: String { "\(Ids.adminNavRow)[\(pageKey)]" }
+
     public init?(navId: String?) {
         switch navId {
         case "dashboard", nil: self = .dashboard
@@ -59,6 +78,7 @@ public enum AdminPage: String, CaseIterable, Identifiable {
         case "admin-nest": self = .nest
         #if !FAUNA_KIDS
         case "admin-mail": self = .mail
+        case "admin-mail-reports": self = .mailReports
         case "admin-calendar": self = .calendar
         case "admin-contacts": self = .contacts
         case "admin-files": self = .files
@@ -81,6 +101,7 @@ public enum AdminPage: String, CaseIterable, Identifiable {
         case .nest: L.admin.nestPage.title
         #if !FAUNA_KIDS
         case .mail: L.admin.mailPage.title
+        case .mailReports: L.admin.mailReportsPage.title
         case .calendar: L.admin.calendarPage.title
         case .contacts: L.admin.contactsPage.title
         case .files: L.admin.filesPage.title
@@ -102,6 +123,7 @@ public enum AdminPage: String, CaseIterable, Identifiable {
         case .nest: "server.rack"
         #if !FAUNA_KIDS
         case .mail: "envelope"
+        case .mailReports: "chart.bar.doc.horizontal"
         case .calendar: "calendar"
         case .contacts: "person.crop.rectangle.stack"
         case .files: "folder"
@@ -141,7 +163,7 @@ public enum AdminPage: String, CaseIterable, Identifiable {
         // kids-app bullet, item (4)).
         [.dashboard, .users, .tiers, .nest, .custodyHosting, .adminLogs]
         #else
-        [.dashboard, .users, .tiers, .nest, .mail, .calendar, .contacts, .files, .aliases, .bridgesPending, .custodyHosting, .dns, .web, .adminLogs]
+        [.dashboard, .users, .tiers, .nest, .mail, .mailReports, .calendar, .contacts, .files, .aliases, .bridgesPending, .custodyHosting, .dns, .web, .adminLogs]
         #endif
     }
 }

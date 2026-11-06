@@ -184,7 +184,10 @@
                      Conflicts): per resolved conflict the resolution badge + the
                      file → winner line + a one-tap "use the other version"
                      (conflict-resolve-button → UseOtherVersion, the File-Versions
-                     restore re-point). Unresolved rows are informational. -->
+                     restore re-point). Unresolved rows are informational. A group
+                     set's review rows, read through the sync agent, continue this
+                     list (group-set.md decision 9; the button then runs the agent's
+                     RestoreRetainedVersion). -->
                 <StackPanel x:Name="ConflictsContainer" Spacing="6" Visibility="Collapsed" />
 
                 <TextBlock x:Name="NoConflictsText" Opacity="0.5"
@@ -344,8 +347,10 @@
                            Title="{loc:Localize Key=devices/declassify_title}"
                            CloseButtonText="{loc:Localize Key=common/cancel}">
                 <StackPanel Spacing="12" MinWidth="360">
-                    <TextBlock Text="{loc:Localize Key=devices/declassify_body}" TextWrapping="Wrap" />
-                    <TextBlock Text="{loc:Localize Key=devices/declassify_irreversible}" TextWrapping="Wrap" />
+                    <TextBlock Text="{loc:Localize Key=devices/declassify_body}" TextWrapping="Wrap"
+                               AutomationProperties.AutomationId="{x:Bind ids:Ids.FolderAudiencePublicNamesWarning}" />
+                    <TextBlock Text="{loc:Localize Key=devices/declassify_irreversible}" TextWrapping="Wrap"
+                               AutomationProperties.AutomationId="{x:Bind ids:Ids.FolderAudiencePublicResealWarning}" />
                     <Button x:Name="FolderAudienceConfirmBtn"
                             AutomationProperties.AutomationId="{x:Bind ids:Ids.FolderAudiencePublicConfirm}"
                             Content="{loc:Localize Key=devices/declassify_confirm}"

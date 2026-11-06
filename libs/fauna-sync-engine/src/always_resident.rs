@@ -140,6 +140,22 @@ async fn materialize_placeholder_rows(engine: &SyncEngine, folder: &str) {
         Err(e) => tracing::error!("pending placeholders ({folder_r}): {e}"),
     }
 }
+
+/// The resident root's owed-restore drain ([`SyncEngine::drain_owed_restores`]),
+/// logged. `folder` is the plaintext folder name; it is redacted here.
+async fn drain_owed_restores(engine: &SyncEngine, folder: &str) {
+    let folder_r = fauna_core::log_redact::log_folder_name(folder);
+    match engine.drain_owed_restores().await {
+        Ok(drain) if drain.applied == 0 && drain.dropped == 0 => {}
+        Ok(drain) => tracing::info!(
+            applied = drain.applied,
+            dropped = drain.dropped,
+            kept = drain.kept,
+            "{folder_r}: owed restores drained"
+        ),
+        Err(e) => tracing::error!("owed restores ({folder_r}): {e}"),
+    }
+}
 /// How often the debouncer is swept for entries whose quiet period has elapsed.
 pub const DEBOUNCE_TICK: Duration = Duration::from_millis(500);
 /// Files uploaded concurrently by a catch-up pass. Deliberately small: each file
@@ -305,6 +321,12 @@ pub async fn stamp_sealed_set_name(engine: &SyncEngine, folder: &str) {
 /// is placeholder-safe: a cloud-only entry's bytes are fetched from the nest
 /// rather than read off this disk (`ResealSource::LocalFile`'s fall-through).
 pub async fn converge_corpus_at_start(engine: &SyncEngine, folder: &str) {
+    // A group set's seat has no nest leg (`p2p-shared-set-build.md` § Build
+    // design — the group set, decision 7): no nonce to re-record under, no
+    // audience or generation history a nest arbitrates, no nest-side name.
+    if engine.nest_leg_absent() {
+        return;
+    }
     rerecord_under_live_nonce(engine, folder).await;
     reseal_pending_under_current(engine, folder).await;
     converge_corpus_to_audience(engine, folder).await;
@@ -335,6 +357,10 @@ pub async fn converge_corpus_at_start(engine: &SyncEngine, folder: &str) {
 /// tick (see [`converge_corpus_at_start`]).
 pub async fn refresh_and_converge_corpus(engine: &SyncEngine, folder: &str) {
     engine.refresh_sync_mode().await;
+    // No audience and no website on a group set (decision 7).
+    if engine.nest_leg_absent() {
+        return;
+    }
     converge_corpus_to_audience(engine, folder).await;
     converge_corpus_to_website(engine, folder).await;
 }
@@ -501,6 +527,13 @@ impl LocalWriteHost for SyncEngine {
     }
 
     async fn converge(&self, folder: &str) -> Vec<String> {
+        if !self.row_read_for_first_pass().await {
+            tracing::info!(
+                "{}: local pass held until the folder row has been read",
+                fauna_core::log_redact::log_folder_name(folder)
+            );
+            return Vec::new();
+        }
         let drained = self.drain_pending_uploads().await.is_ok();
         let reconciled = match self.reconcile().await {
             Ok(_stats) => true,
@@ -889,8 +922,10 @@ async fn next_connected(
 }
 
 /// The sibling registry's next admission — pending forever with no registry;
-/// `None` once the registry is gone (the caller parks the arm).
-async fn next_admission(rx: &mut Option<tokio::sync::watch::Receiver<u64>>) -> Option<()> {
+/// `None` once the registry is gone (the caller parks the arm). Public because
+/// both engine loops wait on it: [`run_watch_loop`] and the agent's on-demand
+/// hydration loop.
+pub async fn next_admission(rx: &mut Option<tokio::sync::watch::Receiver<u64>>) -> Option<()> {
     let Some(rx) = rx.as_mut() else {
         return std::future::pending().await;
     };
@@ -900,8 +935,12 @@ async fn next_admission(rx: &mut Option<tokio::sync::watch::Receiver<u64>>) -> O
 /// One sibling row pull ([`SyncEngine::pull_sibling_changes`]) — after every
 /// nest pull, so a sibling's copy of a row the nest just confirmed is already
 /// current, and on each admission. Best-effort: a failed pass is retried by
-/// the next trigger.
-async fn pull_siblings(engine: &SyncEngine, folder: &str) {
+/// the next trigger. **Every root, whichever mode** (`p2p.md` § Same-account
+/// nest-down folder transfer): the resident [`run_watch_loop`] runs it after
+/// each nest pull, and the agent's on-demand hydration loop after each re-pull
+/// of its placeholder fold — on windows that loop hosts every bound folder, so
+/// without it a seat there never asks a sibling for rows.
+pub async fn pull_siblings(engine: &SyncEngine, folder: &str) {
     let folder_r = fauna_core::log_redact::log_folder_name(folder);
     match engine.pull_sibling_changes().await {
         Ok(report) if report.rows > 0 || report.dropped > 0 => {
@@ -996,6 +1035,13 @@ pub enum EngineCommand {
         pinned: bool,
         reply: tokio::sync::oneshot::Sender<anyhow::Result<()>>,
     },
+    /// The review list's "use the other version" on a group set's review row
+    /// `conflict_id` ([`SyncEngine::restore_retained_version`]): a write into
+    /// the tree and an own row, so it runs on the loop that owns both.
+    RestoreRetainedVersion {
+        conflict_id: i64,
+        reply: tokio::sync::oneshot::Sender<anyhow::Result<()>>,
+    },
     /// The byte half of restoring a version a retired identity of this account
     /// signed (`writer-signed-change-records.md` ruling (8)(d)): open the bytes
     /// `manifest_hash` names under the roots `signed_as` may reach and re-seal
@@ -1027,6 +1073,12 @@ pub enum EngineCommand {
     },
 }
 
+/// Why a free or a pin is refused on an always-resident root — one wording for
+/// the resident loop's answer and the agent's shell verbs, which refuse the same
+/// file before it reaches any loop.
+pub const KEEPS_EVERY_FILE: &str = "this folder keeps every file on this device \
+     (always-resident): there is nothing to free and nothing to pin";
+
 /// Answer one [`EngineCommand`] on `engine` and send the reply — the command
 /// arm of EVERY engine loop, in one place: the resident [`run_watch_loop`] and
 /// the agent's on-demand hydration loop both call it, so a folder's mode never
@@ -1048,15 +1100,15 @@ pub async fn answer_engine_command(engine: &SyncEngine, cmd: EngineCommand) {
             let _ =
                 reply.send(ingest_share_page(engine, &proven_actor_hex, &rows, spool_dir).await);
         }
+        EngineCommand::RestoreRetainedVersion { conflict_id, reply } => {
+            let _ = reply.send(engine.restore_retained_version(conflict_id).await);
+        }
         // The on-demand loop intercepts all three before they reach this answer; a
         // resident root has every file on its disk and no pin to keep.
         EngineCommand::FreeSpace { reply, .. }
         | EngineCommand::FreeLocationSpace { reply, .. }
         | EngineCommand::SetPinned { reply, .. } => {
-            let _ = reply.send(Err(anyhow::anyhow!(
-                "this folder keeps every file on this device (always-resident): there is \
-                 nothing to free and nothing to pin"
-            )));
+            let _ = reply.send(Err(anyhow::anyhow!(KEEPS_EVERY_FILE)));
         }
         // The on-demand loop intercepts it too: there the copy is its binding's to
         // replace. Here every file is a copy this device keeps, replaced in place.
@@ -1127,8 +1179,18 @@ pub(crate) async fn ingest_share_page_landing(
         }
     }
     let fetcher = crate::peer_share_store::SpoolFetcher::new(spool_dir);
-    let origin = crate::peer_share_store::PeerPageOrigin::Share {
-        peer_actor_hex: proven_actor_hex.to_string(),
+    // The family is the ENGINE's, never the caller's: a group set's engine
+    // ingests its fold converged (`PeerPageOrigin::Group`, `p2p-shared-set-build.md`
+    // § Build design — the group set, decision 7), so this one door — the
+    // command arm and the agent's `ShareIngest` route — carries the fold with
+    // no field of its own, and no page can reach a group set as provisional.
+    let origin = match engine.folder_row() {
+        Some(fauna_core::folder_keys::FolderRef::Group(scope)) => {
+            crate::peer_share_store::PeerPageOrigin::Group { scope }
+        }
+        _ => crate::peer_share_store::PeerPageOrigin::Share {
+            peer_actor_hex: proven_actor_hex.to_string(),
+        },
     };
     let (mut report, cursor) =
         ingest_peer_page_landing(engine, &origin, decoded, &fetcher, landing).await?;
@@ -1154,6 +1216,16 @@ pub async fn ingest_peer_page_landing(
     fetcher: &dyn fauna_core::file_download::BlobFetcher,
     landing: Option<&crate::engine::OnDemandLanding<'_>>,
 ) -> anyhow::Result<(crate::peer_share_store::PeerIngestReport, i64)> {
+    // A group set's fold keeps no pull cursor — the plane's per-writer
+    // frontier is the cursor (`p2p-shared-set-build.md` § Build design — the
+    // group set, decision 6) — and its rows are converged, so no range check
+    // applies: every row goes to the ingest, and the cursor answered is 0.
+    if origin.is_converged() {
+        let report = engine
+            .ingest_peer_share_rows_landing(&rows, origin, fetcher, landing)
+            .await?;
+        return Ok((report, 0));
+    }
     let cursor_key = origin.cursor_key();
     let mut accepted = Vec::with_capacity(rows.len());
     let mut out_of_range = 0usize;
@@ -1334,6 +1406,10 @@ pub async fn run_watch_loop(
     // rule). After the pull, so a head it just moved is the one fetched; the
     // tick below retries what failed.
     materialize_placeholder_rows(&engine, &folder).await;
+    // A restore this root never applied (`file-versions.md` § Restore, ordering
+    // 1) — it has no start-up fold to heal one. After the pull, so a later change
+    // the pull delivered has made the intent moot before the drain asks.
+    drain_owed_restores(&engine, &folder).await;
     // Third-party deposits parked while this seat was down — after the pull,
     // so an item another seat already adopted is found landed, not re-adopted.
     adopt_parked_deposits(&engine, &folder).await;
@@ -1414,6 +1490,7 @@ pub async fn run_watch_loop(
                 }
                 pull_siblings(&engine, &folder).await;
                 materialize_placeholder_rows(&engine, &folder).await;
+                drain_owed_restores(&engine, &folder).await;
                 adopt_parked_deposits(&engine, &folder).await;
             }
 
@@ -1460,6 +1537,7 @@ pub async fn run_watch_loop(
                             tracing::error!("reconnect pull ({folder_r}): {e}");
                         }
                         pull_siblings(&engine, &folder).await;
+                        drain_owed_restores(&engine, &folder).await;
                         engine.refresh_share_writer_roster().await;
                     }
                     // The control plane is gone for good. Park the arm rather
@@ -1478,6 +1556,9 @@ pub async fn run_watch_loop(
                     tracing::error!("nudge pull ({folder_r}): {e}");
                 }
                 pull_siblings(&engine, &folder).await;
+                // Another door's restore is owed from its echo, which this pull
+                // may just have read: its device is waiting on the file.
+                drain_owed_restores(&engine, &folder).await;
                 // A deposit's nudge reaches the owner's seats alone; the pass
                 // is one list call when nothing is parked.
                 adopt_parked_deposits(&engine, &folder).await;

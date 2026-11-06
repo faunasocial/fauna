@@ -9,8 +9,8 @@
 //! ([`check_for_newer_release`]) and the sign-in look ([`look_at_sign_in`]),
 //! so no app keeps its own copy of any. Rust apps call them directly; windows
 //! and macOS reach the same functions through `fauna-ffi`'s `version` module.
-//! What the feed
-//! looks like and what counts as *newer* stay in `fauna_core::version`.
+//! What the feed looks like and what counts as *newer* stay in
+//! `fauna_core::version`.
 //!
 //! **A failed look is silent.** The asked check reports its own failure where
 //! the user pressed the button; the unasked look has nobody waiting on it, so
@@ -22,9 +22,7 @@
 //! contacts no third party; a nest that says nothing means no notice, never a
 //! fall-back to the release host (`installers/README.md` § Knowing a newer
 //! version is out → *The nest's newest-release field*). The asked check
-//! always reads the release host. [`look_at_sign_in_over_http`] is the
-//! release-host look macOS and windows still reach through `fauna-ffi` until
-//! each moves to the nest-reading face; nothing else may call it.
+//! always reads the release host.
 
 use std::future::Future;
 
@@ -155,46 +153,9 @@ pub fn keep_the_newer(shown: Option<String>, found: Option<String>) -> Option<St
     }
 }
 
-/// The release-host look — **interim**: the sign-in look macOS and windows
-/// still make through `fauna-ffi` until each moves to [`look_at_sign_in`].
-/// Whether a release newer than `current` is out, as its feed tag, or `None`
-/// (silent by rule). `fetch` produces the feed body — in production
-/// [`fetch_latest_release`] (see [`look_at_sign_in_over_http`]).
-pub async fn look_at_feed_at_sign_in<F, Fut, E>(current: &str, fetch: F) -> Option<String>
-where
-    F: FnOnce() -> Fut,
-    Fut: Future<Output = Result<String, E>>,
-    E: std::fmt::Display,
-{
-    match fetch().await {
-        Ok(body) => fauna_core::version::newer_release_from_latest_json(current, &body),
-        Err(e) => {
-            tracing::debug!("[update_look] sign-in look failed silently: {e}");
-            None
-        }
-    }
-}
-
-/// [`look_at_feed_at_sign_in`] over the real feed — **interim**, for
-/// `fauna-ffi`'s release-host face only (macOS and windows, until each moves
-/// to [`look_at_sign_in`]).
-pub async fn look_at_sign_in_over_http(
-    http: &reqwest::Client,
-    origin: &str,
-    user_agent: &str,
-    current: &str,
-) -> Option<String> {
-    look_at_feed_at_sign_in(current, || fetch_latest_release(http, origin, user_agent)).await
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    async fn look(current: &str, answer: Result<&str, &str>) -> Option<String> {
-        let answer = answer.map(str::to_owned).map_err(str::to_owned);
-        look_at_feed_at_sign_in(current, || async move { answer }).await
-    }
 
     /// A nest that answers `fauna.nest.info` with `reply` (or fails), and
     /// counts the kinds it was asked — the look must ask exactly that one.
@@ -297,6 +258,11 @@ mod tests {
             ask("0.2.0", Ok(r#"{"tag_name":"v0.2.0"}"#)).await,
             NewerReleaseCheck::UpToDate
         );
+        // A feed behind the running build is up to date too.
+        assert_eq!(
+            ask("0.3.0", Ok(r#"{"tag_name":"v0.2.0"}"#)).await,
+            NewerReleaseCheck::UpToDate
+        );
         // The feed answered in JSON, just not with a release (a rate limit):
         // nothing newer to report, so up to date — the shared parse's reading.
         assert_eq!(
@@ -313,33 +279,6 @@ mod tests {
             ask("0.1.2", Ok("<html>502</html>")).await,
             NewerReleaseCheck::Failed
         );
-    }
-
-    #[tokio::test]
-    async fn a_newer_release_is_named_by_its_tag() {
-        assert_eq!(
-            look("0.1.2", Ok(r#"{"tag_name":"v0.2.0"}"#)).await,
-            Some("v0.2.0".to_owned())
-        );
-    }
-
-    #[tokio::test]
-    async fn the_same_or_an_older_release_says_nothing() {
-        assert_eq!(look("0.2.0", Ok(r#"{"tag_name":"v0.2.0"}"#)).await, None);
-        assert_eq!(look("0.3.0", Ok(r#"{"tag_name":"v0.2.0"}"#)).await, None);
-    }
-
-    #[tokio::test]
-    async fn a_failed_look_says_nothing() {
-        // The round trip failed outright.
-        assert_eq!(look("0.1.2", Err("connection refused")).await, None);
-        // The feed answered, but not with a release (rate limit, not found,
-        // an HTML error page).
-        assert_eq!(
-            look("0.1.2", Ok(r#"{"message":"API rate limit"}"#)).await,
-            None
-        );
-        assert_eq!(look("0.1.2", Ok("<html>502</html>")).await, None);
     }
 
     /// One HTTP answer from a loopback listener — the production round trip
@@ -372,16 +311,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_http_look_reads_the_shared_endpoint_on_the_given_origin() {
-        let origin = serve_once(r#"{"tag_name":"v9.9.9"}"#).await;
-        let http = reqwest::Client::new();
-        assert_eq!(
-            look_at_sign_in_over_http(&http, &origin, "fauna-test/0", "0.1.2").await,
-            Some("v9.9.9".to_owned())
-        );
-    }
-
-    #[tokio::test]
     async fn the_http_check_reads_the_shared_endpoint_and_fails_out_loud() {
         let origin = serve_once(r#"{"tag_name":"v9.9.9"}"#).await;
         let http = reqwest::Client::new();
@@ -398,20 +327,6 @@ mod tests {
         assert_eq!(
             check_for_newer_release_over_http(&http, &closed, "fauna-test/0", "0.1.2").await,
             NewerReleaseCheck::Failed
-        );
-    }
-
-    #[tokio::test]
-    async fn the_http_look_is_silent_when_nothing_answers() {
-        // Bind and drop: the port is closed by the time the look dials it.
-        let origin = {
-            let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-            format!("http://{}", l.local_addr().unwrap())
-        };
-        let http = reqwest::Client::new();
-        assert_eq!(
-            look_at_sign_in_over_http(&http, &origin, "fauna-test/0", "0.1.2").await,
-            None
         );
     }
 }

@@ -6,11 +6,11 @@ import SwiftUI
 /// Shared by macOS and iOS (priority #2, mirrors `AwaitingManualDnsView`). Shows
 /// the installer invocation carrying `FAUNA_DEPLOYMENT_SEED` for the box
 /// selected on `nest_recovery`, resolved live via `OnboardingVM
-/// .resolveSelfhostedCommand()` (the reachable-nest `recoverSelfhostedCommand`
-/// FFI, mirroring linux's C2 `fetch_selfhosted_command`) — a copy button, a
+/// .resolveSelfhostedCommand()` (the pre-login `recoverSelfhostedCommandPreLogin`
+/// FFI: the device's own store joined with the nest when it answers) — a copy button, a
 /// continue button, and a restore-data CTA.
 ///
-/// Until the command resolves (no nest URL, no selection, or the fetch fails)
+/// Until the command resolves (no selection, or no seed anywhere)
 /// this shows the pending placeholder with copy **disabled**: an unresolved (or
 /// wrong-box) command must never reach the admin's clipboard — pasting it would
 /// rebuild the box under a *different* `nest_actor_id`, the exact trust break

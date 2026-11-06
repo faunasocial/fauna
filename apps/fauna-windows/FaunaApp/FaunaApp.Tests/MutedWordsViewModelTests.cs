@@ -133,6 +133,115 @@ public class MutedWordsViewModelTests : IDisposable
         Assert.False(string.IsNullOrEmpty(vm.ErrorMessage));
     }
 
+    // ── The level picker (docs/goal/ui/settings.md § Muted words — the level
+    // picker; the levels' meaning: content-moderation-and-ranking.md
+    // § Composition). Each row's level is read through the shared
+    // classification (`muted_keyword_level` → `muted_keyword_level_value`) —
+    // the real UniFFI faces, so these tests pin that the VM never compares a
+    // weight of its own.
+
+    [Fact]
+    public async Task LoadAsync_PaintsEachRowsLevel_ThroughTheSharedClassification()
+    {
+        var rpc = new MockNestRpcClient { NextMutedKeywords = new[] { "spam", "lottery" } };
+        rpc.NextMutedKeywordWeights["lottery"] = -500;
+        var vm = new MutedWordsViewModel(rpc);
+
+        await vm.LoadAsync();
+
+        Assert.Equal(
+            new[] { new MutedWordRow("spam", "hide"), new MutedWordRow("lottery", "show-less") },
+            vm.Rows);
+    }
+
+    /// <summary>A pick is a save at once, sending only the term and its level
+    /// (a delta like add/remove — never the page's list); the row repaints
+    /// from the record the save returns, not from the pick.</summary>
+    [Fact]
+    public async Task SetLevelAsync_SendsOnlyTheTermAndLevel_AndRepaintsFromTheReturnedRecord()
+    {
+        var rpc = new MockNestRpcClient { NextMutedKeywords = new[] { "spam", "lottery" } };
+        var vm = new MutedWordsViewModel(rpc);
+        await vm.LoadAsync();
+
+        rpc.NextMutedKeywordWeights["lottery"] = -500;
+        var ok = await vm.SetLevelAsync("lottery", "show-less");
+
+        Assert.True(ok);
+        Assert.Equal(("lottery", uniffi.fauna_core.MutedKeywordLevel.ShowLess), rpc.LastMutedKeywordLevelSet);
+        Assert.DoesNotContain("MutedKeywordsSet", rpc.Calls);
+        Assert.Equal(
+            new[] { new MutedWordRow("spam", "hide"), new MutedWordRow("lottery", "show-less") },
+            vm.Rows);
+        Assert.Null(vm.ErrorMessage);
+    }
+
+    [Fact]
+    public async Task SetLevelAsync_ATokenNoLevelCarries_SendsNothing()
+    {
+        var rpc = new MockNestRpcClient { NextMutedKeywords = new[] { "spam" } };
+        var vm = new MutedWordsViewModel(rpc);
+        await vm.LoadAsync();
+
+        var ok = await vm.SetLevelAsync("spam", "loud");
+
+        Assert.False(ok);
+        Assert.DoesNotContain("MutedKeywordsSetLevel", rpc.Calls);
+    }
+
+    /// <summary>The picker — and the add and remove buttons — are disabled
+    /// while any round trip is in flight: <see cref="MutedWordsViewModel.Busy"/>
+    /// is set before the save's first await and cleared when it returns.</summary>
+    [Fact]
+    public async Task SetLevelAsync_IsBusyUntilTheRoundTripReturns()
+    {
+        var rpc = new MockNestRpcClient { NextMutedKeywords = new[] { "spam" } };
+        var vm = new MutedWordsViewModel(rpc);
+        await vm.LoadAsync();
+        Assert.False(vm.Busy);
+
+        var gate = new TaskCompletionSource();
+        rpc.MutedKeywordsGate = gate;
+        var pending = vm.SetLevelAsync("spam", "show-less");
+
+        Assert.True(vm.Busy, "the picker must be disabled while its save is in flight");
+        gate.SetResult();
+        Assert.True(await pending);
+        Assert.False(vm.Busy);
+    }
+
+    [Fact]
+    public async Task AddAsync_IsBusyUntilTheRoundTripReturns()
+    {
+        var rpc = new MockNestRpcClient();
+        var vm = new MutedWordsViewModel(rpc);
+        var gate = new TaskCompletionSource();
+        rpc.MutedKeywordsGate = gate;
+
+        var pending = vm.AddAsync("spam");
+
+        Assert.True(vm.Busy);
+        gate.SetResult();
+        await pending;
+        Assert.False(vm.Busy);
+    }
+
+    [Fact]
+    public async Task SetLevelAsync_Failure_RoutesToError_AndClearsBusy()
+    {
+        var rpc = new MockNestRpcClient { NextMutedKeywords = new[] { "spam" } };
+        var vm = new MutedWordsViewModel(rpc);
+        await vm.LoadAsync();
+
+        rpc.NextError = "boom";
+        var ok = await vm.SetLevelAsync("spam", "show-less");
+
+        Assert.False(ok);
+        Assert.False(vm.Busy);
+        Assert.False(string.IsNullOrEmpty(vm.ErrorMessage));
+        Assert.Equal(new[] { new MutedWordRow("spam", "hide") }, vm.Rows);
+    }
+
     [Fact]
     public async Task AddAsync_Failure_RoutesToError_AndCacheUntouched()
     {

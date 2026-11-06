@@ -211,3 +211,99 @@ async fn the_token_status_is_untouched_by_a_hint_dial() {
         TokenStatus::Valid { expires_at_secs } if (now + 3600 - 5..=now + 3600 + 5).contains(&expires_at_secs)
     ));
 }
+
+/// The session connector's half (`onboarding-provisioning.md` § Reach hint →
+/// *The session connector's half*): the launch's verdict reaches the process
+/// reach table the session's dials fall back to, and the deleter it carries is
+/// this account's slot deletion. One test over the four verdicts rather than
+/// four: the table is process-global and the file's tests run in parallel, so
+/// every scenario here dials a host of its own and the sequence is asserted in
+/// the order a session meets it.
+#[tokio::test]
+async fn the_launchs_verdict_reaches_the_session_connectors_reach_table() {
+    use fauna_anon_client::reach_hint;
+
+    // A hint-carried launch installs the hint — at the URL's own port, the
+    // socket the launch's own hint dial used — and leaves the slot in place:
+    // the session has not reached the domain yet.
+    let p = Arc::new(
+        InMemoryPersistence::new()
+            .with_identity(test_secret().to_vec())
+            .with_nest_url("https://hint-carried.example:8443")
+            .with_reach_ipv4("203.0.113.9"),
+    );
+    let connector = MockAuthConnector::new()
+        .push_silent_challenge(SilentChallengeOutcome::Transient {
+            error: "dns: no such host".into(),
+        })
+        .push_silent_challenge(SilentChallengeOutcome::Success(verify_reply()));
+    let (_, p) = run(connector, p).await;
+    assert_eq!(
+        reach_hint::hint_for("hint-carried.example"),
+        Some(std::net::SocketAddr::from(([203, 0, 113, 9], 8443))),
+        "the session's dials fall back to the address the launch reached the box at"
+    );
+    assert_eq!(
+        p.load_reach_ipv4().as_deref(),
+        Some("203.0.113.9"),
+        "installing is not spending: the slot stays until the domain answers"
+    );
+    // The first bearer socket that opens over the domain spends it, through
+    // the deleter the launch bound to this persistence.
+    reach_hint::domain_reached("hint-carried.example");
+    assert_eq!(
+        p.load_reach_ipv4(),
+        None,
+        "the session's first domain success deletes the persisted hint"
+    );
+    assert_eq!(reach_hint::hint_for("hint-carried.example"), None);
+
+    // A domain-carried launch installs nothing: the hint is spent at launch.
+    let p = Arc::new(
+        InMemoryPersistence::new()
+            .with_identity(test_secret().to_vec())
+            .with_nest_url("https://domain-carried.example")
+            .with_reach_ipv4("203.0.113.9"),
+    );
+    let connector = MockAuthConnector::new()
+        .push_silent_challenge(SilentChallengeOutcome::Success(verify_reply()));
+    run(connector, p).await;
+    assert_eq!(reach_hint::hint_for("domain-carried.example"), None);
+
+    // A hint dial that also fails installs nothing: a failed fallback is not
+    // an address the session should keep trying.
+    let p = Arc::new(
+        InMemoryPersistence::new()
+            .with_identity(test_secret().to_vec())
+            .with_nest_url("https://failed-hint.example")
+            .with_reach_ipv4("203.0.113.9"),
+    );
+    let connector =
+        MockAuthConnector::new().push_silent_challenge(SilentChallengeOutcome::Transient {
+            error: "dns: no such host".into(),
+        });
+    run(connector, p).await;
+    assert_eq!(reach_hint::hint_for("failed-hint.example"), None);
+
+    // A launch phase forgets what an earlier launch installed before its own
+    // domain dial, so that dial is never answered from the table and the
+    // decision is re-made from the slot.
+    reach_hint::install(
+        "stale-entry.example",
+        std::net::SocketAddr::from(([203, 0, 113, 9], 443)),
+        Arc::new(|| {}),
+    );
+    let p = Arc::new(
+        InMemoryPersistence::new()
+            .with_identity(test_secret().to_vec())
+            .with_nest_url("https://stale-entry.example"),
+    );
+    let connector = MockAuthConnector::new()
+        .push_silent_challenge(SilentChallengeOutcome::Success(verify_reply()));
+    run(connector, p).await;
+    assert_eq!(
+        reach_hint::hint_for("stale-entry.example"),
+        None,
+        "the phase cleared the entry before dialling, and the domain carried the launch"
+    );
+}

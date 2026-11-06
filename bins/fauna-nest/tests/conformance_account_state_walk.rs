@@ -34,7 +34,7 @@ use fauna_account_store::{
 };
 use fauna_core::account_entry_crypto::peek_generation_id;
 use fauna_core::crypto::{AccountStateKeySchedule, AudienceRung, BackupKey};
-use fauna_core::data::ModerationConfig;
+use fauna_core::data::SyncPrefsConfig;
 use fauna_core::device_endpoints::DeviceEndpoints;
 use fauna_core::generation::{
     FleetMember, GenerationMintRecord, derive_device_xwing_keypair, escrow_target_identity_key,
@@ -50,7 +50,8 @@ use fauna_protocol::generation_escrow::{EscrowPutReply, EscrowPutRequest, KIND_E
 use fauna_protocol::merge_policy::{
     KIND_DEVICE_ENDPOINTS, KIND_DEVICE_SET, KIND_ESCROW_RECEIPT, KIND_ESCROW_TARGET,
     KIND_GENERATION_MINT, KIND_GENERATION_WRAP, KIND_GROUP_RECEPTION_KEY, KIND_MODERATION,
-    KIND_SEEN_SET, LwwStamp, MODERATION_KEY, MergePolicy, audience_rung, merge_policy,
+    KIND_SEEN_SET, KIND_SYNC_PREFS, LwwStamp, MergePolicy, PREFERENCE_KEY, audience_rung,
+    merge_policy,
 };
 use fauna_protocol::sync::{SyncChangesListReply, SyncChangesListRequest};
 use fauna_protocol::{ByteBuf, RpcError, RpcRequester, encode_canonical};
@@ -236,7 +237,7 @@ fn plane_fleet<'a>(
 
 // ── The exemplar kinds, and what each is for ─────────────────────────────────
 //
-// `fauna.state.moderation` (delegable, latest-wins) is the door's LWW
+// `fauna.state.sync-prefs` (delegable, latest-wins) is the door's LWW
 // exemplar: put, frontier accounting, publish_pending.
 //
 // `fauna.state.seen-set` (delegable, union CRDT — W2.5 item 2) is the door's
@@ -260,19 +261,18 @@ fn plane_fleet<'a>(
 // carried now drive the seen-set, and the gate refusal drives the
 // device-endpoints kind.
 
-fn moderation_item() -> ItemId {
+fn prefs_item() -> ItemId {
     ItemId {
-        kind: KIND_MODERATION.into(),
-        key: MODERATION_KEY.into(),
+        kind: KIND_SYNC_PREFS.into(),
+        key: PREFERENCE_KEY.into(),
     }
 }
 
-/// A `ModerationConfig` carrying one muted keyword — the delegable exemplar's
-/// value shape.
-fn moderation_with(keyword: &str) -> Vec<u8> {
-    encode_canonical(&ModerationConfig {
-        muted_keywords: vec![keyword.into()],
-        ..Default::default()
+/// A `SyncPrefsConfig` carrying one default conflict policy — the delegable
+/// exemplar's value shape.
+fn prefs_with(policy: &str) -> Vec<u8> {
+    encode_canonical(&SyncPrefsConfig {
+        default_conflict_policy: Some(policy.into()),
     })
     .unwrap()
     .to_vec()
@@ -291,12 +291,12 @@ fn stamp(at_ms: i64, writer: u8) -> Option<Vec<u8>> {
     )
 }
 
-async fn stored_moderation(store: &AccountStore<SqliteBackend>) -> ModerationConfig {
+async fn stored_prefs(store: &AccountStore<SqliteBackend>) -> SyncPrefsConfig {
     let entry = store
-        .state(KIND_MODERATION, MODERATION_KEY)
+        .state(KIND_SYNC_PREFS, PREFERENCE_KEY)
         .await
         .unwrap()
-        .expect("an entry for the moderation item");
+        .expect("an entry for the sync-prefs item");
     fauna_protocol::decode_strict(&entry.value).unwrap()
 }
 
@@ -395,11 +395,7 @@ async fn a_write_on_one_replica_reaches_the_other_through_the_feed() {
     let (a, b) = (replica(0x0A).await, replica(0x0B).await);
 
     let seq = plane(&a, &rpc, &keys, &signing_key(0x0A))
-        .put(
-            &moderation_item(),
-            moderation_with("spoilers"),
-            stamp(100, 0x0A),
-        )
+        .put(&prefs_item(), prefs_with("spoilers"), stamp(100, 0x0A))
         .await
         .unwrap();
     assert_eq!(seq, 1, "the first local row is writer seq 1");
@@ -419,13 +415,8 @@ async fn a_write_on_one_replica_reaches_the_other_through_the_feed() {
         "B had nothing for the item, so it adopts A's value verbatim"
     );
     assert_eq!(
-        stored_moderation(&b)
-            .await
-            .muted_keywords
-            .iter()
-            .map(|k| k.keyword.clone())
-            .collect::<Vec<_>>(),
-        vec!["spoilers".to_string()]
+        stored_prefs(&b).await.default_conflict_policy,
+        Some("spoilers".to_string())
     );
     assert_eq!(
         b.frontier(ACCOUNT_STATE_SCOPE).await.unwrap(),
@@ -450,11 +441,7 @@ async fn an_entry_crossing_the_feed_carries_its_writer_signature() {
     let (a, b) = (replica(0x0A).await, replica(0x0B).await);
 
     plane(&a, &rpc, &keys, &signing_key(0x0A))
-        .put(
-            &moderation_item(),
-            moderation_with("spoilers"),
-            stamp(100, 0x0A),
-        )
+        .put(&prefs_item(), prefs_with("spoilers"), stamp(100, 0x0A))
         .await
         .unwrap();
     assert_eq!(
@@ -536,11 +523,7 @@ async fn the_writer_door_refuses_a_generation_tip_kind_while_no_tip_resolves() {
     // epoch, not a freeze of the whole plane.
     assert!(
         plane(&a, &rpc, &keys, &signing_key(0x0A))
-            .put(
-                &moderation_item(),
-                moderation_with("spoilers"),
-                stamp(1, 0x0A)
-            )
+            .put(&prefs_item(), prefs_with("spoilers"), stamp(1, 0x0A))
             .await
             .is_ok()
     );
@@ -573,11 +556,7 @@ async fn the_writer_door_refuses_a_kind_outside_its_home_scope() {
 
     // …and a delegable kind through the fleet-scope plane both refuse.
     let err = plane_fleet(&a, &rpc, &keys, &signing_key(0x0A))
-        .put(
-            &moderation_item(),
-            moderation_with("spoilers"),
-            stamp(1, 0x0A),
-        )
+        .put(&prefs_item(), prefs_with("spoilers"), stamp(1, 0x0A))
         .await
         .unwrap_err();
     assert!(
@@ -610,7 +589,7 @@ async fn the_writer_door_refuses_a_stampless_latest_wins_write() {
     let a = replica(0x0A).await;
 
     let err = plane(&a, &rpc, &keys, &signing_key(0x0A))
-        .put(&moderation_item(), moderation_with("spoilers"), None)
+        .put(&prefs_item(), prefs_with("spoilers"), None)
         .await
         .unwrap_err();
     assert!(
@@ -622,7 +601,7 @@ async fn the_writer_door_refuses_a_stampless_latest_wins_write() {
     // the R14 gate's refusal keeps (a row a replica can never publish must not
     // rest locally either).
     assert!(
-        a.state(KIND_MODERATION, MODERATION_KEY)
+        a.state(KIND_SYNC_PREFS, PREFERENCE_KEY)
             .await
             .unwrap()
             .is_none()
@@ -632,7 +611,7 @@ async fn the_writer_door_refuses_a_stampless_latest_wins_write() {
     // The stampless *tombstone* meets the same door: a deletion is ordered
     // only by its stamp, so without one it could never rank at a reader.
     let err = plane(&a, &rpc, &keys, &signing_key(0x0A))
-        .tombstone(&moderation_item(), None)
+        .tombstone(&prefs_item(), None)
         .await
         .unwrap_err();
     assert!(
@@ -654,11 +633,7 @@ async fn a_stamped_tombstone_round_trips_and_deletes_at_the_peer() {
     let (a, b) = (replica(0x0A).await, replica(0x0B).await);
 
     plane(&a, &rpc, &keys, &signing_key(0x0A))
-        .put(
-            &moderation_item(),
-            moderation_with("spoilers"),
-            stamp(100, 0x0A),
-        )
+        .put(&prefs_item(), prefs_with("spoilers"), stamp(100, 0x0A))
         .await
         .unwrap();
     plane(&b, &rpc, &keys, &signing_key(0x0B))
@@ -666,19 +641,14 @@ async fn a_stamped_tombstone_round_trips_and_deletes_at_the_peer() {
         .await
         .unwrap();
     assert_eq!(
-        stored_moderation(&b)
-            .await
-            .muted_keywords
-            .iter()
-            .map(|k| k.keyword.clone())
-            .collect::<Vec<_>>(),
-        vec!["spoilers".to_string()],
+        stored_prefs(&b).await.default_conflict_policy,
+        Some("spoilers".to_string()),
         "B adopted the value before the deletion"
     );
 
     // A deletes, stamped to outrank the value it supersedes.
     plane(&a, &rpc, &keys, &signing_key(0x0A))
-        .tombstone(&moderation_item(), stamp(200, 0x0A))
+        .tombstone(&prefs_item(), stamp(200, 0x0A))
         .await
         .unwrap();
 
@@ -691,7 +661,7 @@ async fn a_stamped_tombstone_round_trips_and_deletes_at_the_peer() {
         "the tombstone is an applied row, never a skip: {report:?}"
     );
     let entry = b
-        .state(KIND_MODERATION, MODERATION_KEY)
+        .state(KIND_SYNC_PREFS, PREFERENCE_KEY)
         .await
         .unwrap()
         .expect("the tombstone row is HELD — it persists until every frontier passes it");
@@ -882,20 +852,16 @@ async fn a_full_state_reconcile_is_idempotent_over_rows_already_applied() {
     let (a, b) = (replica(0x0A).await, replica(0x0B).await);
 
     plane(&a, &rpc, &keys, &signing_key(0x0A))
-        .put(
-            &moderation_item(),
-            moderation_with("spoilers"),
-            stamp(100, 0x0A),
-        )
+        .put(&prefs_item(), prefs_with("spoilers"), stamp(100, 0x0A))
         .await
         .unwrap();
     plane(&b, &rpc, &keys, &signing_key(0x0B))
         .walk()
         .await
         .unwrap();
-    let after_walk = stored_moderation(&b).await;
+    let after_walk = stored_prefs(&b).await;
     let version = b
-        .state(KIND_MODERATION, MODERATION_KEY)
+        .state(KIND_SYNC_PREFS, PREFERENCE_KEY)
         .await
         .unwrap()
         .unwrap()
@@ -911,9 +877,9 @@ async fn a_full_state_reconcile_is_idempotent_over_rows_already_applied() {
     );
     assert_eq!(report.kept, 1, "and is recognized as already held");
     assert_eq!(report.applied, 0);
-    assert_eq!(stored_moderation(&b).await, after_walk);
+    assert_eq!(stored_prefs(&b).await, after_walk);
     assert_eq!(
-        b.state(KIND_MODERATION, MODERATION_KEY)
+        b.state(KIND_SYNC_PREFS, PREFERENCE_KEY)
             .await
             .unwrap()
             .unwrap()
@@ -933,11 +899,7 @@ async fn a_replica_accounts_its_own_rows_without_re_ingesting_them() {
     let a = replica(0x0A).await;
 
     plane(&a, &rpc, &keys, &signing_key(0x0A))
-        .put(
-            &moderation_item(),
-            moderation_with("spoilers"),
-            stamp(100, 0x0A),
-        )
+        .put(&prefs_item(), prefs_with("spoilers"), stamp(100, 0x0A))
         .await
         .unwrap();
     // `put` already accounted our own slot, so a plain walk sees nothing.
@@ -1247,7 +1209,7 @@ async fn a_put_naming_the_row_it_covers_takes_it_off_the_feed_for_every_walker()
     );
 
     // A writes an unrelated row first; C banks its frontier past it, so
-    // C's next walk starts below A's moderation row.
+    // C's next walk starts below A's sync-prefs row.
     plane(&a, &rpc, &keys, &signing_key(0x0A))
         .put(&seen_item("scope-x"), seen_with(&[], &[(1, 1)]), None)
         .await
@@ -1262,7 +1224,7 @@ async fn a_put_naming_the_row_it_covers_takes_it_off_the_feed_for_every_walker()
     );
 
     plane(&a, &rpc, &keys, &signing_key(0x0A))
-        .put(&moderation_item(), moderation_with("one"), stamp(100, 0x0A))
+        .put(&prefs_item(), prefs_with("one"), stamp(100, 0x0A))
         .await
         .unwrap();
 
@@ -1271,22 +1233,17 @@ async fn a_put_naming_the_row_it_covers_takes_it_off_the_feed_for_every_walker()
     let pb = plane(&b, &rpc, &keys, &b_key);
     pb.walk().await.unwrap();
     let item_key = pb
-        .gen0_item_key(KIND_MODERATION, MODERATION_KEY)
-        .expect("moderation is a gen-0 kind");
+        .gen0_item_key(KIND_SYNC_PREFS, PREFERENCE_KEY)
+        .expect("sync prefs is a gen-0 kind");
     let covered = pb.relay_rows_at(&item_key).await.unwrap();
     assert_eq!(
         covered.iter().map(|r| r.writer).collect::<Vec<_>>(),
         vec![writer_id(0x0A)],
         "B holds A's row of the item, and only it"
     );
-    pb.put_replacing(
-        &moderation_item(),
-        moderation_with("two"),
-        stamp(200, 0x0B),
-        &covered,
-    )
-    .await
-    .unwrap();
+    pb.put_replacing(&prefs_item(), prefs_with("two"), stamp(200, 0x0B), &covered)
+        .await
+        .unwrap();
     assert_eq!(
         pb.relay_rows_at(&item_key)
             .await
@@ -1298,20 +1255,15 @@ async fn a_put_naming_the_row_it_covers_takes_it_off_the_feed_for_every_walker()
         "the reply carried `replaced`, so B forgot its copy of the row it named"
     );
 
-    // From a zero frontier: A's seen row and B's moderation row, nothing else.
+    // From a zero frontier: A's seen row and B's sync-prefs row, nothing else.
     let fresh = plane(&d, &rpc, &keys, &signing_key(0x0D))
         .walk()
         .await
         .unwrap();
     assert_eq!(fresh.rows, 2, "the replaced row is not served: {fresh:?}");
     assert_eq!(
-        stored_moderation(&d)
-            .await
-            .muted_keywords
-            .iter()
-            .map(|k| k.keyword.clone())
-            .collect::<Vec<_>>(),
-        vec!["two".to_string()]
+        stored_prefs(&d).await.default_conflict_policy,
+        Some("two".to_string())
     );
 
     // From the banked frontier: B's row alone.
@@ -1321,13 +1273,8 @@ async fn a_put_naming_the_row_it_covers_takes_it_off_the_feed_for_every_walker()
         .unwrap();
     assert_eq!(banked.rows, 1, "the replaced row is not served: {banked:?}");
     assert_eq!(
-        stored_moderation(&c)
-            .await
-            .muted_keywords
-            .iter()
-            .map(|k| k.keyword.clone())
-            .collect::<Vec<_>>(),
-        vec!["two".to_string()]
+        stored_prefs(&c).await.default_conflict_policy,
+        Some("two".to_string())
     );
 }
 
@@ -1897,6 +1844,13 @@ fn the_exemplar_kinds_are_registered_as_this_file_assumes() {
     assert_eq!(audience_rung(KIND_SEEN_SET), Some(AudienceRung::Delegable));
 
     // The delegable LWW exemplar: latest-wins, grant-mintable, sealable today.
+    assert_eq!(merge_policy(KIND_SYNC_PREFS), Some(MergePolicy::LatestWins));
+    assert_eq!(
+        audience_rung(KIND_SYNC_PREFS),
+        Some(AudienceRung::Delegable)
+    );
+    // Moderation's per-keyword and per-hidden-id rows sit on the same rung
+    // under the same policy.
     assert_eq!(merge_policy(KIND_MODERATION), Some(MergePolicy::LatestWins));
     assert_eq!(
         audience_rung(KIND_MODERATION),
@@ -7362,11 +7316,11 @@ where
     .with_generation_custody(&seat.custody)
 }
 
-/// A seat's moderation write, stamped as its own.
-fn seat_moderation(seat: &Seat, keyword: &str, at_ms: i64) -> (ItemId, Vec<u8>, Option<Vec<u8>>) {
+/// A seat's sync-prefs write, stamped as its own.
+fn seat_prefs(seat: &Seat, policy: &str, at_ms: i64) -> (ItemId, Vec<u8>, Option<Vec<u8>>) {
     (
-        moderation_item(),
-        moderation_with(keyword),
+        prefs_item(),
+        prefs_with(policy),
         Some(
             LwwStamp {
                 at_ms,
@@ -7448,8 +7402,8 @@ async fn a_second_nest_settles_to_every_live_row_byte_for_byte() {
     for seat in [&one, &two] {
         seat.join(&a, &keys).await;
     }
-    for (seat, keyword, at) in [(&one, "one", 100), (&two, "two", 200)] {
-        let (item, value, stamp) = seat_moderation(seat, keyword, at);
+    for (seat, policy, at) in [(&one, "one", 100), (&two, "two", 200)] {
+        let (item, value, stamp) = seat_prefs(seat, policy, at);
         seat_delegable(seat, &a, &keys)
             .put(&item, value, stamp)
             .await
@@ -7468,7 +7422,7 @@ async fn a_second_nest_settles_to_every_live_row_byte_for_byte() {
                 "{scope}: B holds exactly A's live rows, byte for byte"
             );
         } else {
-            // Both seats wrote the one moderation item; seat 2's later stamp
+            // Both seats wrote the one sync-prefs item; seat 2's later stamp
             // won the merge, so seat 1's own row is below that listed cover
             // and the diff never pushes it (`account-sync-plane.md` § The bind
             // leg, ruling 1(b)): B holds the cover alone, byte for byte.
@@ -7525,7 +7479,7 @@ async fn cover_pass(
 
 /// **An item only a removed seat carried reaches a second nest** (the
 /// 2026-10-01 measurement (d), by the seat flow). Seat two writes the
-/// moderation record on nest A; seat one walks it, writes two's `Removed`
+/// sync-prefs record on nest A; seat one walks it, writes two's `Removed`
 /// row and settles — its cover step hands the record over, since no
 /// member's row carries it. Bound to an empty nest B, one's passes leave B
 /// holding one's own row of the record, and a fresh seat walking B reads it.
@@ -7538,7 +7492,7 @@ async fn an_item_only_a_removed_seat_carried_reaches_a_second_nest() {
     for seat in [&one, &two] {
         seat.join(&a, &keys).await;
     }
-    let (item, value, stamp) = seat_moderation(&two, "two", 200);
+    let (item, value, stamp) = seat_prefs(&two, "two", 200);
     seat_delegable(&two, &a, &keys)
         .put(&item, value.clone(), stamp)
         .await
@@ -7682,7 +7636,7 @@ async fn no_row_is_lost_under_a_stale_fleet_view() {
 /// lists** (`delegable-scope-reclamation.md` § Delegable-scope reclamation,
 /// "A full scope is owed a put that needs no room", *At a linked nest*;
 /// `account-sync-plane.md` § The bind leg, ruling 4). Two nests, each
-/// linked at the other, both hold seat one's moderation row and, served
+/// linked at the other, both hold seat one's sync-prefs row and, served
 /// after it, seat two's winning one — a stale row and its cover. One leg run
 /// each way leaves each linked nest with the cover alone, and no retire
 /// record is entered for it.
@@ -7700,8 +7654,8 @@ async fn a_linked_leg_leaves_the_linked_nest_with_the_cover_alone() {
     }
     // Two writes over one's row unwalked, so its put names nothing: on A the
     // stale row and its cover are both live.
-    for (seat, keyword, at) in [(&one, "one", 100), (&two, "two", 200)] {
-        let (item, value, stamp) = seat_moderation(seat, keyword, at);
+    for (seat, policy, at) in [(&one, "one", 100), (&two, "two", 200)] {
+        let (item, value, stamp) = seat_prefs(seat, policy, at);
         seat_delegable(seat, &a, &keys)
             .put(&item, value, stamp)
             .await
@@ -7886,7 +7840,7 @@ async fn a_row_relayed_before_its_writer_publishes_settles_by_the_writers_self_e
     }
     settle_bound(&one, &rpc, &keys).await;
 
-    let (item, value, stamp) = seat_moderation(&two, "offline", 300);
+    let (item, value, stamp) = seat_prefs(&two, "offline", 300);
     assert!(
         seat_delegable(&two, &Away, &keys)
             .put(&item, value, stamp)

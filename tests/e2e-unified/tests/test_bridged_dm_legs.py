@@ -1,6 +1,6 @@
 """tier_3 app journeys: the **Bluesky and ActivityPub DM legs** of the
-bridged-conversation family, end to end on the lead app
-(``docs/goal/ui/conversations.md`` § Where logic lives → *The ``Bridged``
+bridged-conversation family, end to end on every app that has built the
+bridged rail (``docs/goal/ui/conversations.md`` § Where logic lives → *The ``Bridged``
 adapter*, rulings 2 (e) and 3; the tier ``docs/goal/architecture/testing.md``
 § The four-tier taxonomy).
 
@@ -71,7 +71,6 @@ import requests
 from clients.ws_rpc_admin_client import WsRpcAdminClient
 from drivers.port_util import find_free_port
 from helpers.ap_nest import deliver_direct_note, enable_ap, start_ap_nest
-from helpers.app_surface import skip_unbuilt
 from helpers.budgets import RECEIVE_CYCLE_S, RPC_ROUNDTRIP_S
 from helpers.fake_follower import FakeFollower, assert_valid_http_signature
 from helpers.waiting import wait_until
@@ -91,19 +90,6 @@ PEER_HANDLE = "erin.test"
 
 def _unique(prefix: str) -> str:
     return f"{prefix}-{uuid.uuid4().hex[:10]}"
-
-
-def _require_bridged(app) -> None:
-    """Skip an app the bridged rail has not reached — the Nostr journey's
-    gate (``test_bridged_conversation._bridged_built``), narrowed to the two
-    apps these journeys are marked for."""
-    if not (app.driver.is_tui() or app.driver.is_web()):
-        skip_unbuilt(
-            app.driver,
-            surface="bridged rooms on the unified Conversations page",
-            detail="no BridgedBackend is registered on this app yet",
-            tracked="docs/goal/ui/conversations.md § Implementation status today",
-        )
 
 
 def _user_client(nest) -> WsRpcAdminClient:
@@ -227,10 +213,14 @@ def _dm_poll_now(nest) -> dict:
 @pytest.mark.feature("atproto")
 @pytest.mark.tui
 @pytest.mark.web
+@pytest.mark.linux
+@pytest.mark.windows
+@pytest.mark.macos
+@pytest.mark.ios
+@pytest.mark.android
 def test_a_bluesky_dm_arrives_as_a_bluesky_room_and_the_reply_reaches_that_peer_alone(
     request, app, bluesky_dm_nest, atproto_far_end
 ):
-    _require_bridged(app)
     nest, far = bluesky_dm_nest, atproto_far_end
     _link_through_callback(nest, far)
     _signed_in_with_mail(app, request, nest, "bluesky_dm_spa_url")
@@ -276,10 +266,14 @@ def test_a_bluesky_dm_arrives_as_a_bluesky_room_and_the_reply_reaches_that_peer_
 @pytest.mark.feature("atproto")
 @pytest.mark.tui
 @pytest.mark.web
+@pytest.mark.linux
+@pytest.mark.windows
+@pytest.mark.macos
+@pytest.mark.ios
+@pytest.mark.android
 def test_a_bluesky_room_started_from_the_picker_by_handle_reaches_the_resolved_peer_alone(
     request, app, bluesky_dm_nest, atproto_far_end
 ):
-    _require_bridged(app)
     nest, far = bluesky_dm_nest, atproto_far_end
     _link_through_callback(nest, far)
     far.register_profile(handle=PEER_HANDLE, did=PEER_DID)
@@ -324,15 +318,6 @@ def test_a_bluesky_room_started_from_the_picker_by_handle_reaches_the_resolved_p
 # ── ActivityPub ──────────────────────────────────────────────────────────
 
 
-@pytest.fixture(scope="module")
-def ap_binary():
-    """fauna-nest with ``activitypub`` + ``test-hooks`` — the federation
-    suite's build, replayed from the collection-time prebuild."""
-    from conftest import _ensure_ap_nest_built
-
-    return _ensure_ap_nest_built()
-
-
 @pytest.fixture
 def fediverse_dm_nest(ap_binary, tmp_path_factory):
     """An AP-enabled nest, its domain its own loopback authority, with one
@@ -340,13 +325,21 @@ def fediverse_dm_nest(ap_binary, tmp_path_factory):
     nest is: each app's run reads a nest no other run wrote."""
     from conftest import _make_user
 
-    port = find_free_port()
-    nest = start_ap_nest(
-        ap_binary,
-        tmp_path_factory.mktemp("fediverse-dm-nest"),
-        port,
-        f"127.0.0.1:{port}",
-    )
+    # An android venue run leases the port from the range its tunnel carries
+    # (`helpers.android_venue.nest_port`); every other run takes a free one.
+    from helpers import android_venue
+
+    port, release_port = android_venue.nest_port(find_free_port)
+    try:
+        nest = start_ap_nest(
+            ap_binary,
+            tmp_path_factory.mktemp("fediverse-dm-nest"),
+            port,
+            f"127.0.0.1:{port}",
+        )
+    except BaseException:
+        release_port()
+        raise
     try:
         nest["user"] = _make_user(nest)
         nest["ap_username"], nest["ap_actor_url"] = enable_ap(nest, nest["user"])
@@ -354,6 +347,7 @@ def fediverse_dm_nest(ap_binary, tmp_path_factory):
     finally:
         nest["proc"].kill()
         nest["proc"].wait()
+        release_port()
 
 
 @pytest.fixture
@@ -383,10 +377,14 @@ def _account_public_key(nest) -> str:
 @pytest.mark.feature("fediverse")
 @pytest.mark.tui
 @pytest.mark.web
+@pytest.mark.linux
+@pytest.mark.windows
+@pytest.mark.macos
+@pytest.mark.ios
+@pytest.mark.android
 def test_a_fediverse_dm_arrives_as_a_fediverse_room_and_the_reply_reaches_that_peer_alone(
     request, app, fediverse_dm_nest, fediverse_peer
 ):
-    _require_bridged(app)
     nest, peer = fediverse_dm_nest, fediverse_peer
     _signed_in_with_mail(app, request, nest, "fediverse_dm_spa_url")
 
@@ -426,10 +424,14 @@ def test_a_fediverse_dm_arrives_as_a_fediverse_room_and_the_reply_reaches_that_p
 @pytest.mark.feature("fediverse")
 @pytest.mark.tui
 @pytest.mark.web
+@pytest.mark.linux
+@pytest.mark.windows
+@pytest.mark.macos
+@pytest.mark.ios
+@pytest.mark.android
 def test_a_fediverse_room_started_from_the_picker_by_account_reaches_the_resolved_peer_alone(
     request, app, fediverse_dm_nest, fediverse_peer
 ):
-    _require_bridged(app)
     nest, peer = fediverse_dm_nest, fediverse_peer
     _signed_in_with_mail(app, request, nest, "fediverse_dm_spa_url")
 

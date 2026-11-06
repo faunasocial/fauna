@@ -92,8 +92,9 @@ class TestAgentProfileEditPickTest {
                     "hash-$text"
                 }
                 "buildEditedProfileWithImages" -> {
-                    signedAvatar = inv.arguments[4] as FfiProfileImageEdit
-                    signedBanner = inv.arguments[5] as FfiProfileImageEdit
+                    // (baseBody, lastDirectBody, displayName, bio, links, avatar, banner, …)
+                    signedAvatar = inv.arguments[5] as FfiProfileImageEdit
+                    signedBanner = inv.arguments[6] as FfiProfileImageEdit
                     ByteArray(0)
                 }
                 else -> RETURNS_DEFAULTS.answer(inv)

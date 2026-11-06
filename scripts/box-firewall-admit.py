@@ -73,6 +73,7 @@ import ipaddress
 import json
 import os
 import re
+import socket
 import sys
 import time
 import urllib.error
@@ -221,6 +222,29 @@ def stale_admissions(rules: list[dict], now: datetime, older_than: timedelta,
         if now - stamp > older_than or run_status(*key) == "completed":
             stale.add(key)
     return stale
+
+
+# The resolver's answer that a name has no address at all — as opposed to a
+# lookup that failed and may succeed on retry.
+_NO_ADDRESS = {getattr(socket, n) for n in ("EAI_NONAME", "EAI_NODATA") if hasattr(socket, n)}
+
+
+def refused_host_ips(hosts: list[str]) -> dict[str, set[str]]:
+    """Each refused host's addresses. A host the resolver says has no address
+    (the acceptance box not yet up) holds no server, so it maps to the empty set
+    and refuses nothing; any other lookup failure raises — refusing nothing on a
+    transient error would let a token that reaches the front door through."""
+    out: dict[str, set[str]] = {}
+    for h in hosts:
+        h = gate._normalize_host(h)
+        try:
+            out[h] = gate._resolve_ips(h)
+        except socket.gaierror as e:
+            if e.errno not in _NO_ADDRESS:
+                raise
+            print(f"  {h}: no address — no server of this project can carry it")
+            out[h] = set()
+    return out
 
 
 def listed_hosts(servers: list[dict], host_ips: dict[str, set[str]]) -> list[str]:
@@ -454,8 +478,7 @@ def main() -> int:
     now = datetime.now(timezone.utc)
     try:
         servers = gate._get_paged("/servers", "servers", token, timeout=args.timeout)
-        refuse_ips = {gate._normalize_host(h): gate._resolve_ips(gate._normalize_host(h))
-                      for h in args.refuse_if_lists}
+        refuse_ips = refused_host_ips(args.refuse_if_lists)
         reached = listed_hosts(servers, refuse_ips)
         if reached:
             print(f"REFUSED: this token's project holds {', '.join(reached)} — a token that "

@@ -1,3 +1,4 @@
+import FaunaFFISwift
 import Foundation
 import Security
 
@@ -64,7 +65,8 @@ public class KeychainStore {
     /// got. A constant-`nil` twin folded by the optimizer is not a gate here.
     private static var e2eFileURL: URL? {
         #if DEBUG
-        guard FaunaE2E.isActive, let dir = E2eEnv.credentialDir, !dir.isEmpty else { return nil }
+        guard FaunaE2E.isActive, !e2eRealKeychain,
+              let dir = E2eEnv.credentialDir, !dir.isEmpty else { return nil }
         return URL(fileURLWithPath: dir).appendingPathComponent("keychain.json")
         #else
         return nil
@@ -76,6 +78,64 @@ public class KeychainStore {
     /// launch-time E2E wipe, which would otherwise destroy exactly the state the
     /// crash-recovery journeys are asserting survives.
     public static var e2eHarnessOwnsStore: Bool { e2eFileURL != nil }
+
+    /// E2E-only: this launch runs the store on a **real** keychain — the production path
+    /// (`save` → `addQuery` under `.forBackup(enabled: false)`), not the in-memory store —
+    /// so a test can read back what a real onboarding left there
+    /// (`docs/features/identity-protected-on-this-device.md` outcomes 3 and 4; the reader
+    /// is `e2eItemAttributes`).
+    ///
+    /// **Which keychain is the platform's, and neither is the box's own.** On iOS it is
+    /// the seat simulator's, which an ad-hoc simulator build reaches with no prompt (the
+    /// bundle's simulated `application-identifier` names its default access group;
+    /// `planeAttributes` adds nothing). On macOS an ad-hoc build reaches only the legacy
+    /// plane, whose default is the box's login keychain — convention 12's venue, never an
+    /// e2e launch's — so the flag counts there only beside `FAUNA_E2E_KEYCHAIN_PATH`, the
+    /// harness's own keychain FILE, to which `Plane.legacyFile` pins every query. Either
+    /// way convention 10 holds (`e2e-launch-isolation.md`).
+    ///
+    /// `#if DEBUG` for the payload's severity, as `e2eFileURL` above: this changes where
+    /// the identity secret is written. The launch wipes the service first (the app shell),
+    /// and the test's reset wipes it again, so no real row outlives the test.
+    public static var e2eRealKeychain: Bool {
+        #if DEBUG && os(iOS)
+        return FaunaE2E.isActive && E2eEnv.realKeychain
+        #elseif DEBUG && os(macOS)
+        return FaunaE2E.isActive && E2eEnv.realKeychain && E2eEnv.keychainPath != nil
+        #else
+        return false
+        #endif
+    }
+
+    #if DEBUG && os(macOS)
+    /// The harness's keychain file, opened and unlocked once per process. The file is
+    /// CREATED by the harness, never here: on a handle `SecKeychainCreate` returns, the
+    /// next item call fails −25293 or blocks on a password dialog although the create and
+    /// even an unlock answered 0, while `SecKeychainOpen` + `SecKeychainUnlock` on the
+    /// finished file works in the creating process and every other (measured 2026-10-30).
+    ///
+    /// A failure stops the launch: the alternative is a store on the box's login keychain.
+    /// Interaction goes off first, so anything that would prompt answers with a status.
+    private static let e2eSharedKeychainFile: SecKeychain = {
+        guard let path = E2eEnv.keychainPath, let password = E2eEnv.keychainPassword else {
+            fatalError("[keychain] a real-keychain launch names no keychain file and password")
+        }
+        SecKeychainSetUserInteractionAllowed(false)
+        var file: SecKeychain?
+        let opened = SecKeychainOpen(path, &file)
+        guard opened == errSecSuccess, let file else {
+            fatalError("[keychain] cannot open \(path): \(opened)")
+        }
+        let unlocked = SecKeychainUnlock(file, UInt32(password.utf8.count), password, true)
+        guard unlocked == errSecSuccess else {
+            fatalError("[keychain] cannot unlock \(path): \(unlocked)")
+        }
+        return file
+    }()
+
+    /// The keychain file this store is pinned to, when it is pinned to one.
+    private let e2eKeychainFile: SecKeychain?
+    #endif
 
     /// Re-read the durable backing into `memoryStore`. Call with `storeLock` held, at the top
     /// of EVERY operation — never once per process.
@@ -151,9 +211,12 @@ public class KeychainStore {
         // a terminal-launched, ad-hoc-signed app whose signature changes each
         // rebuild otherwise blocks on a securityd keychain-ACL prompt with no UI
         // to approve it (the in-process path launches the app directly, like
-        // linux).
-        self.inMemory = FaunaE2E.isActive
+        // linux). The one exception is a real-keychain launch (`e2eRealKeychain`).
+        self.inMemory = FaunaE2E.isActive && !Self.e2eRealKeychain
         self.backend = SystemKeychainBackend()
+        #if DEBUG && os(macOS)
+        self.e2eKeychainFile = Self.e2eRealKeychain ? Self.e2eSharedKeychainFile : nil
+        #endif
     }
 
     // MARK: - Keychain plane (macOS: data-protection vs legacy)
@@ -171,8 +234,9 @@ public class KeychainStore {
     //
     // Which plane is writable is a property of the SIGNATURE, not a preference: the
     // data-protection keychain is reachable only through an access group the app is entitled
-    // to — the app-only `AppleIdentifiers.accountKeychainGroup`, an app group rather than the
-    // File Provider's shared one so the sandboxed extension can never read the identity seed —
+    // to — `AppleIdentifiers.accountKeychainGroup`, the family App ID: the one group a Mac's
+    // and an iPhone's rows share, and the File Provider's own App ID can never name it, so the
+    // sandboxed extension cannot read the identity seed —
     // and an ad-hoc dev build gets `errSecMissingEntitlement` (−34018) on every query there
     // (measured 2026-07-20). So the plane is PROBED once per process and an ad-hoc build
     // lives on the legacy plane. iOS has one keychain: both planes decorate a query
@@ -182,6 +246,12 @@ public class KeychainStore {
     enum Plane: Equatable {
         case dataProtection
         case legacy
+        #if DEBUG && os(macOS)
+        /// The legacy plane, on one named keychain file rather than the default search
+        /// list: a real-keychain e2e launch (`e2eRealKeychain`), which reads what every
+        /// legacy-plane build does while the box's login keychain stays out of it.
+        case legacyFile(SecKeychain)
+        #endif
     }
 
     /// Whether this platform has a second (legacy) plane at all (macOS only).
@@ -203,6 +273,9 @@ public class KeychainStore {
 
     /// The plane this store WRITES (and reads first): probed lazily on first real-keychain use.
     private lazy var writePlane: Plane = {
+        #if DEBUG && os(macOS)
+        if let e2eKeychainFile { return .legacyFile(e2eKeychainFile) }
+        #endif
         let isSystem = backend is SystemKeychainBackend
         if isSystem {
             Self.storeLock.lock()
@@ -237,18 +310,19 @@ public class KeychainStore {
             level: .info, target: "fauna.keychain",
             message:
                 "[keychain] write plane: \(plane == .dataProtection ? "data-protection" : "legacy") "
-                + "(probe status \(status); −34018 = this signature is not entitled to the account access group)"
+                + "(probe status \(status); −34018 = this signature is not entitled to the App ID access group)"
         )
         return plane
     }
 
     /// The attributes that address `plane`. macOS: the data-protection plane is selected by
-    /// `kSecUseDataProtectionKeychain` and addressed through the app-only account access
+    /// `kSecUseDataProtectionKeychain` and addressed through the family App ID access
     /// group; the legacy plane is the default file-based keychain, addressed exactly as the
     /// store always has (no key at all — a synchronizable backup copy written there lands in
     /// iCloud Keychain regardless, and an explicit `false` would refuse it). iOS: one
-    /// keychain, nothing to add for either.
-    static func planeAttributes(_ plane: Plane) -> [String: Any] {
+    /// keychain, nothing to add for either. `forAdd` matters only to `Plane.legacyFile`,
+    /// the one plane an add and a match address differently.
+    static func planeAttributes(_ plane: Plane, forAdd: Bool = false) -> [String: Any] {
         #if os(macOS)
             switch plane {
             case .dataProtection:
@@ -258,6 +332,12 @@ public class KeychainStore {
                 ]
             case .legacy:
                 return [:]
+            #if DEBUG
+            case .legacyFile(let file):
+                return forAdd
+                    ? [kSecUseKeychain as String: file]
+                    : [kSecMatchSearchList as String: [file]]
+            #endif
             }
         #else
             return [:]
@@ -268,11 +348,24 @@ public class KeychainStore {
     /// copy-not-move mechanism (§ iCloud-backup accessibility policy) can be exercised in a plain
     /// unsigned SPM test process — which cannot create a real `synchronizable` `SecItem` (see
     /// `KeychainAccessibilityTests`). `inMemory` is forced off so `save`/`load`/`setICloudBackup`
-    /// take the same code path production does, only reading/writing the fake.
-    init(testBackend: KeychainBackend) {
+    /// take the same code path production does, only reading/writing the fake. `inMemory: true`
+    /// is the e2e store's branch, for a pin on what that branch refuses.
+    init(testBackend: KeychainBackend, inMemory: Bool = false) {
+        self.inMemory = inMemory
+        self.backend = testBackend
+        #if DEBUG && os(macOS)
+        self.e2eKeychainFile = nil
+        #endif
+    }
+
+    #if DEBUG && os(macOS)
+    /// Test seam: the same, pinned to a keychain file the way a real-keychain launch is.
+    init(testBackend: KeychainBackend, e2eKeychainFile: SecKeychain) {
         self.inMemory = false
         self.backend = testBackend
+        self.e2eKeychainFile = e2eKeychainFile
     }
+    #endif
 
     // MARK: - iCloud-backup accessibility policy
     //
@@ -305,19 +398,23 @@ public class KeychainStore {
     // rows are already identity-namespaced and never collide; only a fixed-key row's
     // *backup* copy is best-effort under that narrow config — the working copy is always correct.
     //
-    // The policy applies uniformly to the whole service namespace, not just the secret row:
-    // `KeychainSecretStore` (the account-registry seam) is deliberately policy-free — a
-    // key→value map that must not learn which logical keys are identity material — so the
-    // store cannot single out "just the secret". This matches `deleteAll()`'s existing
-    // sweep-the-service philosophy: a row added later is covered because it is in the
-    // namespace, not because someone remembered to list it.
+    // **The copy carries the identity, never the device** (`ios.md` § Credential Storage, *What
+    // the copy carries*). Which rows may have a circle copy is shared Rust's, per logical key
+    // (`keySyncScope`, device-scoped unless named), so `KeychainSecretStore` (the account-registry
+    // seam) stays a policy-free key→value map. A device-scoped row has exactly one copy,
+    // device-bound, whatever the toggle says, and a row added later is device-scoped because
+    // nobody named it. A circle copy of one is never read and the reconcile deletes it.
 
     /// Device-local "back up identity to iCloud Keychain" preference row. Lives in this
-    /// service (so a factory reset's namespace sweep clears it — a fresh identity defaults
-    /// back to device-bound), but is ALWAYS written device-bound + non-synchronizable and is
-    /// excluded from the policy rewrite: whether *this device* pushes to iCloud is a
-    /// per-device choice, never itself a synced value.
+    /// service, so a factory reset's namespace sweep clears it and a fresh identity defaults
+    /// back to device-bound. Device-scoped like every row not named identity material:
+    /// whether *this device* pushes to iCloud is a per-device choice, never a synced value.
     private static let backupPreferenceAccount = "icloud_backup_enabled"
+
+    /// Whether `account` may have a circle copy at all.
+    private static func isIdentityScoped(_ account: String) -> Bool {
+        keySyncScope(key: account) == .identity
+    }
 
     /// The accessibility class + `synchronizable` flag a credential row is written under.
     struct AccessPolicy: Equatable {
@@ -368,7 +465,7 @@ public class KeychainStore {
             kSecAttrAccessible as String: policy.accessible,
             kSecAttrSynchronizable as String: policy.synchronizable,
             kSecValueData as String: data,
-        ].merging(planeAttributes(plane)) { _, plane in plane }
+        ].merging(planeAttributes(plane, forAdd: true)) { _, plane in plane }
     }
 
     /// Service-wide enumeration of every row in both sync states, returning account name,
@@ -410,7 +507,8 @@ public class KeychainStore {
         // Remove any prior copies in EITHER sync state, then re-land the copy-set the current
         // policy requires. Copy-not-move (§ iCloud-backup accessibility policy): the device-bound
         // working copy is written FIRST and always exists; the synchronizable *backup* copy is
-        // added only when opted in, so no device's only copy is ever the shared iCloud-circle row.
+        // added only to an identity row when opted in, so no device's only copy is ever the shared
+        // iCloud-circle row.
         let plane = writePlane
         _ = backend.delete(Self.matchQuery(service: service, account: rawKey, plane: plane))
         let status = backend.add(
@@ -422,7 +520,7 @@ public class KeychainStore {
         }
         // Synchronizable backup copy, best-effort like the rest of the store — a failure leaves the
         // working copy intact and `reconcileCredentialAccessibility()` re-lands the backup next launch.
-        if iCloudBackupEnabled() {
+        if Self.isIdentityScoped(rawKey), iCloudBackupEnabled() {
             _ = backend.add(
                 Self.addQuery(
                     service: service, account: rawKey, data: data, policy: .forBackup(enabled: true),
@@ -441,12 +539,15 @@ public class KeychainStore {
     }
 
     /// The read behind `load` and the backup preference: this device's own device-bound
-    /// copy first, then either sync state (`kSecAttrSynchronizableAny`) — the anti-lockout
-    /// invariant, which finds the iCloud-circle copy on a freshly-restored device holding
-    /// nothing else. Always the write plane, always the current service.
+    /// copy first, then, for an identity row alone, either sync state
+    /// (`kSecAttrSynchronizableAny`) — the anti-lockout invariant, which finds the
+    /// iCloud-circle copy on a freshly-restored device holding nothing else. A device-scoped
+    /// row's circle copy belongs to another device and reads as absent. Always the write
+    /// plane, always the current service.
     private func loadValue(account: String) -> String? {
-        loadCopy(account: account, synchronizable: false)
-            ?? loadCopy(account: account, synchronizable: nil)
+        let deviceBound = loadCopy(account: account, synchronizable: false)
+        guard deviceBound == nil, Self.isIdentityScoped(account) else { return deviceBound }
+        return loadCopy(account: account, synchronizable: nil)
     }
 
     /// Read one row's value from the write plane, matching a specific sync state (`false` =
@@ -555,62 +656,63 @@ public class KeychainStore {
         return loadValue(account: Self.backupPreferenceAccount) == "1"
     }
 
-    /// Persist the device-local preference. ALWAYS device-bound + non-synchronizable and
-    /// written directly (not via `save`, which would apply the very policy this drives) —
-    /// the "do I push to iCloud" choice is per-device and must never itself sync.
+    /// Persist the device-local preference, best-effort like the rest of the store.
     private func writeBackupPreference(_ enabled: Bool) {
-        let value = Data((enabled ? "1" : "0").utf8)
-        if inMemory {
-            Self.storeLock.lock()
-            defer { Self.storeLock.unlock() }
-            Self.e2eMutate {
-                Self.memoryStore[Self.backupPreferenceAccount] = enabled ? "1" : "0"
-                Self.e2eFlush()
-            }
-            return
-        }
-        let plane = writePlane
-        _ = backend.delete(
-            Self.matchQuery(service: service, account: Self.backupPreferenceAccount, plane: plane))
-        _ = backend.add(
-            Self.addQuery(
-                service: service, account: Self.backupPreferenceAccount, data: value,
-                policy: .forBackup(enabled: false), plane: plane))
+        try? save(rawKey: Self.backupPreferenceAccount, value: enabled ? "1" : "0")
     }
 
     /// Flip iCloud backup on/off. Records the device-local preference first (so any
     /// subsequent write already lands under the new policy), then re-writes every existing
-    /// credential row to match. Best-effort by signature like the rest of the store: a
-    /// partial failure never strands the user (reads match `kSecAttrSynchronizableAny`), and
-    /// `reconcileCredentialAccessibility()` re-converges the rows on the next launch.
-    public func setICloudBackup(enabled: Bool) {
+    /// credential row to match. Opting in returns whether the backup landed; when it did not,
+    /// the preference goes back to OFF and any copy that did land is taken back, so the toggle
+    /// never rests ON over a backup that does not exist (`ios.md` § Credential Storage, the
+    /// opt-in bullet). The device-bound working copies are untouched either way: reads match
+    /// `kSecAttrSynchronizableAny`, and a failure here never strands the user.
+    @discardableResult
+    public func setICloudBackup(enabled: Bool) -> Bool {
         writeBackupPreference(enabled)
-        rewriteAllCredentials(toBackupEnabled: enabled)
+        let landed = rewriteAllCredentials(toBackupEnabled: enabled)
+        guard enabled, !landed else { return true }
+        writeBackupPreference(false)
+        _ = rewriteAllCredentials(toBackupEnabled: false)
+        return false
     }
 
     /// Bring every credential row's copy-set in line with the current preference. Runs at
     /// launch (idempotent, self-healing): it re-converges any row a crash mid-`setICloudBackup`
     /// left behind.
+    ///
+    /// A preference standing ON where a copy did not land is cleared only off the
+    /// data-protection plane, which can never hold one. On that plane a failed pass is
+    /// transient and the person's choice stands: the next launch retries it.
     public func reconcileCredentialAccessibility() {
-        rewriteAllCredentials(toBackupEnabled: iCloudBackupEnabled())
+        let enabled = iCloudBackupEnabled()
+        let landed = rewriteAllCredentials(toBackupEnabled: enabled)
+        if enabled, !landed, writePlane != .dataProtection {
+            writeBackupPreference(false)
+        }
     }
 
-    /// Converge every row in the service namespace (except the device-local preference) to the
-    /// copy-set the target policy requires. The in-memory store has no accessibility to migrate.
+    /// Converge every row in the service namespace to the copy-set its scope and the target
+    /// policy require. The in-memory store has no accessibility to migrate. Returns whether the
+    /// target holds: with backup on, every identity row's synchronizable copy reads back, a
+    /// device-scoped row never having one. A keychain holding no row at all holds the target.
+    /// An enumeration that fails is a pass that never ran, so it reports false: the legacy
+    /// plane answers this one −50, which is why a legacy-plane build never reports a landing.
     ///
     /// Enumerates BOTH sync states and groups by account, because copy-not-move means an opted-in
     /// row exists as two copies (device-bound + synchronizable) under the same account.
-    private func rewriteAllCredentials(toBackupEnabled enabled: Bool) {
-        guard !inMemory else { return }
+    private func rewriteAllCredentials(toBackupEnabled enabled: Bool) -> Bool {
+        guard !inMemory else { return true }
         let (status, result) = backend.copyMatching(
             Self.enumerateQuery(service: service, plane: writePlane))
-        guard status == errSecSuccess, let items = result as? [[String: Any]] else { return }
+        if status == errSecItemNotFound { return true }
+        guard status == errSecSuccess, let items = result as? [[String: Any]] else { return false }
         var deviceBoundData: [String: Data] = [:]
         var syncData: [String: Data] = [:]
         for item in items {
             guard let account = item[kSecAttrAccount as String] as? String,
-                  let data = item[kSecValueData as String] as? Data,
-                  account != Self.backupPreferenceAccount else {
+                  let data = item[kSecValueData as String] as? Data else {
                 continue
             }
             if (item[kSecAttrSynchronizable as String] as? Bool) ?? false {
@@ -619,16 +721,24 @@ public class KeychainStore {
                 deviceBoundData[account] = data
             }
         }
+        var landed = true
         for account in Set(deviceBoundData.keys).union(syncData.keys) {
             convergeRow(
                 account: account, deviceBoundData: deviceBoundData[account],
                 syncData: syncData[account], enabled: enabled)
+            if enabled, Self.isIdentityScoped(account),
+               let data = deviceBoundData[account] ?? syncData[account],
+               !verifyReadable(account: account, synchronizable: true, expected: data) {
+                landed = false
+            }
         }
+        return landed
     }
 
     /// Converge one account's copy-set to the target policy without ever leaving the device
-    /// without a readable device-bound copy. Target OFF → exactly `{ device-bound }`; target ON →
-    /// exactly `{ device-bound, synchronizable }`.
+    /// without a readable device-bound copy. Device-scoped row → whatever device-bound copy it
+    /// has, and no circle copy; identity row, target OFF → exactly `{ device-bound }`; identity
+    /// row, target ON → exactly `{ device-bound, synchronizable }`.
     ///
     /// Order is lockout-safe (§ policy): the device-bound *working* copy is ensured FIRST (added +
     /// read-back-verified when it has to be landed from the synchronizable value), and only then
@@ -639,6 +749,14 @@ public class KeychainStore {
     /// device-bound copy yet (never re-promoting a possibly cross-identity-clobbered circle value
     /// when a real working copy exists).
     private func convergeRow(account: String, deviceBoundData: Data?, syncData: Data?, enabled: Bool) {
+        guard Self.isIdentityScoped(account) else {
+            // Never promoted: a stray circle copy names another device, so a keychain holding
+            // only that ends up holding nothing, and this device mints its own row.
+            if syncData != nil {
+                _ = backend.delete(syncStateKey(account: account, synchronizable: true))
+            }
+            return
+        }
         guard let data = deviceBoundData ?? syncData else { return }
         let deviceBoundPolicy = AccessPolicy.forBackup(enabled: false)
         if deviceBoundData == nil {
@@ -695,6 +813,84 @@ public class KeychainStore {
         return status == errSecSuccess && (item as? Data) == expected
     }
 }
+
+#if DEBUG
+extension KeychainStore {
+    /// One copy of a row as the keychain reports it: the accessibility class and the sync
+    /// flag, nothing else.
+    public struct E2eItemCopy: Equatable {
+        public let accessible: String
+        public let synchronizable: Bool
+    }
+
+    /// E2E-only reader for the outcome-4 witness: every copy the real keychain holds of
+    /// `account` (both sync states), as ATTRIBUTES only — `kSecReturnAttributes`, never
+    /// `kSecReturnData`, so the secret itself never leaves the keychain through this seam.
+    /// `nil` when the store is not on a real keychain (the in-memory e2e store has no class
+    /// to report); otherwise the `SecItemCopyMatching` status beside the copies it found
+    /// (`errSecItemNotFound` → none). On the legacy plane a row comes back with no class
+    /// and no sync flag at all: the platform does not honour them there, and `accessible`
+    /// then reads `"nil"` — the finding the macos witness asserts, not a gap in the reader.
+    public func e2eItemAttributes(account: String) -> (status: OSStatus, copies: [E2eItemCopy])? {
+        guard !inMemory else { return nil }
+        var query = Self.matchQuery(service: service, account: account, plane: writePlane)
+        query[kSecReturnAttributes as String] = true
+        query[kSecMatchLimit as String] = kSecMatchLimitAll
+        let (status, item) = backend.copyMatching(query)
+        let rows = (item as? [[String: Any]]) ?? []
+        let copies = rows.map { row in
+            E2eItemCopy(
+                accessible: Self.accessibleName(row[kSecAttrAccessible as String]),
+                synchronizable: Self.flag(row[kSecAttrSynchronizable as String]))
+        }
+        return (status, copies)
+    }
+
+    /// E2E-only restore model (`KeychainDropDeviceBoundCopiesTestCommand`): delete every
+    /// device-bound row of the service with one `SecItemDelete`, which reports no count, so
+    /// an attributes read of the same rows counts them first. `nil` when the store is not on
+    /// a real keychain; otherwise the delete's status and how many rows it was given.
+    public func e2eDropDeviceBoundCopies() -> (status: OSStatus, dropped: Int)? {
+        guard !inMemory else { return nil }
+        let deviceBound: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrSynchronizable as String: false,
+        ].merging(Self.planeAttributes(writePlane)) { _, plane in plane }
+        var count = deviceBound
+        count[kSecReturnAttributes as String] = true
+        count[kSecMatchLimit as String] = kSecMatchLimitAll
+        let rows = (backend.copyMatching(count).item as? [[String: Any]]) ?? []
+        return (backend.delete(deviceBound), rows.count)
+    }
+
+    /// The `kSecAttrAccessible*` constant's own name for the raw value the keychain
+    /// returns (`"cku"` for `…AfterFirstUnlockThisDeviceOnly`), so a test asserts the
+    /// symbol the store writes rather than Apple's private abbreviation; an unknown value
+    /// is reported raw.
+    static func accessibleName(_ raw: Any?) -> String {
+        let known: [(CFString, String)] = [
+            (kSecAttrAccessibleWhenUnlocked, "kSecAttrAccessibleWhenUnlocked"),
+            (kSecAttrAccessibleAfterFirstUnlock, "kSecAttrAccessibleAfterFirstUnlock"),
+            (kSecAttrAccessibleWhenPasscodeSetThisDeviceOnly,
+             "kSecAttrAccessibleWhenPasscodeSetThisDeviceOnly"),
+            (kSecAttrAccessibleWhenUnlockedThisDeviceOnly,
+             "kSecAttrAccessibleWhenUnlockedThisDeviceOnly"),
+            (kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
+             "kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly"),
+        ]
+        guard let value = raw as? String else { return String(describing: raw ?? "nil") }
+        return known.first { ($0.0 as String) == value }?.1 ?? value
+    }
+
+    /// `kSecAttrSynchronizable` comes back as a number (`0`/`1`) or a `CFBoolean`.
+    private static func flag(_ raw: Any?) -> Bool {
+        if let b = raw as? Bool { return b }
+        if let n = raw as? NSNumber { return n.boolValue }
+        return false
+    }
+}
+#endif
 
 // MARK: - Keychain operation seam
 

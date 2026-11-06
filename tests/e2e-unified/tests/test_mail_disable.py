@@ -2,30 +2,29 @@
 
 Flipping `mail-settings-enabled-toggle` off opens the destructive
 `mail-settings-disable-confirm` dialog; confirming with
-`mail-settings-disable-confirm-button` dispatches MailSettingsAction::DisableMail
-= bulk soft-revoke **every** credential (one RevokeCredential per row) + clear
-the `msek` in the `fauna.state.mail` plane over the real nest, returning the snapshot to
-`enabled: false`. It deliberately does NOT touch the Admin-scoped deployment-wide
-`set_mail_enabled` flag (one user disabling their own mailbox must not tear down
-the box's mail subsystem).
+`mail-settings-disable-confirm-button` dispatches MailSettingsAction::DisableMail.
+**Turning mail off stops mail, and only mail** (`mail-credentials.md` § Trigger
+taxonomy, the Disable-mail row): the nest's per-actor mail flag goes off (IMAP
+refuses), every submission token is revoked (no sending), and the credentials
+are KEPT — the calendar, contacts and file apps signing in with them keep
+working, and the page keeps showing them (§ Credential-management
+reachability). Turning mail back on restores sending and reading under the same
+credentials, with no new set-up. It deliberately does NOT touch the Admin-scoped
+deployment-wide `set_mail_enabled` flag (one user disabling their own mailbox
+must not tear down the box's mail subsystem).
 
 tier_3: a real client driver drives the real `fauna-nest` binary end-to-end
-(glue → shared MailSettingsMachine → WS-RPC → nest DB → render). Lead app =
-linux; wired on **linux + web + windows** (the web overlay in
-`apps/fauna-web/src/lib/components/MailSettingsSection.svelte`; the windows inline
-overlay in `apps/fauna-windows/.../Controls/MailSettingsPanel.xaml{,.cs}`);
-macos/ios/android lift the same dialog + DisableMail over the shared machine
-(route-3 hand-offs). The shared crate's enable→disable→re-enable round-trip
-(including the "no set_mail_enabled(false)" assertion) is unit-tested in
-`libs/fauna-client-mail-settings/tests/state_machine.rs`.
+(glue → shared MailSettingsMachine → WS-RPC → nest DB → render). The shared
+crate's enable→disable→re-enable round-trip (the kept credentials, the nest flag
+and the "no set_mail_enabled(false)" assertion) is unit-tested in
+`libs/fauna-client-mail-settings/tests/state_machine.rs`; the nest's IMAP refusal
+and the CalDAV handler serving on are nest unit tests; that the calendar app
+stays signed in is `test_mail_settings_controls.py`'s outcome over a dedicated
+mail nest.
 
-⚠ A DEDICATED actor (``dedicated_actor_app``), never the shared session
-``test_user``. The disable clears the MSEK and its grace generations by
-design, so every record already in the actor's mailbox can never open again,
-and the re-enable does not bring them back. On ``test_user`` that stranded
-all the mail earlier modules had delivered, and every later module's relaunch
-counted it on the conversations page's unopenable-mail floor for the rest of
-the run.
+A DEDICATED actor (``dedicated_actor_app``), never the shared session
+``test_user``: while this test's mail is off the actor's mail stops being
+served, which no later module on ``test_user`` expects.
 """
 
 import pytest
@@ -45,43 +44,44 @@ pytestmark = [pytest.mark.tier_3, pytest.mark.linux, pytest.mark.web, pytest.mar
 
 
 @pytest.mark.feature("turn-on-mail")
-def test_disable_mail_revokes_all_credentials_via_confirm_dialog(dedicated_actor_app):
+def test_disable_mail_keeps_every_credential_via_confirm_dialog(dedicated_actor_app):
     app, _actor = dedicated_actor_app
     app.mail_settings.navigate()
     app.mail_settings.ensure_mail_enabled()
 
-    # Provision a second credential so disabling exercises the *bulk* revoke
-    # (every row), not just a single-credential revoke.
+    # A second credential, so the test proves EVERY row is kept, not just one.
     app.mail_settings.add_credential("Phone")
     assert app.mail_settings.wait_for_credential_count_at_least(2, timeout=app.mail_settings.ENABLE_SETTLE_S), (
         "expected ≥2 credentials before disabling; "
         f"error: {app.mail_settings.page_error_text(timeout=2.0)!r}"
     )
-    # Serve-here is enabled-gated, so it's visible while mail is on.
-    assert app.mail_settings.serve_here_visible(), (
-        "serve-here toggle should be visible while mail is enabled"
-    )
+    before = app.mail_settings.credential_count()
 
-    # Flip the enabled-toggle off → confirmation dialog → Disable. DisableMail
-    # revokes every credential and leaves the MSEK dormant on the account's mail
-    # custody (present-wins — `mail-credentials.md` § MSEK lifecycle, *Disable
-    # mail*); the page re-renders disabled once the round-trip settles.
+    # Flip the enabled-toggle off → confirmation dialog → Disable; the page
+    # re-renders disabled once the round-trip settles.
     app.mail_settings.disable_mail()
-
-    assert app.mail_settings.wait_for_credential_count(0, timeout=15.0), (
-        "DisableMail should revoke every credential (0 rows remain); "
+    assert app.mail_settings.wait_for_enabled_toggle_state("off"), (
+        "mail must read off after the Disable; "
         f"error: {app.mail_settings.page_error_text(timeout=2.0)!r}"
     )
-    # Disabled ⇒ the enabled-gated serve-here toggle disappears.
-    assert not app.mail_settings.serve_here_visible(timeout=3.0), (
-        "serve-here toggle should disappear once mail is disabled"
+
+    assert app.mail_settings.credential_count() == before, (
+        "turning mail off keeps every credential; "
+        f"error: {app.mail_settings.page_error_text(timeout=2.0)!r}"
+    )
+    # The kept credentials stay manageable: the credential section — and the
+    # serve-here toggle it carries — still renders.
+    assert app.mail_settings.serve_here_visible(), (
+        "the credential section stays while a kept credential exists"
     )
 
-    # Re-enable works — over the dormant MSEK with no live credential, EnableMail
-    # mints a fresh credential under the SAME key, so mail sealed before the
-    # disable stays openable.
+    # Turning mail back on reuses the kept credentials — no new one is minted.
     app.mail_settings.enable_mail("Default")
-    assert app.mail_settings.wait_for_credential_count_at_least(1, timeout=app.mail_settings.ENABLE_SETTLE_S), (
-        "re-enable should mint a fresh credential after disable; "
+    assert app.mail_settings.wait_for_enabled_toggle_state("on", timeout=app.mail_settings.ENABLE_SETTLE_S), (
+        "mail must read on after the re-enable; "
+        f"error: {app.mail_settings.page_error_text(timeout=2.0)!r}"
+    )
+    assert app.mail_settings.credential_count() == before, (
+        "the re-enable reuses the kept credentials; "
         f"error: {app.mail_settings.page_error_text(timeout=2.0)!r}"
     )

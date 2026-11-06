@@ -108,6 +108,31 @@ impl CacheDb {
         self.upsert_contact(actor_id, peer_id, "accepted").await
     }
 
+    /// Write `(actor_id, peer_id) accepted` only when `actor_id` holds no edge
+    /// toward `peer_id` yet — one statement, so an edge of any status written
+    /// meanwhile is never overwritten. Returns whether a row was inserted.
+    /// The requester's half of an accept (`docs/goal/ui/contacts.md`
+    /// § Persistence → *The accept makes the edge mutual*, guard 4).
+    pub async fn insert_accepted_contact_if_absent(
+        &self,
+        actor_id: &[u8; 32],
+        peer_id: &[u8; 32],
+    ) -> Result<bool> {
+        let actor_id = *actor_id;
+        let peer_id = *peer_id;
+        let conn = self.conn.lock().await;
+        let now = now_epoch_secs();
+        let inserted = conn
+            .execute(
+                "INSERT INTO contacts (actor_id, peer_id, status, accepted_at, created_at)
+                 VALUES (?1, ?2, 'accepted', ?3, ?3)
+                 ON CONFLICT(actor_id, peer_id) DO NOTHING",
+                rusqlite::params![actor_id.as_slice(), peer_id.as_slice(), now],
+            )
+            .context("insert accepted contact if absent")?;
+        Ok(inserted > 0)
+    }
+
     /// Promote an accepted contact to confirmed.
     /// Only updates if current status is "accepted".
     pub async fn promote_to_confirmed(

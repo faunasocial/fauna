@@ -18,8 +18,8 @@
 //! is behavioral" premise did not hold: every desktop app starts its own
 //! runtime at the post-auth hook that provisions the agent, so the app usually
 //! won and kept the role. So the mount takes the store's **agent presence
-//! lock** (`<store dir>/agent.lock`, exclusive, blocking) *before* the runtime
-//! starts and holds it for the stint ([`Mounted`]); every seed-holding runtime
+//! lock** (`<store dir>/agent.lock`, exclusive, waiting out the probes to a deadline) *before* the runtime
+//! starts and holds it for the stint ([`Mounted`]) — and only while the runtime runs: a runtime that ends on its own ends the stint, presence with it; every seed-holding runtime
 //! probes it — at assembly and at each re-try it does not contend while the
 //! agent is present, and one that holds the role hands it over between passes
 //! (legs down, its lock released, the role fact flipped). This runtime is
@@ -279,6 +279,15 @@ trait StintMount {
     fn store_handle(&self) -> Option<AccountStoreHandle> {
         None
     }
+
+    /// Resolves once the mounted runtime has ended **on its own** — its store
+    /// thread exited (a failed reassembly, `ServeEnd::Failed`) and dropped its
+    /// command receiver ([`AccountStoreHandle::closed`]). The stint then tears
+    /// down like any other: the presence lock describes a runtime that is
+    /// running, never one that died under it. Pending for ever by default.
+    async fn closed(&self) {
+        std::future::pending::<()>().await
+    }
 }
 
 /// The body of [`host_stint`], over any mount.
@@ -298,6 +307,14 @@ trait StintMount {
 ///    and ends the hold on its first iteration.
 /// 3. It is cleared only AFTER the mount's teardown has returned, on every
 ///    exit path — a refused assembly included.
+///
+/// **The hold also ends when the runtime dies under it** ([`StintMount::closed`]):
+/// a store thread that exits on its own releases `engine.lock`, and a stint
+/// still holding `agent.lock` would then tell every app beside it that the
+/// agent hosts the store while nothing pumps — sync and custody stopped with
+/// nothing an app could do (`principles.md` § No client-causable unrecoverable
+/// state). That end is an `Err`, so [`run`] re-mounts on its backoff rather
+/// than once a second against a reassembly that keeps failing.
 async fn hold_stint<M, F, Fut>(
     state: &SyncServiceState,
     inputs: &HostInputs,
@@ -328,11 +345,22 @@ where
     );
 
     // Hold. The runtime pumps on its own cadence (or reads plainly, if an app
-    // holds the election); this loop only watches for the mount becoming wrong.
+    // holds the election); this loop only watches for the mount becoming wrong
+    // — or the runtime ending under it.
+    let mut runtime_died = false;
     loop {
         tokio::select! {
             _ = tokio::time::sleep(Duration::from_secs(STINT_RECHECK_SECS)) => {}
             _ = state.host_wake.notified() => {}
+            () = mounted.closed() => {
+                tracing::warn!(
+                    actor_id = %inputs.actor_id_hex,
+                    "account host: the account runtime ended on its own; tearing the \
+                     mount down (presence released) to re-mount"
+                );
+                runtime_died = true;
+                break;
+            }
             _ = shutdown.changed() => {
                 if *shutdown.borrow() {
                     break;
@@ -353,6 +381,9 @@ where
     publish_store(state, None);
     mounted.tear_down().await;
     state.hosted_account.send_replace(None);
+    if runtime_died {
+        anyhow::bail!("account host: the account runtime ended on its own");
+    }
     Ok(())
 }
 
@@ -370,16 +401,25 @@ impl StintMount for Mounted {
         Some(self.handle.clone())
     }
 
+    async fn closed(&self) {
+        self.handle.closed().await
+    }
+
     async fn tear_down(self) {
         let Mounted {
             handle,
             device,
             presence,
         } = self;
-        // Deterministic teardown, never a drop: `shutdown` drains the pump's
-        // in-flight pass before the store closes, which is what keeps a
-        // mid-pass exit from leaving the outbox half-drained.
-        handle.shutdown().await;
+        // Deterministic teardown, never a drop — and never one that waits out
+        // the pass in flight: an app is waiting on this mount to come down
+        // (the un-provision's receipt, `crate::account_host::UNMOUNT_BUDGET`)
+        // before it erases or re-mounts the store, and a pass against an
+        // unreachable nest runs for most of a minute. So the pass is cut one
+        // grace after the request, at its next await — crash-safe by
+        // construction, and a pass ending inside the grace still drains its
+        // outbox (`AccountStoreHandle::shutdown_cutting_the_pass`).
+        handle.shutdown_cutting_the_pass().await;
         // Presence goes only once the runtime — and with it `engine.lock` — is
         // gone: an app that read the agent absent any earlier would contend
         // against a holder that is still pumping.
@@ -571,10 +611,22 @@ async fn assemble(state: &SyncServiceState, inputs: &HostInputs) -> anyhow::Resu
     };
 
     // Presence before the runtime's election, for the stint's lifetime (module
-    // docs). Blocking, and bounded by construction: the only other takers are
-    // the apps' momentary probes. A failure states no priority and mounts
-    // anyway.
-    let presence = take_presence(&store_root, &inputs.actor_id_hex);
+    // docs). It waits out the apps' momentary probes up to the acquire's own
+    // deadline (`AGENT_PRESENCE_ACQUIRE_DEADLINE`), on a blocking thread so the
+    // wait holds no runtime worker. A failure or an elapse states no priority
+    // and mounts anyway.
+    let presence = {
+        let store_root = store_root.clone();
+        let actor_id_hex = inputs.actor_id_hex.clone();
+        tokio::task::spawn_blocking(move || take_presence(&store_root, &actor_id_hex))
+            .await
+            .unwrap_or_else(|e| {
+                tracing::warn!(
+                    "account host: presence acquire task failed ({e}) — mounting without it"
+                );
+                None
+            })
+    };
 
     let reconnects = rpc.subscribe_reconnects();
     // The runtime *borrows* the stint's device client; the stint keeps the
@@ -590,6 +642,7 @@ async fn assemble(state: &SyncServiceState, inputs: &HostInputs) -> anyhow::Resu
         Some(reconnects),
         Some(rpc.subscribe_pushes()),
         Some(state.peer_files.binding()),
+        Some(state.peer_files.bound_leg()),
     );
 
     // The push announce and the banner arm are not the mount's: they ride the
@@ -659,6 +712,7 @@ fn runtime_params<R>(
     reconnects: Option<watch::Receiver<u64>>,
     pushes: Option<tokio::sync::broadcast::Receiver<fauna_protocol::PushEvent>>,
     file_sync: Option<fauna_sync_engine::account_runtime::PeerFileSync>,
+    bound_leg: Option<crate::peer_files::BoundLegRecorder>,
 ) -> AccountRuntimeParams<R> {
     AccountRuntimeParams {
         store_root,
@@ -719,12 +773,21 @@ fn runtime_params<R>(
         peer_transport: Some(std::sync::Arc::new(
             move |inputs: fauna_sync_engine::account_runtime::PeerLegFactoryInputs| {
                 let file_sync = file_sync.clone();
+                let bound_leg = bound_leg.clone();
                 Box::pin(async move {
                     let (transport, bound_addrs) = fauna_iroh::peer_leg_transport(
                         inputs.writer_key.to_bytes(),
                         inputs.relay_url.as_deref(),
                     )
                     .await?;
+                    if let Some(recorder) = &bound_leg {
+                        recorder.record(
+                            &transport,
+                            &bound_addrs,
+                            inputs.writer_key.verifying_key().to_bytes(),
+                            inputs.device_authorization.clone(),
+                        );
+                    }
                     Ok(fauna_sync_engine::account_runtime::PeerLegBinding {
                         transport,
                         bound_addrs,
@@ -737,6 +800,12 @@ fn runtime_params<R>(
         // one — a capability with no device id, a host wiring bug — fails the
         // enrollment pass loudly rather than naming a row no one can address.
         enrollment_target_device_id: inputs.sync_device_id.clone(),
+        // The agent is no app and holds no app default: the machine's row is
+        // the app's, born under the app's own label when the app's runtime or
+        // provisioner registers it — a register-create from here (a row the
+        // app never made) keeps the placeholder, which the app's labeled
+        // register supersedes (`devices.md` § Device names, rule (a)).
+        enrollment_device_label: None,
     }
 }
 
@@ -948,6 +1017,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
     }
 
@@ -1035,6 +1105,91 @@ mod tests {
             self.0.gate.notified().await;
             self.0.done.store(true, std::sync::atomic::Ordering::SeqCst);
         }
+    }
+
+    /// A mount holding a real presence lock over a "runtime" whose end the test
+    /// controls: `exited` flipping to `true` is the store thread exiting on its
+    /// own (`AccountStoreHandle::closed` resolving). Teardown drops presence, as
+    /// [`Mounted`]'s does.
+    struct DyingMount {
+        presence: Option<AgentPresenceLock>,
+        exited: watch::Receiver<bool>,
+    }
+
+    impl StintMount for DyingMount {
+        async fn closed(&self) {
+            let mut exited = self.exited.clone();
+            let _ = exited.wait_for(|e| *e).await;
+        }
+
+        async fn tear_down(self) {
+            drop(self.presence);
+        }
+    }
+
+    /// ⚠ **Presence follows the runtime's life**. A
+    /// runtime whose store thread exits on its own (a failed reassembly) has
+    /// released `engine.lock`; the stint must release `agent.lock` with it, so
+    /// an app beside it reads the agent absent and takes the role — not keep
+    /// telling every app the agent hosts a store nothing pumps. The stint ends
+    /// as an `Err`, so `run` re-mounts on its backoff.
+    ///
+    /// Red without the hold's `closed()` arm: the stint only re-reads an
+    /// unchanged capability on its tick and never ends.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_runtime_that_dies_under_the_stint_releases_the_presence_lock() {
+        use fauna_account_store::locks::AgentPresence;
+        let state = provisioned_state();
+        *state.capability.write().await = Some(account_capability());
+        let tmp = tempfile::tempdir().unwrap();
+        let store_dir = tmp.path().join("store");
+        let presence = match AgentPresenceLock::acquire(&store_dir) {
+            AgentPresenceLockOutcome::Held(lock) => lock,
+            other => panic!("the agent's lock: {other:?}"),
+        };
+        let (exit_tx, exit_rx) = watch::channel(false);
+        let (assembled_tx, assembled_rx) = tokio::sync::oneshot::channel();
+        let stint = {
+            let state = Arc::clone(&state);
+            tokio::spawn(async move {
+                let (_shutdown_tx, mut shutdown_rx) = watch::channel(false);
+                let inputs = host_inputs(&state).await.expect("a provisioned account");
+                hold_stint(&state, &inputs, &mut shutdown_rx, || async move {
+                    let _ = assembled_tx.send(());
+                    Ok(DyingMount {
+                        presence: Some(presence),
+                        exited: exit_rx,
+                    })
+                })
+                .await
+            })
+        };
+        assembled_rx.await.expect("the stint mounted");
+        assert!(
+            matches!(
+                AgentPresenceLock::is_present(&store_dir),
+                AgentPresence::Present
+            ),
+            "while the runtime runs, an app reads the agent present"
+        );
+
+        exit_tx.send(true).unwrap();
+        let ended = tokio::time::timeout(Duration::from_secs(30), stint)
+            .await
+            .expect("the stint must end when its runtime dies")
+            .expect("stint task");
+        assert!(
+            ended.is_err(),
+            "a runtime's own end is the stint's error, so the re-mount backs off"
+        );
+        assert!(
+            matches!(
+                AgentPresenceLock::is_present(&store_dir),
+                AgentPresence::Absent
+            ),
+            "the dead runtime's presence is released: an app reads the agent absent"
+        );
+        assert_eq!(*state.hosted_account.borrow(), None, "the slot is cleared");
     }
 
     fn provisioned_state() -> Arc<SyncServiceState> {

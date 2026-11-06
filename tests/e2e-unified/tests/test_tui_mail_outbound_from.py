@@ -36,7 +36,7 @@ import time
 
 import pytest
 
-from helpers.e2e_session import E2E_LOGIN_DEVICE_ID
+from helpers.e2e_session import e2e_login_device_id
 from helpers.mail_wire import header_value
 from helpers.mail_aliases import add_exact_alias
 
@@ -79,7 +79,7 @@ def test_tui_outbound_from_is_handle_at_handle_domain(
             "secret_hex": admin_secret_hex,
             "handle": HANDLE_LOCAL,
             "actor_id": admin_actor_id.hex(),
-            "device_id": E2E_LOGIN_DEVICE_ID,
+            "device_id": e2e_login_device_id(app),
         },
         "nav": {"stack": [{"view": "conversations"}]},
     })

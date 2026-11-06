@@ -22,11 +22,15 @@ import SwiftUI
 public struct PostUnlockOfferTeaser: View {
     public let postId: String
     public let offer: UnlockOfferView?
+    /// `PostSummary.unlockPurchasePending` already narrowed by the caller to a
+    /// post that is not open (`!gatedUnlocked`).
+    public let purchasePending: Bool
     public let vm: FeedVM
 
-    public init(postId: String, offer: UnlockOfferView?, vm: FeedVM) {
+    public init(postId: String, offer: UnlockOfferView?, purchasePending: Bool = false, vm: FeedVM) {
         self.postId = postId
         self.offer = offer
+        self.purchasePending = purchasePending
         self.vm = vm
     }
 
@@ -53,6 +57,16 @@ public struct PostUnlockOfferTeaser: View {
                 .accessibilityIdentifier(Ids.gatedPostBuyButton)
                 .automationActivate(Ids.gatedPostBuyButton) { Task { await buy() } }
                 .faunaGate("fauna.subscriptions.subscribe")
+        } else if purchasePending {
+            // Bought, the author's grant still on its way (`monetization.md` §
+            // Per-post pay-to-unlock → *a completed buy must not be re-offered*):
+            // the shared marker the buy sets and every later declined resolve
+            // re-sets. Never set while the offer is (the buy clears it in the same
+            // write), so it takes the buy button's place — linux `post_list.rs`'s
+            // `gated-post-purchase-pending` label, same condition.
+            automationText(Ids.gatedPostPurchasePending, L.feed.post.purchasePending)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
         }
         #else
         EmptyView()

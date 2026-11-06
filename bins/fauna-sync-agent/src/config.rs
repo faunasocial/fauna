@@ -276,8 +276,10 @@ impl SyncPaths {
     /// An explicit `--data-dir` root (tests, e2e): everything — the trust store
     /// included — lives inside it. A test launch must never read or write the
     /// box's real install-scoped state (testing.md § conventions point 10).
+    /// The trust dir is the spawner's derivation, the one the app keeps its
+    /// read replica in (`agent_spawner::agent_trust_dir`).
     pub fn at(root: PathBuf) -> Self {
-        let trust_dir = root.join("trust");
+        let trust_dir = fauna_client_sync::agent_spawner::agent_trust_dir(&root);
         Self::with(root, trust_dir)
     }
 

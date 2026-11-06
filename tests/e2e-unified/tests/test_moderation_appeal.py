@@ -45,7 +45,6 @@ import uuid
 
 import pytest
 
-from helpers.app_surface import app_name, skip_unbuilt
 from i18n.strings import S
 
 pytestmark = [
@@ -58,8 +57,6 @@ pytestmark = [
     pytest.mark.macos,
     pytest.mark.ios,
 ]
-
-_BUILT_APPS = ("tui", "web", "linux", "android", "windows", "macos", "ios")
 
 # The console's + the queue's own wording (i18n, en.yaml) — the shared verdicts
 # every app renders (`fauna_client_moderation::{takedown,appeal}`).
@@ -90,17 +87,6 @@ def _poll(check, budget_s, tag):
             return
         time.sleep(0.25)
     raise AssertionError(f"{tag}: not reached within {budget_s}s")
-
-
-def _require_built(app):
-    if app_name(app.driver) not in _BUILT_APPS:
-        skip_unbuilt(
-            app.driver,
-            surface="appeal-button",
-            detail="the appeal affordance (moderation.md § Legal takedown — "
-            "the transparency triple's second leg) is built on tui first",
-            tracked="",
-        )
 
 
 def _take_down_own_post(app, *, expect_appeal: bool = True):
@@ -181,7 +167,6 @@ def test_the_author_appeals_a_takedown_through_the_app(admin_app):
     """takedown → the queue's appeal handle → guard → reason → recorded → the
     row survives, still appealable."""
     app = admin_app
-    _require_built(app)
     rows = _take_down_own_post(app) + 1
 
     # --- The guard, rendered: an appeal with no reason is not merely refused
@@ -247,7 +232,7 @@ def test_a_queue_row_shows_its_category_confidence_and_action(admin_app):
     """A nest-issued row shows what it was flagged as, how confident the flag
     is, and the action taken (moderation.md § Layout & flow — badge +
     confidence + the optional enforcement-action label). No appeal affordance
-    is read, so the appeal gate (`_require_built`) does not apply here."""
+    is read."""
     app = admin_app
     _take_down_own_post(app, expect_appeal=False)
 

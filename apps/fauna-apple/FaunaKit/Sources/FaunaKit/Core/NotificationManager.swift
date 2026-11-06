@@ -83,7 +83,7 @@ public class NotificationManager {
 
     /// Raise the OS toast for an inbound knock (contact request) — apple's
     /// twin of android's `NotificationHelper.postKnockNotification` and
-    /// linux's `notify_knock` (windows' own leg is row 876, not yet built).
+    /// linux's `notify_knock` and windows' `KnockToastBuilder`.
     /// What it says is the shared decision `knockTextFor`
     /// (`behavior/notifications.md` § The knock toast) resolved through
     /// ``knockToastBody(for:)``: the knock row's own sentence when the push
@@ -93,18 +93,27 @@ public class NotificationManager {
     /// caller.
     public func postKnockNotification(_ knock: FfiKnock) {
         guard notificationsAvailable else { return }
+        UNUserNotificationCenter.current().add(Self.knockRequest(for: knock))
+    }
+
+    /// Every knock toast is posted under this one identifier, never one per
+    /// sender (`behavior/notifications.md` § Localized body → the knock toast):
+    /// a flood of fresh keys replaces one toast instead of stacking. The sender
+    /// rides in `userInfo[knockSenderIdKey]`, which the tap hand-off reads.
+    static let knockRequestIdentifier = "knock"
+
+    /// The request build, pulled out of ``postKnockNotification(_:)`` so a test
+    /// can pin the identifier without a `UNUserNotificationCenter`.
+    static func knockRequest(for knock: FfiKnock) -> UNNotificationRequest {
         let content = UNMutableNotificationContent()
         content.title = L.lookup("notifications.knock_title")
         content.body = knockToastBody(for: knock)
         content.sound = .default
-        content.categoryIdentifier = Self.knockCategoryIdentifier
-        content.userInfo = [Self.knockSenderIdKey: knock.senderId]
-
-        let request = UNNotificationRequest(
-            identifier: "knock-\(knock.senderId)",
-            content: content, trigger: nil
+        content.categoryIdentifier = knockCategoryIdentifier
+        content.userInfo = [knockSenderIdKey: knock.senderId]
+        return UNNotificationRequest(
+            identifier: knockRequestIdentifier, content: content, trigger: nil
         )
-        UNUserNotificationCenter.current().add(request)
     }
 
     public func updateBadgeCount(_ count: Int) {

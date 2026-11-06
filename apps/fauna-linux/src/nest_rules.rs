@@ -28,9 +28,13 @@ use std::cell::RefCell;
 use std::path::PathBuf;
 
 use adw::prelude::*;
-use fauna_client_policy::{NestRulesBook, NestRulesRead, SignedNestRules, StoredNestRules};
+pub use fauna_client_policy::NestPlaceholder;
+use fauna_client_policy::{
+    NestRuleLine, NestRulesBook, NestRulesRead, NestRulesSummary, SignedNestRules, StoredNestRules,
+    nest_placeholder,
+};
 use fauna_core::content_category::ContentLabelEntry;
-use fauna_core::obligation::{ComposedVerdict, RenderVerdict};
+use fauna_core::obligation::ComposedVerdict;
 use fauna_core::scoring::LabelerPostInput;
 use fauna_protocol::discovery::NestInfoReply;
 use fauna_ui_ids as ids;
@@ -190,29 +194,10 @@ pub fn join_labels<'a>(
     })
 }
 
-/// The nest placeholder a composed verdict paints, when a nest rule drove it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NestPlaceholder {
-    pub verdict: RenderVerdict,
-    pub domain: String,
-    /// The admin's reason, verbatim, in the app's language where written.
-    pub reason: String,
-}
-
-impl NestPlaceholder {
-    pub fn is_block(&self) -> bool {
-        self.verdict == RenderVerdict::Block
-    }
-}
-
-/// The placeholder a composed verdict paints, when the nest drove it.
+/// The placeholder a composed verdict paints, when the nest drove it
+/// (`fauna_client_policy::nest_placeholder`, in the app's language).
 pub fn nest_verdict(verdict: &ComposedVerdict) -> Option<NestPlaceholder> {
-    let source = verdict.nest()?;
-    Some(NestPlaceholder {
-        verdict: verdict.verdict,
-        domain: source.domain.clone(),
-        reason: fauna_core::content_policy::reason_text(&source.reason, UI_LANG).to_string(),
-    })
+    nest_placeholder(verdict, UI_LANG)
 }
 
 /// Whether a nest rule BLOCKS an item — the verdict half of the
@@ -310,10 +295,12 @@ impl Withheld {
         }
     }
 
-    /// The placeholder widget, painted in place of the item.
-    pub fn placeholder_box(&self, on_reveal: impl Fn() + 'static) -> gtk::Box {
+    /// The placeholder widget, painted in place of the item. `sealed_note` is
+    /// the shared decision (`crate::content_policy::region_sealed_note`); only
+    /// a region's frame carries the sentence.
+    pub fn placeholder_box(&self, sealed_note: bool, on_reveal: impl Fn() + 'static) -> gtk::Box {
         match self {
-            Self::Region(p) => crate::region::placeholder_box(p, on_reveal),
+            Self::Region(p) => crate::region::placeholder_box(p, sealed_note, on_reveal),
             Self::Nest(p) => placeholder_box(p, on_reveal),
         }
     }
@@ -397,8 +384,8 @@ pub fn bind_settings(rows: &gtk::Box) {
 }
 
 /// Repaint the Settings rules surface (`settings-nest-rules-*`) into `rows` —
-/// a paint of the shared `NestRulesSummary`; empty while the session nest has
-/// published no rules.
+/// a paint of the shared `NestRulesSummary`; empty while it is not shown
+/// (`NestRulesSummary::is_shown`: no rule listed and the document applies).
 pub fn paint_settings(rows: &gtk::Box) {
     while let Some(child) = rows.first_child() {
         rows.remove(&child);
@@ -410,18 +397,8 @@ pub fn paint_settings(rows: &gtk::Box) {
             .and_then(|id| s.book.get(id))
             .map(|accepted| accepted.summary(UI_LANG))
     });
-    let Some(summary) = summary.filter(|s| !s.rules.is_empty()) else {
+    let Some(summary) = summary.filter(NestRulesSummary::is_shown) else {
         return;
-    };
-    let resolve =
-        |text: &fauna_core::localized::LocalizedText| text.resolve(crate::i18n::strings::lookup);
-    let line = |id: &str, text: &str| {
-        let label = gtk::Label::new(Some(text));
-        label.set_halign(gtk::Align::Start);
-        label.set_wrap(true);
-        label.set_xalign(0.0);
-        crate::testid::set_test_id(&label, id);
-        label
     };
     let section = gtk::Box::new(gtk::Orientation::Vertical, 4);
     section.set_margin_top(12);
@@ -437,14 +414,12 @@ pub fn paint_settings(rows: &gtk::Box) {
             &fauna_core::format::format_unix_local(summary.issued_at),
         ),
     ));
+    // The whole document's note, unscoped — a rule's own sits in its item.
+    if let Some(why) = &summary.not_applied_sentence {
+        section.append(&line(ids::SETTINGS_NEST_RULES_INERT_NOTICE, &resolve(why)));
+    }
     for rule in &summary.rules {
-        let verdict = resolve(&rule.verdict);
-        let text = match &rule.level {
-            Some(level) => t::rule_line(&verdict, &resolve(level), &rule.reason),
-            None => t::rule_line_no_level(&verdict, &rule.reason),
-        };
-        let item = line(ids::SETTINGS_NEST_RULES_ITEM, &text);
-        section.append(&item);
+        section.append(&line(ids::SETTINGS_NEST_RULES_ITEM, &rule_line(rule)));
         if let Some(inert) = &rule.inert {
             section.append(&line(
                 ids::SETTINGS_NEST_RULES_INERT_NOTICE,
@@ -453,6 +428,58 @@ pub fn paint_settings(rows: &gtk::Box) {
         }
     }
     rows.append(&section);
+}
+
+// ── the joining surface ─────────────────────────────────────────────────────
+
+/// The joining surface (`onboarding-nest-rules`, `nest-rules.md`
+/// § Acceptance at joining) painted into `rows`, emptied first — a paint of
+/// the summary the wizard machine read before sign-in
+/// (`OnboardingMachine::joining_nest_rules`, which already decided whether this
+/// page shows it; `None` paints nothing): the heading naming the nest, the
+/// not-applied sentence after it when none of the document applies here, then
+/// one `onboarding-nest-rules-item` per rule. Sits directly above the terms
+/// notice. tui `nest_rules::joining_elements`.
+pub fn paint_joining(rows: &gtk::Box, summary: Option<&NestRulesSummary>) {
+    while let Some(child) = rows.first_child() {
+        rows.remove(&child);
+    }
+    rows.set_visible(summary.is_some());
+    let Some(summary) = summary else {
+        return;
+    };
+    let heading = t::joining_heading(&summary.domain);
+    let text = match &summary.not_applied_sentence {
+        Some(why) => format!("{heading} {}", resolve(why)),
+        None => heading,
+    };
+    rows.append(&line(ids::ONBOARDING_NEST_RULES, &text));
+    for rule in &summary.rules {
+        rows.append(&line(ids::ONBOARDING_NEST_RULES_ITEM, &rule_line(rule)));
+    }
+}
+
+fn resolve(text: &fauna_core::localized::LocalizedText) -> String {
+    text.resolve(crate::i18n::strings::lookup)
+}
+
+fn line(id: &str, text: &str) -> gtk::Label {
+    let label = gtk::Label::new(Some(text));
+    label.set_halign(gtk::Align::Start);
+    label.set_wrap(true);
+    label.set_xalign(0.0);
+    crate::testid::set_test_id(&label, id);
+    label
+}
+
+/// One rule as both rules surfaces list it: verdict, level where the rule has
+/// one, and the nest's own reason verbatim.
+fn rule_line(rule: &NestRuleLine) -> String {
+    let verdict = resolve(&rule.verdict);
+    match &rule.level {
+        Some(level) => t::rule_line(&verdict, &resolve(level), &rule.reason),
+        None => t::rule_line_no_level(&verdict, &rule.reason),
+    }
 }
 
 #[cfg(test)]
@@ -540,7 +567,9 @@ mod tests {
         assert!(is_nest_blocked(&composed));
         let withheld = Withheld::from_verdict(&composed).expect("the nest drove it");
         assert!(withheld.is_block());
-        let placeholder = withheld.placeholder_box(|| {}).upcast::<gtk::Widget>();
+        let placeholder = withheld
+            .placeholder_box(false, || {})
+            .upcast::<gtk::Widget>();
         assert_eq!(
             text(&find(&placeholder, ids::NEST_BLOCKED_NOTICE)[0]),
             t::blocked_notice(DOMAIN)
@@ -562,7 +591,9 @@ mod tests {
         assert_eq!(changed_notice(), Some(t::changed_notice(DOMAIN)));
         let collapsed = Withheld::from_verdict(&verdict("a lottery ticket")).unwrap();
         assert!(!collapsed.is_block());
-        let placeholder = collapsed.placeholder_box(|| {}).upcast::<gtk::Widget>();
+        let placeholder = collapsed
+            .placeholder_box(false, || {})
+            .upcast::<gtk::Widget>();
         assert_eq!(
             find(&placeholder, ids::NEST_COLLAPSED_REVEAL_BUTTON).len(),
             1
@@ -580,5 +611,55 @@ mod tests {
         clear_session();
         assert!(nest_verdict(&verdict("zzcasino")).is_none());
         assert_eq!(changed_notice(), None);
+    }
+
+    /// A newer grammar's document decodes to no rules here, and joining still
+    /// accepts it: both rules surfaces paint the not-applied sentence with no
+    /// rule listed — the settings one unscoped after the version, the joining
+    /// one after the heading (`nest-rules.md` § Acceptance at joining).
+    #[test]
+    fn a_newer_version_paints_its_sentence_on_both_rules_surfaces() {
+        crate::testid::run_on_gtk_thread(newer_version_body);
+    }
+
+    fn newer_version_body() {
+        STATE.with(|s| *s.borrow_mut() = State::default());
+        let mut newer = ContentPolicyDocument::empty();
+        newer.version += 1;
+        apply_info(&nest_info(&newer, 1));
+        let sentence = crate::i18n::strings::nest_rules::NOT_APPLIED_NEWER_VERSION;
+
+        let rows = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        paint_settings(&rows);
+        let rows = rows.upcast::<gtk::Widget>();
+        assert_eq!(find(&rows, ids::SETTINGS_NEST_RULES_SECTION).len(), 1);
+        assert_eq!(find(&rows, ids::SETTINGS_NEST_RULES_ITEM).len(), 0);
+        let notes = find(&rows, ids::SETTINGS_NEST_RULES_INERT_NOTICE);
+        assert_eq!(notes.len(), 1);
+        assert_eq!(text(&notes[0]), sentence);
+
+        let summary = STATE.with(|s| {
+            let s = s.borrow();
+            s.book
+                .get(s.nest_id.as_deref().unwrap())
+                .unwrap()
+                .summary(UI_LANG)
+        });
+        let joining = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        paint_joining(&joining, Some(&summary));
+        assert!(joining.is_visible());
+        let joining = joining.upcast::<gtk::Widget>();
+        let heading = text(&find(&joining, ids::ONBOARDING_NEST_RULES)[0]);
+        assert_eq!(
+            heading,
+            format!("{} {sentence}", t::joining_heading(DOMAIN))
+        );
+        assert!(find(&joining, ids::ONBOARDING_NEST_RULES_ITEM).is_empty());
+
+        let empty = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        paint_joining(&empty, None);
+        assert!(!empty.is_visible());
+        assert!(empty.first_child().is_none());
+        clear_session();
     }
 }

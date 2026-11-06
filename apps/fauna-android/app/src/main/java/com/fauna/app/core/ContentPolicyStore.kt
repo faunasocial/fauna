@@ -4,6 +4,7 @@ import com.fauna.ffi.FfiContentPolicy
 import com.fauna.ffi.FfiSupervisionSnapshot
 import com.fauna.ffi.contentRenderForItem
 import com.fauna.ffi.contentRenderVerdict
+import com.fauna.ffi.guardianEnforcedCategories
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -22,7 +23,7 @@ import javax.inject.Singleton
  * `crate::content_policy` module and web's `contentPolicy.svelte.ts`
  * (priority #2/#3, one concept everywhere):
  *
- * 1. the guardian's per-category floor (the `content_policy` of a
+ * 1. the guardian's rule document (the `content_policy` of a
  *    `fauna.family.status` reply's gated `supervision` fold; `null` unless
  *    supervised),
  * 2. the viewer's OWN spam/phishing per-mille thresholds
@@ -54,7 +55,7 @@ import javax.inject.Singleton
  * § Content policy, the unfetched-policy ruling clause 1): "read failed" and
  * "read says unsupervised" are different facts, and refresh fires exactly when
  * a read is least likely to succeed (construction, WS reconnect) — so a
- * transient outage must never clear a loaded guardian floor. Only a
+ * transient outage must never clear a loaded guardian policy. Only a
  * *successful* status read (which may report unsupervised) or the identity
  * change below moves the guardian half. The own-thresholds half gets the same
  * keep for uniformity, though its failure direction is benign either way.
@@ -62,7 +63,7 @@ import javax.inject.Singleton
  * Keep-on-failure makes the identity reset load-bearing (the trap web's
  * `contentPolicy.svelte.ts` documents): without it a failed re-read after an
  * account switch would render the NEXT account against the previous ward's
- * floor. The closer registration lives here, next to the state, per
+ * rules. The closer registration lives here, next to the state, per
  * account-scoping.md § The scoping taxonomy.
  */
 @Singleton
@@ -127,14 +128,14 @@ class ContentPolicyStore @Inject constructor(
         // Seed the guardian half from the persisted last-known supervision
         // snapshot BEFORE the first read fires (family-safety.md § Content
         // policy, clause 2 — "loaded at launch ahead of the first read"): a
-        // supervised ward who launches offline keeps their floor instead of
+        // supervised ward who launches offline keeps their guardian rules instead of
         // rendering unsupervised until a read succeeds. Only the guardian
         // half — the viewer's own thresholds are deliberately not in the
         // snapshot (their absence only under-enforces the viewer's own
         // collapse; they re-arrive with their own read). Synchronous, so
         // refresh()'s coroutine can never lose a race against it; a later
         // successful read supersedes it and the identity closer above drops
-        // it exactly like any loaded floor. The restore is the same
+        // it exactly like any loaded policy. The restore is the same
         // `FfiSupervisionSnapshot` shape a live read's fold carries, so it
         // enters through the same door.
         accountStores.supervisionSnapshot()?.let { applySupervision(it) }
@@ -146,7 +147,7 @@ class ContentPolicyStore @Inject constructor(
     /**
      * Move the guardian half from a **successful** `fauna.family.status` read
      * made elsewhere — [com.fauna.app.ui.viewmodel.FamilyVM]'s page read, the
-     * freshest view of the ward's own policy (web's Family page feeds its floor
+     * freshest view of the ward's own policy (web's Family page feeds its guardian half
      * the same way). [supervision] is that reply's gated fold
      * (`FfiFamilyStatus.supervision`): `null` means the read named nothing
      * enforceable, which clears the half. Never call it for a failed read
@@ -158,7 +159,7 @@ class ContentPolicyStore @Inject constructor(
         }
     }
 
-    /** Re-pull the guardian floor + Notify knob + own spam thresholds. The status
+    /** Re-pull the guardian rules + Notify knob + own spam thresholds. The status
      *  read and the preferences read are independent; each keeps its last-known
      *  half on failure (class doc), so an unsupervised viewer (no family status)
      *  still gets the own-threshold half and vice versa. */
@@ -247,12 +248,25 @@ data class ContentPolicyInputs(
     }
 
     /**
+     * Would Guardian Notify count an item with these [labels]: the `content_notify`
+     * knob on AND the guardian rules biting on one of them? The predicate
+     * `FamilyNotifyStore.record` counts by, read here so the sealed-item sentence
+     * (`region.sealed_note`) never says "nothing was reported" of an item Notify
+     * counted. Short-circuits (no FFI call) without the knob or a guardian policy.
+     */
+    fun notifyWouldCount(labels: List<ContentLabelEntry>): Boolean {
+        if (!contentNotify) return false
+        val policy = contentPolicy ?: return false
+        return guardianEnforcedCategories(labels, policy).isNotEmpty()
+    }
+
+    /**
      * The client render verdict for one item's `labels` — one of
      * `"show" | "badge" | "collapse" | "block"`, resolved by the shared
-     * `contentRenderVerdict` (strictest-wins compose of the guardian floor and
+     * `contentRenderVerdict` (strictest-wins compose of the guardian rules and
      * the viewer's own thresholds, all in Rust).
      *
-     * When there is neither a guardian floor nor an own threshold, no rule can
+     * When there is neither a guardian policy nor an own threshold, no rule can
      * fire, so the verdict is at most `"badge"` — and `"badge"`/`"show"` are
      * identical to the render gate (both render normally). This short-circuits to
      * `"show"` without the shared-Rust call, which keeps a default-constructed

@@ -4,6 +4,12 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+# Forwards `fauna-payments/test-helpers` (the `fake` provider in a release
+# build's `known_kinds`), for an app's e2e feature to forward in turn
+# (`e2e-automation-surface-gating.md` rule (b)). Never default.
+test-helpers = ["fauna-payments/test-helpers"]
+
 [dependencies]
 # fauna-protocol carries the typed `fauna.payments.*` wire types + the
 # `RpcRequester` seam this crate is generic over. `default-features = false`

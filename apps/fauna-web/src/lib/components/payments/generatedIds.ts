@@ -13,6 +13,7 @@ export const PAYMENTS_IDS = {
   GATED_POST_BUY_BUTTON: 'gated-post-buy-button',
   GATED_POST_PAYMENT_LINK: 'gated-post-payment-link',
   GATED_POST_PRICE: 'gated-post-price',
+  GATED_POST_PURCHASE_PENDING: 'gated-post-purchase-pending',
   POST_TIP_COUNT: 'post-tip-count',
   POST_TIP_ITEM: 'post-tip-item',
   POST_TIP_LIST: 'post-tip-list',

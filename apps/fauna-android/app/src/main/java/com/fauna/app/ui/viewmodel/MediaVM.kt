@@ -149,6 +149,11 @@ class MediaVM @Inject constructor(
         machine?.setSort(key)
     }
 
+    /** Set the `media-sort-direction` (`true` = descending). */
+    fun setDescending(descending: Boolean) {
+        machine?.setDescending(descending)
+    }
+
     /** Set the `media-folder-filter`: a set name, or null for the all-media default. */
     fun setFilter(folder: String?) {
         machine?.setFilter(folder)
@@ -218,8 +223,19 @@ class MediaVM @Inject constructor(
      */
     suspend fun loadVersions(folder: String, path: String, includePruned: Boolean = false): List<FileVersionSummary> {
         val m = machine ?: return emptyList()
-        return runCatching { m.fileVersions(folder, path, includePruned) }.getOrElse { emptyList() }
+        val versions = runCatching { m.fileVersions(folder, path, includePruned) }.getOrElse { emptyList() }
+        // A version a connected app deposited names its depositor: read the
+        // connected-apps roster first when it cannot name one yet, so the rows
+        // paint "<app> via <owner>" (`folder-deposit.md` ruling 3). A failed
+        // read leaves the generic depositor wording.
+        runCatching { api.readDepositorRoster(versions.mapNotNull { it.depositedBy }) }
+        return versions
     }
+
+    /** A version row's author line, composed by the shared connected-apps
+     *  machine (`folder-deposit.md` ruling 3); `null` without a connection. */
+    fun versionAuthor(version: FileVersionSummary): uniffi.fauna_core.LocalizedText? =
+        runCatching { api.versionAuthor(version.authorDisplay, version.depositedBy) }.getOrNull()
 
     /**
      * `file-version-undelete-button` — restore a soft-pruned version to the

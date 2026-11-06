@@ -61,25 +61,20 @@ from helpers.waiting import wait_until
 
 pytestmark = [
     pytest.mark.tier_3,
-    # tui leads (`p2p.md` § Implementation status today); windows and linux
-    # run their native pairs. macOS joins as its native leg lands — an owed
-    # leg is filed in `OWED_SEATS` below, never skipped.
+    # tui leads (`p2p.md` § Implementation status today); windows, linux and
+    # macos run their native pairs. A leg owed on some platform is filed in
+    # `OWED_SEATS` below, never skipped.
     pytest.mark.tui,
     pytest.mark.windows,
     pytest.mark.linux,
+    pytest.mark.macos,
 ]
 
-# This journey's own owed legs, in `sync_seats.UNBUILT_MODES`' shape. The native
-# seats themselves are built on both platforms (they sync in the seat module);
-# what is owed is THIS journey's reading of their agent and their keep-state
-# stop on that app. A landed leg deletes
-# its entry here.
-OWED_SEATS = {
-    "darwin": {
-        "native": "the macOS app's leg of the device-to-device transfer — its "
-                  "agent's peer reading and its keep-state stop are unproven",
-    },
-}
+# This journey's own owed legs, in `sync_seats.UNBUILT_MODES`' shape: a native
+# seat built in the seat module whose agent reading or keep-state stop THIS
+# journey has not proven. Every platform's leg has landed; an owed one files its
+# entry here, and a landed one deletes it.
+OWED_SEATS: dict = {}
 
 
 def seat_pairs(sys_platform: str) -> tuple:
@@ -133,6 +128,11 @@ def _seat_factory(nest_instance, request, account, folder, tmp, run_token, seat_
     if note:
         print(note, flush=True)
 
+    # A web seat's browser reaches the nest only through the SPA proxy.
+    spa_url = (
+        request.getfixturevalue("spa_url") if sync_seats.WEB_MODE in seat_pair else None
+    )
+
     def seat(seat_name: str):
         return sync_seats.make_seat(
             modes[seat_name],
@@ -142,7 +142,7 @@ def _seat_factory(nest_instance, request, account, folder, tmp, run_token, seat_
             node_url=url,
             node_port=port,
             folder=folder,
-            sign_in=harness_sign_in(url, secret_key, actor_id, handle),
+            sign_in=harness_sign_in(url, secret_key, actor_id, handle, spa_url=spa_url),
             request=request,
         )
 
@@ -316,6 +316,108 @@ def test_a_file_still_arrives_through_the_nest_when_the_direct_path_is_gone(
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+# More distinct bodies than the file has chunks, so every body seat a would
+# serve for it is forged — none of the file can arrive straight from a.
+FORGED_BODIES = 64
+
+
+@pytest.mark.timeout(int(2 * STARTUP_WINDOW + SIBLING_WINDOW + WINDOW + 120))
+@pytest.mark.parametrize("seat_pair", _SEAT_PAIRS)
+@pytest.mark.feature("device-to-device-file-transfer")
+def test_a_tampered_piece_from_your_other_device_is_refused(
+    nest_instance, request, seat_pair
+):
+    """Outcome 6 (``p2p.md`` § Wormability posture, rule 4: a poisoned chunk
+    fails its hash check and is refused). Two seats of one account hold a
+    direct path; seat ``a``'s agent is made to serve a forged copy of every
+    chunk body (the test-only ``ArmPeerServeFault``, one byte flipped in each).
+    ``a`` writes a file into a folder whose bytes the nest holds. Seat ``b``
+    asks ``a`` first, refuses what it served, and the file lands byte for byte
+    from the nest — no forged byte was ever written on ``b``."""
+    account = _account(nest_instance)
+    port, url, secret_key = account[0], account[1], account[2]
+    folder = f"tamper-{secrets.token_hex(4)}"
+    # The default residency (full): the nest holds the true bytes, so a
+    # refused sibling leaves the file to the nest rather than to nobody.
+    user_create_folder(port, folder, secret_key=secret_key, base_url=url)
+
+    run_token = sync_seats.new_run_token(seats=2)
+    name = f"{run_token}-tampered.bin"
+    body = secrets.token_bytes(BODY_BYTES)
+    tmp = Path(tempfile.mkdtemp(prefix=f"fauna-{folder}-"))
+    seat = _seat_factory(nest_instance, request, account, folder, tmp, run_token, seat_pair)
+
+    try:
+        with contextlib.ExitStack() as stack:
+            a = stack.enter_context(seat("a"))
+            b = stack.enter_context(seat("b"))
+            a.await_ready(STARTUP_WINDOW)
+            b.await_ready(STARTUP_WINDOW)
+            # The direct path exists, so b asks a before the nest.
+            _await_siblings(b, a, "before the tamper")
+            a.agent_client(timeout=60.0).arm_peer_serve_fault(FORGED_BODIES)
+            before = _reading(b)
+
+            # Every sight of the file on b before it is whole — a full-length
+            # copy holding other bytes is a forgery that got written.
+            target = b.path / name
+            wrong: list[int] = []
+
+            def landed() -> bool:
+                try:
+                    seen = target.read_bytes()
+                except OSError:
+                    return False
+                if len(seen) == len(body) and seen != body:
+                    wrong.append(sum(x != y for x, y in zip(seen, body)))
+                return seen == body
+
+            (a.path / name).write_bytes(body)
+            wait_until(
+                landed, WINDOW, interval=0.5,
+                diagnose=lambda: (
+                    f"the tampered transfer: {name!r} never reached seat b byte for "
+                    f"byte (its plane reading {b.peer_files()!r}) — refusing a's "
+                    f"forged pieces must leave the file to the nest, not lose it\n"
+                    f"--- seat b ---\n{b.diagnostics()}\n--- seat a ---\n{a.diagnostics()}"
+                ),
+            )
+            assert not wrong, (
+                f"seat b wrote a full-length copy of {name!r} holding other bytes "
+                f"before the true one ({wrong!r} byte(s) differing) — a forged piece "
+                f"from seat a was written, not refused\n--- seat b ---\n{b.diagnostics()}"
+            )
+
+            after = _reading(b)
+            refused = after.get("refused", 0) - before.get("refused", 0)
+            served = after.get("chunks", 0) - before.get("chunks", 0)
+            left = after.get("to_nest", 0) - before.get("to_nest", 0)
+            assert refused >= 1, (
+                f"{name!r} reached seat b, but its agent refused nothing from seat a: "
+                f"its sibling reading went {before!r} -> {after!r}. Seat a served only "
+                f"forged pieces, so b either never asked a (the direct path was not "
+                f"taken) or took a forgery without checking it\n"
+                f"--- seat b ---\n{b.diagnostics()}\n--- seat a ---\n{a.diagnostics()}"
+            )
+            assert served == 0 and left >= 1, (
+                f"seat b refused {refused} forged piece(s), but its reading went "
+                f"{before!r} -> {after!r} ({served} chunk(s) kept from a sibling, "
+                f"{left} left to the nest): every piece a served was forged, so none "
+                f"may be kept and the file must have come from the nest\n"
+                f"--- seat b ---\n{b.diagnostics()}"
+            )
+            stray = sorted(
+                p.name for p in b.path.iterdir()
+                if p.name.startswith(run_token) and p.name != name
+            )
+            assert not stray, (
+                f"seat b holds {stray!r} beside {name!r} — a refused transfer left "
+                f"a copy behind\n{b.diagnostics()}"
+            )
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def _sequenced_rows(nest_instance, secret_key: str, folder: str, name: str) -> list:
     """The nest's sequenced change rows for ``name`` in ``folder``, matched by
     the row's only label, its convergent ``path_sealed``."""
@@ -432,7 +534,9 @@ def test_two_devices_keep_passing_a_file_while_the_nest_is_down(
             )
             assert rows[0].get("device_id") != marker_device, (
                 f"the nest's one row for {name!r} is attributed to seat b, which "
-                f"only ever held it provisionally: {rows[0]!r}"
+                f"only ever held it provisionally: {_row_summary(rows)} (seat b's "
+                f"device is {marker_device})\n--- seat a ---\n{a.diagnostics()}\n"
+                f"--- seat b ---\n{b.diagnostics()}"
             )
             # Behind the barrier b is reconnected and has run a sync pass since
             # the return: a reconcile that dropped or forked its copy shows here.

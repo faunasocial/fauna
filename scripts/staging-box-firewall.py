@@ -72,13 +72,9 @@ _spec = importlib.util.spec_from_file_location("deploy_verify_cloud_firewall", _
 gate = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(gate)
 
-# The one box whose :22 may answer is the binaries gate's to name; the door
-# rule below is fenced to that host and no other.
-_BINARIES_PATH = Path(__file__).resolve().parent / "deploy-verify-binaries.py"
-_bspec = importlib.util.spec_from_file_location("deploy_verify_binaries", _BINARIES_PATH)
-_binaries = importlib.util.module_from_spec(_bspec)
-_bspec.loader.exec_module(_binaries)
-ADMITTED_22_HOST = _binaries.ADMITTED_22_HOST
+# The one box whose :22 may answer is named by the cloud-firewall gate (which
+# ships, as this file does); the door rule below is fenced to that host and no other.
+ADMITTED_22_HOST = gate.ADMITTED_22_HOST
 
 # The keys a rule may carry on create. Anything else the API returns on a read
 # is dropped rather than echoed back.

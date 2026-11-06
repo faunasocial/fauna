@@ -203,6 +203,24 @@ pub struct FileVersionSummary {
     #[serde(default)]
     #[cfg_attr(feature = "uniffi", uniffi(default = None))]
     pub folder_id: Option<i64>,
+    /// Hex hash of the version's thumbnail — the chunk manifest its row's
+    /// `thumbnail_hash` names, sealed under the version's own root (`media.md`
+    /// § Encryption at rest → *A thumbnail rests as its file rests*). A restore
+    /// carries it into the restore record — verbatim, or re-sealed with the
+    /// version's bytes — so the restored head keeps its tile. `None` when the
+    /// row names none. Carried back verbatim on restore.
+    #[serde(default)]
+    #[cfg_attr(feature = "uniffi", uniffi(default = None))]
+    pub thumbnail_hash: Option<String>,
+    /// Hex writer key of the connected app that deposited this version, when
+    /// the owner's device adopted it from a folder deposit (`folder-deposit.md`
+    /// ruling 3) — signed by the owner's device. The version row's author
+    /// reads it beside [`Self::author_display`] through the connected-apps
+    /// machine's `version_author`: "<app> via <owner>" on the owner's apps,
+    /// "a connected app via <owner>" where no roster names the key.
+    #[serde(default)]
+    #[cfg_attr(feature = "uniffi", uniffi(default = None))]
+    pub deposited_by: Option<String>,
 }
 
 /// The `media-folder-filter` picker's raw value standing for the all-media
@@ -312,6 +330,11 @@ pub struct MediaPageSnapshot {
     /// | `false` | (any) | still loading — no rows, and **no** `media-empty-state` |
     /// | `true` | empty | the genuine empty state — paint `media-empty-state` |
     /// | `true` | non-empty | the `media-item` rows |
+    ///
+    /// A refresh whose read held rows or own sets back for want of custody is
+    /// not yet successful: the page stays unloaded and re-reads until a read
+    /// is complete or the first-load settle's budget is spent
+    /// (`crate::SettlePolicy`).
     ///
     /// **Monotonic**: set on the first successful refresh and never cleared. A
     /// *failed* refresh leaves it as it was — a first-read failure keeps the page

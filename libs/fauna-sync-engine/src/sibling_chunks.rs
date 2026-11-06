@@ -42,6 +42,10 @@ pub struct SiblingTally {
     /// Chunks wanted from a sibling and left to the nest: missing there,
     /// relay-deferred, or lost to a sibling that erred.
     pub to_nest: u64,
+    /// Chunk bodies a sibling served whole that did not hash to their store
+    /// key, refused before anything wrote them (wormability rule 4) — each
+    /// one also drops that sibling, so its chunks count in [`Self::to_nest`].
+    pub refused: u64,
 }
 
 /// See the module docs.
@@ -50,6 +54,7 @@ pub struct SiblingChannels {
     chunks: AtomicU64,
     bytes: AtomicU64,
     to_nest: AtomicU64,
+    refused: AtomicU64,
     /// Bumped on every admission — the engines' "pull this sibling now"
     /// signal. A `watch`, not a `Notify`: every engine of the host holds its
     /// own receiver, and one busy in another arm when the pass admits still
@@ -64,6 +69,7 @@ impl Default for SiblingChannels {
             chunks: AtomicU64::default(),
             bytes: AtomicU64::default(),
             to_nest: AtomicU64::default(),
+            refused: AtomicU64::default(),
             admissions: tokio::sync::watch::channel(0).0,
         }
     }
@@ -148,6 +154,7 @@ impl SiblingChannels {
             chunks: self.chunks.load(Ordering::Relaxed),
             bytes: self.bytes.load(Ordering::Relaxed),
             to_nest: self.to_nest.load(Ordering::Relaxed),
+            refused: self.refused.load(Ordering::Relaxed),
         }
     }
 
@@ -202,6 +209,11 @@ impl SiblingChunkSource for SiblingChannels {
                     got.extend(pull.bodies);
                 }
                 Err(e) => {
+                    if e.downcast_ref::<fauna_peer_sync::ranged::ForgedBody>()
+                        .is_some()
+                    {
+                        self.refused.fetch_add(1, Ordering::Relaxed);
+                    }
                     tracing::debug!(
                         node = %fauna_core::hex32::encode(&node_id),
                         path = %fauna_core::log_redact::log_path(relative_path),

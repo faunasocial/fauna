@@ -24,9 +24,27 @@ itself (both clauses) is pinned at tier_1 in ``fauna_client_core::nest_trust``.
 
 Client arm: **tui leads** (the lead app). The other six apps join by extending
 ``_SUPPORTED_APPS`` as their fork rendering lands (linux and the apple legs ride
-the same launch harness; android renders the fork variant since 2026-10-12 but its
-arm joins ``_SUPPORTED_APPS`` only once run green on the host emulator; web cannot reach the native binding arm in e2e — its
-origin is never TLS, see ``test_nest_rotation_repin.py``).
+the same launch harness; android renders the fork variant since 2026-10-12
+(``LaunchIdentityForkedScreen``: the warning naming both heads plus the fallthrough
+button) and its arm joined with no new harness code, the planted-pin bridge methods
+riding the same ``call_machine_method`` path the pin test uses). windows joined
+2026-11-05 on the launch-harness leg ``test_nest_rotation_repin.py`` already uses:
+``LaunchIdentityChangedPage``'s fork variant, with the two rotation-pin names added
+to the TestAgent's machine-free dispatch so they are served on the signed-in app.
+
+**web joined 2026-10-30 over its own detection point, not the native binding.**
+The docstring here used to say web "cannot reach the native binding arm in e2e
+— its origin is never TLS". True of the native arm, and beside the point: web's
+launch machine runs ``nest_trust::run_pinned_silent_challenge``, which reads the
+login binding (``login.md`` § Binding the nest — a possession proof the box
+serves over plain HTTP too), meets the planted pin as ``Changed``, fetches the
+chain over the same connection through the same ``try_rotation_repin`` and
+reports the same ``fork`` bit. So web rides the plain-HTTP ``rotatable_nest``
+behind its ``rotatable_spa_url`` proxy, keys the pin on that origin (what
+``LocalStoragePinStore`` keys on), and — as ``test_nest_identity_pin.py``'s web
+arm does — plants the pin before reaching the app, because a cached session
+would skip the pinned challenge on the relaunch (``hard_reload``, which keeps
+localStorage).
 
 Latency-independent (convention 14): the one wait beyond the shared launch polls is
 the box's in-process adoption — the sanctioned named-budget deadline poll, copied
@@ -40,12 +58,17 @@ import time
 
 import pytest
 
+from helpers.app_launch import app_launch_config
 from common.launch_harness import make_launch_harness, reached_authenticated_app
 from conftest import _trust_seeder, get_available_apps
 
-pytestmark = [pytest.mark.tier_3, pytest.mark.linux, pytest.mark.tui]
+pytestmark = [
+    pytest.mark.tier_3, pytest.mark.linux, pytest.mark.tui,
+    pytest.mark.macos, pytest.mark.ios, pytest.mark.android, pytest.mark.web,
+    pytest.mark.windows,
+]
 
-_SUPPORTED_APPS = ("tui", "linux")
+_SUPPORTED_APPS = ("tui", "linux", "macos", "ios", "android", "web", "windows")
 
 # Element IDs (tests/e2e-unified/ui.yaml § launch_identity_changed).
 FORK_WARNING = "nest-identity-fork-warning"
@@ -116,24 +139,35 @@ def _bridge_read(driver, name, nest_url):
 
 @pytest.mark.feature("connect-and-sign-in")
 def test_competing_successors_warn_naming_both_heads_with_no_trust(
-    request, fork_client, rotatable_tls_nest, tmp_path
+    request, fork_client, tmp_path
 ):
     """Rotate → plant a competing seq-1 head → relaunch → the fork warning names
     both heads, offers no trust button, and the pin does not move."""
-    nest = rotatable_tls_nest
-    app_path = request.getfixturevalue(f"{fork_client}_app_path")
-    harness = make_launch_harness(
-        fork_client, tmp_path=tmp_path, app_path=app_path, seed_trust=_trust_seeder(request)
-    )
-    try:
-        driver = harness.launch(
-            secret_hex=bytes(nest["user"]["signing_key"]).hex(),
-            node_url=nest["url"],
-            trust=nest,
+    if fork_client == "web":
+        # Plain HTTP behind the SPA proxy: the browser's origin is the proxy,
+        # and that origin is what the pin is keyed on.
+        nest = request.getfixturevalue("rotatable_nest")
+        node_url = request.getfixturevalue("rotatable_spa_url")
+        secret_hex = bytes(nest["admin"]["signing_key"]).hex()
+        harness = make_launch_harness("web", spa_url=node_url)
+        trust = None
+    else:
+        nest = request.getfixturevalue("rotatable_tls_nest")
+        node_url = nest["url"]
+        secret_hex = bytes(nest["user"]["signing_key"]).hex()
+        harness = make_launch_harness(
+            fork_client, tmp_path=tmp_path, **app_launch_config(fork_client, request),
+            seed_trust=_trust_seeder(request),
         )
-        # First contact TOFU-pins the genuine identity; wait for the app so the
-        # async graduation has settled before the store is touched.
-        reached_authenticated_app(driver, timeout=90)
+        trust = nest
+    try:
+        driver = harness.launch(secret_hex=secret_hex, node_url=node_url, trust=trust)
+        if fork_client != "web":
+            # First contact TOFU-pins the genuine identity; wait for the app so
+            # the async graduation has settled before the store is touched. Web
+            # stays on its launch surface instead: a cached session would skip
+            # the pinned challenge on the relaunch (test_nest_identity_pin.py).
+            reached_authenticated_app(driver, timeout=90)
         before_hex = _nest_id_hex(nest["url"])
 
         if not driver.preserve_state_across_relaunch():
@@ -163,10 +197,10 @@ def test_competing_successors_warn_naming_both_heads_with_no_trust(
         competing_hex = secrets.token_bytes(32).hex()
         driver.call_machine_method(
             "set_nest_identity_pin_rotation_accepted_for_test",
-            json.dumps({"nest_url": nest["url"], "actor_id": competing_hex, "seq": 1}),
+            json.dumps({"nest_url": node_url, "actor_id": competing_hex, "seq": 1}),
         )
-        assert _bridge_read(driver, "nest_identity_pin_for_test", nest["url"]) == competing_hex
-        assert _bridge_read(driver, "nest_identity_pin_rotation_seq_for_test", nest["url"]) == 1, (
+        assert _bridge_read(driver, "nest_identity_pin_for_test", node_url) == competing_hex
+        assert _bridge_read(driver, "nest_identity_pin_rotation_seq_for_test", node_url) == 1, (
             "the planted pin must carry the chain-accepted seq — without it neither "
             "fork clause can fire and the relaunch shows the ordinary warning"
         )
@@ -199,8 +233,8 @@ def test_competing_successors_warn_naming_both_heads_with_no_trust(
             "the fallthrough is the one way out of the fork surface"
         )
         # No silent path: the pin still names the accepted head at its seq.
-        assert _bridge_read(driver, "nest_identity_pin_for_test", nest["url"]) == competing_hex
-        assert _bridge_read(driver, "nest_identity_pin_rotation_seq_for_test", nest["url"]) == 1
+        assert _bridge_read(driver, "nest_identity_pin_for_test", node_url) == competing_hex
+        assert _bridge_read(driver, "nest_identity_pin_rotation_seq_for_test", node_url) == 1
     finally:
         with contextlib.suppress(Exception):
             harness.teardown()

@@ -22,50 +22,64 @@ struct MacSnapshotFileListView: View {
         // position, so the indexed `snapshot-file-download-button` per row still
         // `.onAppear`-registers off-screen (apple-e2e-automation.md rule 6: "macOS
         // realizes eagerly and masks it").
-        List(filtered, id: \.path) { file in
-            HStack {
-                Image(systemName: file.fileType == "dir" ? "folder" : "doc")
+        List {
+            // A kind row lists no files, and an empty folder snapshot says so —
+            // never an empty list without a reason (`backups.md` § Snapshot-list
+            // shape → *Kind entries*).
+            if let notice = vm.detailNoticeText {
+                Text(notice)
                     .foregroundStyle(.secondary)
-                VStack(alignment: .leading) {
-                    Text(file.path)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                    Text(ValueFormat.byteSize(UInt64(max(0, file.sizeBytes))))
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                // Without an explicit width, an unconstrained Text's IDEAL size is
-                // its full untruncated content width, so a long path can grow this
-                // VStack (and the row) past the available column width instead of
-                // truncating — parking snapshot-file-download-button off the
-                // visible window edge (geo-parked, HIDDEN despite being genuinely
-                // rendered). Claiming the flexible leading space forces the Text
-                // to truncate into whatever width it's actually given.
-                .frame(maxWidth: .infinity, alignment: .leading)
-                Spacer(minLength: 8)
-                // The affordance is a REGULAR-FILE gesture: a directory or symlink
-                // row gets no dead download button (the shape tui's lead leg
-                // recorded on its ledger row so a following one would not have to
-                // rediscover it).
-                if file.fileType == "regular" {
-                    Button {
-                        Task { await downloadFile(file) }
-                    } label: {
-                        Image(systemName: "arrow.down.circle")
-                    }
-                    .buttonStyle(.borderless)
-                    .accessibilityIdentifier(Ids.snapshotFileDownloadButton)
-                    .automationActivate(Ids.snapshotFileDownloadButton) {
-                        Task { await downloadFile(file) }
-                    }
-                }
+            }
+            ForEach(filtered, id: \.path) { file in
+                fileRow(file)
             }
         }
         .accessibilityIdentifier(Ids.snapshotDetailFiles)
-        // Read-only anchor for `is_visible("snapshot-detail-files")`.
-        .automationValue(Ids.snapshotDetailFiles, text: { "" })
+        // Read-only anchor for `is_visible("snapshot-detail-files")`; reads the
+        // notice line when one stands in for the list.
+        .automationValue(Ids.snapshotDetailFiles, text: { vm.detailNoticeText ?? "" })
         .searchable(text: $searchText)
         .navigationTitle(L.backups.snapshot(id: String(snapshot.id)))
+    }
+
+    private func fileRow(_ file: SnapshotFileRow) -> some View {
+        HStack {
+            Image(systemName: file.fileType == "dir" ? "folder" : "doc")
+                .foregroundStyle(.secondary)
+            VStack(alignment: .leading) {
+                Text(file.path)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Text(ValueFormat.byteSize(UInt64(max(0, file.sizeBytes))))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            // Without an explicit width, an unconstrained Text's IDEAL size is
+            // its full untruncated content width, so a long path can grow this
+            // VStack (and the row) past the available column width instead of
+            // truncating — parking snapshot-file-download-button off the
+            // visible window edge (geo-parked, HIDDEN despite being genuinely
+            // rendered). Claiming the flexible leading space forces the Text
+            // to truncate into whatever width it's actually given.
+            .frame(maxWidth: .infinity, alignment: .leading)
+            Spacer(minLength: 8)
+            // The affordance is a REGULAR-FILE gesture: a directory or symlink
+            // row gets no dead download button (the shape tui's lead leg
+            // recorded on its ledger row so a following one would not have to
+            // rediscover it).
+            if file.fileType == "regular" {
+                Button {
+                    Task { await downloadFile(file) }
+                } label: {
+                    Image(systemName: "arrow.down.circle")
+                }
+                .buttonStyle(.borderless)
+                .accessibilityIdentifier(Ids.snapshotFileDownloadButton)
+                .automationActivate(Ids.snapshotFileDownloadButton) {
+                    Task { await downloadFile(file) }
+                }
+            }
+        }
     }
 
     /// Fetch the file's bytes then save them through the shared
@@ -77,7 +91,7 @@ struct MacSnapshotFileListView: View {
         // apple targets share one refusal instead of each dropping the command
         // silently — convention 11, see the VM's doc comment.
         guard let data = await vm.downloadSnapshotFile(
-            deviceId: snapshot.deviceId, snapshotId: snapshot.id, path: file.path)
+            snapshotId: snapshot.id, path: file.path)
         else { return }
         let name = (file.path as NSString).lastPathComponent
         try? SnapshotFileSaver.save(suggestedFileName: name, data: data)

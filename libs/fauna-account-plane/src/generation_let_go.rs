@@ -151,10 +151,16 @@ where
     let listing = fleet.listing();
     let mut generations = store.relay_generations(fleet.scope()).await?;
     generations.sort_unstable();
+    tracing::debug!(
+        candidates = generations.len(),
+        "dead read: relay generations"
+    );
     let mut dead = Vec::new();
     for g in generations {
         crate::pass_breath::pass_breath().await;
+        let gid = fauna_core::hex32::encode(&g);
         if state.is_shredded(&g) || state.a_sibling_reach_lists(&g) {
+            tracing::debug!(generation = %gid, "dead read: shredded, or a sibling's reach lists it");
             continue;
         }
         if generation_tip::generation_key_for(
@@ -167,9 +173,11 @@ where
         .await?
         .is_some()
         {
+            tracing::debug!(generation = %gid, "dead read: this device keys it");
             continue;
         }
         if answered_empty.get(&g) != Some(&true) && holder_wraps(fleet.requester(), &g).await? {
+            tracing::debug!(generation = %gid, "dead read: the bound holder wraps it");
             continue;
         }
         let mut live_rows = 0u64;
@@ -192,6 +200,7 @@ where
             }
         }
         if live_rows == 0 {
+            tracing::debug!(generation = %gid, "dead read: no live row rests under it");
             continue;
         }
         dead.push(DeadGeneration {

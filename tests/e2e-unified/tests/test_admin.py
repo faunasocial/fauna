@@ -9,7 +9,7 @@ from nacl.signing import SigningKey
 from clients.ws_rpc_admin_client import WsRpcAdminClient
 from common.auth import create_actor_and_register, ensure_tier, register_user, set_user_tier
 from helpers import budgets
-from helpers.app_surface import app_name, skip_environment, skip_unbuilt
+from helpers.app_surface import skip_environment
 from helpers.rpc_hold import refuse_rpc, release_rpc_hold
 from helpers.waiting import wait_until
 from i18n.strings import S
@@ -74,11 +74,6 @@ def test_settings_tier_edit(admin_app):
         f"(got {admin_app.admin.tier_cap_value('inbox', index=0)!r}). "
         f"error: {admin_app.error_text()!r}"
     )
-
-
-# Apps that paint `admin-settings-tier-delete-button` (admin.md § 3 — *Removing
-# a tier*): tui leads, the other six follow in the batched trickle-down.
-_TIER_DELETE_BUILT_APPS = {"tui", "linux", "web", "android"}
 
 
 def _wait_for_tier_rows(admin_app, at_least: int = 1) -> None:
@@ -177,13 +172,6 @@ def test_settings_tier_delete(admin_app, nest_instance):
     are precondition setup through the nest's admin API (defining a tier from
     the page is `test_settings_tier_define_new`); both deletes go through the UI.
     """
-    if app_name(admin_app.driver) not in _TIER_DELETE_BUILT_APPS:
-        skip_unbuilt(
-            admin_app.driver,
-            surface="admin-settings-tier-delete-button",
-            detail="deleting a tier from the Tiers page is not built on this app yet",
-            tracked="admin.md § 3. Settings → Removing a tier",
-        )
     port, url = nest_instance["port"], nest_instance["url"]
     sk = nest_instance["admin"]["signing_key"]
     # Per-run names: the nest outlives one app of a cross-app sweep.
@@ -435,7 +423,9 @@ def test_a_failed_dashboard_read_drops_only_its_own_cards(
         # the way a person does (entering lands on the dashboard), so no other
         # admin page's load can answer after the dashboard's and clear its error.
         admin_app.admin.leave_admin()
-        admin_app.driver.wait_for("admin-tab", timeout=budgets.RPC_ROUNDTRIP_S)
+        # `admin-tab` is the in-Settings entry on mobile, so it is not on the
+        # screen leaving admin lands on; `enter_by_click` opens Settings there
+        # and waits for the tab itself.
         admin_app.admin.enter_by_click()
         wait_until(
             lambda: admin_app.error_text() or None,

@@ -62,7 +62,7 @@ use bytes::Bytes;
 
 use ed25519_dalek::SigningKey;
 use fauna_account_store::types::WriterId;
-use fauna_core::data::ModerationConfig;
+use fauna_core::data::SyncPrefsConfig;
 use fauna_core::device_endpoints::{DeviceEndpoints, DeviceEndpointsEntry};
 use fauna_core::encoding::{canonical_decode, canonical_encode};
 use fauna_core::identity::ActorKeypair;
@@ -74,7 +74,7 @@ use fauna_nest::{
 };
 use fauna_protocol::account_state::{ACCOUNT_STATE_SCOPE, ItemClass};
 use fauna_protocol::merge_policy::{
-    KIND_DEVICE_ENDPOINTS, KIND_GENERATION_MINT, KIND_MODERATION, KIND_SEEN_SET,
+    KIND_DEVICE_ENDPOINTS, KIND_GENERATION_MINT, KIND_SEEN_SET, KIND_SYNC_PREFS,
 };
 use fauna_protocol::scope::ContentScope;
 use fauna_protocol::sync::{SyncChangesListReply, SyncChangesListRequest};
@@ -262,13 +262,13 @@ fn params(
         owed_nests: None,
         peer_transport: None,
         enrollment_target_device_id: device_row(device),
+        enrollment_device_label: None,
     }
 }
 
-fn moderation_bytes(words: &[&str]) -> Vec<u8> {
-    canonical_encode(&ModerationConfig {
-        muted_keywords: words.iter().map(|w| (*w).into()).collect(),
-        ..Default::default()
+fn sync_prefs_bytes(words: &[&str]) -> Vec<u8> {
+    canonical_encode(&SyncPrefsConfig {
+        default_conflict_policy: Some(words.join(" ")),
     })
     .unwrap()
 }
@@ -377,8 +377,8 @@ async fn v1_two_runtimes_converge_through_the_scope_tagged_nudge() {
     );
 
     // The app-side write, through the handle only.
-    let value = moderation_bytes(&["lottery"]);
-    a.put_preference(KIND_MODERATION, value.clone())
+    let value = sync_prefs_bytes(&["lottery"]);
+    a.put_preference(KIND_SYNC_PREFS, value.clone())
         .await
         .expect("put on A");
 
@@ -391,7 +391,7 @@ async fn v1_two_runtimes_converge_through_the_scope_tagged_nudge() {
             let value = value.clone();
             async move {
                 matches!(
-                    b.get_preference(KIND_MODERATION).await,
+                    b.get_preference(KIND_SYNC_PREFS).await,
                     Ok(Some(entry)) if entry.value == value
                 )
             }
@@ -411,8 +411,8 @@ async fn v1_two_runtimes_converge_through_the_scope_tagged_nudge() {
             let base = base.clone();
             async move {
                 let report = b.reconcile_now().await;
-                let after = b.get_preference(KIND_MODERATION).await;
-                let a_view = a.get_preference(KIND_MODERATION).await;
+                let after = b.get_preference(KIND_SYNC_PREFS).await;
+                let a_view = a.get_preference(KIND_SYNC_PREFS).await;
                 let feed: Result<SyncChangesListReply, _> = rpc
                     .request(
                         "fauna.sync.changes.list",
@@ -756,7 +756,7 @@ async fn fleet_id(handle: &AccountStoreHandle) -> [u8; 32] {
         .device_key
 }
 
-/// Every channel's marker reads `through` on `d`, and the moderation record
+/// Every channel's marker reads `through` on `d`, and the sync-prefs record
 /// reads `words`.
 async fn reads_everything(
     d: &AccountStoreHandle,
@@ -771,18 +771,18 @@ async fn reads_everything(
         .into_iter()
         .collect();
     let record = d
-        .get_preference(KIND_MODERATION)
+        .get_preference(KIND_SYNC_PREFS)
         .await
         .expect("record")
         .map(|e| e.value);
     channels.iter().all(|c| held.get(c) == Some(&through))
-        && record.as_deref() == Some(moderation_bytes(words).as_slice())
+        && record.as_deref() == Some(sync_prefs_bytes(words).as_slice())
 }
 
 /// **A removed device's rows leave the delegable scope, and no item is lost**
 /// (`delegable-scope-reclamation.md` § Delegable-scope reclamation, parts
 /// (3) and (4); the 2026-10-01 measurement (a)). A and B settle; B raises
-/// five markers only it raises and writes the moderation record; both raise
+/// five markers only it raises and writes the sync-prefs record; both raise
 /// five shared markers in turn. B is shut down and A removes it. A's passes
 /// hand over the items only B's rows carried and retire every row of B's
 /// below a cover: no row under B is left, and a fresh device reads every
@@ -811,7 +811,7 @@ async fn a_removed_devices_rows_leave_the_scope_and_no_item_is_lost() {
     for ch in &only_b {
         assert!(b.raise_read_marker(ch, 1).await.expect("B raises"));
     }
-    b.put_preference(KIND_MODERATION, moderation_bytes(&["witness"]))
+    b.put_preference(KIND_SYNC_PREFS, sync_prefs_bytes(&["witness"]))
         .await
         .expect("B writes the record");
     for ch in &shared {
@@ -876,7 +876,7 @@ async fn a_removed_devices_rows_leave_the_scope_and_no_item_is_lost() {
 /// **A removed device's sole items are handed over at a full scope, the
 /// count unchanged** (`delegable-scope-reclamation.md` § Delegable-scope
 /// reclamation, part (3) and "A full scope is owed a put that needs no
-/// room"). B raises five markers only it raises and writes the moderation
+/// room"). B raises five markers only it raises and writes the sync-prefs
 /// record; A removes it; the scope is then filled to its cap with rows no
 /// device opens. A's hand-overs name B's rows, so the nest supersedes each
 /// in the put's own transaction: every hand-over lands, no row under B is
@@ -904,7 +904,7 @@ async fn a_removed_devices_sole_items_are_handed_over_at_a_full_scope() {
     for ch in &only_b {
         assert!(b.raise_read_marker(ch, 1).await.expect("B raises"));
     }
-    b.put_preference(KIND_MODERATION, moderation_bytes(&["witness"]))
+    b.put_preference(KIND_SYNC_PREFS, sync_prefs_bytes(&["witness"]))
         .await
         .expect("B writes the record");
     for _ in 0..2 {
@@ -986,7 +986,7 @@ async fn a_removed_devices_sole_items_are_handed_over_at_a_full_scope() {
 /// § Delegable-scope reclamation; the 2026-10-01 measurement (b): 11, 17, 23
 /// and 29 rows). The same machine signs in four times — each life over an
 /// empty store and slot, the same enrollment target — and each advances the
-/// same five markers and the moderation record. After the last life's passes
+/// same five markers and the sync-prefs record. After the last life's passes
 /// the scope holds one row per item, every one under the last life's writer.
 #[tokio::test]
 async fn four_lives_of_one_machine_leave_one_row_per_item() {
@@ -998,6 +998,7 @@ async fn four_lives_of_one_machine_leave_one_row_per_item() {
         let device = format!("life{life}");
         let d = AccountStoreRuntime::start(AccountRuntimeParams {
             enrollment_target_device_id: device_row("life1"),
+            enrollment_device_label: None,
             ..params_trusting_deployment(&base, &device, &rpc)
         })
         .await
@@ -1023,7 +1024,7 @@ async fn four_lives_of_one_machine_leave_one_row_per_item() {
         for ch in &channels {
             assert!(d.raise_read_marker(ch, life).await.expect("raise"));
         }
-        d.put_preference(KIND_MODERATION, moderation_bytes(&[device.as_str()]))
+        d.put_preference(KIND_SYNC_PREFS, sync_prefs_bytes(&[device.as_str()]))
             .await
             .expect("this life writes the record");
         eventually("this life's rows are published", || {
@@ -1842,6 +1843,7 @@ async fn v17_a_sign_in_after_a_sign_out_reads_the_rotation_ring_once_its_prologu
     // named row) signs in again over an empty state dir and an empty slot.
     let again = AccountStoreRuntime::start(AccountRuntimeParams {
         enrollment_target_device_id: device_row("before"),
+        enrollment_device_label: None,
         ..params_trusting_deployment(&base, "after", &rpc)
     })
     .await
@@ -1920,14 +1922,14 @@ async fn v8_two_same_store_runtimes_elect_one_engine_singleton() {
     // read the row — and its publish step (the non-holder runs it too: its
     // own rows are its own to publish) sends it to the nest, with no pump
     // pass on the writing side.
-    let value = moderation_bytes(&["lottery"]);
+    let value = sync_prefs_bytes(&["lottery"]);
     survivor
-        .put_preference(KIND_MODERATION, value.clone())
+        .put_preference(KIND_SYNC_PREFS, value.clone())
         .await
         .expect("put on the non-holder");
     for (name, h) in [("the holder", &holder), ("the non-holder", &survivor)] {
         let entry = h
-            .get_preference(KIND_MODERATION)
+            .get_preference(KIND_SYNC_PREFS)
             .await
             .expect("get")
             .expect("entry present");
@@ -1946,7 +1948,7 @@ async fn v8_two_same_store_runtimes_elect_one_engine_singleton() {
         .expect("the second device's pass");
     assert_eq!(
         other
-            .get_preference(KIND_MODERATION)
+            .get_preference(KIND_SYNC_PREFS)
             .await
             .expect("get on the second device")
             .map(|entry| entry.value),
@@ -1961,7 +1963,7 @@ async fn v8_two_same_store_runtimes_elect_one_engine_singleton() {
     // this test wrote to that store directly.
     holder.shutdown().await;
     other
-        .put_preference(KIND_MODERATION, moderation_bytes(&["prize"]))
+        .put_preference(KIND_SYNC_PREFS, sync_prefs_bytes(&["prize"]))
         .await
         .expect("the second device's write after the holder exits");
     other.settled().await;
@@ -1971,8 +1973,8 @@ async fn v8_two_same_store_runtimes_elect_one_engine_singleton() {
             let survivor = survivor.clone();
             async move {
                 matches!(
-                    survivor.get_preference(KIND_MODERATION).await,
-                    Ok(Some(entry)) if entry.value == moderation_bytes(&["prize"])
+                    survivor.get_preference(KIND_SYNC_PREFS).await,
+                    Ok(Some(entry)) if entry.value == sync_prefs_bytes(&["prize"])
                 )
             }
         },
@@ -2073,7 +2075,7 @@ async fn an_app_runtime_yields_the_role_to_an_agent_that_mounts_beside_it_and_ta
         .await
         .expect("a second device");
     other
-        .put_preference(KIND_MODERATION, moderation_bytes(&["after-the-agent"]))
+        .put_preference(KIND_SYNC_PREFS, sync_prefs_bytes(&["after-the-agent"]))
         .await
         .expect("the second device's write after the agent exits");
     other.settled().await;
@@ -2083,8 +2085,8 @@ async fn an_app_runtime_yields_the_role_to_an_agent_that_mounts_beside_it_and_ta
             let app = app.clone();
             async move {
                 matches!(
-                    app.get_preference(KIND_MODERATION).await,
-                    Ok(Some(entry)) if entry.value == moderation_bytes(&["after-the-agent"])
+                    app.get_preference(KIND_SYNC_PREFS).await,
+                    Ok(Some(entry)) if entry.value == sync_prefs_bytes(&["after-the-agent"])
                 )
             }
         },
@@ -2154,12 +2156,18 @@ async fn v9_two_runtimes_assemble_concurrently_on_one_cold_store_dir() {
     let (rpc, _state, tmp) = nest().await;
     let base: PathBuf = tmp.path().to_path_buf();
 
+    // Both carry the host app's default (`devices.md` § Device names): the
+    // ceremony's register-create must name the absent row with it.
+    let labeled = || AccountRuntimeParams {
+        enrollment_device_label: Some("fauna-ios".to_string()),
+        ..params(&base, "shared", &rpc)
+    };
     let first = tokio::spawn({
-        let p = params(&base, "shared", &rpc);
+        let p = labeled();
         async move { AccountStoreRuntime::start(p).await }
     });
     let second = tokio::spawn({
-        let p = params(&base, "shared", &rpc);
+        let p = labeled();
         async move { AccountStoreRuntime::start(p).await }
     });
     // Either assembly can be the race's loser, so both carry the same reading.
@@ -2262,6 +2270,12 @@ async fn v9_two_runtimes_assemble_concurrently_on_one_cold_store_dir() {
         "the machine row is its named row — the app's own id (the RULED \
          2026-09-28 block); the grant on it is over the writer key (T10)"
     );
+    assert_eq!(
+        devices.devices[0].label, "fauna-ios",
+        "the ceremony's register-create names the row with the host's app \
+         default, never the `fauna` placeholder (devices.md § Device names); \
+         a synthetic label rests plaintext"
+    );
     let grant_wire = _state
         .db
         .get_sync_device_grant(&actor_bytes(), &first_auth.device_key)
@@ -2272,13 +2286,13 @@ async fn v9_two_runtimes_assemble_concurrently_on_one_cold_store_dir() {
 
     // The store both of them adopted is shared and usable: one writes, the
     // other reads the same row (no pump involved — the store IS the state).
-    let value = moderation_bytes(&["cold-race"]);
+    let value = sync_prefs_bytes(&["cold-race"]);
     first
-        .put_preference(KIND_MODERATION, value.clone())
+        .put_preference(KIND_SYNC_PREFS, value.clone())
         .await
         .expect("put through the first runtime");
     let entry = second
-        .get_preference(KIND_MODERATION)
+        .get_preference(KIND_SYNC_PREFS)
         .await
         .expect("get through the second runtime")
         .expect("entry present");
@@ -2358,9 +2372,9 @@ async fn v7_a_siblings_write_moves_data_version_and_is_served_without_restart() 
 
     // (a) + (b): the sibling — a plain reader/writer — commits; the holder's
     // counter moves and its read path serves the value, with no pass run.
-    let value = moderation_bytes(&["lottery"]);
+    let value = sync_prefs_bytes(&["lottery"]);
     sibling
-        .put_preference(KIND_MODERATION, value.clone())
+        .put_preference(KIND_SYNC_PREFS, value.clone())
         .await
         .expect("put on the sibling");
     // The sibling's publish step follows its write and advances its own
@@ -2371,7 +2385,7 @@ async fn v7_a_siblings_write_moves_data_version_and_is_served_without_restart() 
     let v1 = holder.data_version().await.expect("read").unwrap();
     assert_ne!(v0, v1, "a sibling's commit moves the holder's data_version");
     let entry = holder
-        .get_preference(KIND_MODERATION)
+        .get_preference(KIND_SYNC_PREFS)
         .await
         .expect("get")
         .expect("entry present");
@@ -2389,7 +2403,7 @@ async fn v7_a_siblings_write_moves_data_version_and_is_served_without_restart() 
         "the first runtime holds the role"
     );
     holder
-        .put_preference(KIND_MODERATION, moderation_bytes(&["lottery", "prize"]))
+        .put_preference(KIND_SYNC_PREFS, sync_prefs_bytes(&["lottery", "prize"]))
         .await
         .expect("put on the holder");
     let v2 = holder.data_version().await.expect("read").unwrap();
@@ -2403,8 +2417,8 @@ async fn v7_a_siblings_write_moves_data_version_and_is_served_without_restart() 
     let vs = sibling.data_version().await.expect("read").unwrap();
     holder
         .put_preference(
-            KIND_MODERATION,
-            moderation_bytes(&["lottery", "prize", "win"]),
+            KIND_SYNC_PREFS,
+            sync_prefs_bytes(&["lottery", "prize", "win"]),
         )
         .await
         .expect("second put on the holder");
@@ -2454,8 +2468,8 @@ async fn own_pump_a_siblings_row_applied_by_this_holders_walk_moves_the_generati
     a.reconcile_now().await.expect("A's barrier");
     let g0 = a.change_generation();
 
-    let value = moderation_bytes(&["lottery"]);
-    b.put_preference(KIND_MODERATION, value.clone())
+    let value = sync_prefs_bytes(&["lottery"]);
+    b.put_preference(KIND_SYNC_PREFS, value.clone())
         .await
         .expect("put on B");
     b.settled().await; // B's publish step has run: the row is on the feed.
@@ -2463,7 +2477,7 @@ async fn own_pump_a_siblings_row_applied_by_this_holders_walk_moves_the_generati
     a.nudge_scope(ACCOUNT_STATE_SCOPE);
     generation_moves_past(&a, g0, "A's walk applied B's row").await;
     assert_eq!(
-        a.get_preference(KIND_MODERATION)
+        a.get_preference(KIND_SYNC_PREFS)
             .await
             .expect("read")
             .map(|e| e.value),
@@ -2485,8 +2499,8 @@ fn predecessor_backup_key() -> fauna_core::crypto::BackupKey {
 }
 
 /// Pin (b): a successor's walk carrying its predecessor's delegable rows moves
-/// the generation — the case where a successor opens Muted words in its first
-/// seconds and must see the inherited words without a re-visit. Setup after
+/// the generation — the case where a successor opens a preference page in its
+/// first seconds and must see the inherited value without a re-visit. Setup after
 /// `conformance_succession_carry.rs::a_successors_fresh_replica_reads_the_e1_value_its_predecessor_wrote`:
 /// the predecessor writes the way a preference page does (the plane's local
 /// put, then the publish), and the successor's runtime is handed the
@@ -2517,7 +2531,7 @@ async fn own_pump_a_successors_carry_of_its_predecessors_rows_moves_the_generati
 
     // The predecessor's device, on the one nest actor that stands for the
     // rows the ceremony re-pointed at the successor.
-    let value = moderation_bytes(&["witness"]);
+    let value = sync_prefs_bytes(&["witness"]);
     {
         let keys = AccountStateKeySchedule::derive(&predecessor_backup_key());
         let device = SigningKey::from_bytes(&[0x5A; 32]);
@@ -2536,13 +2550,13 @@ async fn own_pump_a_successors_carry_of_its_predecessors_rows_moves_the_generati
         let plane =
             AccountStatePlane::new(&store, &rpc, &keys, &device, &trust, ACCOUNT_STATE_SCOPE)
                 .unwrap();
-        put_preference_local(&store, &plane, KIND_MODERATION, value.clone())
+        put_preference_local(&store, &plane, KIND_SYNC_PREFS, value.clone())
             .await
             .expect("the predecessor's local put");
         assert_eq!(plane.publish_pending().await.expect("publish"), 1);
         assert!(
             store
-                .state(KIND_MODERATION, PREFERENCE_KEY)
+                .state(KIND_SYNC_PREFS, PREFERENCE_KEY)
                 .await
                 .unwrap()
                 .is_some()
@@ -2560,7 +2574,7 @@ async fn own_pump_a_successors_carry_of_its_predecessors_rows_moves_the_generati
         "the carry moved the generation (still {g0})"
     );
     assert_eq!(
-        s.get_preference(KIND_MODERATION)
+        s.get_preference(KIND_SYNC_PREFS)
             .await
             .expect("read")
             .map(|e| e.value),
@@ -2597,11 +2611,11 @@ async fn own_pump_a_quiet_run_moves_nothing() {
     }
 
     // B's value first, A's after it: latest wins, so B's row loses on A.
-    b.put_preference(KIND_MODERATION, moderation_bytes(&["older"]))
+    b.put_preference(KIND_SYNC_PREFS, sync_prefs_bytes(&["older"]))
         .await
         .expect("put on B");
     b.settled().await;
-    a.put_preference(KIND_MODERATION, moderation_bytes(&["newer"]))
+    a.put_preference(KIND_SYNC_PREFS, sync_prefs_bytes(&["newer"]))
         .await
         .expect("put on A");
     a.settled().await;
@@ -2630,11 +2644,11 @@ async fn own_pump_a_quiet_run_moves_nothing() {
         "a pass with nothing new moves nothing: {report:?}"
     );
     assert_eq!(
-        a.get_preference(KIND_MODERATION)
+        a.get_preference(KIND_SYNC_PREFS)
             .await
             .expect("read")
             .map(|e| e.value),
-        Some(moderation_bytes(&["newer"]))
+        Some(sync_prefs_bytes(&["newer"]))
     );
 
     a.shutdown().await;
@@ -2664,7 +2678,7 @@ async fn own_pump_the_counted_level_moves_on_a_changed_run_and_ends_with_its_own
     let (dropped, dropped_relay) = StoreChangeLevel::new(a.clone()).await;
     let dropped_relay = tokio::spawn(dropped_relay);
 
-    b.put_preference(KIND_MODERATION, moderation_bytes(&["lottery"]))
+    b.put_preference(KIND_SYNC_PREFS, sync_prefs_bytes(&["lottery"]))
         .await
         .expect("put on B");
     b.settled().await;
@@ -2706,7 +2720,7 @@ async fn own_pump_a_gestures_own_write_and_its_publish_move_nothing() {
     a.reconcile_now().await.expect("A's barrier");
     let g0 = a.change_generation();
 
-    a.put_preference(KIND_MODERATION, moderation_bytes(&["mine"]))
+    a.put_preference(KIND_SYNC_PREFS, sync_prefs_bytes(&["mine"]))
         .await
         .expect("put");
     a.settled().await; // the publish step the put armed has run
@@ -2720,7 +2734,7 @@ async fn own_pump_a_gestures_own_write_and_its_publish_move_nothing() {
     // it is the gesture's, never the run's.
     let (report, put) = tokio::join!(
         a.reconcile_now(),
-        a.put_preference(KIND_MODERATION, moderation_bytes(&["mine", "again"]))
+        a.put_preference(KIND_SYNC_PREFS, sync_prefs_bytes(&["mine", "again"]))
     );
     report.expect("pass");
     put.expect("put");
@@ -2874,7 +2888,7 @@ async fn own_pump_a_non_holders_generation_never_moves() {
     let g0 = holder.change_generation();
 
     other
-        .put_preference(KIND_MODERATION, moderation_bytes(&["elsewhere"]))
+        .put_preference(KIND_SYNC_PREFS, sync_prefs_bytes(&["elsewhere"]))
         .await
         .expect("put on the other device");
     other.settled().await;
@@ -2890,7 +2904,7 @@ async fn own_pump_a_non_holders_generation_never_moves() {
     );
 
     sibling
-        .put_preference(KIND_MODERATION, moderation_bytes(&["here"]))
+        .put_preference(KIND_SYNC_PREFS, sync_prefs_bytes(&["here"]))
         .await
         .expect("put on the sibling");
     sibling.settled().await;
@@ -3032,6 +3046,7 @@ async fn v10_the_runtime_authenticates_as_the_store_principal() {
         owed_nests: None,
         peer_transport: None,
         enrollment_target_device_id: device_row("machine"),
+        enrollment_device_label: None,
     })
     .await
     .expect("runtime assembles");
@@ -3045,7 +3060,7 @@ async fn v10_the_runtime_authenticates_as_the_store_principal() {
     // A durable local write whose publish leg must eventually travel the
     // principal's connection.
     handle
-        .put_preference(KIND_MODERATION, moderation_bytes(&["principal"]))
+        .put_preference(KIND_SYNC_PREFS, sync_prefs_bytes(&["principal"]))
         .await
         .expect("put through the runtime");
 
@@ -3232,6 +3247,7 @@ async fn v14_the_first_need_mint_crosses_the_store_principals_own_connection() {
         owed_nests: None,
         peer_transport: None,
         enrollment_target_device_id: device_row("machine"),
+        enrollment_device_label: None,
     })
     .await
     .expect("runtime assembles");
@@ -3324,6 +3340,7 @@ async fn v13_a_deleted_machine_revives_as_a_successor_through_the_real_doors() {
         owed_nests: None,
         peer_transport: None,
         enrollment_target_device_id: device_row("machine"),
+        enrollment_device_label: None,
     };
     let converge = |handle: AccountStoreHandle| async move {
         let deadline = std::time::Instant::now() + Duration::from_secs(120);
@@ -3377,7 +3394,7 @@ async fn v13_a_deleted_machine_revives_as_a_successor_through_the_real_doors() {
 
     // ── The un-pushed tail: a row the (about-to-die) writer journaled but
     // never pushed, staged on the closed store (see the doc header).
-    let tail_value = moderation_bytes(&["the-tail-that-must-survive"]);
+    let tail_value = sync_prefs_bytes(&["the-tail-that-must-survive"]);
     {
         let creds = CredentialStore::with_file_backend(CRED_NAMESPACE, creds_dir.clone());
         let writer =
@@ -3401,7 +3418,7 @@ async fn v13_a_deleted_machine_revives_as_a_successor_through_the_real_doors() {
         };
         store
             .put_state(fauna_account_store::types::StateEntry {
-                kind: KIND_MODERATION.to_string(),
+                kind: KIND_SYNC_PREFS.to_string(),
                 key: fauna_protocol::merge_policy::PREFERENCE_KEY.to_string(),
                 scope: ACCOUNT_STATE_SCOPE.to_string(),
                 value: tail_value.clone(),
@@ -3455,7 +3472,7 @@ async fn v13_a_deleted_machine_revives_as_a_successor_through_the_real_doors() {
     // The no-data-loss proof: the staged un-pushed value survived the
     // succession and reads back through the revived runtime…
     let entry = handle
-        .get_preference(KIND_MODERATION)
+        .get_preference(KIND_SYNC_PREFS)
         .await
         .expect("get")
         .expect("the tail survived");
@@ -3524,12 +3541,12 @@ async fn v11_a_seedless_runtime_hosts_a_store_a_signed_in_app_enrolled() {
     // ── The signed-in app: the only process here that ever holds the seed.
     // Its assembly mints the writer key, persists the backup key and runs the
     // enrollment ceremony's mint half.
-    let from_app = moderation_bytes(&["from-the-app"]);
+    let from_app = sync_prefs_bytes(&["from-the-app"]);
     {
         let app = AccountStoreRuntime::start(params(&base, "machine", &rpc))
             .await
             .expect("the app's seed-holding assembly");
-        app.put_preference(KIND_MODERATION, from_app.clone())
+        app.put_preference(KIND_SYNC_PREFS, from_app.clone())
             .await
             .expect("the app writes a row");
         app.reconcile_now().await.expect("the app's pass");
@@ -3565,7 +3582,7 @@ async fn v11_a_seedless_runtime_hosts_a_store_a_signed_in_app_enrolled() {
 
     // Read: it opens what the app sealed.
     let seen = agent
-        .get_preference(KIND_MODERATION)
+        .get_preference(KIND_SYNC_PREFS)
         .await
         .expect("get through the seedless host")
         .expect("the app's row is present");
@@ -3576,9 +3593,9 @@ async fn v11_a_seedless_runtime_hosts_a_store_a_signed_in_app_enrolled() {
     );
 
     // Write: its own row lands, and the pass publishes it.
-    let from_agent = moderation_bytes(&["from-the-agent"]);
+    let from_agent = sync_prefs_bytes(&["from-the-agent"]);
     agent
-        .put_preference(KIND_MODERATION, from_agent.clone())
+        .put_preference(KIND_SYNC_PREFS, from_agent.clone())
         .await
         .expect("the seedless host writes");
     let report = agent
@@ -3599,7 +3616,7 @@ async fn v11_a_seedless_runtime_hosts_a_store_a_signed_in_app_enrolled() {
         .expect("a seed-holding app on another machine");
     app.reconcile_now().await.expect("its pass");
     assert_eq!(
-        app.get_preference(KIND_MODERATION)
+        app.get_preference(KIND_SYNC_PREFS)
             .await
             .expect("get on the seed-holding device")
             .map(|entry| entry.value),
@@ -3753,6 +3770,7 @@ fn v12_params(
         owed_nests: None,
         peer_transport: Some(factory),
         enrollment_target_device_id: device_row(device),
+        enrollment_device_label: None,
     }
 }
 
@@ -3834,7 +3852,7 @@ async fn v12_the_elected_runtime_binds_the_peer_listener_and_a_sibling_walks_it(
     ))
     .await
     .expect("start A");
-    a.put_preference(KIND_MODERATION, moderation_bytes(&["over-the-peer-leg"]))
+    a.put_preference(KIND_SYNC_PREFS, sync_prefs_bytes(&["over-the-peer-leg"]))
         .await
         .expect("A writes a preference");
 
@@ -3939,20 +3957,16 @@ async fn v12_the_elected_runtime_binds_the_peer_listener_and_a_sibling_walks_it(
         .expect("walk the runtime-hosted listener");
     let got = dialer_store
         .state(
-            KIND_MODERATION,
+            KIND_SYNC_PREFS,
             fauna_protocol::merge_policy::PREFERENCE_KEY,
         )
         .await
         .unwrap()
         .expect("A's preference row arrived over the peer leg");
-    let decoded: ModerationConfig = canonical_decode(&got.value).unwrap();
+    let decoded: SyncPrefsConfig = canonical_decode(&got.value).unwrap();
     assert_eq!(
-        decoded
-            .muted_keywords
-            .iter()
-            .map(|k| k.keyword.clone())
-            .collect::<Vec<_>>(),
-        vec!["over-the-peer-leg".to_string()]
+        decoded.default_conflict_policy,
+        Some("over-the-peer-leg".to_string())
     );
 
     // Refusing: a witness signed by a STRANGER root is refused at the
@@ -4088,7 +4102,7 @@ async fn a_full_delegable_scope_parks_a_new_item_and_lands_the_rest() {
     let a = AccountStoreRuntime::start(params(base, "a", &rpc))
         .await
         .expect("start A");
-    a.put_preference(KIND_MODERATION, moderation_bytes(&["one"]))
+    a.put_preference(KIND_SYNC_PREFS, sync_prefs_bytes(&["one"]))
         .await
         .expect("put");
     a.settled().await;
@@ -4131,7 +4145,7 @@ async fn a_full_delegable_scope_parks_a_new_item_and_lands_the_rest() {
 
     let channel = "4e".repeat(32);
     assert!(a.raise_read_marker(&channel, 1).await.expect("raise"));
-    a.put_preference(KIND_MODERATION, moderation_bytes(&["two"]))
+    a.put_preference(KIND_SYNC_PREFS, sync_prefs_bytes(&["two"]))
         .await
         .expect("the rewrite is durable locally");
     a.settled().await;
@@ -4156,11 +4170,11 @@ async fn a_full_delegable_scope_parks_a_new_item_and_lands_the_rest() {
     fresh.reconcile_now().await.expect("pass");
     assert_eq!(
         fresh
-            .get_preference(KIND_MODERATION)
+            .get_preference(KIND_SYNC_PREFS)
             .await
             .expect("get")
             .map(|e| e.value),
-        Some(moderation_bytes(&["two"])),
+        Some(sync_prefs_bytes(&["two"])),
         "the rewrite reached the nest past the parked row"
     );
     assert!(

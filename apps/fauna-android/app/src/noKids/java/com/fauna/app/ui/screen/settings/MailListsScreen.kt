@@ -25,6 +25,7 @@ import com.fauna.app.ui.viewmodel.MailListsVM
 import uniffi.fauna_client_mail_settings.ListDraft
 import uniffi.fauna_client_mail_settings.ListView
 import uniffi.fauna_client_mail_settings.ListsStatus
+import uniffi.fauna_client_mail_settings.archiveUrlNeedsConfirm
 import java.net.URLEncoder
 import social.fauna.generated.Ids
 
@@ -285,24 +286,50 @@ private fun ListSheet(
                 if (editing != null) "fauna.bridges.update_account_list"
                 else "fauna.bridges.create_account_list",
             )
+            // Off-server archive link: a List-Archive URL on a host the user
+            // does not own is published to every recipient, so the first press
+            // relabels the submit with the confirm string and saves nothing
+            // (`mail-mass-mailing.md` § Don't do these). The decision is the
+            // shared `archiveUrlNeedsConfirm`; the arm is keyed by the trimmed
+            // URL, so editing the link after arming disarms it.
+            val archiveTrimmed = archiveUrl.trim()
+            val needsArchiveConfirm = archiveUrlNeedsConfirm(
+                archiveTrimmed,
+                editing?.listArchiveUrl,
+                localDomains,
+            )
+            val archiveArm = key(archiveTrimmed) { rememberTwoClickArm() }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Button(
                     onClick = {
-                        onSubmit(
-                            ListDraft(
-                                friendlyName = name,
-                                localPart = localPart,
-                                localDomain = domain,
-                                description = description,
-                                listHelpUrl = helpUrl,
-                                listArchiveUrl = archiveUrl,
-                                recipientsPerSend = perSend.toUIntOrNull(),
+                        val save = {
+                            onSubmit(
+                                ListDraft(
+                                    friendlyName = name,
+                                    localPart = localPart,
+                                    localDomain = domain,
+                                    description = description,
+                                    listHelpUrl = helpUrl,
+                                    listArchiveUrl = archiveUrl,
+                                    recipientsPerSend = perSend.toUIntOrNull(),
+                                )
                             )
-                        )
+                        }
+                        if (needsArchiveConfirm) archiveArm.press(save) else save()
                     },
                     enabled = submitGate.enabled,
                     modifier = Modifier.testTag(Ids.MAIL_LISTS_ADD_SHEET_SUBMIT_BUTTON),
-                ) { Text(stringResource(R.string.mail_lists_submit)) }
+                ) {
+                    Text(
+                        stringResource(
+                            if (needsArchiveConfirm && archiveArm.armed) {
+                                R.string.mail_lists_archive_off_server_confirm
+                            } else {
+                                R.string.mail_lists_submit
+                            }
+                        )
+                    )
+                }
                 OutlinedButton(
                     onClick = onCancel,
                     modifier = Modifier.testTag(Ids.MAIL_LISTS_ADD_SHEET_CANCEL_BUTTON),

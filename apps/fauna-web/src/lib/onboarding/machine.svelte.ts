@@ -28,7 +28,7 @@ import {
   savePendingInvite,
   deletePendingInvite,
 } from './pending-invite-store';
-import { logMessage } from '#lib/wasm';
+import { logMessage, type NestRulesSummaryValue } from '#lib/wasm';
 import { commitConfirmedIdentity as commitIdentity } from './identity-commit';
 import { setNestDialOverride } from '#lib/api';
 
@@ -565,6 +565,11 @@ export interface Machine {
   loginPhase(): LoginPhase;
   handleCheckSnapshot(): HandleCheckSnapshot;
   inviteRequestSnapshot(): InviteRequestSnapshot;
+  /** The nest's rules for the joining surface of the current step
+   *  (`OnboardingMachine::joining_nest_rules`), or `undefined` when this page
+   *  shows none — `invite_request`, and `handle_entry` while its Continue
+   *  signs in, once the verified read has landed. */
+  joiningNestRules(lang: string): NestRulesSummaryValue | undefined;
   /** Snapshot of the claim_code page. Reached only when handle-check
    * returns UnregisteredUnclaimedNest. Pre-submit state is
    * `state == 'Idle'`. */
@@ -1444,6 +1449,12 @@ function wrapMachine(inner: object): Machine {
       // setContact: the wasm binding expects a JSON-encoded string;
       // the typed Machine API accepts a ContactInfo object. Wrap once
       // here so callers don't sprinkle JSON.stringify at every call site.
+      if (prop === 'joiningNestRules') {
+        return (lang: string) => {
+          const raw = (target as Record<string, (l: string) => string>).joiningNestRulesJson(lang);
+          return raw ? (JSON.parse(raw) ?? undefined) : undefined;
+        };
+      }
       if (prop === 'setContact') {
         return (contact: ContactInfo) => {
           const fn = (target as Record<string, (s: string) => void>).setContact.bind(target);

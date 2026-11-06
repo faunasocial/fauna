@@ -106,6 +106,15 @@ async fn serve(mut server: fauna_client::testing::ServerSide, captured: Captured
 async fn sent_by_an_engine_bound_to(
     row: Option<FolderRef>,
 ) -> Vec<(String, fauna_protocol::Value)> {
+    sent_recording(row, None).await
+}
+
+/// [`sent_by_an_engine_bound_to`], the record naming `deposited_by` as its
+/// depositor (`folder-deposit.md` ruling 3).
+async fn sent_recording(
+    row: Option<FolderRef>,
+    deposited_by: Option<[u8; 32]>,
+) -> Vec<(String, fauna_protocol::Value)> {
     let dir = tempfile::tempdir().unwrap();
     let auth = Arc::new(AuthClient::new(
         "http://127.0.0.1:0".into(),
@@ -152,6 +161,7 @@ async fn sent_by_an_engine_bound_to(
             None,
             None,
             CausalStamp::unknown(),
+            deposited_by,
         ),
     )
     .await
@@ -219,4 +229,31 @@ async fn a_foreign_ref_stamps_no_row_and_keeps_the_channel_form() {
         ],
         "a cross-nest set's address is its channel; sent {sent:?}"
     );
+}
+
+/// The record's depositor, off the wire.
+fn recorded_depositor(sent: &[(String, fauna_protocol::Value)]) -> Option<String> {
+    sent.iter()
+        .find(|(kind, _)| kind == "fauna.sync.changes.record")
+        .map(|(_, payload)| typed::<SyncChangeRecordRequest>(payload))
+        .expect("a record was sent")
+        .deposited_by
+}
+
+/// `folder-deposit.md` ruling 3: the one record funnel carries an adopted
+/// deposit's depositor on both record planes — the same-nest record and the
+/// cross-nest relay — and every other record names none.
+#[tokio::test]
+async fn the_record_funnel_carries_the_depositor_on_both_planes() {
+    let writer = [0x5d; 32];
+    for row in [Some(FolderRef::Local(9)), Some(FolderRef::Foreign(CHANNEL))] {
+        let sent = sent_recording(row, Some(writer)).await;
+        assert_eq!(
+            recorded_depositor(&sent),
+            Some(hex::encode(writer)),
+            "{row:?}: the depositor rides the record; sent {sent:?}"
+        );
+        let sent = sent_recording(row, None).await;
+        assert_eq!(recorded_depositor(&sent), None, "{row:?}: no depositor");
+    }
 }

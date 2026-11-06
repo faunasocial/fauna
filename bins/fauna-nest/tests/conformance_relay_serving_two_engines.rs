@@ -148,9 +148,7 @@ async fn start_test_nest() -> Nest {
             token_store,
             ..Default::default()
         },
-        sync: fauna_nest::state::SyncState {
-            chunk_resolver: resolver,
-        },
+        sync: fauna_nest::state::SyncState::with_resolver(resolver),
         ..base
     });
 

@@ -1,7 +1,7 @@
 """tier_4 (live-remote, OPT-IN, NON-DESTRUCTIVE): bootstrap a claim-fresh
 deployed nest to a serving production box — claimed by the fleet's
 live admin identity, its Let's Encrypt cert served, its mail ports up — through
-the linux app UI and release-artifact surfaces only.
+the app UI and release-artifact surfaces only.
 
 Why this exists (user ruling 2026-09-26: *"use the dedicated e2e tests against
 [the live nest] for that (or add a new such test if needed)"*): a genesis-fresh box
@@ -16,7 +16,8 @@ app UI action (convention 8), every wait a poll on observable state
 
   1. **Reach the admin shell** (``helpers.live_admin.reach_admin_shell``): sign
      in if the box already knows the identity, else claim it with
-     ``FAUNA_LIVE_CLAIM_CODE`` under an explicit ``FAUNA_LIVE_HANDLE``, choosing
+     ``FAUNA_LIVE_CLAIM_CODE`` under the box's own provisioned handle (the
+     staging-box file's ``handle``, or ``FAUNA_LIVE_MAIL_ADDRESS``), choosing
      NAT mode ``public`` (a box serving the public web and mail).
   2. **Wait for the domain cert.** The claim's ``@domain`` suffix is the sole
      determinant of the deployment domain and triggers ACME for it
@@ -62,17 +63,21 @@ Preconditions (env):
                             (``--nest live`` / ``FAUNA_E2E_LIVE=1``) is what
                             selects it.
 Needed only for the step that consumes it (failed with a named reason there):
-  FAUNA_LIVE_HANDLE         the handle to CLAIM under, e.g. test@example.net — an
-                            unclaimed box only; claiming bakes it in as the
-                            admin's real handle and its suffix as the domain, so
-                            it is never a probe. On a claimed box the handle is
-                            derived from the secret.
+  claim handle              an unclaimed box only — resolved per box
+                            (``live_box_door.mailbox``: FAUNA_LIVE_MAIL_ADDRESS >
+                            the staging-box file's ``handle``; FAUNA_LIVE_HANDLE
+                            still overrides the typed handle). Claiming bakes it
+                            in as the admin's real handle and its suffix as the
+                            domain, so it is never a probe. On a claimed box the
+                            handle is derived from the secret.
   FAUNA_LIVE_CLAIM_CODE     an unclaimed box only — the code the nest prints in
                             its startup banner (stderr, i.e. the container log).
                             A read-only harness input, never a hook.
   FAUNA_LIVE_MAIL_PASSWORD  only when mail is not yet enabled — the PLAIN
                             password mail is enabled with (= the IMAP login the
-                            mail live tests use).
+                            mail live tests use). An override: by default it is
+                            resolved per box (``live_box_door.mailbox``: this
+                            var > the box's staging-box file).
 
 Test taxonomy: tier_4 (live-remote — the deployed production image under real
 supervision).
@@ -90,7 +95,6 @@ import urllib.request
 import pytest
 
 from helpers import live_box_door
-from helpers.app_surface import skip_unbuilt
 from helpers.live_admin import (
     approve_pending_bridges,
     enable_mail,
@@ -105,7 +109,7 @@ from helpers.live_handle import derive_handle
 URL = live_box_door.live_box_url()
 SECRET, SECRET_SOURCE = live_box_door.admin_seed(URL)
 CLAIM_CODE = os.environ.get("FAUNA_LIVE_CLAIM_CODE", "")
-PASSWORD = os.environ.get("FAUNA_LIVE_MAIL_PASSWORD", "")
+_ADDRESS, PASSWORD = live_box_door.mailbox(URL)
 
 pytestmark = [
     pytest.mark.tier_4,
@@ -119,8 +123,8 @@ pytestmark = [
     pytest.mark.skipif(
         not (URL and SECRET),
         reason="live-box bootstrap test: name the box (`--nest live:URL`, or FAUNA_LIVE_NEST_URL) and provide the "
-        f"box's admin seed ({live_box_door.SEED_SOURCES}) to run (plus FAUNA_LIVE_HANDLE + FAUNA_LIVE_CLAIM_CODE on an "
-        "unclaimed box, FAUNA_LIVE_MAIL_PASSWORD while mail is off; hits a live "
+        f"box's admin seed ({live_box_door.SEED_SOURCES}) to run (plus FAUNA_LIVE_CLAIM_CODE and the box's handle on an "
+        "unclaimed box, the box's mail password while mail is off; hits a live "
         "external nest; opt-in, non-destructive — see module docstring)",
     ),
 ]
@@ -170,15 +174,6 @@ def _poll(fn, desc: str, timeout: float, interval: float = 5.0):
 
 
 def test_live_box_bootstrap(app):
-    if not app.driver.is_linux():
-        skip_unbuilt(
-            app.driver,
-            surface="the live-box bootstrap drive (claim → cert → mail up)",
-            detail="drives the linux Fauna app UI; the other apps are the "
-            "remaining cross-app follow-on",
-            tracked="docs/goal/architecture/nest/tls-certificates.md",
-        )
-
     # 0) Preflight: a claimed box must know the admin seed, else it is the wrong
     #    box's seed (or a reset box) — environment, named by its source, not a
     #    failure of the bootstrap. Skipped with a claim code: an unclaimed box
@@ -187,8 +182,10 @@ def test_live_box_bootstrap(app):
         live_box_door.preflight_admin(URL, SECRET, SECRET_SOURCE)
 
     # 1) Claim or sign in, UI-only.
+    #    A claim-fresh run claims under the box's own provisioned handle.
     state = reach_admin_shell(
-        app, nest_url=URL, secret_hex=SECRET, claim_code=CLAIM_CODE, nat_mode="public"
+        app, nest_url=URL, secret_hex=SECRET, claim_code=CLAIM_CODE,
+        claim_handle=_ADDRESS if CLAIM_CODE else "", nat_mode="public",
     )
     print(f"\n[bootstrap] reached admin shell via: {state}")
     wait_connected(app)

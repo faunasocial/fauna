@@ -1073,3 +1073,128 @@ async fn conversation_admin_block_serves_the_author_and_withholds_other_members(
     );
     assert!(own.legal_takedown.is_some());
 }
+
+/// (2026-11-03) The same sealed bytes sent into two channels are two mirror rows
+/// under ONE record cid — the channel is not in a conv record's hash
+/// (`message-segment-store.md` § Record identity per kind). A legal order
+/// names the content, so the takedown withholds every copy, audits each
+/// channel holding one, and the restore re-serves both
+/// (`takedown-and-block.md` § Legal takedown → *Conversations*). Before the
+/// fix the flag write matched two rows and the transaction rolled back: the
+/// record could never be taken down.
+#[tokio::test]
+async fn conversation_legal_takedown_withholds_every_channel_copy_of_a_record() {
+    let (router, state) = router_with_moderation().await;
+    let member = [0x52u8; 32];
+    let first = "c1".repeat(32);
+    let second = "c2".repeat(32);
+    let envelope = app_env(0xdf);
+    for channel in [&first, &second] {
+        dispatch(
+            &router,
+            state.clone(),
+            member,
+            "fauna.conversations.channel.send",
+            send_payload(channel, envelope.clone()),
+        )
+        .await
+        .expect("send ok");
+    }
+    let content_id = hex::encode(
+        fauna_mls::segments::derive_record_cid(&envelope)
+            .expect("derive conv record cid")
+            .digest(),
+    );
+
+    let admin = [0x5cu8; 32];
+    state.db.add_admin_actor(&admin).await.unwrap();
+    let reply: ModerationLegalTakedownReply = decode(
+        &dispatch(
+            &router,
+            state.clone(),
+            admin,
+            "fauna.moderation.legal_takedown",
+            conv_takedown_payload(&content_id, "EU-DSA-2024/778", false),
+        )
+        .await
+        .expect("a record copied into a second channel is still taken down"),
+    )
+    .unwrap();
+    assert_eq!(reply.status, "taken_down");
+
+    let fetch = |channel: String| {
+        let (router, state) = (&router, state.clone());
+        async move {
+            let reply: ChannelFetchReply = decode(
+                &dispatch(
+                    router,
+                    state,
+                    member,
+                    "fauna.conversations.channel.fetch",
+                    fetch_payload(&channel, 0, 100),
+                )
+                .await
+                .expect("fetch ok"),
+            )
+            .unwrap();
+            assert_eq!(reply.messages.len(), 1);
+            reply.messages[0].clone()
+        }
+    };
+    for channel in [&first, &second] {
+        let msg = fetch(channel.clone()).await;
+        assert!(msg.envelope.is_empty(), "withheld in {channel}");
+        assert_eq!(
+            msg.legal_takedown.as_ref().expect("tombstone").reference,
+            "EU-DSA-2024/778"
+        );
+    }
+    {
+        let conn = state.db.conn().await;
+        let mut stmt = conn
+            .prepare(
+                "SELECT detail FROM audit_log
+                  WHERE action = 'moderation:legal-takedown' AND target = ?1",
+            )
+            .unwrap();
+        let details: Vec<String> = stmt
+            .query_map(rusqlite::params![content_id], |r| r.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(details.len(), 2, "one audit row per channel: {details:?}");
+        for channel in [&first, &second] {
+            assert!(
+                details
+                    .iter()
+                    .any(|d| d.contains(&format!("channel={channel}"))),
+                "{channel} audited: {details:?}"
+            );
+        }
+    }
+    assert!(
+        conv_queue_row(&router, &state, member, &content_id)
+            .await
+            .is_some(),
+        "the attested sender's queue carries one row"
+    );
+
+    let reply: ModerationLegalTakedownReply = decode(
+        &dispatch(
+            &router,
+            state.clone(),
+            admin,
+            "fauna.moderation.legal_takedown",
+            conv_takedown_payload(&content_id, "appeal upheld", true),
+        )
+        .await
+        .expect("restore ok"),
+    )
+    .unwrap();
+    assert_eq!(reply.status, "restored");
+    for channel in [&first, &second] {
+        let msg = fetch(channel.clone()).await;
+        assert_eq!(msg.envelope, envelope, "re-served in {channel}");
+        assert!(msg.legal_takedown.is_none());
+    }
+}

@@ -2097,7 +2097,7 @@ type ingestReportRequest struct {
 
 // IngestReportReply mirrors fauna-protocol's IngestDmarcReportReply and
 // IngestTlsrptReportReply: the nest's outcome word (stored / duplicate /
-// malformed / oversize / wrong_domain) and, for a DMARC report, which kind it
+// malformed / oversize / wrong_domain / not_opted_in / full) and, for a DMARC report, which kind it
 // was (aggregate / forensic; empty for TLSRPT).
 type IngestReportReply struct {
 	Outcome string `cbor:"outcome"`
@@ -2167,9 +2167,79 @@ type recipientSealKeyHalves struct {
 // SuccessionPending mirrors the Rust `succession_pending` field (additive,
 // defaults false) — meaningful only when Key is nil; see
 // FetchRecipientMLSPubkeyHybrid.
+//
+// CalendarKey / CardKey mirror the calendar and card seal keys
+// (`owner-key-material.md` § Path B-sibling-5 / -6), registered in the same
+// row as Key — so set exactly when Key is — and always the standing keys,
+// whatever MailNewIngest asked.
 type fetchRecipientMLSPubkeyReply struct {
 	Key               *recipientSealKeyHalves `cbor:"key"`
 	SuccessionPending bool                    `cbor:"succession_pending"`
+	CalendarKey       *recipientSealKeyHalves `cbor:"calendar_key"`
+	CardKey           *recipientSealKeyHalves `cbor:"card_key"`
+}
+
+// SealKeyPair is one public seal key of a recipient: the 32-byte X25519
+// pubkey and its 1184-byte ML-KEM-768 encapsulation key, which
+// mailfauna.SealRecordHybrid seals X-Wing to.
+type SealKeyPair struct {
+	Pubkey  []byte
+	MlkemEk []byte
+}
+
+// RecipientKeyRow is a recipient's whole registered seal-key row: the mail key
+// (what FetchRecipientMLSPubkeyHybrid returns) and the calendar and card keys
+// beside it. Mail is nil when the recipient has provisioned no key (see
+// SuccessionPending, as FetchRecipientMLSPubkeyHybrid); Calendar and Card are
+// nil then too, or when a nest omitted them — each caller decides what an
+// absent kind key means for it.
+type RecipientKeyRow struct {
+	Mail              *SealKeyPair
+	Calendar          *SealKeyPair
+	Card              *SealKeyPair
+	SuccessionPending bool
+}
+
+// sealKeyPairOf validates one wire key value: nil stays nil, a present value
+// must carry both well-formed halves (the refusal FetchRecipientMLSPubkeyHybrid
+// documents — a misbehaving nest must not select a classical seal by omitting
+// the ek).
+func sealKeyPairOf(field string, h *recipientSealKeyHalves) (*SealKeyPair, error) {
+	if h == nil {
+		return nil, nil
+	}
+	if len(h.MLSPubkey) != recipientMLSPubkeyLen || len(h.MlkemEk) != recipientMlkemEkLen {
+		return nil, fmt.Errorf(
+			"fetch_recipient_mls_pubkey: the nest sent a recipient %s without both halves (mls_pubkey %d bytes, want %d; mlkem_ek %d bytes, want %d)",
+			field, len(h.MLSPubkey), recipientMLSPubkeyLen, len(h.MlkemEk), recipientMlkemEkLen)
+	}
+	return &SealKeyPair{Pubkey: h.MLSPubkey, MlkemEk: h.MlkemEk}, nil
+}
+
+// FetchRecipientKeyRow fetches the recipient's whole seal-key row in one call
+// — the mail, calendar and card keys. mailNewIngest as
+// FetchRecipientMLSPubkeyHybrid (it selects the mail key only).
+func FetchRecipientKeyRow(ctx context.Context, c Caller, actorID []byte, mailNewIngest bool) (RecipientKeyRow, error) {
+	req := fetchRecipientMLSPubkeyRequest{ActorID: actorID, MailNewIngest: mailNewIngest}
+	var reply fetchRecipientMLSPubkeyReply
+	if err := c.Call(ctx, MethodFetchRecipientMLSPubkey, req, &reply); err != nil {
+		return RecipientKeyRow{}, fmt.Errorf("fetch_recipient_mls_pubkey: %w", err)
+	}
+	if reply.Key == nil {
+		return RecipientKeyRow{SuccessionPending: reply.SuccessionPending}, nil
+	}
+	var row RecipientKeyRow
+	var err error
+	if row.Mail, err = sealKeyPairOf("seal key", reply.Key); err != nil {
+		return RecipientKeyRow{}, err
+	}
+	if row.Calendar, err = sealKeyPairOf("calendar key", reply.CalendarKey); err != nil {
+		return RecipientKeyRow{}, err
+	}
+	if row.Card, err = sealKeyPairOf("card key", reply.CardKey); err != nil {
+		return RecipientKeyRow{}, err
+	}
+	return row, nil
 }
 
 // FetchRecipientMLSPubkey returns the recipient's 32-byte X25519
@@ -2210,20 +2280,14 @@ func FetchRecipientMLSPubkey(ctx context.Context, c Caller, actorID []byte) ([]b
 // (IMAP/DAV session pubkey caching), so the content-sealing-epochs write gate
 // never seals their non-mail bytes under a mail epoch key.
 func FetchRecipientMLSPubkeyHybrid(ctx context.Context, c Caller, actorID []byte, mailNewIngest bool) (pubkey, mlkemEk []byte, successionPending bool, err error) {
-	req := fetchRecipientMLSPubkeyRequest{ActorID: actorID, MailNewIngest: mailNewIngest}
-	var reply fetchRecipientMLSPubkeyReply
-	if err := c.Call(ctx, MethodFetchRecipientMLSPubkey, req, &reply); err != nil {
-		return nil, nil, false, fmt.Errorf("fetch_recipient_mls_pubkey: %w", err)
+	row, err := FetchRecipientKeyRow(ctx, c, actorID, mailNewIngest)
+	if err != nil {
+		return nil, nil, false, err
 	}
-	if reply.Key == nil {
-		return nil, nil, reply.SuccessionPending, nil
+	if row.Mail == nil {
+		return nil, nil, row.SuccessionPending, nil
 	}
-	if len(reply.Key.MLSPubkey) != recipientMLSPubkeyLen || len(reply.Key.MlkemEk) != recipientMlkemEkLen {
-		return nil, nil, false, fmt.Errorf(
-			"fetch_recipient_mls_pubkey: the nest sent a recipient seal key without both halves (mls_pubkey %d bytes, want %d; mlkem_ek %d bytes, want %d)",
-			len(reply.Key.MLSPubkey), recipientMLSPubkeyLen, len(reply.Key.MlkemEk), recipientMlkemEkLen)
-	}
-	return reply.Key.MLSPubkey, reply.Key.MlkemEk, false, nil
+	return row.Mail.Pubkey, row.Mail.MlkemEk, false, nil
 }
 
 // ── fetch_recipient_index_key ────────────────────────────────────
@@ -4533,6 +4597,11 @@ type forwardMessageRequest struct {
 	RawMessage         []byte          `cbor:"raw_message"`
 	RuleIDOrForwardAll string          `cbor:"rule_id_or_forward_all"`
 	CopyMode           ForwardCopyMode `cbor:"copy_mode"`
+	// AuthResults is the source message's inbound verdicts — set by the MX
+	// door, nil from the submission door — read by the forwarder NDR's
+	// backscatter suppressors (mail-forwarding.md § Suppression matches the
+	// outbound shape).
+	AuthResults *AuthVerdicts `cbor:"auth_results,omitempty"`
 }
 
 // forwardMessageReply mirrors ForwardMessageReply. `Queued` is true when the
@@ -4560,6 +4629,7 @@ func ForwardMessage(
 	rawMessage []byte,
 	ruleIDOrForwardAll string,
 	copyMode ForwardCopyMode,
+	authResults *AuthVerdicts,
 ) (int64, error) {
 	req := forwardMessageRequest{
 		ActorID:            actorID,
@@ -4569,6 +4639,7 @@ func ForwardMessage(
 		RawMessage:         rawMessage,
 		RuleIDOrForwardAll: ruleIDOrForwardAll,
 		CopyMode:           copyMode,
+		AuthResults:        authResults,
 	}
 	var reply forwardMessageReply
 	if err := c.Call(ctx, MethodForwardMessage, req, &reply); err != nil {
@@ -5855,6 +5926,7 @@ type webdavAdmitPrincipalRequest struct {
 	DPoPProofs []string `cbor:"dpop_proofs"`
 	HTM        string   `cbor:"htm"`
 	HTU        string   `cbor:"htu"`
+	SourceIP   string   `cbor:"source_ip,omitempty"`
 }
 
 // WebdavAdmittedFolder mirrors WebdavAdmittedFolder — one `folder:read` scope's
@@ -5868,7 +5940,8 @@ type WebdavAdmittedFolder struct {
 }
 
 // WebdavAdmittedPrincipal mirrors WebdavAdmittedPrincipal. Exp is the access
-// token's `exp`, epoch seconds — the admission cache's ceiling.
+// token's `exp`, epoch seconds — informational: the door caches no admission
+// and admits every request through the nest.
 type WebdavAdmittedPrincipal struct {
 	ActorID      []byte                 `cbor:"actor_id"`
 	HolderX25519 []byte                 `cbor:"holder_x25519"`
@@ -5889,13 +5962,15 @@ type WebdavAdmitPrincipalReply struct {
 
 // WebdavAdmitPrincipal relays a principal's bearer presentation — the token from
 // `Authorization: DPoP`, every `DPoP` proof header, the request's method (`htm`)
-// and absolute `https` URL under `/webdav/` (`htu`) — to the nest's admission.
-// A refused admission is a reply, not an error. BridgeMda only.
-func WebdavAdmitPrincipal(ctx context.Context, c Caller, token string, proofs []string, htm, htu string) (WebdavAdmitPrincipalReply, error) {
+// and absolute `https` URL under `/webdav/` (`htu`), and the DAV client's
+// address (`sourceIP`, the failed-credential throttle's source key) — to the
+// nest's admission. A refused admission is a reply, not an error. BridgeMda
+// only.
+func WebdavAdmitPrincipal(ctx context.Context, c Caller, token string, proofs []string, htm, htu, sourceIP string) (WebdavAdmitPrincipalReply, error) {
 	if proofs == nil {
 		proofs = []string{}
 	}
-	req := webdavAdmitPrincipalRequest{Token: token, DPoPProofs: proofs, HTM: htm, HTU: htu}
+	req := webdavAdmitPrincipalRequest{Token: token, DPoPProofs: proofs, HTM: htm, HTU: htu, SourceIP: sourceIP}
 	var reply WebdavAdmitPrincipalReply
 	if err := c.Call(ctx, MethodWebdavAdmitPrincipal, req, &reply); err != nil {
 		return WebdavAdmitPrincipalReply{}, fmt.Errorf("webdav_admit_principal: %w", err)

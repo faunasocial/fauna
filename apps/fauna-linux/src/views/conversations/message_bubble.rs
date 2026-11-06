@@ -93,6 +93,7 @@ pub fn build(
     caps: &ThreadCapabilities,
     thread_id: &ThreadId,
     show_reply_all: bool,
+    can_send: bool,
     on_reply: OnReply,
     client: &Rc<FaunaClient>,
     rt: &tokio::runtime::Handle,
@@ -246,7 +247,16 @@ pub fn build(
         let cl = client.clone();
         let rth = rt.clone();
         let latest = Rc::clone(latest_by_id);
-        bubble.append(&withheld.placeholder_box(move || {
+        // The sealed-item sentence after the frame — an end-to-end thread's
+        // bubble only, never one Guardian Notify counted
+        // (`region-blocking.md` § Implementation status today), decided in
+        // shared Rust.
+        let sealed_note = crate::content_policy::region_sealed_note(
+            &composed,
+            caps.encryption.is_sealed(),
+            &msg.labels,
+        );
+        bubble.append(&withheld.placeholder_box(sealed_note, move || {
             crate::conversations::reveal_content(mid.clone());
             let Some(m) = latest.borrow().get(&mid).cloned() else {
                 return;
@@ -261,6 +271,7 @@ pub fn build(
                 &cap,
                 &tid,
                 show_reply_all,
+                can_send,
                 orp.clone(),
                 &cl,
                 &rth,
@@ -354,6 +365,7 @@ pub fn build(
                 &cap,
                 &tid,
                 show_reply_all,
+                can_send,
                 orp.clone(),
                 &cl,
                 &rth,
@@ -424,6 +436,7 @@ pub fn build(
                 &cap,
                 &tid,
                 show_reply_all,
+                can_send,
                 orp.clone(),
                 &cl,
                 &rth,
@@ -445,6 +458,7 @@ pub fn build(
         caps,
         thread_id,
         show_reply_all,
+        can_send,
         on_reply,
         client,
         rt,
@@ -550,6 +564,7 @@ fn append_full_content(
     caps: &ThreadCapabilities,
     thread_id: &ThreadId,
     show_reply_all: bool,
+    can_send: bool,
     on_reply: OnReply,
     client: &Rc<FaunaClient>,
     rt: &tokio::runtime::Handle,
@@ -813,6 +828,7 @@ fn append_full_content(
 
     let reply_btn = gtk::Button::from_icon_name("mail-reply-sender-symbolic");
     reply_btn.add_css_class("flat");
+    reply_btn.set_sensitive(can_send);
     crate::testid::set_test_id(&reply_btn, ids::DM_REPLY_BUTTON);
     {
         let on_reply = on_reply.clone();
@@ -826,6 +842,7 @@ fn append_full_content(
     // (capability gating: never rail-branch the widget tree).
     let reply_all_btn = gtk::Button::from_icon_name("mail-reply-all-symbolic");
     reply_all_btn.add_css_class("flat");
+    reply_all_btn.set_sensitive(can_send);
     reply_all_btn.set_visible(show_reply_all);
     crate::testid::set_test_id(&reply_all_btn, ids::DM_REPLY_ALL_BUTTON);
     {

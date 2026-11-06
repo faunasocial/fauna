@@ -7,6 +7,7 @@ import com.fauna.app.core.ShellLog
 import com.fauna.ffi.FfiEventDrafts
 import com.fauna.ffi.FfiEventDraftsSyncInterface
 import com.fauna.ffi.autosaveDebounceMs
+import com.fauna.ffi.fillEventDraft
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -134,7 +135,12 @@ class EventDraftsHost internal constructor(
                 // keystroke sends the whole form to `saveDrafts` under THEIR
                 // handle, sealed under THEIR `BackupKey`.
                 if (restored != null && synchronized(this@EventDraftsHost) { generation == mine }) {
-                    _draft.value = restored
+                    // The shared FILL rule (events.md § Persistence, *A restore
+                    // FILLS*): the load retries a read lost to the transport for
+                    // minutes, so it can land after the user has started an
+                    // event — a draft holding user input keeps it, whole.
+                    val filled = fillEventDraft(_draft.value ?: FfiEventDrafts("", "", "", "", ""), restored)
+                    _draft.value = if (isEmptyDraft(filled)) null else filled
                 }
             } catch (e: Exception) {
                 ShellLog.w("EventDrafts", "restore drafts failed: ${e.message}")
@@ -144,8 +150,10 @@ class EventDraftsHost internal constructor(
 
     /** Retire the autosave on logout. The [FfiEventDraftsSync] handle itself
      *  is closed by [com.fauna.app.core.ApiClient]. A pending debounced save
-     *  is dropped rather than flushed — it belongs to the outgoing actor
-     *  (mirrors web's `resetEventDrafts`). */
+     *  is dropped here, not flushed — [com.fauna.app.core.ApiClient.clearAuth]
+     *  runs [captureLeaveFlush] BEFORE calling this, so the outgoing actor's
+     *  last edit is saved under the outgoing actor's own handle (the leave-flush
+     *  promise names sign-out and switch as leave doors). */
     fun stopDraftsSync() {
         synchronized(this) {
             // Bump first: everything below is the drop, and the seam comes
@@ -216,6 +224,17 @@ class EventDraftsHost internal constructor(
             // A `stopDraftsSync` may have raced in between; don't resurrect it.
             if (generation == mine && sync != null) saveJob = job else job.cancel()
         }
+    }
+
+    /** The sign-out / account-switch leave door (`reserved-folders.md` § The
+     *  leave-flush promise): captures the OUTGOING session's handle and last
+     *  edit as ONE atomic pair, now, and returns the save for the caller to run
+     *  before the client is torn down — [stopDraftsSync] drops both right
+     *  after. Not generation-checked: the pair was read under the lock, so it
+     *  cannot mix actors. `null` when there is nothing to flush. */
+    fun captureLeaveFlush(): (suspend () -> Unit)? {
+        val (s, d) = synchronized(this) { (sync ?: return null) to (lastEdited ?: return null) }
+        return { s.saveDrafts(d.summary, d.dtstart, d.dtend, d.description, d.location) }
     }
 
     /** The leave-flush (`reserved-folders.md` § The leave-flush promise, the

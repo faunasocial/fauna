@@ -89,6 +89,7 @@ class DevicesVMOnDemandTest {
         val appContext = mock(Context::class.java)
         whenever(api.folderChangedTick).thenReturn(MutableSharedFlow())
         whenever(api.reconnectTick).thenReturn(MutableSharedFlow())
+        whenever(api.devicesStaleTick).thenReturn(MutableSharedFlow())
         whenever(api.storeChangedTick).thenReturn(MutableSharedFlow())
         val log = mutableListOf<String>()
         val toggle = FakeOnDemandToggle(stronger, failSetShown, log)

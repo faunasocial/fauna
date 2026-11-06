@@ -73,6 +73,15 @@ export function localTimestamp(epochMs: number): string {
 }
 
 /**
+ * A local date (epoch-**millisecond**) in `format_unix_local_date`'s fixed
+ * shape — `YYYY-MM-DD` — the web twin for the same timezone-database reason as
+ * {@link localTimestamp}. Seconds-valued callers multiply by 1000.
+ */
+export function localDate(epochMs: number): string {
+  return localTimestamp(epochMs).slice(0, 10);
+}
+
+/**
  * One mail-health heartbeat stamp (`last_outbound_delivered_at` /
  * `last_inbound_accepted_at`, unix **seconds**; `null` = never) as text: "Never"
  * or the shared relative bucket / absolute date. The text of heartbeat rows 5–6

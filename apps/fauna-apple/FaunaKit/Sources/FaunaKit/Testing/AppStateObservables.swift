@@ -89,6 +89,17 @@ public enum AppStateObservables {
             }
         }
 
+        // `mls_bound_channels` (`fauna_e2e_agent::MLS_BOUND_CHANNELS_KEY`) — the
+        // sorted channel hex ids the FaunaMls backend has bound a thread to, the
+        // restore witness for a Welcome-only 1:1 that no rail lists. Unlike the
+        // keys above, no session publishes `[]`, never an absent key.
+        if let data = conversationsSession?.mlsBoundChannelsJson().data(using: .utf8),
+           let bound = try? JSONSerialization.jsonObject(with: data) {
+            state["mls_bound_channels"] = bound
+        } else {
+            state["mls_bound_channels"] = [String]()
+        }
+
         // Convention 14's `account_pump_cycles` observable — the SHARED
         // `fauna_client_account_runtime` JSON; do not invent a per-platform
         // counter. No live client yet returns the shared-Rust contract's own
@@ -106,6 +117,18 @@ public enum AppStateObservables {
                 "started": 0, "completed": 0, "runtime": false, "holder": false,
             ] as [String: Any]
         }
+
+        // `custody_ceremony_ingest` (`fauna_e2e_agent::CUSTODY_CEREMONY_INGEST_KEY`)
+        // — the host's ingest tally the devices-15 "stays gone when its owner
+        // sends again" journeys read. No live client publishes no key
+        // (convention 11); `test-helpers` flavor only, hence `#if DEBUG`.
+        #if DEBUG
+        if let json = liveClient?.api.custodyCeremonyIngestJson(),
+           let data = json.data(using: .utf8),
+           let ingest = try? JSONSerialization.jsonObject(with: data) {
+            state["custody_ceremony_ingest"] = ingest
+        }
+        #endif
 
         // Convention 14's `feed_reloads` observable — a UniFFI read
         // off the live `FeedVM.manager`. No manager (never authenticated)
@@ -213,10 +236,20 @@ public enum AppStateObservables {
         // region blocks, per each surface's verdict, against the block
         // placeholders painted. `#if DEBUG` — the witnesses feeding it are.
         state["region_block_render"] = RegionBlockRender.stateFragment
+        // The nest source's twin (`nest-rules.md` § Element IDs): the on-screen
+        // items a nest rule blocks against the nest block placeholders painted,
+        // and the changed-rules notice's text while it is up.
+        state["nest_block_render"] = NestBlockRender.stateFragment
+        state["ward_rule_document_rules"] = ContentPolicyTestState.wardRuleDocumentRules as Any? ?? NSNull()
+        state["nest_rules_changed_notice"] = NestRulesTestState.changedNoticeText as Any? ?? NSNull()
         #endif
 
         state["settings"] = [
             "inbox_mode": inboxMode as Any,
+            // The token id behind each painted `session-card`, in order
+            // (`actions/sessions.py::painted_token_ids`); `null` before the
+            // Sessions page's first hydrate.
+            "session_token_ids": SessionsTestState.paintedTokenIds as Any? ?? NSNull(),
         ] as [String: Any]
 
         // Current UI error/warning/info — `AppMessages` is auto-populated by
@@ -269,6 +302,13 @@ public enum AppStateObservables {
         liveClient: FaunaClient?
     ) -> [String: Any] {
         var data: [String: Any] = [:]
+
+        // The Profile page's declared state fields (ui.yaml `profile`): `is_self`,
+        // `actor_id` and `home_nest_url` — the actor-home slot the follow, the knock
+        // and the remote header read share (`null` = this nest), the read-back of the
+        // nav patch's field of the same name. Mirrored by the page itself
+        // (``ProfileStateMirror``): a plain field read, no round trip.
+        data["profile"] = ProfileStateMirror.state()
 
         // The identity succession's pre-switch group sweep — the machine-readable
         // twin of an outcome that renders as ID-less chrome, which is why
@@ -383,6 +423,28 @@ public enum AppStateObservables {
     /// absent while a preview is still resolving too, so this is what lets a
     /// test wait until a preview has FAILED before it reads "no card". One
     /// helper for both shells' `data.feed.posts[]` rows; tui's and linux's key.
+    /// The `launch_phase` observable: the held launch machine's phase, one
+    /// string per `LaunchPhase` case (`offline` splits on `transient`). Both
+    /// shells publish it as its own top-level key — never inside macOS's
+    /// `launch` dict, whose appearance tests read as the window decision.
+    /// It is what makes "the launch verdict landed offline" race-free on iOS,
+    /// where an entered session stays in its cached shell on that verdict
+    /// (`onboarding.md` § App-launch routing) and a bare
+    /// `session.authenticated == false` read would pass before any verdict
+    /// (`e2e-latency-independent-assertions.md`, convention 14).
+    public static func launchPhaseLabel(_ phase: LaunchPhase) -> String {
+        switch phase {
+        case .boot: return "boot"
+        case .hydrating: return "hydrating"
+        case .silentChallenge: return "silent_challenge"
+        case .refreshing: return "refreshing"
+        case .online: return "online"
+        case .offline(let transient): return transient ? "offline_transient" : "offline"
+        case .wizardAt: return "wizard"
+        case .identityChanged: return "identity_changed"
+        }
+    }
+
     public static func feedPostLinkPreviews(_ document: RenderDocument) -> [[String: String]] {
         renderDocumentLinkPreviews(document: document).map { ["url": $0.url, "state": $0.state] }
     }

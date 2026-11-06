@@ -49,31 +49,31 @@ Stamped 2026-10-13 at ab51f8d2bd.
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ✅ full | 0.1.2-dev+c438a386 standalone |
-| linux | ⚠ partial | 0.1.2-dev+c438a386 standalone |
-| windows | ⚠ partial | 0.1.2-dev+c438a386 standalone |
-| macos | ⚠ partial | 0.1.2-dev+8b423269 standalone |
-| ios | ⚠ partial | 0.1.2-dev+c438a386 standalone |
+| web | ✅ full | 0.1.5-dev+e4b19f90 standalone |
+| linux | ✅ full | 0.1.5-dev+e4b19f90 standalone |
+| windows | ⚠ partial | 0.1.5-dev+e4b19f90 standalone |
+| macos | ✅ full | 0.1.5-dev+e4b19f90 standalone |
+| ios | ✅ full | 0.1.5-dev+662ece79 standalone |
 | android |  no run recorded | |
-| tui | ✅ full | 0.1.2-dev+c438a386 standalone |
+| tui | ✅ full | 0.1.5-dev+390d61b5 standalone |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
 | 1 | app | `tests/e2e-unified/tests/test_admin_nav.py::test_admin_tab_visible_for_admin` | windows (windows): passed, macos (macos): passed, tui (linux): passed, tui (windows): passed |
-| 1 | app | `tests/e2e-unified/tests/test_admin_nav.py::test_admin_tab_hidden_for_non_admin` | web (linux): passed, web (windows): passed, windows (windows): passed, macos (macos): passed, tui (linux): passed, tui (windows): passed |
-| 1 | app | `tests/e2e-unified/tests/test_admin_nav.py::test_admin_nav_back_present` | web (linux): passed, web (windows): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (windows): passed |
-| 1 | app | `tests/e2e-unified/tests/test_admin_nav.py::test_admin_nav_back_exits_shell` | web (linux): passed, web (windows): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (windows): passed |
-| 1 | app | `tests/e2e-unified/tests/test_admin_nav.py::test_admin_nav_back_lands_on_primary_view` | web (linux): passed, web (windows): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (windows): passed |
-| 2 | app | `tests/e2e-unified/tests/test_admin.py::test_admin_dashboard_loads` | web (linux): passed, web (windows): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (windows): passed |
-| 2 | app | `tests/e2e-unified/tests/test_admin.py::test_admin_dashboard_user_count` | web (linux): passed, web (windows): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (windows): passed |
-| 2 | app | `tests/e2e-unified/tests/test_admin.py::test_admin_dashboard_version` | web (linux): passed, web (windows): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (windows): passed |
+| 1 | app | `tests/e2e-unified/tests/test_admin_nav.py::test_admin_tab_hidden_for_non_admin` | web (linux): passed, windows (windows): passed, macos (macos): passed, tui (linux): passed, tui (windows): passed |
+| 1 | app | `tests/e2e-unified/tests/test_admin_nav.py::test_admin_nav_back_present` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (windows): passed |
+| 1 | app | `tests/e2e-unified/tests/test_admin_nav.py::test_admin_nav_back_exits_shell` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (windows): passed |
+| 1 | app | `tests/e2e-unified/tests/test_admin_nav.py::test_admin_nav_back_lands_on_primary_view` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (windows): passed |
+| 2 | app | `tests/e2e-unified/tests/test_admin.py::test_admin_dashboard_loads` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (windows): passed |
+| 2 | app | `tests/e2e-unified/tests/test_admin.py::test_admin_dashboard_user_count` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (windows): passed |
+| 2 | app | `tests/e2e-unified/tests/test_admin.py::test_admin_dashboard_version` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (windows): passed |
 | 3 | app | `tests/e2e-unified/tests/test_admin_error_surfacing.py::test_admin_mail_page_surfaces_fetch_error` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 4 | nest | `tests/e2e-unified/tests/api/test_admin_auth.py::test_am_i_admin_non_admin` | nest (linux): passed, nest (macos): passed |
 | 4 | nest | `tests/e2e-unified/tests/test_ws_rpc_admin_client.py::test_non_admin_actor_is_permission_denied_on_admin_kind` | nest (linux): passed, nest (macos): passed, nest (windows): passed |
-| 5 | app | `tests/e2e-unified/tests/test_admin_nav.py::test_admin_area_navigation_switches_between_admin_pages` | web (linux): passed, linux (linux): passed, tui (linux): passed |
-| 6 | app | `tests/e2e-unified/tests/test_macos_shell_canonical_entry.py::test_admin_shell_reentry_after_leaving_a_deep_sub_page_lands_on_dashboard` | — |
-| 6 | app | `tests/e2e-unified/tests/test_admin_nav.py::test_admin_entry_after_leaving_a_deep_page_lands_on_the_dashboard` | web (linux): passed, linux (linux): passed, tui (linux): passed |
+| 5 | app | `tests/e2e-unified/tests/test_admin_nav.py::test_admin_area_navigation_switches_between_admin_pages` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 6 | app | `tests/e2e-unified/tests/test_macos_shell_canonical_entry.py::test_admin_shell_reentry_after_leaving_a_deep_sub_page_lands_on_dashboard` | macos (macos): passed |
+| 6 | app | `tests/e2e-unified/tests/test_admin_nav.py::test_admin_entry_after_leaving_a_deep_page_lands_on_the_dashboard` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 7 | app | `tests/e2e-unified/tests/test_admin.py::test_admin_dashboard_shows_the_storage_the_nest_holds` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 8 | app | `tests/e2e-unified/tests/test_admin.py::test_admin_dashboard_shows_the_one_card_set` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 9 | app | `tests/e2e-unified/tests/test_admin.py::test_a_failed_dashboard_read_drops_only_its_own_cards` | web (linux): passed, tui (linux): passed |
+| 9 | app | `tests/e2e-unified/tests/test_admin.py::test_a_failed_dashboard_read_drops_only_its_own_cards` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 <!-- features-render:end -->

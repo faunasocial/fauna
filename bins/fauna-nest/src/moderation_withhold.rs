@@ -71,11 +71,13 @@ use anyhow::{Context, Result};
 use std::collections::{HashMap, HashSet};
 
 /// Each post's withhold ground, read once per walk — the post half of the
-/// predicate's flag input (the conversation half reads its own in SQL).
+/// predicate's flag input (the conversation half reads its own in SQL) — and
+/// which posts a federated follow delivered, which the walk leaves out.
 #[derive(Default, Debug)]
 pub struct PostWithholds {
     taken_down: HashSet<[u8; 32]>,
     blocked: HashSet<[u8; 32]>,
+    delivered: HashSet<[u8; 32]>,
 }
 
 impl PostWithholds {
@@ -89,7 +91,38 @@ impl PostWithholds {
                 .admin_blocked_post_ids()
                 .await
                 .context("listing admin-blocked post ids for the withhold walk")?,
+            delivered: db
+                .follow_delivered_post_ids()
+                .await
+                .context("listing follow-delivered post ids for the withhold walk")?,
         })
+    }
+
+    /// Fold one live post's blob references into `sets`: the one place both
+    /// walks (the handler's [`recompute`] and the GC sweep's) decide what a
+    /// post contributes.
+    ///
+    /// A **follow-delivered** row contributes nothing, on either side
+    /// (`federated-follow.md` § Decision 3, *What is not stored*, and
+    /// § Decision 4). This nest holds none of its attachments (the follower's
+    /// client fetches them from the author's home), so a withhold has no bytes
+    /// here to keep off the wire. The door's 451 or 403 for such a hash, where
+    /// an unflagged delivered row's answers 404, would tell an anonymous asker
+    /// that some local reader follows the author. Nor may it exempt: an
+    /// unflagged delivered row naming a local taken-down post's photo would
+    /// re-serve compelled bytes and reveal the same thing by a 200. The
+    /// moderation flag still binds the row's single-post read, where the
+    /// per-reader guard answers first.
+    pub fn fold_post(
+        &self,
+        sets: &mut WithholdSets,
+        post_id: &[u8; 32],
+        refs: impl IntoIterator<Item = [u8; 32]>,
+    ) {
+        if self.delivered.contains(post_id) {
+            return;
+        }
+        sets.add_record(self.ground(post_id), refs);
     }
 
     /// The ground withholding `post_id`, the stronger one when both apply.
@@ -266,8 +299,9 @@ pub async fn recompute(
             }
         };
         if let Some(post) = crate::db::posts::decode_stored_post(&body) {
-            sets.add_record(
-                withholds.ground(post_id),
+            withholds.fold_post(
+                &mut sets,
+                post_id,
                 post.blob_refs().into_iter().map(|h| h.digest()),
             );
         }

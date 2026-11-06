@@ -10,7 +10,9 @@ import java.io.File
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import uniffi.fauna_core.RenderBlock
+import uniffi.fauna_feed.HeldVideo
 import uniffi.fauna_feed.PlaybackSource
+import uniffi.fauna_feed.heldVideoSource
 
 /**
  * The android half of feed inline playback — `video-thumbnail` as the player host
@@ -31,13 +33,15 @@ object InlineVideoPlayback {
     /** What a tap resolved to. */
     sealed interface Media {
         /** The [source] the element publishes: the nest-relative path the reader
-         *  was opened on, or `sealed:<hash>` for opened bytes. */
+         *  was opened on, or the shared `heldVideoSource` spelling for held bytes
+         *  (`sealed:<hash>` / `home:<hash>`). */
         val source: String
 
         /** A `Url` source, read through the pinned ranged reader. */
         class Streamed(override val source: String, val reader: FfiRangedNestReaderInterface) : Media
 
-        /** A sealed video's opened bytes, on disk for `setDataSource(path)`. */
+        /** Held bytes — a sealed video's opened plaintext, or a foreign-homed clip
+         *  fetched through the plane — on disk for `setDataSource(path)`. */
         class Opened(override val source: String, val file: File) : Media
     }
 
@@ -85,22 +89,24 @@ object InlineVideoPlayback {
     ): Media? = when (val source = manager.playbackSource(block)) {
         is PlaybackSource.Url ->
             if (home != null && block is RenderBlock.Video) {
-                openFromPlane(manager, hosts, home, block.hash, cacheDir)
+                openFromPlane(manager, hosts, home, HeldVideo.HOME, block.hash, cacheDir)
             } else {
                 withContext(Dispatchers.IO) {
                     runCatching { Media.Streamed(source.url, opener.open(nestUrl, source.url)) }.getOrNull()
                 }
             }
-        is PlaybackSource.Sealed -> openFromPlane(manager, hosts, home, source.hash, cacheDir)
+        is PlaybackSource.Sealed -> openFromPlane(manager, hosts, home, HeldVideo.SEALED, source.hash, cacheDir)
         is PlaybackSource.Unplayable -> null
     }
 
     /** The blob [hash] from [home] through the plane, opened under the post's key
-     *  when it is sealed, written to a temp file the player reads. */
+     *  when it is sealed, written to a temp file the player reads; [held] is the arm
+     *  the resolve took, which names the published source. */
     private suspend fun openFromPlane(
         manager: FfiFeedManager,
         hosts: FfiPostBlobHostsInterface?,
         home: FfiPostBlobHome?,
+        held: HeldVideo,
         hash: String,
         cacheDir: File,
     ): Media? = PostMediaOpen.fetchAndOpen(hosts, manager, home, hash)?.let { bytes ->
@@ -108,7 +114,7 @@ object InlineVideoPlayback {
             runCatching {
                 val file = File.createTempFile("inline-video-", ".bin", cacheDir)
                 file.writeBytes(bytes)
-                Media.Opened("sealed:$hash", file)
+                Media.Opened(heldVideoSource(held, hash), file)
             }.getOrNull()
         }
     }

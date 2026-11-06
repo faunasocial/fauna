@@ -187,3 +187,93 @@ fn the_slot_status_json_reseeds_to_the_same_state() {
         other => panic!("a written slot must re-seed to PendingReview, got {other:?}"),
     }
 }
+
+/// Reads [`OnboardingMachine::pending_invite_slot`] at the moment a recheck flips
+/// the snapshot to `Rechecking` — the observer fires synchronously at that
+/// transition, before the recheck's first await, which is exactly where an app's
+/// submit continuation can land.
+struct SlotAtRecheck {
+    machine: std::sync::OnceLock<std::sync::Weak<OnboardingMachine>>,
+    seen: std::sync::Mutex<Vec<Option<fauna_onboarding_machine::PendingInviteSlot>>>,
+}
+
+impl fauna_onboarding_machine::observer::OnboardingObserver for SlotAtRecheck {
+    fn on_changed(&self) {
+        let Some(m) = self.machine.get().and_then(std::sync::Weak::upgrade) else {
+            return;
+        };
+        if matches!(
+            m.invite_request_snapshot().state,
+            InviteRequestState::Rechecking
+        ) {
+            self.seen.lock().unwrap().push(m.pending_invite_slot());
+        }
+    }
+}
+
+/// **A recheck in flight does not hide the request it is checking.**
+///
+/// The pending page polls, and every app starts its first recheck as soon as the
+/// recheck affordance appears — that is, on the observer tick the submit's own
+/// `PendingReview` raises, which can run before the app's continuation of the
+/// submit await reads the slot. Measured on windows (2026-11-04): the slot read
+/// `Rechecking`, came back empty, and the submit was never registered — the
+/// joiner silently missing from the account registry. A request under recheck is
+/// still pending, so the slot must still answer, with the `PendingReview` it is
+/// checking (a `Rechecking` status would not re-seed to a resumable state).
+#[tokio::test]
+async fn the_slot_survives_a_recheck_in_flight() {
+    use fauna_onboarding_machine::nest_api::{FakeNestApi, NestApi};
+
+    let probe = Arc::new(SlotAtRecheck {
+        machine: std::sync::OnceLock::new(),
+        seen: std::sync::Mutex::new(Vec::new()),
+    });
+    let fake = Arc::new(FakeNestApi::new());
+    let m = OnboardingMachine::with_nest_api(probe.clone(), fake as Arc<dyn NestApi>);
+    probe.machine.set(Arc::downgrade(&m)).ok();
+    m.seed_identity("0".repeat(64));
+    m.seed_pending_invite(
+        "https://a.example".into(),
+        "alice@a.example".into(),
+        "REQ1".into(),
+        serde_json::json!({ "PendingReview": { "request_id": "REQ1", "last_checked_ms": 7 } })
+            .to_string(),
+    );
+
+    m.recheck_invite_status().await;
+
+    let seen = probe.seen.lock().unwrap().clone();
+    assert_eq!(
+        seen.len(),
+        1,
+        "the recheck passes through Rechecking exactly once"
+    );
+    let slot = seen[0]
+        .clone()
+        .expect("a request under recheck is still pending — the slot must answer");
+    assert_eq!(slot.nest_url, "https://a.example");
+    assert_eq!(slot.handle, "alice@a.example");
+    assert_eq!(slot.request_id, "REQ1");
+
+    let m2 = make();
+    m2.seed_pending_invite(
+        slot.nest_url,
+        slot.handle,
+        slot.request_id,
+        slot.status_json,
+    );
+    match m2.invite_request_snapshot().state {
+        InviteRequestState::PendingReview {
+            request_id,
+            last_checked_ms,
+        } => {
+            assert_eq!(request_id, "REQ1");
+            assert_eq!(
+                last_checked_ms, 7,
+                "the slot must carry the state under recheck"
+            );
+        }
+        other => panic!("a slot written mid-recheck must re-seed to PendingReview, got {other:?}"),
+    }
+}

@@ -272,10 +272,22 @@ const SECCOMP_DENY = [
 // back to clone, where the CLONE_NEWUSER rule below reads them.
 const SECCOMP_ENOSYS = ["clone3"];
 const CLONE_NEWUSER = 0x10000000;
+// The socket families the network namespace CONTAINS — unix, inet, inet6, netlink —
+// the same set the cargo boundary allows (`scripts/cargo-boundary.py`'s
+// SOCKET_FAMILIES; build-compile-cache.md § The boundary's scope and what OFF means,
+// decision (1)): `--unshare-net` does not namespace every family (`AF_VSOCK` reaches
+// the hypervisor host from inside it, measured on the primary dev VM 2026-11-05), so `socket` and
+// `socketpair` answer EAFNOSUPPORT for any other. libseccomp refuses an allow rule
+// under an allow default, so the set is spelled as what it excludes: every family
+// above netlink, and each one below it that is not in the set.
+const SOCKET_FAMILIES = [1, 2, 10, 16];
 const SCMP_ACT_ALLOW = 0x7fff0000;
 const SCMP_ACT_ERRNO = (errno: number) => 0x00050000 | (errno & 0xffff);
 const EPERM = 1;
 const ENOSYS = 38;
+const EAFNOSUPPORT = 97;
+const SCMP_CMP_EQ = 4;
+const SCMP_CMP_GT = 6;
 const SCMP_CMP_MASKED_EQ = 7;
 
 // Build the filter and return the memfd holding its BPF program, inheritable by the
@@ -334,6 +346,23 @@ function seccompFilterFd(): { fd: number; close: () => void } {
   view.setBigUint64(8, BigInt(CLONE_NEWUSER), true);
   view.setBigUint64(16, BigInt(CLONE_NEWUSER), true);
   rule("clone", SCMP_ACT_ERRNO(EPERM), cmp);
+  // socket / socketpair arg 0 (the family): above netlink, or one below it outside the
+  // set — EAFNOSUPPORT, as a kernel built without the family would answer.
+  const family = (op: number, value: number) => {
+    const c = new Uint8Array(24);
+    const v = new DataView(c.buffer);
+    v.setUint32(0, 0, true);
+    v.setInt32(4, op, true);
+    v.setBigUint64(8, BigInt(value), true);
+    return c;
+  };
+  const top = Math.max(...SOCKET_FAMILIES);
+  for (const name of ["socket", "socketpair"]) {
+    rule(name, SCMP_ACT_ERRNO(EAFNOSUPPORT), family(SCMP_CMP_GT, top));
+    for (let f = 0; f < top; f++) {
+      if (!SOCKET_FAMILIES.includes(f)) rule(name, SCMP_ACT_ERRNO(EAFNOSUPPORT), family(SCMP_CMP_EQ, f));
+    }
+  }
   const fd = libc.symbols.memfd_create(cstr("deno-sandbox-seccomp"), 0);
   if (fd < 0) fail("memfd_create failed");
   const rc = lib.symbols.seccomp_export_bpf(ctx, fd);

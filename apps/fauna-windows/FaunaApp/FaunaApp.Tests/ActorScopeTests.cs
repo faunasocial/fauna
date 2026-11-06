@@ -188,7 +188,7 @@ public class ActorScopeTests : IDisposable
             guardianHandle: "guardian1", usageTodayMinutes: 45);
         var outgoingPeer = new byte[32];
         WardAsksCache.SetFromStatus(
-            true, [new uniffi.fauna_ffi.FfiFamilyContactRequest(outgoingPeer, "peer", 1)], []);
+            true, null, [new uniffi.fauna_ffi.FfiFamilyContactRequest(outgoingPeer, "peer", 1)], []);
         WardAsksCache.NoteFeedRefusal(new FeedTriple("b", "link", ""));
 
         // Each assertion below is paired with its pre-drop opposite, so none can

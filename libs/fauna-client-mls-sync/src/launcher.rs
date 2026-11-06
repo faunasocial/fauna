@@ -136,6 +136,7 @@ pub fn tokio_launcher(
     Some(Arc::new(TokioMlsSyncLauncher {
         sync,
         backend: Arc::downgrade(&backend),
+        identity: manager.session_generation_watch(),
         manager: Arc::downgrade(&manager),
         post_restore,
     }))
@@ -148,10 +149,14 @@ pub fn tokio_launcher(
 /// future (held by the task awaiting `start_receive_loop`) must not pin a
 /// torn-down session's internals, and the failed upgrade is what ends the
 /// retry on logout.
+///
+/// `identity` is taken at session build, like the session's own receiver, so an
+/// identity change between the build and the launch still retires the autosave.
 struct TokioMlsSyncLauncher {
     sync: Arc<MlsStateSync>,
     backend: Weak<FaunaMlsBackend>,
     manager: Weak<ConversationsManager>,
+    identity: tokio::sync::watch::Receiver<u64>,
     post_restore: Option<Arc<dyn PostRestoreHook>>,
 }
 
@@ -208,7 +213,12 @@ impl MlsSyncLauncher for TokioMlsSyncLauncher {
         let Some(backend) = self.backend.upgrade() else {
             return;
         };
-        attach_replica_autosave(self.manager.clone(), backend, Arc::clone(&self.sync));
+        attach_replica_autosave(
+            self.manager.clone(),
+            backend,
+            Arc::clone(&self.sync),
+            self.identity.clone(),
+        );
     }
 }
 
@@ -232,12 +242,27 @@ impl SnapshotObserver for ReplicaAutosaveObserver {
 /// [`REPLICA_DEBOUNCE`] of quiescence, snapshots on the task, then seals + uploads
 /// off-task.
 ///
-/// **Retirement (no leak).** The task holds only a `Weak<ConversationsManager>`, so
-/// it never keeps the session's manager alive: when the owner drops the session (its
-/// receive loop exits on liveness → the last strong manager ref drops), the manager
-/// drops, the observer's `Sender` drops with it, `rx.recv()` yields `None`, and the
-/// task retires — the event-driven twin of linux's `clear_observers` teardown. It
-/// holds strong `backend`/`sync` (neither references the manager, so they don't
+/// **Retirement (no leak).** The task ends with its session's identity, by
+/// whichever of two ways that ends first:
+///
+/// * **The identity changes** (`identity`, the manager's session-generation watch):
+///   an app that keeps ONE manager across sign-ins (apple's `ConversationsVM`, the
+///   tui) never drops it, and `ConversationsManager::clear_for_identity_change`
+///   keeps observers — so without this the outgoing session's task would live for
+///   the process, snapshotting whatever the manager next holds through its own stale
+///   backend and uploading to its own signed-out account
+///   (`account-scoping.md` § The scoping taxonomy, corollary 2). The task returns on
+///   the change, whether it is idle or mid-debounce, and checks once more after the
+///   debounce, before the snapshot — the receive loop's
+///   `ReceiveLoopExit::IdentityChanged` twin. Its observer stays registered but
+///   inert (its channel's receiver is gone, so a send is a dropped tick).
+/// * **The manager drops.** The task holds only a `Weak<ConversationsManager>`, so it
+///   never keeps the session's manager alive: when the owner drops the session, the
+///   manager drops, the observer's `Sender` drops with it, `rx.recv()` yields `None`,
+///   and the task retires — the event-driven twin of linux's `clear_observers`
+///   teardown.
+///
+/// It holds strong `backend`/`sync` (neither references the manager, so they don't
 /// pin it), upgrading the `Weak` only transiently per snapshot.
 ///
 /// **Snapshot consistency.** `snapshot_replica` runs on the tokio task, concurrent
@@ -264,7 +289,11 @@ fn attach_replica_autosave(
     manager: Weak<ConversationsManager>,
     backend: Arc<FaunaMlsBackend>,
     sync: Arc<MlsStateSync>,
+    mut identity: tokio::sync::watch::Receiver<u64>,
 ) {
+    if identity.has_changed().unwrap_or(true) {
+        return;
+    }
     let Some(manager_strong) = manager.upgrade() else {
         return;
     };
@@ -273,11 +302,21 @@ fn attach_replica_autosave(
     drop(manager_strong);
 
     tokio::spawn(async move {
-        while rx.recv().await.is_some() {
+        loop {
+            // Idle until a mutation; an identity change (or the watch's sender
+            // gone with the manager) retires the task.
+            tokio::select! {
+                ev = rx.recv() => {
+                    if ev.is_none() {
+                        return;
+                    }
+                }
+                _ = identity.changed() => return,
+            }
             // Debounce: coalesce a burst into one upload — reset the quiescence
             // window on each new mutation (the tokio twin of linux's glib
             // generation-counter debounce). A closed channel mid-window (manager
-            // dropped) retires the task.
+            // dropped) or an identity change retires the task.
             loop {
                 tokio::select! {
                     _ = tokio::time::sleep(REPLICA_DEBOUNCE) => break,
@@ -286,10 +325,16 @@ fn attach_replica_autosave(
                             return;
                         }
                     }
+                    _ = identity.changed() => return,
                 }
             }
+            // Once more before the snapshot: a change racing the debounce's end
+            // must not seal the incoming identity's state through this backend.
+            if identity.has_changed().unwrap_or(true) {
+                return;
+            }
             let Some(manager) = manager.upgrade() else {
-                break;
+                return;
             };
             // Snapshot the provider + every bound channel's history on this task;
             // hand the owned snapshot to an off-task seal + upload so a transient
@@ -489,5 +534,67 @@ mod tests {
         drop(manager);
         launcher.launch().await;
         assert_eq!(hook.runs.load(Ordering::SeqCst), 0);
+    }
+
+    /// An empty replica that counts every upload — what the autosave reaches.
+    #[derive(Default)]
+    struct CountingReplica {
+        puts: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl MlsReplicaTransport for CountingReplica {
+        async fn get(&self, _path: String) -> Result<Option<Vec<u8>>, MlsTransportError> {
+            Ok(None)
+        }
+        async fn put(
+            &self,
+            _path: String,
+            _blob: Vec<u8>,
+            _base: ReplicaBase,
+        ) -> Result<PutOutcome, MlsTransportError> {
+            self.puts.fetch_add(1, Ordering::SeqCst);
+            Ok(PutOutcome::Stored)
+        }
+    }
+
+    /// Wait out the autosave's debounce plus its off-task upload.
+    async fn settle() {
+        tokio::time::sleep(REPLICA_DEBOUNCE + Duration::from_millis(700)).await;
+    }
+
+    /// An app that keeps one manager across sign-ins wipes it with
+    /// `clear_for_identity_change`, which keeps observers — so the outgoing
+    /// session's autosave must retire on the identity change itself, or it keeps
+    /// sealing whatever the manager next notifies through its own stale backend
+    /// to its own (signed-out) account (`account-scoping.md` § The scoping
+    /// taxonomy, corollary 2). The discriminating mutation is the outgoing
+    /// engine's provider state: the saves are change-gated, so a manager notify
+    /// alone would upload nothing with or without the retirement.
+    #[tokio::test]
+    async fn an_identity_change_retires_the_replica_autosave() {
+        let transport = CountingReplica::default();
+        let puts = Arc::clone(&transport.puts);
+        let (backend, manager, _conv, launcher, _hook) = graph(Box::new(transport));
+        launcher.launch().await;
+
+        // The control: before the change, a notify reaches the replica.
+        manager.set_search_query(Some("before".into()));
+        settle().await;
+        let before = puts.load(Ordering::SeqCst);
+        assert!(
+            before > 0,
+            "the autosave never uploaded — the control is void"
+        );
+
+        manager.clear_for_identity_change();
+        backend.engine().generate_key_packages(1).unwrap();
+        manager.set_search_query(Some("after".into()));
+        settle().await;
+        assert_eq!(
+            puts.load(Ordering::SeqCst),
+            before,
+            "the outgoing session's autosave uploaded after the identity change"
+        );
     }
 }

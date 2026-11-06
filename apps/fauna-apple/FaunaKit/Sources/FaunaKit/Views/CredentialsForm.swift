@@ -16,10 +16,35 @@ public struct CredentialsForm: View {
     public let kind: String
     public let getCred: (String) -> String
     public let setCred: (String, String) -> Void
-    /// Owns the `hosted-auth` field's begin/wait/state/can-begin calls
-    /// (onboarding.md § 4) — every other field type never touches it.
-    public let machine: OnboardingMachine
-    public let form: CredentialForm
+    /// The `hosted-auth` field's can-begin / state / begin-then-wait calls
+    /// (onboarding.md § 4) — every other field type never touches them. Closures
+    /// rather than a machine so the `nest_retire` page's own machine drives the
+    /// same form (priority #2); the `OnboardingMachine` init below is the
+    /// wizard's one-line adapter.
+    public let hostedAuthCanBegin: (String) -> Bool
+    public let hostedAuthState: (String) -> HostedAuthState
+    public let hostedAuthBegin: (String) async -> HostedAuthPrompt?
+    public let hostedAuthWait: (String) async -> Void
+
+    public init(
+        fields: [FieldMetaPlain],
+        kind: String,
+        getCred: @escaping (String) -> String,
+        setCred: @escaping (String, String) -> Void,
+        hostedAuthCanBegin: @escaping (String) -> Bool,
+        hostedAuthState: @escaping (String) -> HostedAuthState,
+        hostedAuthBegin: @escaping (String) async -> HostedAuthPrompt?,
+        hostedAuthWait: @escaping (String) async -> Void
+    ) {
+        self.fields = fields
+        self.kind = kind
+        self.getCred = getCred
+        self.setCred = setCred
+        self.hostedAuthCanBegin = hostedAuthCanBegin
+        self.hostedAuthState = hostedAuthState
+        self.hostedAuthBegin = hostedAuthBegin
+        self.hostedAuthWait = hostedAuthWait
+    }
 
     public init(
         fields: [FieldMetaPlain],
@@ -29,12 +54,13 @@ public struct CredentialsForm: View {
         machine: OnboardingMachine,
         form: CredentialForm
     ) {
-        self.fields = fields
-        self.kind = kind
-        self.getCred = getCred
-        self.setCred = setCred
-        self.machine = machine
-        self.form = form
+        self.init(
+            fields: fields, kind: kind, getCred: getCred, setCred: setCred,
+            hostedAuthCanBegin: { machine.hostedAuthCanBegin(form: form, fieldId: $0) },
+            hostedAuthState: { machine.hostedAuthState(form: form, fieldId: $0) },
+            hostedAuthBegin: { try? await machine.hostedAuthBegin(form: form, fieldId: $0) },
+            hostedAuthWait: { _ = try? await machine.hostedAuthWait(form: form, fieldId: $0) }
+        )
     }
 
     public var body: some View {
@@ -84,11 +110,11 @@ public struct CredentialsForm: View {
         Button(hostedAuthLabel(field: field)) {
             beginHostedAuth(field: field)
         }
-        .disabled(!machine.hostedAuthCanBegin(form: form, fieldId: field.id))
+        .disabled(!hostedAuthCanBegin(field.id))
         .accessibilityIdentifier(fieldId)
         .automationActivate(
             fieldId,
-            isEnabled: { machine.hostedAuthCanBegin(form: form, fieldId: field.id) },
+            isEnabled: { hostedAuthCanBegin(field.id) },
             text: { hostedAuthLabel(field: field) }
         ) {
             beginHostedAuth(field: field)
@@ -96,7 +122,7 @@ public struct CredentialsForm: View {
     }
 
     private func hostedAuthLabel(field: FieldMetaPlain) -> String {
-        switch machine.hostedAuthState(form: form, fieldId: field.id) {
+        switch hostedAuthState(field.id) {
         case .idle:
             return L.provisioning.hostedAuth.connect
         case .pending(let userCode, _):
@@ -114,11 +140,11 @@ public struct CredentialsForm: View {
     /// exactly tui's `Action::HostedAuth` handler.
     private func beginHostedAuth(field: FieldMetaPlain) {
         Task {
-            guard let prompt = try? await machine.hostedAuthBegin(form: form, fieldId: field.id),
+            guard let prompt = await hostedAuthBegin(field.id),
                   let url = URL(string: prompt.verificationUrl)
             else { return }
             OpenURL.open(url)
-            _ = try? await machine.hostedAuthWait(form: form, fieldId: field.id)
+            await hostedAuthWait(field.id)
         }
     }
 }

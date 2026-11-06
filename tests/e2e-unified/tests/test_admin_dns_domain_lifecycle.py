@@ -19,11 +19,13 @@ import secrets
 
 import pytest
 
+from helpers.app_surface import require_surface
 from helpers.budgets import RPC_ROUNDTRIP_S, UI_SETTLE_S
 from helpers.waiting import wait_until
 from i18n.strings import S
 
-pytestmark = [pytest.mark.tier_3, pytest.mark.tui, pytest.mark.web, pytest.mark.linux]
+pytestmark = [pytest.mark.tier_3, pytest.mark.tui, pytest.mark.web, pytest.mark.linux,
+              pytest.mark.macos, pytest.mark.ios, pytest.mark.android, pytest.mark.windows]
 
 
 @pytest.fixture
@@ -209,22 +211,6 @@ def test_the_primary_row_is_the_one_that_offers_the_rename(lifecycle_admin_app, 
     assert app.driver.count("admin-dns-domain-promote-button", scope=_row(app, primary)) == 0
 
 
-def _skip_unless_lifted(app, surface: str) -> None:
-    """The remove-confirm dialog and the tagged first-domain warning are built on
-    tui, web, linux and android; macos, ios and windows are parity debt until
-    their trickle-down lift."""
-    from helpers.app_surface import app_name, skip_unbuilt
-
-    if app_name(app.driver) not in {"tui", "web", "linux", "android"}:
-        skip_unbuilt(
-            app.driver,
-            surface=surface,
-            detail="built on tui, web, linux and android (mail-multidomain.md § Removing a "
-            "local domain, § Wizard steps step 7)",
-            tracked="",
-        )
-
-
 @pytest.mark.feature("admin-dns-and-certificates")
 def test_the_first_domain_add_warns_it_becomes_the_permanent_primary(
     lifecycle_admin_app, lifecycle_nest
@@ -234,7 +220,6 @@ def test_the_first_domain_add_warns_it_becomes_the_permanent_primary(
     exists the form warns of nothing (``mail-multidomain.md`` § Wizard steps,
     step 7)."""
     app = lifecycle_admin_app
-    _skip_unless_lifted(app, "admin-dns-add-domain-primary-warning")
     app.admin.navigate_dns()
     app.driver.wait_for("admin-dns-add-domain-button", timeout=UI_SETTLE_S)
     assert _nest_domains(lifecycle_nest) == [], "a fresh dedicated nest must host no domain yet"
@@ -270,7 +255,6 @@ def test_removing_a_domain_asks_to_confirm_first(lifecycle_admin_app, lifecycle_
     kept, and only the dialog's confirm removes it (``mail-multidomain.md``
     § Removing a local domain, § Confirm dialog text)."""
     app = lifecycle_admin_app
-    _skip_unless_lifted(app, "admin-dns-domain-remove-confirm-modal")
     _primary, other = _two_domains(app, lifecycle_nest)
 
     app.admin.press_domain_remove(other)
@@ -552,18 +536,11 @@ def test_after_a_rename_the_profile_shows_the_handle_on_the_new_primary(
     opened again as the same device: its launch sign-in is answered by the nest
     with the domain it now holds, and the header must say so."""
     from helpers.admin_wire import admin_user
-    from helpers.app_surface import app_name, skip_unbuilt
+    from helpers.app_surface import app_name
     from helpers.relaunch import relaunch, require_relaunchable
 
     app = lifecycle_admin_app
-    if app_name(app.driver) not in ("tui", "web", "linux", "android"):
-        skip_unbuilt(
-            app.driver,
-            surface="profile-handle as <handle>@<current primary>",
-            detail="the SELF header falls back to the bare handle (or the actor id) "
-                   "and never reads the account's live domain",
-            tracked="",
-        )
+    require_surface(app.driver, "profile-handle-primary-domain")
     require_relaunchable(app.driver)
     handle = admin_user(lifecycle_nest).get("handle")
     assert handle, "the claimed admin must hold a handle for the header to show"

@@ -111,6 +111,10 @@ fauna-client-accounts = { workspace = true }
 # agent's unattended credential file rests; the app resolves the same store
 # over it ([`agent::agent_credential_store`]).
 fauna-account-store = { path = "../fauna-account-store" }
+# `BearerSource`, the client's auto-refreshing bearer cache the one shared
+# provisioning hook reads (`agent::AgentBearerSource`). A workspace crate with
+# no edge back here, already in every desktop graph through `fauna-client`.
+fauna-nest-http = { path = "../fauna-nest-http" }
 
 # wasm: forward fauna-protocol's `js` feature (fauna-core's js-sys time
 # backend) so the transitive wasm build resolves. Off on native.
@@ -134,3 +138,6 @@ async-trait = "0.1"
 # The shared spawner's PATH-resolution test writes a fake agent binary into a
 # throwaway dir (`agent_spawner::path_lookup`).
 tempfile = { workspace = true }
+# The reach-hint test reads the slot through a real registry over the in-memory
+# store.
+fauna-client-accounts = { workspace = true, features = ["test-helpers"] }

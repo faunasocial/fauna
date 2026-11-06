@@ -32,7 +32,9 @@ public sealed partial class SettingsEncryptionPage : Page
             // Refresh rides the shared session's manager (same reach as
             // SettingsMemberReviewPage): the durable ensure_keypackages, never a
             // raw RPC upload.
-            var manager = clients.ConvSession?.Manager() ?? ConversationsManagerHost.Instance;
+            // Null for a retired session (ConversationsManagerHost.ManagerFor): the
+            // VM then refreshes no key packages, on a page that is on its way out.
+            var manager = ConversationsManagerHost.ManagerFor(clients.ConvSession, "encryption key packages");
             _viewModel = new SettingsViewModel(clients.Nest, clients.Rpc!, keyPackageManager: manager);
             _viewModel.PropertyChanged += ViewModel_PropertyChanged;
         }

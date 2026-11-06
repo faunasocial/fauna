@@ -831,8 +831,8 @@ fn relayed_mailbox_and_flags(
     if floor.is_own_submission {
         ("Sent", "\\Seen")
     } else {
-        match floor.spam_disposition.as_str() {
-            "accept_to_spam_folder" | "policy_junk" => ("Junk", ""),
+        match fauna_protocol::bridge_routing::SpamDisposition::from_wire(&floor.spam_disposition) {
+            Some(d) if d.files_to_junk() => ("Junk", ""),
             _ => ("INBOX", ""),
         }
     }

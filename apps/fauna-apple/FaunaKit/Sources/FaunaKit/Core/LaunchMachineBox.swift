@@ -15,7 +15,7 @@ import Foundation
 /// machine and turns the button into a no-op.
 ///
 /// That is exactly what a bare `@State private var launchMachine: LaunchMachine?`
-/// did on both Apple apps. `startInProcessAgentIfNeeded()`/`startTestAgentIfNeeded()`
+/// did on both Apple apps. `startTestAgentIfNeeded()` (and then the in-process agent)
 /// wire the bridge's `commandHandler`/`stateProvider` closures from inside `init()`,
 /// capturing `self` before SwiftUI has installed the live `@State` storage for the
 /// instance that renders `body`; per Apple's own guidance `@State` must never be read

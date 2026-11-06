@@ -4,6 +4,7 @@ using System.Linq;
 using System.Threading.Tasks;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
+using FaunaApp.Core.Logs;
 using FaunaApp.Core.Services;
 using uniffi.fauna_client_mail_settings;
 using uniffi.fauna_ffi;
@@ -18,13 +19,16 @@ public enum MailImportStep { Source, Scope, Confirm, Progress, Done }
 /// <summary>Which Source-step fields the picked provider shows
 /// (<c>mailbox-migration.md</c> § Wizard steps step 1's "Required fields" table, as
 /// transcribed by the tui lead app). Gmail/iCloud take an app password; Outlook shows
-/// the OAuth button <b>and</b> the IMAP-fallback fields; Generic shows the IMAP fields
-/// alone. A pure function of the pick, so the panel can apply it inside the picker's own
-/// handler without waiting for a dispatch to come back.</summary>
+/// the address and the Sign in with Microsoft button alone (Microsoft takes no password
+/// from a mail app, and the grant connects by itself, so no Connect button either);
+/// Generic shows the IMAP fields alone. A pure function of the pick, so the panel can
+/// apply it inside the picker's own handler without waiting for a dispatch to come
+/// back.</summary>
 public sealed record MailImportSourceFields(
     bool ShowAppPassword,
     bool ShowOauthButton,
-    bool ShowImapFields);
+    bool ShowImapFields,
+    bool ShowConnectButton);
 
 /// <summary>One source-mailbox row on the Scope step
 /// (indexed <c>mail-import-scope-mailbox-item</c>), projected from the shared machine's
@@ -102,6 +106,45 @@ public partial class MailImportViewModel : ObservableObject
     /// including a rejected Connect, clobbering what the user typed.</summary>
     public string Host { get; private set; } = string.Empty;
     public string Port { get; private set; } = string.Empty;
+    /// <summary>The snapshot's own <c>username</c> — read only by the panel's
+    /// once-per-visit draft prefill of a remembered source, for the same reason as
+    /// <see cref="Host"/>.</summary>
+    public string Username { get; private set; } = string.Empty;
+    /// <summary>The snapshot's own max message size in whole MB — the machine's 50 MiB
+    /// default until a Scope Next commits the user's own (§ Wizard steps step 3). Read
+    /// only to seed the Scope step's max-size draft when that step opens on an empty
+    /// field, for the same reason as <see cref="Host"/>: the apple
+    /// <c>syncDraftsFromSnapshot</c> shape, the value the shared machine holds rather
+    /// than a windows copy of the number.</summary>
+    public string MaxSizeMb { get; private set; } = string.Empty;
+
+    /// <summary>The account remembers the source a successful Connect reached
+    /// (<c>mailbox-migration.md</c> § Credential handling → The remembered source):
+    /// the Forget control is painted only while this is true.</summary>
+    [ObservableProperty] private bool _sourceRemembered;
+    /// <summary>"Import duplicates anyway" — read from the snapshot, never from a click
+    /// echo.</summary>
+    [ObservableProperty] private bool _importDuplicates;
+    /// <summary>A source mailbox's UIDVALIDITY changed: the restart offer is painted only
+    /// while this is true.</summary>
+    [ObservableProperty] private bool _hasRebuiltMailboxes;
+    /// <summary>The deployment carries a Microsoft registration
+    /// (<c>microsoftSigninAvailable</c>); without one the sign-in button stays inert and
+    /// the unavailable sentence is painted.</summary>
+    [ObservableProperty] private bool _microsoftSignInAvailable;
+    /// <summary>A Microsoft sign-in is under way — a code requested, out, or its grant
+    /// connecting. The button stays inert and the repaint tick keeps running.</summary>
+    [ObservableProperty] private bool _microsoftSignInInFlight;
+    /// <summary>The code Microsoft issued, set only while it waits on the person
+    /// (<c>Waiting</c> with a non-empty code); empty otherwise.</summary>
+    [ObservableProperty] private string _microsoftCode = string.Empty;
+    /// <summary>The address the person signs in at, beside <see cref="MicrosoftCode"/>.</summary>
+    [ObservableProperty] private string _microsoftUrl = string.Empty;
+    /// <summary>The session is a failed import (<c>Errored</c>): the Progress step shows
+    /// the frozen counters and the reason, and offers Dismiss alone
+    /// (<c>mailbox-migration.md</c> § A failed import is a record the wizard shows until
+    /// the user moves on).</summary>
+    [ObservableProperty] private bool _isFailed;
 
     // ── Confirm / Progress / Done summaries (presentation glue, matching the linux lead) ──
     [ObservableProperty] private string _confirmSummary = string.Empty;
@@ -111,25 +154,45 @@ public partial class MailImportViewModel : ObservableObject
     [ObservableProperty] private string _doneSummary = string.Empty;
     /// <summary>Pause is offered only while the session is running.</summary>
     [ObservableProperty] private bool _canPause;
-    /// <summary>Resume is offered only while the session is paused.</summary>
+    /// <summary>Resume is offered while the session is paused — and while an adopted
+    /// session waits for its credential (<see cref="ResumeNeedsCredentials"/>): a session
+    /// the app adopted after a crash stays <c>Running</c> on the nest's row, so Resume is
+    /// its only way forward (tui and apple always offer it).</summary>
     [ObservableProperty] private bool _canResume;
+    /// <summary>An adopted session needs the source credential again
+    /// (<c>resumeNeedsCredentials</c>, § Resume protocol step 2): the Progress step paints
+    /// the provider's own credential field beside Resume.</summary>
+    [ObservableProperty] private bool _resumeNeedsCredentials;
+    /// <summary>The session's provider, as the Source picker index — which credential
+    /// field the resume prompt paints.</summary>
+    [ObservableProperty] private int _resumeKindIndex;
+    /// <summary>The snapshot's port, read only to seed the resume prompt's port draft when
+    /// <see cref="ResumeNeedsCredentials"/> turns on.</summary>
+    public string ResumePort { get; private set; } = string.Empty;
+    /// <summary>The session is paused because the person's Fauna mailbox is full
+    /// (<c>pauseReason == MailboxFull</c>): the Progress step paints the full-mailbox
+    /// notice and Skip the rest beside Resume and Cancel.</summary>
+    [ObservableProperty] private bool _mailboxFull;
 
     /// <summary>True once a <c>Start</c>/<c>Resume</c> came back with the session really
     /// <c>Running</c>; the panel reads it to spawn <see cref="DriveImportAsync"/> exactly
     /// once per accepted transition. Cleared by the drive loop's own completion.</summary>
     public bool ShouldDriveImport { get; private set; }
 
+    /// <summary>True once a Sign-in-with-Microsoft dispatch came back with Microsoft's
+    /// code out (<c>Waiting</c>) — never on a refused begin (unavailable, no address).
+    /// The panel reads it to spawn <see cref="DriveMicrosoftSignInAsync"/>, the polling
+    /// half, exactly as it spawns <see cref="DriveImportAsync"/>.</summary>
+    public bool ShouldDriveMicrosoftSignIn { get; private set; }
+
     /// <summary>The Scope step's source mailboxes, rebuilt from the snapshot on every
     /// projection.</summary>
     public ObservableCollection<MailImportMailboxRow> Mailboxes { get; } = new();
 
     /// <summary>The Progress step's per-mailbox rows
-    /// (<c>mail-import-mailbox-progress-list</c>), rebuilt on every projection.
-    /// The machine tracks only GLOBAL imported/skipped/errored counts, not a per-mailbox
-    /// breakdown (<c>MailImportSnapshot</c> has no <c>mailboxProgress</c> field the way
-    /// export's does) — so each row shows its planned message count, not a live
-    /// per-mailbox fraction. The tui lead app's own accurate-to-what-exists
-    /// simplification, not a gap this page adds.</summary>
+    /// (<c>mail-import-mailbox-progress-list</c>), rebuilt on every projection from the
+    /// snapshot's <c>mailboxProgress</c> (one row per mailbox the run takes, laid at Start);
+    /// each row's text is the shared <c>ImportMailboxProgressText</c>, never composed here.</summary>
     public ObservableCollection<MailImportMailboxProgressRow> MailboxProgress { get; } = new();
 
     internal MailImportViewModel(IMailImportMachine machine)
@@ -191,6 +254,43 @@ public partial class MailImportViewModel : ObservableObject
         Apply(_machine.Snapshot());
     }
 
+    /// <summary><b>Sign in with Microsoft</b> (<c>mail-import-source-oauth-button</c>):
+    /// commit the address the field holds, then ask Microsoft for a code — the shared
+    /// <c>MicrosoftSignInActions</c>, so windows does not restate the ordering.</summary>
+    public async Task SignInWithMicrosoftAsync(string username)
+    {
+        var actions = FaunaClientMailSettingsMethods.MicrosoftSignInActions(username);
+        foreach (var action in actions)
+        {
+            if (!await DispatchOneAsync(action)) break;
+        }
+        var snap = _machine.Snapshot();
+        Apply(snap);
+        if (snap.microsoftSignin?.@state == MicrosoftSignInState.Waiting) ShouldDriveMicrosoftSignIn = true;
+    }
+
+    /// <summary>The sign-in's polling half. Returns when the grant ends — it connects to
+    /// the source by itself and the wizard moves on to Scope. A declined, expired or
+    /// refused grant is a sentence on the snapshot's <c>error</c>, which the final
+    /// projection surfaces. Awaited without <c>ConfigureAwait(false)</c> for the same
+    /// reason as <see cref="DriveImportAsync"/>.</summary>
+    public async Task DriveMicrosoftSignInAsync()
+    {
+        try
+        {
+            await _machine.RunMicrosoftSignIn();
+        }
+        catch (Exception ex)
+        {
+            ShellLog.Warn("MailImportViewModel", $"microsoft sign-in poll failed: {ex.Message}");
+        }
+        finally
+        {
+            ShouldDriveMicrosoftSignIn = false;
+            Apply(_machine.Snapshot());
+        }
+    }
+
     // ── Step 3 — Scope ──
     public Task ToggleMailboxAsync(string mailbox)
         => DispatchAsync(new MailImportAction.ToggleMailbox(mailbox));
@@ -216,9 +316,56 @@ public partial class MailImportViewModel : ObservableObject
     /// <see cref="ShouldDriveImport"/> only when the session really came back
     /// <c>Running</c>.</summary>
     public Task StartAsync() => DispatchAndMaybeDriveAsync(new MailImportAction.Start());
-    public Task ResumeAsync() => DispatchAndMaybeDriveAsync(new MailImportAction.Resume());
+    /// <summary>Resume as one ordered dispatch, sequenced by the shared
+    /// <c>ResumeActions</c>: while the session needs its credential the port draft (Generic)
+    /// and the password are committed first, otherwise a bare Resume. The run is spawned
+    /// when the shared <c>ImportActionStartsRun</c> says an accepted action obliges it.</summary>
+    public async Task ResumeAsync(string port, string password)
+    {
+        var actions = FaunaClientMailSettingsMethods.ResumeActions(
+            ResumeNeedsCredentials, KindAt(ResumeKindIndex), port, password);
+        var startsRun = false;
+        foreach (var action in actions)
+        {
+            if (!await DispatchOneAsync(action)) break;
+            startsRun |= FaunaClientMailSettingsMethods.ImportActionStartsRun(action);
+        }
+        var snap = _machine.Snapshot();
+        Apply(snap);
+        if (startsRun && snap.sessionState == ImportSessionState.Running) ShouldDriveImport = true;
+    }
+
+    /// <summary>Full-mailbox notice's Skip the rest: records what is left as skipped and
+    /// finishes. It starts a run (<c>ImportActionStartsRun</c>), so the shared check arms
+    /// the drive loop.</summary>
+    public Task SkipRestAsync() => DispatchAndMaybeDriveAsync(new MailImportAction.SkipRest());
+    /// <summary>Drop the rebuilt mailboxes' cursors and resume; the run is spawned
+    /// because the shared <c>ImportActionStartsRun</c> says so, not a hand-listed check.</summary>
+    public Task RestartRebuiltMailboxesAsync()
+        => DispatchAndMaybeDriveAsync(new MailImportAction.RestartRebuiltMailboxes());
     public Task PauseAsync() => DispatchAsync(new MailImportAction.Pause());
     public Task CancelAsync() => DispatchAsync(new MailImportAction.Cancel());
+    /// <summary>Leave a failed import: discards the session and returns to Source.</summary>
+    public Task DismissAsync() => DispatchAsync(new MailImportAction.Dismiss());
+    public Task ForgetSourceAsync() => DispatchAsync(new MailImportAction.ForgetSource());
+    public Task SetImportDuplicatesAsync(bool value)
+        => DispatchAsync(new MailImportAction.SetImportDuplicates(value));
+
+    /// <summary>Re-read the machine after an import push (a hydrate, then a projection)
+    /// without any gesture — the panel repaints WITHOUT disarming an armed Cancel. A
+    /// failure is not fatal; the machine stamps its own snapshot's error.</summary>
+    public async Task ResyncAsync()
+    {
+        try
+        {
+            await _machine.Hydrate();
+        }
+        catch (Exception ex)
+        {
+            ShellLog.Warn("MailImportViewModel", $"import resync failed: {ex.Message}");
+        }
+        Apply(_machine.Snapshot());
+    }
 
     /// <summary>The fetch-drive loop. Returns when every selected mailbox is exhausted,
     /// when Pause/Cancel was dispatched concurrently, or on a session-fatal error —
@@ -255,8 +402,11 @@ public partial class MailImportViewModel : ObservableObject
         Apply(snap);
         // Only an ACCEPTED transition arms the loop: a rejected Start leaves the session
         // untouched (or absent), and spawning run_import on it would drive nothing while
-        // hiding the rejection behind a spinner.
-        if (snap.sessionState == ImportSessionState.Running) ShouldDriveImport = true;
+        // hiding the rejection behind a spinner. Whether this dispatch obliges the app to
+        // spawn run_import is the shared machine's answer (Start, Resume and the
+        // rebuilt-mailbox restart), never a hand-listed check.
+        if (FaunaClientMailSettingsMethods.ImportActionStartsRun(action)
+            && snap.sessionState == ImportSessionState.Running) ShouldDriveImport = true;
     }
 
     private async Task DispatchAsync(MailImportAction action)
@@ -291,6 +441,21 @@ public partial class MailImportViewModel : ObservableObject
         TlsModeIndex = snap.tlsMode == ImportTlsMode.StartTls ? 1 : 0;
         Host = snap.host;
         Port = snap.port.ToString();
+        Username = snap.username;
+        MaxSizeMb = (snap.maxSizeBytes / (1024UL * 1024UL)).ToString(System.Globalization.CultureInfo.InvariantCulture);
+        SourceRemembered = snap.sourceRemembered;
+        ImportDuplicates = snap.importDuplicates;
+        HasRebuiltMailboxes = snap.rebuiltMailboxes.Length > 0;
+        IsFailed = snap.sessionState == ImportSessionState.Errored;
+
+        MicrosoftSignInAvailable = snap.microsoftSigninAvailable;
+        var signIn = snap.microsoftSignin;
+        MicrosoftSignInInFlight = signIn is not null && signIn.@state is
+            MicrosoftSignInState.Requesting or MicrosoftSignInState.Waiting or MicrosoftSignInState.Connecting;
+        var waiting = snap.microsoftSigninAvailable && signIn is not null
+            && signIn.@state == MicrosoftSignInState.Waiting && signIn.userCode.Length > 0;
+        MicrosoftCode = waiting ? signIn!.userCode : string.Empty;
+        MicrosoftUrl = waiting ? signIn!.verificationUri : string.Empty;
 
         Mailboxes.Clear();
         foreach (var m in snap.mailboxes)
@@ -298,13 +463,17 @@ public partial class MailImportViewModel : ObservableObject
             Mailboxes.Add(new MailImportMailboxRow { Name = m.name, Selected = m.selected });
         }
 
-        var selected = snap.mailboxes.Where(m => m.selected).ToList();
-        ulong plannedMessages = 0;
-        foreach (var m in selected) plannedMessages += m.messageCount;
-
-        ConfirmSummary = Strings.Format(
-            "mail_import/confirm_summary_fmt",
-            SourceKindLabel(snap.sourceKind), selected.Count, plannedMessages);
+        // The Confirm total is the shared machine's own sum; a size appears only once every
+        // selected mailbox has one (the sized template), else the count-only summary.
+        var totals = FaunaClientMailSettingsMethods.ImportSelectedTotals(snap);
+        ConfirmSummary = totals.bytes is ulong bytes
+            ? Strings.Format(
+                "mail_import/confirm_summary_sized_fmt",
+                SourceKindLabel(snap.sourceKind), totals.mailboxes, totals.messages,
+                ValueFormat.ByteSize(bytes))
+            : Strings.Format(
+                "mail_import/confirm_summary_fmt",
+                SourceKindLabel(snap.sourceKind), totals.mailboxes, totals.messages);
         var timing = TransferTimingText.Of(
             snap.startedAt, snap.lastProgressAt,
             snap.sessionState == ImportSessionState.Running,
@@ -327,15 +496,20 @@ public partial class MailImportViewModel : ObservableObject
                 "mail_import/done_summary_fmt",
                 snap.importedCount, snap.skippedCount, snap.erroredCount);
         CanPause = snap.sessionState == ImportSessionState.Running;
-        CanResume = snap.sessionState == ImportSessionState.Paused;
+        ResumeNeedsCredentials = snap.resumeNeedsCredentials && !IsFailed;
+        ResumeKindIndex = IndexOf(snap.sourceKind);
+        ResumePort = snap.port.ToString();
+        MailboxFull = snap.sessionState == ImportSessionState.Paused
+            && snap.pauseReason == ImportPauseReason.MailboxFull;
+        CanResume = snap.sessionState == ImportSessionState.Paused || ResumeNeedsCredentials;
 
         MailboxProgress.Clear();
-        foreach (var m in selected)
+        foreach (var row in snap.mailboxProgress ?? Array.Empty<ImportMailboxProgress>())
         {
             MailboxProgress.Add(new MailImportMailboxProgressRow
             {
-                Name = m.name,
-                Progress = Strings.Format("mail_import/progress_row_fmt", m.messageCount),
+                Name = row.name,
+                Progress = Strings.Resolve(FaunaClientMailSettingsMethods.ImportMailboxProgressText(row)),
             });
         }
     }
@@ -347,14 +521,14 @@ public partial class MailImportViewModel : ObservableObject
     /// dispatch's async round trip makes the very next keystroke 404.</summary>
     public static MailImportSourceFields FieldsFor(int sourceKindIndex) => KindAt(sourceKindIndex) switch
     {
-        // Outlook shows the OAuth button AND the IMAP-fallback fields — ui.yaml's own
-        // "(+ Outlook fallback)" annotation on host/port/tls-mode/username/password is
-        // what settles this, and the fallback is the only working path today.
-        ImportSourceKind.Outlook => new MailImportSourceFields(false, true, true),
-        ImportSourceKind.Generic => new MailImportSourceFields(false, false, true),
+        // Outlook: the address and Sign in with Microsoft — no password, no host, no
+        // Connect (the grant connects by itself); Microsoft takes no password from a mail
+        // app (mailbox-migration.md § Microsoft sign-in — the device-code grant).
+        ImportSourceKind.Outlook => new MailImportSourceFields(false, true, false, false),
+        ImportSourceKind.Generic => new MailImportSourceFields(false, false, true, true),
         // Gmail / iCloud: app password only; host/port/tls-mode stay on the preset the
         // machine's SelectSourceKind arm applied.
-        _ => new MailImportSourceFields(true, false, false),
+        _ => new MailImportSourceFields(true, false, false, true),
     };
 
     private static MailImportStep StepOf(ImportStep s) => s switch

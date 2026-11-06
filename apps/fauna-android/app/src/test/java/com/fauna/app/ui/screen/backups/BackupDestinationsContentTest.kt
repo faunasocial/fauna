@@ -161,6 +161,10 @@ class BackupDestinationsContentTest {
         reseedResultText: String? = null,
         onReseed: (String?) -> Unit = {},
         reseedRunsPullBack: (String) -> Boolean = { false },
+        pullBackPreflightFor: String? = null,
+        pullBackPreflightLines: List<String> = emptyList(),
+        onPreflightPullBack: (String) -> Unit = {},
+        onCancelPullBackPreflight: () -> Unit = {},
     ) {
         composeTestRule.setContent {
             // Scrollable, because production mounts this section as a header item
@@ -198,6 +202,10 @@ class BackupDestinationsContentTest {
                 reseedResultText = reseedResultText,
                 onReseed = onReseed,
                 reseedRunsPullBack = reseedRunsPullBack,
+                pullBackPreflightFor = pullBackPreflightFor,
+                pullBackPreflightLines = pullBackPreflightLines,
+                onPreflightPullBack = onPreflightPullBack,
+                onCancelPullBackPreflight = onCancelPullBackPreflight,
             )
             }
         }
@@ -673,19 +681,42 @@ class BackupDestinationsContentTest {
     @Test
     fun reseedOnANestRow_namesTheNest_andRunsFromThatRow() {
         val ran = mutableListOf<String?>()
+        val preflighted = mutableListOf<String>()
         render(
             destinations = listOf(dest()),
             reseedRows = listOf("id-a"),
             onReseed = { ran += it },
             reseedRunsPullBack = { it == "id-a" },
+            // The VM's held preflight for the pressed row (its answer already in).
+            pullBackPreflightFor = "id-a",
+            pullBackPreflightLines = listOf("Vouched line", "Folders line"),
+            onPreflightPullBack = { preflighted += it },
         )
 
         node("backup-destination-reseed-button").performClick()
+        // The press ran the preflight for THAT row before the confirm opened.
+        assertEquals(listOf("id-a"), preflighted)
         node("backup-destination-reseed-confirm-modal").assertIsDisplayed()
         composeTestRule.onNodeWithText("Restore the copy on Aunt's nest to this nest?").assertIsDisplayed()
+        // The confirm carries the preflight's lines.
+        composeTestRule.onNodeWithText("Vouched line").assertIsDisplayed()
+        composeTestRule.onNodeWithText("Folders line").assertIsDisplayed()
 
         node("backup-destination-reseed-confirm-button").performClick()
         assertEquals(listOf<String?>("id-a"), ran)
+    }
+
+    /** A nest row's confirm does not open before the preflight has answered. */
+    @Test
+    fun reseedOnANestRow_opensNoConfirmBeforeThePreflightAnswers() {
+        render(
+            destinations = listOf(dest()),
+            reseedRows = listOf("id-a"),
+            reseedRunsPullBack = { it == "id-a" },
+            pullBackPreflightFor = null,
+        )
+        node("backup-destination-reseed-button").performClick()
+        composeTestRule.onAllNodesWithTag("backup-destination-reseed-confirm-modal").assertCountEquals(0)
     }
 
     @Test

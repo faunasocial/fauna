@@ -92,25 +92,13 @@ def test_calendar_page_renders(admin_app):
     )
 
 
-#: Apps that tag the port field's help line (`admin-calendar-caldav-port-help-text`):
-#: tui is the lead app; windows and apple paint it untagged until their trickle-down.
-_PORT_HELP_TAGGED_APPS = {"tui", "linux", "web", "android"}
-
-
 @pytest.mark.feature("admin-calendar-contacts-files")
-def test_caldav_port_field_says_it_applies_only_without_a_domain(admin_app):
-    """The CalDAV-port field's help line says the port is for a nest with no
-    domain, and that a domain nest ignores it (admin.md § 8 Calendar) — the
-    string the shared catalog holds for it, read through its own id."""
-    from helpers.app_surface import app_name, skip_unbuilt
-
-    if app_name(admin_app.driver) not in _PORT_HELP_TAGGED_APPS:
-        skip_unbuilt(
-            admin_app.driver,
-            surface="admin-calendar-caldav-port-help-text",
-            detail="the port help line is tagged on tui first",
-            tracked="the six-app trickle-down of the admin-calendar port help id",
-        )
+def test_caldav_port_field_says_it_applies_where_apps_reach_the_nest_directly(admin_app):
+    """The CalDAV-port field's help line says the port applies where calendar,
+    contacts and file apps reach the nest directly at its own address, and not,
+    on a server in the cloud with a domain, at the domain's mail server name on
+    443 (admin.md § 8 Calendar) — the string the shared catalog holds for it,
+    read through its own id."""
     admin_app.admin.navigate_calendar()
     assert _wait(admin_app.admin.caldav_port_field_present), (
         f"port field did not render. error: {admin_app.error_text()!r}"
@@ -119,7 +107,7 @@ def test_caldav_port_field_says_it_applies_only_without_a_domain(admin_app):
     assert _wait(lambda: " ".join(admin_app.admin.caldav_port_help_text().split()) == want), (
         f"port help line reads {admin_app.admin.caldav_port_help_text()!r}, wanted {want!r}"
     )
-    assert "no domain" in want and "ignored" in want
+    assert "own address" in want and "443" in want
 
 
 @pytest.mark.feature("admin-calendar-contacts-files")

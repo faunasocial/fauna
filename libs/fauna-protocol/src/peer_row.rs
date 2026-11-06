@@ -98,6 +98,16 @@ pub struct PeerChangeRow {
     /// ingest door).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signer_cert: Option<fauna_core::encoding::EmbedAsBytes>,
+    /// A group set's base (`p2p-shared-set-build.md` § Build design — the
+    /// group set, decision 10): the manifest the folded `fauna.group.file`
+    /// row's signed core names as the head it wrote over, carried from the
+    /// fold to the ingest door so the retention can tell an ordinary
+    /// supersede from a concurrent loss. `None` on every folder-family row
+    /// and on a group row naming no base; [`SyncChange`] — the nest record's
+    /// shape — never carries it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(with = "serde_bytes")]
+    pub group_base: Option<[u8; 32]>,
     #[serde(flatten, default)]
     pub extra: BTreeMap<String, Value>,
 }

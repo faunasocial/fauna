@@ -8,6 +8,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"github.com/faunasocial/fauna/libs/fauna-mail-go/fauna_conversations"
 	"github.com/faunasocial/fauna/libs/fauna-mail-go/fauna_core"
 	"github.com/faunasocial/fauna/libs/fauna-mail-go/fauna_index"
 	"io"
@@ -982,6 +983,15 @@ func uniffiCheckChecksums() {
 	}
 	{
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_fauna_ffi_checksum_func_region_sealed_note_owed()
+		})
+		if checksum != 13749 {
+			// If this happens try cleaning and rebuilding your project
+			panic("fauna_ffi: uniffi_fauna_ffi_checksum_func_region_sealed_note_owed: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_fauna_ffi_checksum_func_ward_contact_ask_pending()
 		})
 		if checksum != 4689 {
@@ -1207,6 +1217,15 @@ func uniffiCheckChecksums() {
 	}
 	{
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_fauna_ffi_checksum_func_derive_recipient_dav_material()
+		})
+		if checksum != 23720 {
+			// If this happens try cleaning and rebuilding your project
+			panic("fauna_ffi: uniffi_fauna_ffi_checksum_func_derive_recipient_dav_material: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_fauna_ffi_checksum_func_derive_recipient_epoch_hpke_keypair()
 		})
 		if checksum != 13505 {
@@ -1299,7 +1318,7 @@ func uniffiCheckChecksums() {
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_fauna_ffi_checksum_func_is_sealed_mail_record()
 		})
-		if checksum != 17570 {
+		if checksum != 43029 {
 			// If this happens try cleaning and rebuilding your project
 			panic("fauna_ffi: uniffi_fauna_ffi_checksum_func_is_sealed_mail_record: UniFFI API checksum mismatch")
 		}
@@ -1324,11 +1343,38 @@ func uniffiCheckChecksums() {
 	}
 	{
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_fauna_ffi_checksum_func_open_record_with_key()
+		})
+		if checksum != 52339 {
+			// If this happens try cleaning and rebuilding your project
+			panic("fauna_ffi: uniffi_fauna_ffi_checksum_func_open_record_with_key: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_fauna_ffi_checksum_func_seal_mls_snapshot_blob()
 		})
 		if checksum != 8566 {
 			// If this happens try cleaning and rebuilding your project
 			panic("fauna_ffi: uniffi_fauna_ffi_checksum_func_seal_mls_snapshot_blob: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_fauna_ffi_checksum_func_seal_record_to_recipient()
+		})
+		if checksum != 33198 {
+			// If this happens try cleaning and rebuilding your project
+			panic("fauna_ffi: uniffi_fauna_ffi_checksum_func_seal_record_to_recipient: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_fauna_ffi_checksum_func_seal_record_to_recipient_xwing()
+		})
+		if checksum != 34569 {
+			// If this happens try cleaning and rebuilding your project
+			panic("fauna_ffi: uniffi_fauna_ffi_checksum_func_seal_record_to_recipient_xwing: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -1938,7 +1984,7 @@ func uniffiCheckChecksums() {
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_fauna_ffi_checksum_func_install_nest_identity_pin_store_with_mirror()
 		})
-		if checksum != 40977 {
+		if checksum != 6813 {
 			// If this happens try cleaning and rebuilding your project
 			panic("fauna_ffi: uniffi_fauna_ffi_checksum_func_install_nest_identity_pin_store_with_mirror: UniFFI API checksum mismatch")
 		}
@@ -1990,18 +2036,9 @@ func uniffiCheckChecksums() {
 	}
 	{
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_fauna_ffi_checksum_func_look_at_sign_in()
-		})
-		if checksum != 21277 {
-			// If this happens try cleaning and rebuilding your project
-			panic("fauna_ffi: uniffi_fauna_ffi_checksum_func_look_at_sign_in: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_fauna_ffi_checksum_func_release_feed_origin()
 		})
-		if checksum != 30271 {
+		if checksum != 58675 {
 			// If this happens try cleaning and rebuilding your project
 			panic("fauna_ffi: uniffi_fauna_ffi_checksum_func_release_feed_origin: UniFFI API checksum mismatch")
 		}
@@ -3081,7 +3118,7 @@ func uniffiCheckChecksums() {
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_fauna_ffi_checksum_method_ffifoldersclient_members_list_actors()
 		})
-		if checksum != 50653 {
+		if checksum != 47997 {
 			// If this happens try cleaning and rebuilding your project
 			panic("fauna_ffi: uniffi_fauna_ffi_checksum_method_ffifoldersclient_members_list_actors: UniFFI API checksum mismatch")
 		}
@@ -3171,7 +3208,7 @@ func uniffiCheckChecksums() {
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_fauna_ffi_checksum_method_mailrecordopener_open()
 		})
-		if checksum != 33636 {
+		if checksum != 7898 {
 			// If this happens try cleaning and rebuilding your project
 			panic("fauna_ffi: uniffi_fauna_ffi_checksum_method_mailrecordopener_open: UniFFI API checksum mismatch")
 		}
@@ -3205,6 +3242,15 @@ func uniffiCheckChecksums() {
 	}
 	{
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_fauna_ffi_checksum_method_mlscapability_dav_seal_pubkeys()
+		})
+		if checksum != 39861 {
+			// If this happens try cleaning and rebuilding your project
+			panic("fauna_ffi: uniffi_fauna_ffi_checksum_method_mlscapability_dav_seal_pubkeys: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_fauna_ffi_checksum_method_mlscapability_decrypt()
 		})
 		if checksum != 19690 {
@@ -3219,6 +3265,15 @@ func uniffiCheckChecksums() {
 		if checksum != 19002 {
 			// If this happens try cleaning and rebuilding your project
 			panic("fauna_ffi: uniffi_fauna_ffi_checksum_method_mlscapability_new_epoch_aware_mail_record_opener: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_fauna_ffi_checksum_method_mlscapability_new_record_opener()
+		})
+		if checksum != 53333 {
+			// If this happens try cleaning and rebuilding your project
+			panic("fauna_ffi: uniffi_fauna_ffi_checksum_method_mlscapability_new_record_opener: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -3408,6 +3463,15 @@ func uniffiCheckChecksums() {
 		if checksum != 63492 {
 			// If this happens try cleaning and rebuilding your project
 			panic("fauna_ffi: uniffi_fauna_ffi_checksum_method_ffinestclient_email: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_fauna_ffi_checksum_method_ffinestclient_ensure_connected()
+		})
+		if checksum != 52027 {
+			// If this happens try cleaning and rebuilding your project
+			panic("fauna_ffi: uniffi_fauna_ffi_checksum_method_ffinestclient_ensure_connected: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -9921,7 +9985,8 @@ type FfiFoldersClientInterface interface {
 	// shared folder: who the set is shared with (the owner-side "Shared with"
 	// list). Each entry carries the actor's hex id, its nest-resolved `handle`
 	// (empty when unknown), and a `role` of `"owner"` | `"member"`. Distinct
-	// from `members_list`, which is the enrolled *device* roster.
+	// from `members_list`, which is the enrolled *device* roster. An owner-only
+	// set answers an empty roster, never `fauna.folders.not_shared`.
 	MembersListActors(name string) ([]FfiFolderActorMember, error)
 	// `fauna.folders.members.set_access` — the **owner** grants or edits a
 	// member's `"reader"`/`"writer"` access (+ optional byte cap, `None` =
@@ -10327,7 +10392,8 @@ func (_self *FfiFoldersClient) MembersList(name string) ([]FfiFolderMember, erro
 // shared folder: who the set is shared with (the owner-side "Shared with"
 // list). Each entry carries the actor's hex id, its nest-resolved `handle`
 // (empty when unknown), and a `role` of `"owner"` | `"member"`. Distinct
-// from `members_list`, which is the enrolled *device* roster.
+// from `members_list`, which is the enrolled *device* roster. An owner-only
+// set answers an empty roster, never `fauna.folders.not_shared`.
 func (_self *FfiFoldersClient) MembersListActors(name string) ([]FfiFolderActorMember, error) {
 	_pointer := _self.ffiObject.incrementPointer("*FfiFoldersClient")
 	defer _self.ffiObject.decrementPointer()
@@ -11804,6 +11870,15 @@ type FfiNestClientInterface interface {
 	Disconnect()
 	// Typed-call client for the `fauna.email.*` kinds over this connection.
 	Email() *FfiEmailClient
+	// Authenticate and start the reconnect supervisor, **without** waiting for
+	// the socket — the form a long-lived app session takes, where
+	// [`Self::connect`] is the form for a caller that must know the nest
+	// answered (`transport-connection.md` § Connection lifecycle). `Err` is
+	// only ever a refusal no retry clears, and no supervisor is left behind
+	// it; a nest that did not answer is `Ok`, the supervisor retrying it, and
+	// a request made meanwhile waits for the connection within its own
+	// deadline. Idempotent: a running supervisor is left alone.
+	EnsureConnected() error
 	// Typed-call client for the `fauna.family.*` kinds over this connection
 	// (the Family surface + supervised indicator — family-safety.md).
 	Family() *FfiFamilyClient
@@ -12101,6 +12176,45 @@ func (_self *FfiNestClient) Email() *FfiEmailClient {
 		return C.uniffi_fauna_ffi_fn_method_ffinestclient_email(
 			_pointer, _uniffiStatus)
 	}))
+}
+
+// Authenticate and start the reconnect supervisor, **without** waiting for
+// the socket — the form a long-lived app session takes, where
+// [`Self::connect`] is the form for a caller that must know the nest
+// answered (`transport-connection.md` § Connection lifecycle). `Err` is
+// only ever a refusal no retry clears, and no supervisor is left behind
+// it; a nest that did not answer is `Ok`, the supervisor retrying it, and
+// a request made meanwhile waits for the connection within its own
+// deadline. Idempotent: a running supervisor is left alone.
+func (_self *FfiNestClient) EnsureConnected() error {
+	_pointer := _self.ffiObject.incrementPointer("*FfiNestClient")
+	defer _self.ffiObject.decrementPointer()
+	_, err := uniffiRustCallAsync[*FfiError](
+		FfiConverterFfiErrorINSTANCE,
+		// completeFn
+		func(handle C.uint64_t, status *C.RustCallStatus) struct{} {
+			C.ffi_fauna_ffi_rust_future_complete_void(handle, status)
+			return struct{}{}
+		},
+		// liftFn
+		func(_ struct{}) struct{} { return struct{}{} },
+		C.uniffi_fauna_ffi_fn_method_ffinestclient_ensure_connected(
+			_pointer),
+		// pollFn
+		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+			C.ffi_fauna_ffi_rust_future_poll_void(handle, continuation, data)
+		},
+		// freeFn
+		func(handle C.uint64_t) {
+			C.ffi_fauna_ffi_rust_future_free_void(handle)
+		},
+	)
+
+	if err == nil {
+		return nil
+	}
+
+	return err
 }
 
 // Typed-call client for the `fauna.family.*` kinds over this connection
@@ -15615,10 +15729,12 @@ func (_ FfiDestroyerFfiSyncClient) Destroy(value *FfiSyncClient) {
 type MailRecordOpenerInterface interface {
 	// Open a sealed `MailRecordEnvelope` (either suite — classical
 	// X25519, or hybrid X-Wing when the snapshot entry carries the
-	// MSEK-derived ML-KEM decapsulation key). Each leaf keypair is
-	// tried newest first (current, then every prior generation — no seal
-	// basis is known here), exactly the `MlsCapability::open_mail_record`
-	// semantics.
+	// MSEK-derived ML-KEM decapsulation key), **dispatching on its kind**: a
+	// `mail-record` tries each leaf keypair newest first (current, then every
+	// prior generation — no seal basis is known here), exactly the
+	// `MlsCapability::open_mail_record` semantics; a `calendar-record` or
+	// `card-record` tries that kind's ring (`owner-key-material.md` § Path
+	// B-sibling-5 / -6). A record never meets another kind's key.
 	//
 	// # Errors
 	//
@@ -15627,7 +15743,11 @@ type MailRecordOpenerInterface interface {
 	// - `"decode mail-record envelope: ..."` for a non-envelope input
 	// (an unsealed payload — refused, never passed through);
 	// - `"HPKE open failed: no matching leaf keypair in snapshot"` when
-	// every keypair fails (wrong recipient or tampered envelope).
+	// every keypair fails (wrong recipient or tampered envelope);
+	// - `"no <kind> ring: ..."` for a DAV record on an opener built without
+	// the session MSEK ([`Self::new`]);
+	// - `"HPKE open failed: no <kind> key in the ring opens it"` when every
+	// generation of the kind's ring fails.
 	Open(envelopeBytes []byte) ([]byte, error)
 	// Open a sealed `MailRecordEnvelope` known to be a genuine mail-new-
 	// ingest record — the MSEK-holder opener chain (content-sealing-epochs
@@ -15704,10 +15824,12 @@ func NewMailRecordOpener(snapshotPlaintextBytes []byte) (*MailRecordOpener, erro
 
 // Open a sealed `MailRecordEnvelope` (either suite — classical
 // X25519, or hybrid X-Wing when the snapshot entry carries the
-// MSEK-derived ML-KEM decapsulation key). Each leaf keypair is
-// tried newest first (current, then every prior generation — no seal
-// basis is known here), exactly the `MlsCapability::open_mail_record`
-// semantics.
+// MSEK-derived ML-KEM decapsulation key), **dispatching on its kind**: a
+// `mail-record` tries each leaf keypair newest first (current, then every
+// prior generation — no seal basis is known here), exactly the
+// `MlsCapability::open_mail_record` semantics; a `calendar-record` or
+// `card-record` tries that kind's ring (`owner-key-material.md` § Path
+// B-sibling-5 / -6). A record never meets another kind's key.
 //
 // # Errors
 //
@@ -15716,7 +15838,11 @@ func NewMailRecordOpener(snapshotPlaintextBytes []byte) (*MailRecordOpener, erro
 // - `"decode mail-record envelope: ..."` for a non-envelope input
 // (an unsealed payload — refused, never passed through);
 // - `"HPKE open failed: no matching leaf keypair in snapshot"` when
-// every keypair fails (wrong recipient or tampered envelope).
+// every keypair fails (wrong recipient or tampered envelope);
+// - `"no <kind> ring: ..."` for a DAV record on an opener built without
+// the session MSEK ([`Self::new`]);
+// - `"HPKE open failed: no <kind> key in the ring opens it"` when every
+// generation of the kind's ring fails.
 func (_self *MailRecordOpener) Open(envelopeBytes []byte) ([]byte, error) {
 	_pointer := _self.ffiObject.incrementPointer("*MailRecordOpener")
 	defer _self.ffiObject.decrementPointer()
@@ -15878,6 +16004,17 @@ type MlsCapabilityInterface interface {
 	// treat it so** — serve `SEARCH` the old way for that command, exactly as
 	// the client leg skips a launch rather than failing login.
 	ResumeMailIndexSession(snapshotPlaintextBytes []byte, rail FfiIndexRail) (*FfiMailIndexSession, error)
+	// The public halves of the calendar and card keypairs this capability's
+	// MSEK derives — the keys a CalDAV / CardDAV session seals its writes to
+	// (`owner-key-material.md` § Path B-sibling-5 → *Derivation*: the MDA
+	// derives them from the session MSEK at MUA-AUTH), so every record the
+	// session seals is one its [`Self::new_record_opener`] ring opens. The
+	// session compares them with the registered pairs and logs a mismatch.
+	//
+	// # Errors
+	//
+	// `FfiError::General` if this capability is zeroized.
+	DavSealPubkeys() (DavSealPubkeys, error)
 	// Decrypt an `MlsSnapshotBlob` sealed under this capability's
 	// MSEK. Returns the snapshot plaintext (the serialized
 	// read-side MLS state; design tracked internally, § Snapshot
@@ -15920,6 +16057,20 @@ type MlsCapabilityInterface interface {
 	// at least one usable leaf keypair (same failure shape as
 	// [`MailRecordOpener::new`]).
 	NewEpochAwareMailRecordOpener(snapshotPlaintextBytes []byte) (*MailRecordOpener, error)
+	// Construct a session record opener that opens **every** record kind
+	// the MSEK reaches — mail through the snapshot's leaf keypairs, calendar
+	// and card through their per-kind rings (the current generation from
+	// this capability's MSEK, the grace generations from the snapshot's
+	// `calendar_grace_roots` / `card_grace_roots`) — without the mail-epoch
+	// chain: the opener a CalDAV / CardDAV session builds at AUTH
+	// (`owner-key-material.md` § Path B-sibling-5 → *Snapshot carriage*).
+	// The MSEK never crosses the boundary; the opener keeps only derived
+	// keypairs.
+	//
+	// # Errors
+	//
+	// As [`Self::new_epoch_aware_mail_record_opener`].
+	NewRecordOpener(snapshotPlaintextBytes []byte) (*MailRecordOpener, error)
 	// Unseal a `WebdavKeysBlob` under this capability's MSEK and return the
 	// decoded served-set content keys (`webdav-server.md` § Key model). The Go
 	// WebDAV MDA calls this once per AUTH'd session; the MSEK never crosses the
@@ -15986,6 +16137,33 @@ func (_self *MlsCapability) ResumeMailIndexSession(snapshotPlaintextBytes []byte
 	}
 }
 
+// The public halves of the calendar and card keypairs this capability's
+// MSEK derives — the keys a CalDAV / CardDAV session seals its writes to
+// (`owner-key-material.md` § Path B-sibling-5 → *Derivation*: the MDA
+// derives them from the session MSEK at MUA-AUTH), so every record the
+// session seals is one its [`Self::new_record_opener`] ring opens. The
+// session compares them with the registered pairs and logs a mismatch.
+//
+// # Errors
+//
+// `FfiError::General` if this capability is zeroized.
+func (_self *MlsCapability) DavSealPubkeys() (DavSealPubkeys, error) {
+	_pointer := _self.ffiObject.incrementPointer("*MlsCapability")
+	defer _self.ffiObject.decrementPointer()
+	_uniffiRV, _uniffiErr := rustCallWithError[*FfiError](FfiConverterFfiError{}, func(_uniffiStatus *C.RustCallStatus) RustBufferI {
+		return GoRustBuffer{
+			inner: C.uniffi_fauna_ffi_fn_method_mlscapability_dav_seal_pubkeys(
+				_pointer, _uniffiStatus),
+		}
+	})
+	if _uniffiErr != nil {
+		var _uniffiDefaultValue DavSealPubkeys
+		return _uniffiDefaultValue, _uniffiErr
+	} else {
+		return FfiConverterDavSealPubkeysINSTANCE.Lift(_uniffiRV), nil
+	}
+}
+
 // Decrypt an `MlsSnapshotBlob` sealed under this capability's
 // MSEK. Returns the snapshot plaintext (the serialized
 // read-side MLS state; design tracked internally, § Snapshot
@@ -16048,6 +16226,34 @@ func (_self *MlsCapability) NewEpochAwareMailRecordOpener(snapshotPlaintextBytes
 	defer _self.ffiObject.decrementPointer()
 	_uniffiRV, _uniffiErr := rustCallWithError[*FfiError](FfiConverterFfiError{}, func(_uniffiStatus *C.RustCallStatus) C.uint64_t {
 		return C.uniffi_fauna_ffi_fn_method_mlscapability_new_epoch_aware_mail_record_opener(
+			_pointer, FfiConverterBytesINSTANCE.Lower(snapshotPlaintextBytes), _uniffiStatus)
+	})
+	if _uniffiErr != nil {
+		var _uniffiDefaultValue *MailRecordOpener
+		return _uniffiDefaultValue, _uniffiErr
+	} else {
+		return FfiConverterMailRecordOpenerINSTANCE.Lift(_uniffiRV), nil
+	}
+}
+
+// Construct a session record opener that opens **every** record kind
+// the MSEK reaches — mail through the snapshot's leaf keypairs, calendar
+// and card through their per-kind rings (the current generation from
+// this capability's MSEK, the grace generations from the snapshot's
+// `calendar_grace_roots` / `card_grace_roots`) — without the mail-epoch
+// chain: the opener a CalDAV / CardDAV session builds at AUTH
+// (`owner-key-material.md` § Path B-sibling-5 → *Snapshot carriage*).
+// The MSEK never crosses the boundary; the opener keeps only derived
+// keypairs.
+//
+// # Errors
+//
+// As [`Self::new_epoch_aware_mail_record_opener`].
+func (_self *MlsCapability) NewRecordOpener(snapshotPlaintextBytes []byte) (*MailRecordOpener, error) {
+	_pointer := _self.ffiObject.incrementPointer("*MlsCapability")
+	defer _self.ffiObject.decrementPointer()
+	_uniffiRV, _uniffiErr := rustCallWithError[*FfiError](FfiConverterFfiError{}, func(_uniffiStatus *C.RustCallStatus) C.uint64_t {
+		return C.uniffi_fauna_ffi_fn_method_mlscapability_new_record_opener(
 			_pointer, FfiConverterBytesINSTANCE.Lower(snapshotPlaintextBytes), _uniffiStatus)
 	})
 	if _uniffiErr != nil {
@@ -16948,6 +17154,64 @@ func (c FfiConverterDaneTlsaRecord) Write(writer io.Writer, value DaneTlsaRecord
 type FfiDestroyerDaneTlsaRecord struct{}
 
 func (_ FfiDestroyerDaneTlsaRecord) Destroy(value DaneTlsaRecord) {
+	value.Destroy()
+}
+
+// The public halves of an owner's calendar and card recipient keypairs
+// ([`MlsCapability::dav_seal_pubkeys`]) — public material only.
+type DavSealPubkeys struct {
+	// 32-byte X25519 public half of the recipient-calendar keypair.
+	CalendarPubkey []byte
+	// 1184-byte ML-KEM-768 encapsulation key of the recipient-calendar keypair.
+	CalendarMlkemEk []byte
+	// 32-byte X25519 public half of the recipient-card keypair.
+	CardPubkey []byte
+	// 1184-byte ML-KEM-768 encapsulation key of the recipient-card keypair.
+	CardMlkemEk []byte
+}
+
+func (r *DavSealPubkeys) Destroy() {
+	FfiDestroyerBytes{}.Destroy(r.CalendarPubkey)
+	FfiDestroyerBytes{}.Destroy(r.CalendarMlkemEk)
+	FfiDestroyerBytes{}.Destroy(r.CardPubkey)
+	FfiDestroyerBytes{}.Destroy(r.CardMlkemEk)
+}
+
+type FfiConverterDavSealPubkeys struct{}
+
+var FfiConverterDavSealPubkeysINSTANCE = FfiConverterDavSealPubkeys{}
+
+func (c FfiConverterDavSealPubkeys) Lift(rb RustBufferI) DavSealPubkeys {
+	return LiftFromRustBuffer[DavSealPubkeys](c, rb)
+}
+
+func (c FfiConverterDavSealPubkeys) Read(reader io.Reader) DavSealPubkeys {
+	return DavSealPubkeys{
+		FfiConverterBytesINSTANCE.Read(reader),
+		FfiConverterBytesINSTANCE.Read(reader),
+		FfiConverterBytesINSTANCE.Read(reader),
+		FfiConverterBytesINSTANCE.Read(reader),
+	}
+}
+
+func (c FfiConverterDavSealPubkeys) Lower(value DavSealPubkeys) C.RustBuffer {
+	return LowerIntoRustBuffer[DavSealPubkeys](c, value)
+}
+
+func (c FfiConverterDavSealPubkeys) LowerExternal(value DavSealPubkeys) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[DavSealPubkeys](c, value))
+}
+
+func (c FfiConverterDavSealPubkeys) Write(writer io.Writer, value DavSealPubkeys) {
+	FfiConverterBytesINSTANCE.Write(writer, value.CalendarPubkey)
+	FfiConverterBytesINSTANCE.Write(writer, value.CalendarMlkemEk)
+	FfiConverterBytesINSTANCE.Write(writer, value.CardPubkey)
+	FfiConverterBytesINSTANCE.Write(writer, value.CardMlkemEk)
+}
+
+type FfiDestroyerDavSealPubkeys struct{}
+
+func (_ FfiDestroyerDavSealPubkeys) Destroy(value DavSealPubkeys) {
 	value.Destroy()
 }
 
@@ -20163,29 +20427,18 @@ func (_ FfiDestroyerFfiContentKeyGeneration) Destroy(value FfiContentKeyGenerati
 }
 
 // FFI mirror of [`fauna_core::obligation::ContentPolicy`] — the guardian's
-// per-category render floor (`family-safety.md` § Content policy). Each field
-// is a closed-enum string `inherit` | `collapse` | `block`, the same
-// string-knob convention as [`FfiReachPolicy`]'s `feed_sources`; a floor value
-// the client build cannot name renders fail-closed as `block`.
+// content rules (`family-safety.md` § Content policy): its rule document.
 type FfiContentPolicy struct {
-	Nsfw       string
-	Spam       string
-	Phishing   string
-	Commercial string
 	// The guardian's rule document (`ContentPolicy.document`), as its
 	// canonical dag-cbor — what the shared rule editor reads
 	// (`FfiRuleEditor::for_guardian`) and writes back
 	// (`FfiRuleEditor::document_bytes`). `None`: the guardian has authored
-	// none. Bytes this build cannot read render fail-closed, as an unknown
-	// floor does (`nest-rules.md` § Implementation status today).
+	// none. Bytes this build cannot read render fail-closed
+	// (`nest-rules.md` § The shared rule editor (b)).
 	Document *[]byte
 }
 
 func (r *FfiContentPolicy) Destroy() {
-	FfiDestroyerString{}.Destroy(r.Nsfw)
-	FfiDestroyerString{}.Destroy(r.Spam)
-	FfiDestroyerString{}.Destroy(r.Phishing)
-	FfiDestroyerString{}.Destroy(r.Commercial)
 	FfiDestroyerOptionalBytes{}.Destroy(r.Document)
 }
 
@@ -20199,10 +20452,6 @@ func (c FfiConverterFfiContentPolicy) Lift(rb RustBufferI) FfiContentPolicy {
 
 func (c FfiConverterFfiContentPolicy) Read(reader io.Reader) FfiContentPolicy {
 	return FfiContentPolicy{
-		FfiConverterStringINSTANCE.Read(reader),
-		FfiConverterStringINSTANCE.Read(reader),
-		FfiConverterStringINSTANCE.Read(reader),
-		FfiConverterStringINSTANCE.Read(reader),
 		FfiConverterOptionalBytesINSTANCE.Read(reader),
 	}
 }
@@ -20216,10 +20465,6 @@ func (c FfiConverterFfiContentPolicy) LowerExternal(value FfiContentPolicy) Exte
 }
 
 func (c FfiConverterFfiContentPolicy) Write(writer io.Writer, value FfiContentPolicy) {
-	FfiConverterStringINSTANCE.Write(writer, value.Nsfw)
-	FfiConverterStringINSTANCE.Write(writer, value.Spam)
-	FfiConverterStringINSTANCE.Write(writer, value.Phishing)
-	FfiConverterStringINSTANCE.Write(writer, value.Commercial)
 	FfiConverterOptionalBytesINSTANCE.Write(writer, value.Document)
 }
 
@@ -24585,7 +24830,7 @@ type FfiRegionRule struct {
 	Factor      string
 	MinPermille uint16
 	// A closed-enum string, `collapse` | `block` — the same string-knob
-	// convention as [`FfiContentPolicy`]'s floors.
+	// string-knob convention as [`FfiReachPolicy`]'s knobs.
 	Verdict    string
 	ReasonCode string
 	// `{ lang → text }`, with a required `default` entry. The authority's own
@@ -27665,10 +27910,80 @@ func (_ FfiDestroyerNewerRelease) Destroy(value NewerRelease) {
 	value.Destroy()
 }
 
+// The public halves of an owner's calendar and card recipient keypairs, plus
+// the `content.read{calendar}` payload — all derived from one MSEK
+// ([`derive_recipient_dav_material`]).
+//
+// The `calendar_capability_secret` is secret material; UniFFI hands the caller
+// a copy (not zeroized across the boundary), so callers keep its lifetime
+// short.
+type RecipientDavMaterial struct {
+	// 32-byte X25519 public half of the recipient-calendar keypair.
+	CalendarPubkey []byte
+	// 1184-byte ML-KEM-768 encapsulation key of the recipient-calendar keypair.
+	CalendarMlkemEk []byte
+	// 32-byte X25519 public half of the recipient-card keypair.
+	CardPubkey []byte
+	// 1184-byte ML-KEM-768 encapsulation key of the recipient-card keypair.
+	CardMlkemEk []byte
+	// The `32 + 2400`-byte `content.read{calendar}` grant payload — the
+	// calendar's own secret, byte-identical to what the client mint's
+	// `derive_scope_payload` wraps.
+	CalendarCapabilitySecret []byte
+}
+
+func (r *RecipientDavMaterial) Destroy() {
+	FfiDestroyerBytes{}.Destroy(r.CalendarPubkey)
+	FfiDestroyerBytes{}.Destroy(r.CalendarMlkemEk)
+	FfiDestroyerBytes{}.Destroy(r.CardPubkey)
+	FfiDestroyerBytes{}.Destroy(r.CardMlkemEk)
+	FfiDestroyerBytes{}.Destroy(r.CalendarCapabilitySecret)
+}
+
+type FfiConverterRecipientDavMaterial struct{}
+
+var FfiConverterRecipientDavMaterialINSTANCE = FfiConverterRecipientDavMaterial{}
+
+func (c FfiConverterRecipientDavMaterial) Lift(rb RustBufferI) RecipientDavMaterial {
+	return LiftFromRustBuffer[RecipientDavMaterial](c, rb)
+}
+
+func (c FfiConverterRecipientDavMaterial) Read(reader io.Reader) RecipientDavMaterial {
+	return RecipientDavMaterial{
+		FfiConverterBytesINSTANCE.Read(reader),
+		FfiConverterBytesINSTANCE.Read(reader),
+		FfiConverterBytesINSTANCE.Read(reader),
+		FfiConverterBytesINSTANCE.Read(reader),
+		FfiConverterBytesINSTANCE.Read(reader),
+	}
+}
+
+func (c FfiConverterRecipientDavMaterial) Lower(value RecipientDavMaterial) C.RustBuffer {
+	return LowerIntoRustBuffer[RecipientDavMaterial](c, value)
+}
+
+func (c FfiConverterRecipientDavMaterial) LowerExternal(value RecipientDavMaterial) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[RecipientDavMaterial](c, value))
+}
+
+func (c FfiConverterRecipientDavMaterial) Write(writer io.Writer, value RecipientDavMaterial) {
+	FfiConverterBytesINSTANCE.Write(writer, value.CalendarPubkey)
+	FfiConverterBytesINSTANCE.Write(writer, value.CalendarMlkemEk)
+	FfiConverterBytesINSTANCE.Write(writer, value.CardPubkey)
+	FfiConverterBytesINSTANCE.Write(writer, value.CardMlkemEk)
+	FfiConverterBytesINSTANCE.Write(writer, value.CalendarCapabilitySecret)
+}
+
+type FfiDestroyerRecipientDavMaterial struct{}
+
+func (_ FfiDestroyerRecipientDavMaterial) Destroy(value RecipientDavMaterial) {
+	value.Destroy()
+}
+
 // The post-quantum halves of an owner's standing recipient-mail X-Wing identity,
 // both derived from one 32-byte MSEK (`derive_recipient_mail_xwing_material`):
 // the public `mlkem_ek` the client publishes to enable hybrid inbound mail, and
-// the `capability_secret` a `content.read{mail|calendar}` grant wraps to a holder.
+// the `capability_secret` a `content.read{mail}` grant wraps to a holder.
 //
 // The `capability_secret` is secret material; UniFFI hands the caller a copy (not
 // zeroized across the boundary), so callers keep its lifetime short.
@@ -27678,8 +27993,9 @@ type RecipientMailXwingMaterial struct {
 	// (`mlkem_ek` field, S3c), so the MTA seals inbound mail to it under the X-Wing
 	// suite.
 	MlkemEk []byte
-	// The `32 + 2400`-byte `content.read{mail|calendar}` grant payload
-	// (`x25519_secret ∥ mlkem_decaps_key`) — byte-identical to what the client
+	// The `32 + 2400`-byte `content.read{mail}` grant payload
+	// (`x25519_secret ∥ mlkem_decaps_key`; the calendar grant carries the
+	// calendar's own secret, [`derive_recipient_dav_material`]) — byte-identical to what the client
 	// mint's `derive_scope_payload` wraps (both call the shared
 	// `fauna_mls::wrapped_blob::derive_recipient_mail_capability_secret`). A holder
 	// opens BOTH classical and X-Wing-sealed mail records with it (the 32-vs-2432
@@ -30076,6 +30392,52 @@ func (FfiConverterFfiPushStandingFailure) Write(writer io.Writer, value FfiPushS
 type FfiDestroyerFfiPushStandingFailure struct{}
 
 func (_ FfiDestroyerFfiPushStandingFailure) Destroy(value FfiPushStandingFailure) {
+}
+
+// The kind of owner record a sealed envelope carries — the FFI mirror of
+// `fauna_mls::wrapped_blob::RecordKind`. Selects the envelope `kind` and its
+// AAD together, so a Go seal site names the kind once and can never pair one
+// kind's tag with another's binding (`owner-key-material.md` § Path
+// B-sibling-5 → *AEAD and envelope*).
+type FfiRecordKind uint
+
+const (
+	// Inbound mail and its index hints (`mail-record`).
+	FfiRecordKindMail FfiRecordKind = 1
+	// CalDAV bodies, sidecars, calendar metadata, placed invitations
+	// (`calendar-record`).
+	FfiRecordKindCalendar FfiRecordKind = 2
+	// CardDAV bodies, sidecars, address-book metadata (`card-record`).
+	FfiRecordKindCard FfiRecordKind = 3
+)
+
+type FfiConverterFfiRecordKind struct{}
+
+var FfiConverterFfiRecordKindINSTANCE = FfiConverterFfiRecordKind{}
+
+func (c FfiConverterFfiRecordKind) Lift(rb RustBufferI) FfiRecordKind {
+	return LiftFromRustBuffer[FfiRecordKind](c, rb)
+}
+
+func (c FfiConverterFfiRecordKind) Lower(value FfiRecordKind) C.RustBuffer {
+	return LowerIntoRustBuffer[FfiRecordKind](c, value)
+}
+
+func (c FfiConverterFfiRecordKind) LowerExternal(value FfiRecordKind) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[FfiRecordKind](c, value))
+}
+func (FfiConverterFfiRecordKind) Read(reader io.Reader) FfiRecordKind {
+	id := readInt32(reader)
+	return FfiRecordKind(id)
+}
+
+func (FfiConverterFfiRecordKind) Write(writer io.Writer, value FfiRecordKind) {
+	writeInt32(writer, int32(value))
+}
+
+type FfiDestroyerFfiRecordKind struct{}
+
+func (_ FfiDestroyerFfiRecordKind) Destroy(value FfiRecordKind) {
 }
 
 // The deployment's registration posture — the three modes of `admin-users`'
@@ -38747,6 +39109,23 @@ func NotifyReportMinIntervalSecs() uint32 {
 	}))
 }
 
+// Does a region placeholder owe the sealed-item sentence
+// (`region.sealed_note`)? The native twin of the web `regionSealedNote` wasm
+// export — both over `fauna_core::obligation::region_sealed_note_owed_for`,
+// the reduced-input form of the rule linux and tui read off their
+// `ContentPolicyState` (`region-blocking.md` § Implementation status today).
+// `region_drove`: the placeholder is the region's and the viewer's own report
+// did not hide the item; `verdict`: the render's wire verdict; `encryption`:
+// the open thread's `capabilities.encryption` (only end-to-end is sealed);
+// `notify_counted`: Guardian Notify counted this item (the content_notify knob
+// on and the guardian floor biting on its labels).
+func RegionSealedNoteOwed(regionDrove bool, verdict string, encryption fauna_conversations.ThreadEncryption, notifyCounted bool) bool {
+	return FfiConverterBoolINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) C.int8_t {
+		return C.uniffi_fauna_ffi_fn_func_region_sealed_note_owed(FfiConverterBoolINSTANCE.Lower(regionDrove), FfiConverterStringINSTANCE.Lower(verdict),
+			CFromRustBuffer(fauna_conversations.FfiConverterThreadEncryptionINSTANCE.LowerExternal(encryption)), FfiConverterBoolINSTANCE.Lower(notifyCounted), _uniffiStatus)
+	}))
+}
+
 // Whether the ward's own `contact_requests` (from `FfiFamilyStatus`) hold an
 // outstanding ask for `peer_actor_id_hex` — what `contact-request-pending`
 // renders from. Over the shared
@@ -39258,6 +39637,31 @@ func DeriveBridgeServiceUserMlkem768(ed25519Seed []byte) (BridgeServiceUserMlkem
 	}
 }
 
+// Derive an owner's calendar and card recipient material from its 32-byte
+// MSEK (`owner-key-material.md` § Path B-sibling-5 / -6): the two public pairs
+// `provision_recipient_mls_pubkey` registers beside the mail pair, and the
+// calendar grant payload. Deterministic in `msek`.
+//
+// Test-only surface: production clients derive these inside shared Rust
+// (`fauna_client_mail_settings::DavSealPubkeys`, `derive_scope_payload`). The
+// `cmd/seal-helper-testonly` modes use this so tier_3 harnesses can register
+// all three pairs and mint a calendar grant without the client UI.
+//
+// `msek` must be exactly 32 bytes; otherwise `FfiError::General`.
+func DeriveRecipientDavMaterial(msek []byte) (RecipientDavMaterial, error) {
+	_uniffiRV, _uniffiErr := rustCallWithError[*FfiError](FfiConverterFfiError{}, func(_uniffiStatus *C.RustCallStatus) RustBufferI {
+		return GoRustBuffer{
+			inner: C.uniffi_fauna_ffi_fn_func_derive_recipient_dav_material(FfiConverterBytesINSTANCE.Lower(msek), _uniffiStatus),
+		}
+	})
+	if _uniffiErr != nil {
+		var _uniffiDefaultValue RecipientDavMaterial
+		return _uniffiDefaultValue, _uniffiErr
+	} else {
+		return FfiConverterRecipientDavMaterialINSTANCE.Lift(_uniffiRV), nil
+	}
+}
+
 // Derive the actor's per-epoch recipient-mail HPKE keypair for epoch `e`
 // from its 32-byte MSEK — the epoch sibling of
 // [`derive_recipient_hpke_keypair`] (content-sealing-epochs design § 2,
@@ -39455,7 +39859,7 @@ func GenerateX25519Keypair() X25519Keypair {
 }
 
 // Report whether `bytes` are a sealed `MailRecordEnvelope` (strict
-// canonical DAG-CBOR, `kind == "mail-record"`, supported version) — as
+// canonical DAG-CBOR, any of the three record kinds, supported version) — as
 // opposed to raw plaintext (RFC 5322 / iCalendar / canonical index-hint
 // token bytes).
 //
@@ -39526,6 +39930,31 @@ func OpenMailRecordWithKey(envelopeBytes []byte, key []byte) ([]byte, error) {
 	}
 }
 
+// [`open_mail_record_with_key`] for a record of any `kind` — opens a sealed
+// envelope with a grant's derived per-kind key (a `content.read{calendar}`
+// payload is the calendar's own secret, in the mail payload's 32-vs-2432 byte
+// contract; `owner-key-material.md` § Path B-sibling-5 → *Capability
+// payload*). The envelope must declare `kind`; a key of another kind fails the
+// open, never mis-decrypts.
+//
+// # Errors
+//
+// `FfiError::General` for a malformed envelope, a kind mismatch, a key of
+// neither length, or the failed open (wrong key, tampered ciphertext).
+func OpenRecordWithKey(kind FfiRecordKind, envelopeBytes []byte, key []byte) ([]byte, error) {
+	_uniffiRV, _uniffiErr := rustCallWithError[*FfiError](FfiConverterFfiError{}, func(_uniffiStatus *C.RustCallStatus) RustBufferI {
+		return GoRustBuffer{
+			inner: C.uniffi_fauna_ffi_fn_func_open_record_with_key(FfiConverterFfiRecordKindINSTANCE.Lower(kind), FfiConverterBytesINSTANCE.Lower(envelopeBytes), FfiConverterBytesINSTANCE.Lower(key), _uniffiStatus),
+		}
+	})
+	if _uniffiErr != nil {
+		var _uniffiDefaultValue []byte
+		return _uniffiDefaultValue, _uniffiErr
+	} else {
+		return FfiConverterBytesINSTANCE.Lift(_uniffiRV), nil
+	}
+}
+
 // Seal an `MlsSnapshotBlob` for nest's `provision_mls_snapshot_blob`.
 //
 // `serialized_state` is the caller-prepared read-only MLS provider
@@ -39550,6 +39979,48 @@ func SealMlsSnapshotBlob(serializedState []byte, actorId []byte, msek []byte) ([
 	_uniffiRV, _uniffiErr := rustCallWithError[*FfiError](FfiConverterFfiError{}, func(_uniffiStatus *C.RustCallStatus) RustBufferI {
 		return GoRustBuffer{
 			inner: C.uniffi_fauna_ffi_fn_func_seal_mls_snapshot_blob(FfiConverterBytesINSTANCE.Lower(serializedState), FfiConverterBytesINSTANCE.Lower(actorId), FfiConverterBytesINSTANCE.Lower(msek), _uniffiStatus),
+		}
+	})
+	if _uniffiErr != nil {
+		var _uniffiDefaultValue []byte
+		return _uniffiDefaultValue, _uniffiErr
+	} else {
+		return FfiConverterBytesINSTANCE.Lift(_uniffiRV), nil
+	}
+}
+
+// [`seal_to_recipient`] for a record of any `kind` — the calendar and card
+// seal sites hand the recipient's calendar / card X25519 pubkey (from
+// `fetch_recipient_mls_pubkey`'s `calendar_key` / `card_key`) and the matching
+// kind.
+//
+// # Errors
+//
+// As [`seal_to_recipient`].
+func SealRecordToRecipient(kind FfiRecordKind, plaintext []byte, recipientX25519Pubkey []byte) ([]byte, error) {
+	_uniffiRV, _uniffiErr := rustCallWithError[*FfiError](FfiConverterFfiError{}, func(_uniffiStatus *C.RustCallStatus) RustBufferI {
+		return GoRustBuffer{
+			inner: C.uniffi_fauna_ffi_fn_func_seal_record_to_recipient(FfiConverterFfiRecordKindINSTANCE.Lower(kind), FfiConverterBytesINSTANCE.Lower(plaintext), FfiConverterBytesINSTANCE.Lower(recipientX25519Pubkey), _uniffiStatus),
+		}
+	})
+	if _uniffiErr != nil {
+		var _uniffiDefaultValue []byte
+		return _uniffiDefaultValue, _uniffiErr
+	} else {
+		return FfiConverterBytesINSTANCE.Lift(_uniffiRV), nil
+	}
+}
+
+// [`seal_to_recipient_xwing`] for a record of any `kind` — the hybrid twin of
+// [`seal_record_to_recipient`].
+//
+// # Errors
+//
+// As [`seal_to_recipient_xwing`].
+func SealRecordToRecipientXwing(kind FfiRecordKind, plaintext []byte, recipientXwingPubkey []byte) ([]byte, error) {
+	_uniffiRV, _uniffiErr := rustCallWithError[*FfiError](FfiConverterFfiError{}, func(_uniffiStatus *C.RustCallStatus) RustBufferI {
+		return GoRustBuffer{
+			inner: C.uniffi_fauna_ffi_fn_func_seal_record_to_recipient_xwing(FfiConverterFfiRecordKindINSTANCE.Lower(kind), FfiConverterBytesINSTANCE.Lower(plaintext), FfiConverterBytesINSTANCE.Lower(recipientXwingPubkey), _uniffiStatus),
 		}
 	})
 	if _uniffiErr != nil {
@@ -41147,9 +41618,9 @@ func InstallNestIdentityPinStoreReadOnly(dataDir string) {
 // the replica is refreshed once now. The macOS app uses it so the sandboxed
 // File Provider extension — which cannot reach the user-domain writer dir —
 // reads the app's pins from the app-group container's `trust/`
-// (`install_nest_identity_pin_store_read_only` there). The app stays the
-// only minter; the replica is its file, copied. Best-effort: a replica that
-// cannot be written never fails a mint.
+// (`install_nest_identity_pin_store_read_only` there). The replica never
+// mints; it is the writer's file, copied. Best-effort: a replica that cannot
+// be written never fails a mint.
 func InstallNestIdentityPinStoreWithMirror(dataDir string, replicaDir string) {
 	rustCall(func(_uniffiStatus *C.RustCallStatus) bool {
 		C.uniffi_fauna_ffi_fn_func_install_nest_identity_pin_store_with_mirror(FfiConverterStringINSTANCE.Lower(dataDir), FfiConverterStringINSTANCE.Lower(replicaDir), _uniffiStatus)
@@ -41259,46 +41730,10 @@ func IsNewer(current string, candidate string) bool {
 	}))
 }
 
-// **Interim — the release-host sign-in look macOS and windows still call
-// until each moves to `FfiNestClient::look_for_newer_release_at_sign_in`,
-// which reads the signed-in nest and contacts no third party
-// (`installers/README.md` § Knowing a newer version is out); then this
-// function is deleted.** Over
-// [`fauna_client::update_look::look_at_sign_in_over_http`]: the newer release
-// to paint the same notice for, or `None` — nothing newer, or a failed look
-// (silent by rule). Same arguments as [`check_for_newer_release`].
-func LookAtSignIn(feedOrigin string, userAgent string) *NewerRelease {
-	res, _ := uniffiRustCallAsync[error](
-		nil,
-		// completeFn
-		func(handle C.uint64_t, status *C.RustCallStatus) RustBufferI {
-			res := C.ffi_fauna_ffi_rust_future_complete_rust_buffer(handle, status)
-			return GoRustBuffer{
-				inner: res,
-			}
-		},
-		// liftFn
-		func(ffi RustBufferI) *NewerRelease {
-			return FfiConverterOptionalNewerReleaseINSTANCE.Lift(ffi)
-		},
-		C.uniffi_fauna_ffi_fn_func_look_at_sign_in(FfiConverterStringINSTANCE.Lower(feedOrigin), FfiConverterStringINSTANCE.Lower(userAgent)),
-		// pollFn
-		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
-			C.ffi_fauna_ffi_rust_future_poll_rust_buffer(handle, continuation, data)
-		},
-		// freeFn
-		func(handle C.uint64_t) {
-			C.ffi_fauna_ffi_rust_future_free_rust_buffer(handle)
-		},
-	)
-
-	return res
-}
-
 // The release feed's production origin
 // ([`fauna_core::version::GITHUB_API_ORIGIN`]) — what [`check_for_newer_release`]
-// and [`look_at_sign_in`] are called with outside e2e automation, so no app
-// spells a feed URL of its own. Under e2e, each app's compile-gated
+// is called with outside e2e automation, so no app spells a feed URL of its
+// own. Under e2e, each app's compile-gated
 // `FAUNA_E2E_RELEASE_FEED_URL` seam passes the harness's stub feed instead.
 func ReleaseFeedOrigin() string {
 	return FfiConverterStringINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) RustBufferI {

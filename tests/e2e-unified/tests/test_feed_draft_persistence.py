@@ -182,3 +182,57 @@ def test_feed_compose_draft_survives_app_restart(logged_in_app, nest_instance, t
         "teardown failing, so look at the compose clear path on this app, not at "
         "draft persistence."
     )
+
+
+@pytest.mark.windows
+def test_feed_compose_edit_survives_leaving_and_returning_to_feed(logged_in_app, nest_instance, test_user):
+    """Windows: the session's feed manager outlives each Feed-page load, so coming
+    back to Feed must not re-restore the nest's draft over the live compose.
+
+    A saved draft ``first`` is on the nest; the user then extends it to ``second``
+    and leaves Feed before relying on the debounce. The return must show
+    ``second``. A per-load re-restore reads the nest's blob back into the manager,
+    which reverts the composer to ``first`` whenever the leave-flush PUT has not
+    landed yet (or failed). Not proven RED: with the flush and the GET on one
+    socket the revert is timing-dependent, so this is a regression witness for the
+    once-per-manager restore (the deterministic pin is
+    ``FeedDraftsServiceTests`` in ``FaunaApp.Tests``)."""
+    app = logged_in_app
+    node_url = nest_instance["url"]
+    actor_id = test_user["actor_id_bytes"]
+    signing_key = bytes(test_user["signing_key"])
+
+    first = "feed draft saved before leaving 7741"
+    suffix = " and extended after the save"
+    second = first + suffix
+
+    from clients.ws_rpc_admin_client import WsRpcAdminClient
+
+    with WsRpcAdminClient(node_url, actor_id=actor_id, signing_key=signing_key) as dev:
+        baseline_blob = dev.call("fauna.drafts.get", {"path": RAIL}).get("blob")
+
+    app.feed.navigate()
+    app.feed.open_composer()
+    app.driver.type_text("compose-text-field", first)
+    assert _wait_compose_body(app, first) == first, "precondition: first draft typed"
+    saved_blob = _wait_drafts_changed(node_url, actor_id, signing_key, baseline_blob)
+    assert saved_blob is not None, "precondition: the first draft must reach the nest"
+
+    app.driver.clear_and_type("compose-text-field", second)
+    assert _wait_compose_body(app, second) == second, "precondition: the edit is in the composer"
+
+    app.conversations.navigate()
+    app.feed.navigate()
+    app.feed.open_composer()
+
+    returned = _wait_compose_body(app, second)
+    assert returned == second, (
+        "returning to Feed reverted the live compose to the nest's draft "
+        f"(expected {second!r}, got {returned!r}); error={app.error_text()!r}"
+    )
+
+    # Cleanup, as in the restart test: the rail is per-actor nest state.
+    app.driver.clear_and_type("compose-text-field", "")
+    assert _wait_drafts_changed(node_url, actor_id, signing_key, saved_blob) is not None, (
+        "cleanup: clearing the composer must persist the emptied draft"
+    )

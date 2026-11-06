@@ -5,7 +5,7 @@
 //! deleted — refund voids, redemption stamps — so the payment audit trail
 //! survives (`external_ref` links back to the provider dashboard).
 
-use super::{CacheDb, PaymentClaimRow, PaymentProviderRow, now_epoch_secs};
+use super::{CacheDb, PaymentClaimRow, PaymentProviderRow, PaymentPurchaseRow, now_epoch_secs};
 use anyhow::{Context, Result};
 use rusqlite::OptionalExtension;
 
@@ -14,22 +14,37 @@ impl CacheDb {
 
     /// Insert-or-replace the author's config for one provider kind. A
     /// re-`set` rotates the secret and/or re-points the tier mapping.
+    ///
+    /// `product_ref`: `None` keeps the row's product as it is (a client that
+    /// predates the field never clears it), `Some("")` clears it, any other
+    /// value narrows the mapping to that product.
     pub async fn upsert_payment_provider(
         &self,
         author_id: &[u8; 32],
         kind: &str,
         webhook_secret: &str,
         tier_name: &str,
+        product_ref: Option<&str>,
     ) -> Result<()> {
         let now = now_epoch_secs();
         let conn = self.conn.lock().await;
         conn.execute(
-            "INSERT INTO payment_providers (author_id, kind, webhook_secret, tier_name, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5)
+            "INSERT INTO payment_providers
+                 (author_id, kind, webhook_secret, tier_name, created_at, product_ref)
+             VALUES (?1, ?2, ?3, ?4, ?5, NULLIF(?6, ''))
              ON CONFLICT(author_id, kind) DO UPDATE SET
                  webhook_secret = excluded.webhook_secret,
-                 tier_name = excluded.tier_name",
-            rusqlite::params![author_id.as_slice(), kind, webhook_secret, tier_name, now],
+                 tier_name = excluded.tier_name,
+                 product_ref = CASE WHEN ?6 IS NULL THEN payment_providers.product_ref
+                                    ELSE NULLIF(?6, '') END",
+            rusqlite::params![
+                author_id.as_slice(),
+                kind,
+                webhook_secret,
+                tier_name,
+                now,
+                product_ref
+            ],
         )
         .context("upsert payment provider")?;
         Ok(())
@@ -43,7 +58,7 @@ impl CacheDb {
         let conn = self.conn.lock().await;
         conn.query_row(
             "SELECT kind, webhook_secret, tier_name, created_at,
-                    last_verified_at, last_rejected_at
+                    last_verified_at, last_rejected_at, product_ref
              FROM payment_providers WHERE author_id = ?1 AND kind = ?2",
             rusqlite::params![author_id.as_slice(), kind],
             Self::map_provider_row,
@@ -60,7 +75,7 @@ impl CacheDb {
         let mut stmt = conn
             .prepare(
                 "SELECT kind, webhook_secret, tier_name, created_at,
-                        last_verified_at, last_rejected_at
+                        last_verified_at, last_rejected_at, product_ref
                  FROM payment_providers WHERE author_id = ?1 ORDER BY kind ASC",
             )
             .context("prepare list payment providers")?;
@@ -133,6 +148,7 @@ impl CacheDb {
             created_at: row.get(3)?,
             last_verified_at: row.get(4)?,
             last_rejected_at: row.get(5)?,
+            product_ref: row.get(6)?,
         })
     }
 
@@ -344,5 +360,142 @@ impl CacheDb {
             redeemed_at: row.get(8)?,
             voided_at: row.get(9)?,
         })
+    }
+
+    /// Re-stamp an UNREDEEMED, un-voided claim with a renewal's window (an
+    /// event that carries none keeps the claim's own), and
+    /// give it the checkout's `return_ref` if it has none yet (a renewal
+    /// invoice can land before its checkout's completion event). Returns
+    /// whether the claim was still open.
+    pub async fn renew_payment_claim(
+        &self,
+        code: &str,
+        valid_until: Option<i64>,
+        return_ref: Option<&str>,
+    ) -> Result<bool> {
+        let conn = self.conn.lock().await;
+        let changed = conn
+            .execute(
+                "UPDATE payment_claim_codes
+                 SET valid_until = COALESCE(?2, valid_until), return_ref = COALESCE(return_ref, ?3)
+                 WHERE code = ?1 AND redeemed_at IS NULL AND voided_at IS NULL",
+                rusqlite::params![code, valid_until, return_ref],
+            )
+            .context("renew payment claim")?;
+        Ok(changed > 0)
+    }
+
+    // ── Purchases ───────────────────────────────────────────────────
+
+    /// The live (un-voided) binding any of `refs` names for this author's
+    /// `provider` — the first ref in order that has one.
+    pub async fn find_payment_purchase(
+        &self,
+        author_id: &[u8; 32],
+        provider: &str,
+        refs: &[String],
+    ) -> Result<Option<PaymentPurchaseRow>> {
+        let conn = self.conn.lock().await;
+        for r in refs {
+            let row = conn
+                .query_row(
+                    "SELECT purchase_ref, tier_name, buyer_actor_id, claim_external_ref, voided_at,
+                            product_ref
+                     FROM payment_purchases
+                     WHERE author_id = ?1 AND provider = ?2 AND purchase_ref = ?3
+                       AND voided_at IS NULL",
+                    rusqlite::params![author_id.as_slice(), provider, r],
+                    |row| {
+                        Ok(PaymentPurchaseRow {
+                            purchase_ref: row.get(0)?,
+                            tier_name: row.get(1)?,
+                            buyer_actor_id: row.get(2)?,
+                            claim_external_ref: row.get(3)?,
+                            voided_at: row.get(4)?,
+                            product_ref: row.get(5)?,
+                        })
+                    },
+                )
+                .optional()
+                .context("find payment purchase")?;
+            if row.is_some() {
+                return Ok(row);
+            }
+        }
+        Ok(None)
+    }
+
+    /// Record every one of `refs` as naming this purchase: its tier, the
+    /// product it was sold as, and its binding (the bound buyer, or the claim
+    /// minted for it). A ref already recorded keeps a product and a binding the
+    /// new write does not carry (a renewal names no product), and a voided one
+    /// is re-opened — a payment landing on it is a fresh purchase.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn record_payment_purchase(
+        &self,
+        author_id: &[u8; 32],
+        provider: &str,
+        refs: &[String],
+        tier_name: &str,
+        product_ref: Option<&str>,
+        buyer_actor_id: Option<&[u8; 32]>,
+        claim_external_ref: Option<&str>,
+    ) -> Result<()> {
+        let now = now_epoch_secs();
+        let conn = self.conn.lock().await;
+        for r in refs {
+            conn.execute(
+                "INSERT INTO payment_purchases
+                 (author_id, provider, purchase_ref, tier_name, buyer_actor_id, claim_external_ref,
+                  created_at, product_ref)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                 ON CONFLICT(author_id, provider, purchase_ref) DO UPDATE SET
+                     tier_name = excluded.tier_name,
+                     product_ref = COALESCE(excluded.product_ref, product_ref),
+                     buyer_actor_id = COALESCE(excluded.buyer_actor_id, buyer_actor_id),
+                     claim_external_ref = COALESCE(excluded.claim_external_ref,
+                                                   claim_external_ref),
+                     voided_at = NULL",
+                rusqlite::params![
+                    author_id.as_slice(),
+                    provider,
+                    r,
+                    tier_name,
+                    buyer_actor_id.map(|b| b.as_slice()),
+                    claim_external_ref,
+                    now,
+                    product_ref
+                ],
+            )
+            .context("record payment purchase")?;
+        }
+        Ok(())
+    }
+
+    /// Stamp `voided_at` on every live row among `refs` — the ids the refund
+    /// or dispute named. A sibling id of the same purchase stays live: a
+    /// subscription that renews after one charge was refunded is a new
+    /// payment, and its renewal must still find the buyer. Returns the rows
+    /// stamped.
+    pub async fn void_payment_purchase_refs(
+        &self,
+        author_id: &[u8; 32],
+        provider: &str,
+        refs: &[String],
+    ) -> Result<usize> {
+        let now = now_epoch_secs();
+        let conn = self.conn.lock().await;
+        let mut changed = 0;
+        for r in refs {
+            changed += conn
+                .execute(
+                    "UPDATE payment_purchases SET voided_at = ?4
+                     WHERE author_id = ?1 AND provider = ?2 AND purchase_ref = ?3
+                       AND voided_at IS NULL",
+                    rusqlite::params![author_id.as_slice(), provider, r, now],
+                )
+                .context("void payment purchase")?;
+        }
+        Ok(changed)
     }
 }

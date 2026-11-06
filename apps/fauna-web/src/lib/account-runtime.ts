@@ -123,17 +123,46 @@ export function startAccountRuntimeFor(
     },
   );
   starting = attempt;
+  const waiting = startAskedWaiters;
+  startAskedWaiters = [];
+  for (const wake of waiting) wake();
+}
+
+/** Woken by the next `startAccountRuntimeFor` that installs an attempt. */
+let startAskedWaiters: Array<() => void> = [];
+
+/** Whether a start that has not been asked for yet will be, for an account —
+ *  registered by `#lib/conversations`, whose manager build asks for it. */
+let startExpected: (actorIdHex: string) => boolean = () => false;
+
+/** Register `startExpected`. A registration, not an import: `#lib/conversations`
+ *  imports this file. */
+export function setAccountRuntimeStartExpected(expected: (actorIdHex: string) => boolean): void {
+  startExpected = expected;
+}
+
+/** Is a runtime on its way for `actorIdHex`? Asked at every poll of a port
+ *  call's wait, so a start given up ends the wait (`account-client-lifecycle.md`
+ *  § *The account port*, decision (j)). A tab that will host none — a second
+ *  tab of the account, an account switched away from — answers no, and its
+ *  call is refused at once. */
+function runtimeComing(actorIdHex: string): boolean {
+  if (signedOutActor?.toLowerCase() === actorIdHex) return false;
+  if (runtimeActor !== null) return runtimeActor.toLowerCase() === actorIdHex;
+  return startExpected(actorIdHex);
 }
 
 /** The account port for `secretHex`'s account — what a chunk machine that
  *  needs the store is wired with (`DevicesMachine.setAccountPort`). The actor
- *  id is bound here, at mint; the core chunk refuses the call when no runtime
+ *  id is bound here, at mint; a call arriving before the account's runtime
+ *  waits while one is coming, and the core chunk refuses it when no runtime
  *  runs or the running one serves another account. Needs the core chunk
  *  loaded (it derives the actor id). */
 export function sharedAccountPort(secretHex: string): SharedAccountPort {
-  const actorIdHex = actorIdFromSecret(secretHex);
+  const actorIdHex = actorIdFromSecret(secretHex).toLowerCase();
   return {
-    call: (door: string, payload: Uint8Array) => accountPortCall(actorIdHex, door, payload),
+    call: (door: string, payload: Uint8Array) =>
+      accountPortCall(actorIdHex, door, payload, () => runtimeComing(actorIdHex)),
   };
 }
 
@@ -181,6 +210,19 @@ export async function stopAccountRuntime(reason: StopReason): Promise<void> {
  *  runtime is still starting reads the store rather than nothing. Never
  *  rejects: a failed start settles too (the read then degrades). */
 export async function accountRuntimeSettled(): Promise<void> {
+  if (starting) await starting;
+}
+
+/** `accountRuntimeSettled` for a reader that may come BEFORE the start is
+ *  asked for: the runtime is started by the conversations manager's build, and
+ *  a feed build or a page mounted at sign-in can get there first, when
+ *  `accountRuntimeSettled` resolves at once with nothing started — and a launch
+ *  pass resting on the store then skipped for the life of the tab. This waits
+ *  for a start to be asked (if none is in flight) and then for it to settle.
+ *  Never rejects; it waits for as long as no start is asked, so it suits only a
+ *  caller that does not hold anything back on it. */
+export async function accountRuntimeNextSettled(): Promise<void> {
+  if (!starting && !started) await new Promise<void>((wake) => startAskedWaiters.push(wake));
   if (starting) await starting;
 }
 

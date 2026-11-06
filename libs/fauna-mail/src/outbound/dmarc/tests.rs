@@ -169,6 +169,29 @@ fn rua_uris_are_mailto_only_with_their_size_limit() {
         parse_rua("https://peer.test/report"),
         RuaDestination::Unsupported { .. }
     ));
+    // A stranger's record must not reach the report's `To:` header with
+    // anything but one plain address: a CR/LF (kept by the lossy TXT decode)
+    // would inject headers into the queued report.
+    for bad in [
+        "mailto:x@evil.example\r\nSubject: injected\r\n\r\nbody@evil.example",
+        "mailto:x@evil.example\nBcc: y@evil.example",
+        "mailto:x\u{0}@evil.example",
+        "mailto:\"x\"@evil.example",
+        "mailto:x@evil.example!10q",
+    ] {
+        assert!(
+            matches!(parse_rua(bad), RuaDestination::Unsupported { .. }),
+            "{bad:?}"
+        );
+    }
+    let long = format!("mailto:{}@evil.example", "a".repeat(65));
+    assert!(matches!(
+        parse_rua(&long),
+        RuaDestination::Unsupported { .. }
+    ));
+    let (dest, skipped) = plan_destinations(&["mailto:x@evil.example\r\nSubject: injected".into()]);
+    assert!(dest.is_empty(), "a CR/LF address is never a destination");
+    assert_eq!(skipped, 1);
     let (dest, skipped) = plan_destinations(&[
         "https://peer.test/r".into(),
         "mailto:a@peer.test!50k".into(),
@@ -366,4 +389,42 @@ fn a_row_too_large_for_the_destination_is_dropped() {
         Disposition::None,
     );
     assert!(build_reports(&meta(), &policy("peer.test"), &agg.rows("peer.test"), 16).is_empty());
+}
+
+#[test]
+fn observation_strings_are_clipped_before_they_are_held() {
+    use fauna_core::mail_auth::DkimAuthResult;
+    let mut agg = DmarcAggregator::default();
+    let ip: std::net::IpAddr = "192.0.2.1".parse().unwrap();
+    let huge = "a".repeat(100_000);
+    let obs = DmarcObservation {
+        header_from_domain: "peer.test".into(),
+        envelope_from_domain: huge.clone(),
+        dkim_results: (0..100)
+            .map(|i| DkimAuthResult {
+                domain: huge.clone(),
+                selector: format!("{i}{huge}"),
+                result: huge.clone(),
+            })
+            .collect(),
+        spf_result: huge.clone(),
+        ..Default::default()
+    };
+    assert!(agg.record(ip, &obs, crate::dmarc_report::Disposition::None));
+    let rows = agg.rows("peer.test");
+    let row = &rows[0];
+    assert_eq!(row.envelope_from.len(), DMARC_OBSERVATION_NAME_MAX_BYTES);
+    assert_eq!(row.spf_result.len(), DMARC_OBSERVATION_TOKEN_MAX_BYTES);
+    assert_eq!(row.dkim_results.len(), DMARC_OBSERVATION_MAX_DKIM_RESULTS);
+    for (d, s, r) in &row.dkim_results {
+        assert_eq!(d.len(), DMARC_OBSERVATION_NAME_MAX_BYTES);
+        assert_eq!(s.len(), DMARC_OBSERVATION_NAME_MAX_BYTES);
+        assert_eq!(r.len(), DMARC_OBSERVATION_TOKEN_MAX_BYTES);
+    }
+    // A From domain longer than any domain is not counted at all.
+    let bogus = DmarcObservation {
+        header_from_domain: huge,
+        ..Default::default()
+    };
+    assert!(!agg.record(ip, &bogus, crate::dmarc_report::Disposition::None));
 }

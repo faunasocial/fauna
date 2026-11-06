@@ -24,12 +24,11 @@
 //! small pieces, so the server side never allocates the body either and every
 //! large allocation the counter sees is the client's.
 
-use std::alloc::{GlobalAlloc, Layout, System};
+use fauna_alloc_probe::LargestAlloc;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use fauna_account_store::sqlite::SqliteBackend;
 use fauna_account_store::store::AccountStore;
@@ -45,39 +44,8 @@ use fauna_sync_engine::segment_backup::{
 
 // ── the allocation counter ───────────────────────────────────────────────────
 
-struct PeakAlloc;
-
-static TRACKING: AtomicBool = AtomicBool::new(false);
-static PEAK: AtomicUsize = AtomicUsize::new(0);
-
-fn note(size: usize) {
-    if TRACKING.load(Ordering::Relaxed) {
-        PEAK.fetch_max(size, Ordering::Relaxed);
-    }
-}
-
-// SAFETY: every call forwards to `System` unchanged; the counter only reads
-// the requested size.
-unsafe impl GlobalAlloc for PeakAlloc {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        note(layout.size());
-        unsafe { System.alloc(layout) }
-    }
-    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-        note(layout.size());
-        unsafe { System.alloc_zeroed(layout) }
-    }
-    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        unsafe { System.dealloc(ptr, layout) }
-    }
-    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        note(new_size);
-        unsafe { System.realloc(ptr, layout, new_size) }
-    }
-}
-
 #[global_allocator]
-static GLOBAL: PeakAlloc = PeakAlloc;
+static GLOBAL: LargestAlloc = LargestAlloc;
 
 // ── the fixture ──────────────────────────────────────────────────────────────
 
@@ -265,11 +233,9 @@ async fn a_segment_transfer_never_allocates_the_segment() {
     .await
     .unwrap();
 
-    PEAK.store(0, Ordering::Relaxed);
-    TRACKING.store(true, Ordering::Relaxed);
+    LargestAlloc::start();
     let report = store.bootstrap_scope_segments(&scope, &source).await;
-    TRACKING.store(false, Ordering::Relaxed);
-    let peak = PEAK.load(Ordering::Relaxed);
+    let peak = LargestAlloc::stop();
 
     let report = report.unwrap();
     assert_eq!(report.adopted, 1, "{report:?}");
@@ -433,11 +399,9 @@ async fn the_owners_backup_pass_never_allocates_the_segment() {
         bound_source: None,
     };
 
-    PEAK.store(0, Ordering::Relaxed);
-    TRACKING.store(true, Ordering::Relaxed);
+    LargestAlloc::start();
     let report = pull.run_once(KIND, 1_780_000_100).await;
-    TRACKING.store(false, Ordering::Relaxed);
-    let peak = PEAK.load(Ordering::Relaxed);
+    let peak = LargestAlloc::stop();
 
     let report = report.unwrap();
     assert_eq!(report.stored_segments, vec![0], "{report:?}");

@@ -57,19 +57,42 @@ use crate::routes::AppState;
 /// is no post body and gets no view.
 const DELIVERED_BODY_CAP: usize = 1024 * 1024;
 
-/// The sealed body of a post a federated follow delivered here, fetched once
-/// by content address from the public blob route of the home it was delivered
-/// from (`content.origin_nest_url` — an address this nest resolved for a
-/// verified peer, never user input). `None` for a post this nest holds as its
-/// own, and for every failure: the view is silent, as for a body that has not
-/// arrived.
+/// The sealed body of a post a federated follow delivered here, fetched by
+/// content address from the public blob route of a home holding custody of it
+/// (`follow_delivery_homes.origin_nest_url` — an address this nest resolved for
+/// a verified peer, never user input): the `prefer`red home (the one delivering
+/// now) first, then the others oldest delivery first
+/// (`federated-follow.md` § Decision 4, the room arm). `None` for a post this
+/// nest holds as its own, and for every failure: the view is silent, as for a
+/// body that has not arrived.
 async fn fetch_delivered_body(
     state: &Arc<AppState>,
     post_id: &[u8; 32],
     digest: &[u8; 32],
+    prefer: Option<&[u8; 32]>,
 ) -> Option<Vec<u8>> {
-    let home = state.db.delivered_post_home(post_id).await.ok().flatten()?;
-    fetch_body_from_home(&home, digest, state.peer_fetch_loopback.as_ref()).await
+    let homes = state.db.delivered_post_homes(post_id).await.ok()?;
+    fetch_from_custody_homes(homes, prefer, digest, state.peer_fetch_loopback.as_ref()).await
+}
+
+/// One [`fetch_body_from_home`] per custody home in order — `prefer` first, the
+/// rest as given — the first body matching `digest` returned.
+async fn fetch_from_custody_homes(
+    mut homes: Vec<([u8; 32], String)>,
+    prefer: Option<&[u8; 32]>,
+    digest: &[u8; 32],
+    loopback: Option<&reqwest::Client>,
+) -> Option<Vec<u8>> {
+    if let Some(prefer) = prefer {
+        // Stable: the preferred home moves to the front, the rest keep order.
+        homes.sort_by_key(|(id, _)| id != prefer);
+    }
+    for (_, url) in homes {
+        if let Some(body) = fetch_body_from_home(&url, digest, loopback).await {
+            return Some(body);
+        }
+    }
+    None
 }
 
 /// `GET <home>/api/v1/blob/<digest>`, the bytes only when they are the body
@@ -112,7 +135,15 @@ async fn fetch_body_from_home(
 /// Every failure is silent and view-less, for the message pass's reason: the
 /// post is its author's act and is stored either way; a view the nest could
 /// not build is the nest's own read failing, never a reason to refuse it.
-pub(crate) async fn index_room_post(state: &Arc<AppState>, post_id: &[u8; 32], body: &[u8]) {
+///
+/// `prefer` is the custody home delivering the post now, tried first when the
+/// body must be fetched; `None` for a post stored by any other door.
+pub(crate) async fn index_room_post(
+    state: &Arc<AppState>,
+    post_id: &[u8; 32],
+    body: &[u8],
+    prefer: Option<&[u8; 32]>,
+) {
     let Some(post) = decode_stored_post(body) else {
         return;
     };
@@ -163,10 +194,13 @@ pub(crate) async fn index_room_post(state: &Arc<AppState>, post_id: &[u8; 32], b
     // this nest homes never dials.
     let sealed = match store.get(&gated.encrypted_ref).await {
         Ok(Some(sealed)) => sealed,
-        _ => match fetch_delivered_body(state, post_id, &gated.encrypted_ref.digest()).await {
-            Some(sealed) => sealed,
-            None => return,
-        },
+        _ => {
+            match fetch_delivered_body(state, post_id, &gated.encrypted_ref.digest(), prefer).await
+            {
+                Some(sealed) => sealed,
+                None => return,
+            }
+        }
     };
     let base = zeroize::Zeroizing::new(fauna_core::group_content::room_post_base_key(&key));
     let per_post = zeroize::Zeroizing::new(fauna_core::subscription::crypto::derive_post_key(
@@ -323,5 +357,39 @@ mod tests {
         );
         let home = serve_once(head_with_length("200 OK", body.len()), body.clone(), false).await;
         assert_eq!(fetch_body_from_home(&home, &digest, lo).await, Some(body));
+    }
+
+    /// A custody home serving nothing falls through to the next one.
+    #[tokio::test]
+    async fn a_body_is_fetched_from_the_next_custody_home() {
+        let client = reqwest::Client::new();
+        let body = b"sealed room post".to_vec();
+        let digest = *blake3::hash(&body).as_bytes();
+        let empty = serve_once(head_with_length("404 Not Found", 0), vec![], false).await;
+        let good = serve_once(head_with_length("200 OK", body.len()), body.clone(), false).await;
+        let homes = vec![([1u8; 32], empty), ([2u8; 32], good)];
+        assert_eq!(
+            fetch_from_custody_homes(homes, None, &digest, Some(&client)).await,
+            Some(body)
+        );
+    }
+
+    /// The preferred home is dialled first and, serving, spares the others.
+    #[tokio::test]
+    async fn the_preferred_custody_home_is_tried_first() {
+        let client = reqwest::Client::new();
+        let body = b"sealed room post".to_vec();
+        let digest = *blake3::hash(&body).as_bytes();
+        let good = serve_once(head_with_length("200 OK", body.len()), body.clone(), false).await;
+        // Listed first but never dialled: nothing listens at its address, and a
+        // dial would fail rather than serve — so only ordering lets `good` win
+        // with this home's turn spent first.
+        let dead = "http://127.0.0.1:1".to_string();
+        let homes = vec![([1u8; 32], dead), ([2u8; 32], good)];
+        let prefer = [2u8; 32];
+        assert_eq!(
+            fetch_from_custody_homes(homes, Some(&prefer), &digest, Some(&client)).await,
+            Some(body)
+        );
     }
 }

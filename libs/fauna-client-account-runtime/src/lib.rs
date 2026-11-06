@@ -50,7 +50,7 @@
 //! app and that host would be sharing exactly the fields whose *absence* is the
 //! agent's contract, so the two stay separate on purpose.
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 pub mod conversations_door;
 pub mod deployment_seeds;
 pub mod holder_yield;
@@ -189,6 +189,14 @@ pub struct AppRuntimeInputs {
     /// it ([`SandboxedStoreContainer`]): the shell that names the container
     /// is the shell that must say how it stays out of the backup.
     pub store_container: Option<SandboxedStoreContainer>,
+    /// The app's **app default** — the frozen label it registers its machine's
+    /// row under (`devices.md` § Device names, class (2)): the SAME constant
+    /// it hands its engine host, so the enrollment ceremony's register-create
+    /// names a phone's row `fauna-ios` / `fauna-android` instead of the
+    /// `fauna` placeholder. Every signed-in app passes `Some`; `None` is only
+    /// for a runtime with no app behind it (the removed-account erase runtime,
+    /// which is stopped as soon as it is ready).
+    pub device_label: Option<String>,
 }
 
 /// What [`resolve_and_start`] needs that the params do not already carry.
@@ -235,6 +243,7 @@ pub fn build_params(
         attested_predecessors,
         peer_transport,
         store_container,
+        device_label,
     } = inputs;
     // The secondary leg's connections authenticate as this same identity
     // (`account-sync-plane.md` § The bind leg, ruling 4): a copy of the seed
@@ -296,6 +305,7 @@ pub fn build_params(
         // Resolved in phase 2 — reading this device's own id is a DB/state-dir
         // open, which a sign-in must not wait on.
         enrollment_target_device_id: String::new(),
+        enrollment_device_label: device_label,
         linked_nests: Some(linked_nests),
         owed_nests: Some(owed_nests),
     })
@@ -341,7 +351,17 @@ impl OwedNestReach for NativeOwedReach {
 /// session of this app is signed in as.
 pub async fn sign_in_with_seed(url: &str, keypair: ActorKeypair) -> SignIn<Arc<NestClient>> {
     let client = NestClient::new(url.to_string(), keypair);
-    match client.connect().await {
+    // The mint first, on its own: its verdict is the sign-in's. `connect()`
+    // alone returns `Ok` over a mint that found no nest or met a refusal a
+    // retry may clear (`account_locked`), its supervisor retrying it
+    // (`transport-connection.md` § Connection lifecycle); `connect()` reuses
+    // the cached bearer.
+    match async {
+        client.authenticate().await?;
+        client.connect().await
+    }
+    .await
+    {
         Ok(()) => SignIn::Connected(client),
         // A refused mint flattens to "couldn't obtain a token"; the typed
         // refusal is the auth client's last one, which tells "the nest holds
@@ -396,10 +416,14 @@ pub fn native_linked_nest_connector(keypair: ActorKeypair) -> LinkedNestConnecto
         let keypair = ActorKeypair::from_secret(*keypair.secret_bytes());
         Box::pin(async move {
             let client = NestClient::new(target.nest_url.clone(), keypair);
-            client
-                .connect()
-                .await
-                .map_err(|e| anyhow::anyhow!("linked nest {}: connect: {e}", target.nest_url))?;
+            // The mint first: an unreachable nest is the connect's failure
+            // (`connect()` alone is `Ok` over it, its supervisor retrying).
+            async {
+                client.authenticate().await?;
+                client.connect().await
+            }
+            .await
+            .map_err(|e| anyhow::anyhow!("linked nest {}: connect: {e}", target.nest_url))?;
             let bound_identity =
                 fauna_client::trust::connection_bound_identity(&client, &target.nest_url)
                     .await
@@ -673,6 +697,25 @@ pub async fn read_marker_state_json(
     serde_json::to_value(view).unwrap_or_else(|_| serde_json::json!({ "found": false }))
 }
 
+/// e2e-only: where this app's account store's `fauna.state.escrow-wrap`
+/// rows sit on the fleet feed, as JSON — `{"found": true, "rows": [{"key",
+/// "item_key_hex", "writers_hex"}]}` or `{"found": false}`. The recovery-kit
+/// let-go journey reads it before the account's one device signs out, so the
+/// nest's test hook can stage a holder that no longer has the wrap, the
+/// plane's copy included (`fleet-scope-reclamation.md` § *Fleet-scope
+/// reclamation*, clause (3)(j)). The reader is
+/// [`fauna_account_plane::account_driver::e2e_readers::escrow_wrap_coordinates_view`];
+/// dispatched and gated exactly like [`device_set_state_json`].
+#[cfg(any(debug_assertions, feature = "e2e-agent"))]
+pub async fn escrow_wrap_coordinates_json(
+    handle: Option<&AccountStoreHandle>,
+) -> serde_json::Value {
+    let view =
+        fauna_account_plane::account_driver::e2e_readers::escrow_wrap_coordinates_view(handle)
+            .await;
+    serde_json::to_value(view).unwrap_or_else(|_| serde_json::json!({ "found": false }))
+}
+
 // The stop's budget, its reason and the one stop per handle live beside the
 // driver (`fauna_account_plane::account_driver`'s `stop` module) since web
 // hosts the runtime too and states the same reason; re-exported here, where
@@ -762,6 +805,7 @@ pub async fn stop_account_runtime(
         let mut stopped_something = false;
         if let Some(store) = settled {
             stop_one(&store, reason).await;
+            await_second_connections(&store).await;
             stopped_something = true;
         }
         // The in-flight half. A failed assembly and a dead assembly task both
@@ -770,6 +814,7 @@ pub async fn stop_account_runtime(
             && let Some(store) = pending.settled().await
         {
             stop_one(&store, reason).await;
+            await_second_connections(&store).await;
             stopped_something = true;
         }
         stopped_something
@@ -791,6 +836,43 @@ pub async fn stop_account_runtime(
             );
             StopOutcome::BudgetElapsed
         }
+    }
+}
+
+/// How long the stop waits, once the runtime has shut down, for the second
+/// connections consumers outside it opened to its store — a bound, not a
+/// clock: a release closes one within milliseconds, and an elapse is reported,
+/// never taken for a close.
+pub const SECOND_CONNECTION_CLOSE_BUDGET: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// Release and await the second connections registered on `store` by
+/// consumers outside the runtime (the share plane's group feed) — AFTER its
+/// shutdown, because each consumer's other holders let go only once they see
+/// the runtime closed (`AccountStoreHandle::release_second_connections`).
+/// Without it an erase meets that connection open, which windows refuses
+/// (`apps/account-scoping.md` § Erasure follows scope, *The stop's receipt
+/// covers the runtime's SECOND connections too*).
+pub async fn await_second_connections(store: &AccountStoreHandle) {
+    let closes = store.release_second_connections();
+    if closes.is_empty() {
+        return;
+    }
+    let names: Vec<&'static str> = closes.iter().map(|(what, _)| *what).collect();
+    let all = async move {
+        for (_, close) in closes {
+            close.await;
+        }
+    };
+    if tokio::time::timeout(SECOND_CONNECTION_CLOSE_BUDGET, all)
+        .await
+        .is_err()
+    {
+        tracing::warn!(
+            "[account-runtime] a second connection to the account store ({}) was still open \
+             {SECOND_CONNECTION_CLOSE_BUDGET:?} after its release — an erase now meets it open, \
+             which windows refuses (os error 32)",
+            names.join(", ")
+        );
     }
 }
 
@@ -949,6 +1031,7 @@ mod tests {
             attested_predecessors: Default::default(),
             peer_transport: None,
             store_container: None,
+            device_label: Some("fauna-tui".to_string()),
         }
     }
 
@@ -1056,6 +1139,14 @@ mod tests {
     /// A seed-holding app is `SeedHolding`. The agent's host is the seedless
     /// one, and the two assemblies stay separate precisely so a change here
     /// can never reach it.
+    /// The app default reaches the ceremony's register-create (`devices.md`
+    /// § Device names: every register leg of a machine passes it).
+    #[test]
+    fn the_app_default_label_reaches_the_enrollment() {
+        let params = build_params(inputs(), rpc(), "https://nest.example").unwrap();
+        assert_eq!(params.enrollment_device_label.as_deref(), Some("fauna-tui"));
+    }
+
     #[test]
     fn an_app_assembles_a_seed_holding_host() {
         let params = build_params(inputs(), rpc(), "https://nest.example").unwrap();
@@ -1304,5 +1395,44 @@ mod tests {
         // A stray completion never underflows into "stopping forever".
         q.stop_finished();
         assert!(!q.is_busy());
+    }
+
+    /// Nothing listens on port 1 of the loopback, so a dial there is refused
+    /// at once.
+    const UNREACHABLE: &str = "http://127.0.0.1:1";
+
+    /// **No nest answering is a failed sign-in, never a connection.**
+    /// `NestClient::connect()` alone returns `Ok` over a first mint that found
+    /// no nest, its supervisor retrying it (`transport-connection.md`
+    /// § Connection lifecycle); the road would read that as signed in.
+    #[tokio::test]
+    async fn a_sign_in_where_no_nest_answers_fails() {
+        let signed = sign_in_with_seed(
+            UNREACHABLE,
+            ActorKeypair::from_secret_hex(SECRET).expect("keypair"),
+        )
+        .await;
+        assert!(
+            matches!(signed, SignIn::Failed(_)),
+            "an unreachable nest is a failed sign-in"
+        );
+    }
+
+    /// The secondary leg's connector reports an unreachable linked nest at the
+    /// connect — not as a bound-identity read over a session that never came up.
+    #[tokio::test]
+    async fn the_linked_connector_reports_an_unreachable_nest_at_the_connect() {
+        let connect =
+            native_linked_nest_connector(ActorKeypair::from_secret_hex(SECRET).expect("keypair"));
+        let target = LinkedNestTarget {
+            nest_id: [0x33; 32],
+            nest_url: UNREACHABLE.to_string(),
+            replica: true,
+        };
+        let err = match connect(target).await {
+            Ok(_) => panic!("an unreachable linked nest connected"),
+            Err(e) => e.to_string(),
+        };
+        assert!(err.contains(": connect:"), "{err}");
     }
 }

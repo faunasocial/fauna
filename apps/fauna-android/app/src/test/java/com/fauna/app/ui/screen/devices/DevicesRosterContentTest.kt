@@ -1,7 +1,10 @@
 package com.fauna.app.ui.screen.devices
 
+import android.content.Context
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.test.core.app.ApplicationProvider
+import com.fauna.app.R
 import com.fauna.app.ui.currentClipboardText
 import org.junit.Assert.assertEquals
 import org.junit.Rule
@@ -37,6 +40,8 @@ class DevicesRosterContentTest {
 
     @get:Rule
     val composeTestRule = createComposeRule()
+
+    private val context: Context = ApplicationProvider.getApplicationContext()
 
     // guardianMarked defaults false — family-safety.md § Full visibility for
     // young children (Slice F); none of this file's existing coverage
@@ -175,6 +180,8 @@ class DevicesRosterContentTest {
         localDeviceId: String? = null,
         actorId: String? = "cd".repeat(32),
         onRemoveDevice: (Int) -> Unit = {},
+        onRenameDevice: (String, String) -> Unit = { _, _ -> },
+        deviceName: (String) -> String? = { null },
         keylessPrincipals: Set<String> = emptySet(),
         custodyRows: List<CustodyHolderRowView> = emptyList(),
         custodyHeld: List<CustodyHeldRowView> = emptyList(),
@@ -195,6 +202,8 @@ class DevicesRosterContentTest {
                 localDeviceId = localDeviceId,
                 actorId = actorId,
                 onRemoveDevice = onRemoveDevice,
+                onRenameDevice = onRenameDevice,
+                deviceName = deviceName,
                 statusLabel = { online -> if (online) "Online" else "Offline" },
                 placeLabel = { o, a, d -> "PLACE:$o/$a/$d" },
                 keylessPrincipals = keylessPrincipals,
@@ -309,6 +318,38 @@ class DevicesRosterContentTest {
         composeTestRule.onAllNodesWithText("Delete")
             .filterToOne(hasAnyAncestor(isDialog())).performClick()
         assertEquals(0, removed)
+    }
+
+    // `device-rename-button` opens ONE editor over its card (`devices.md` § Device
+    // names, rule (1)): the input prefilled with the machine's opened name, then the
+    // confirm and cancel; confirm hands the machine `(deviceId, text)` and closes it.
+    @Test
+    fun renameEditorOpensPrefilledConfirmsByDeviceIdAndCancelWritesNothing() {
+        var renamed: Pair<String, String>? = null
+        val id = "cd".repeat(32)
+        render(
+            snapshot(devices = listOf(device("Phone", deviceId = id), device("Laptop"))),
+            onRenameDevice = { d, t -> renamed = d to t },
+            deviceName = { if (it == id) "Phone" else null },
+        )
+        composeTestRule.onNodeWithTag("device-rename-input").assertDoesNotExist()
+        composeTestRule.onNodeWithTag("device-rename-confirm-button").assertDoesNotExist()
+        composeTestRule.onNodeWithTag("device-rename-cancel-button").assertDoesNotExist()
+
+        composeTestRule.onAllNodesWithTag("device-rename-button")[0].performClick()
+        assertEquals(1, composeTestRule.onAllNodesWithTag("device-rename-input").fetchSemanticsNodes().size)
+        composeTestRule.onNodeWithTag("device-rename-input").assertTextContains("Phone")
+
+        // Cancel closes the editor and writes nothing.
+        composeTestRule.onNodeWithTag("device-rename-cancel-button").performClick()
+        composeTestRule.onNodeWithTag("device-rename-input").assertDoesNotExist()
+        assertEquals(null, renamed)
+
+        composeTestRule.onAllNodesWithTag("device-rename-button")[0].performClick()
+        composeTestRule.onNodeWithTag("device-rename-input").performTextReplacement("Desk phone")
+        composeTestRule.onNodeWithTag("device-rename-confirm-button").performClick()
+        assertEquals(id to "Desk phone", renamed)
+        composeTestRule.onNodeWithTag("device-rename-input").assertDoesNotExist()
     }
 
     // `peer-actor-id-copy-btn` copies the CLIENT'S OWN actor ID, not any
@@ -566,7 +607,7 @@ class DevicesRosterContentTest {
             composeTestRule.onNodeWithTag(id).assertExists()
         }
         composeTestRule.onNodeWithTag("custody-held-scope")
-            .assertTextEquals("Their account's sealed data — unreadable on this device, apart from what they published to everyone")
+            .assertTextEquals(context.getString(R.string.devices_custody_held_scope_account))
         composeTestRule.onNodeWithTag("custody-held-bytes").assertTextEquals("HELD:1024")
         composeTestRule.onNodeWithTag("custody-held-budget-input").assertTextContains("8 GB")
     }
@@ -660,9 +701,7 @@ class DevicesRosterContentTest {
         render(custodyOffers = listOf(offer(nestCanHold = true)))
         composeTestRule.onNodeWithTag("custody-offer-card").assertExists()
         composeTestRule.onNodeWithTag("custody-offer-floor-note").assertTextEquals(
-            "This device would store sealed data it cannot read, apart from what they have published " +
-                "to everyone. Of the rest it would see only the shape: which scopes exist, how much is " +
-                "stored, and when it changes — never the content.",
+            context.getString(R.string.devices_custody_offer_floor),
         )
         composeTestRule.onAllNodesWithTag("custody-offer-target-select").assertCountEquals(0)
     }

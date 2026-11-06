@@ -10,6 +10,16 @@ use crate::i18n::strings;
 use crate::i18n::strings::{common, status};
 use crate::testid::set_test_id;
 
+thread_local! {
+    /// The Devices page's ONE rename editor (`ui/devices.md` § Device names):
+    /// the card it is open on, keyed by `device_id` — never a painted index,
+    /// so a roster refresh that reshapes the list cannot retarget it — and
+    /// the text typed so far. The list rebuilds on every observer tick, so
+    /// the editor state lives here, outside the widgets.
+    static RENAMING: std::cell::RefCell<Option<(String, String)>> =
+        const { std::cell::RefCell::new(None) };
+}
+
 /// Build the page-level "peer identity" section — a single, non-per-row copy
 /// control for THIS client's own actor ID (`devices.md` § Layout & flow point
 /// 2; ui.yaml `peer-actor-id-copy-btn` is `indexed: false`), for handing to a
@@ -274,16 +284,123 @@ fn build_device_card(
     set_test_id(&remove_btn, ids::DEVICE_REMOVE_BUTTON);
     crate::offline_gate::declare_wire_kind(&remove_btn, "fauna.sync.devices.delete");
 
-    let machine = Arc::clone(machine);
+    let remove_machine = Arc::clone(machine);
     remove_btn.connect_clicked(move |_| {
-        let machine = Arc::clone(&machine);
+        let machine = Arc::clone(&remove_machine);
         // `remove_device` deletes the device then self-refreshes (observer tick),
         // so the page re-renders without the row.
         async_helper::run_on_tokio(async move { machine.remove_device(index).await }, |_| {});
     });
 
+    // --- Rename affordance (`devices.md` § Device names, rule (1)) ---
+    // `device-rename-button` opens ONE editor over this card: the input
+    // prefilled with the machine's opened name (`DevicesMachine::device_name`,
+    // without rule (c)'s ` · code`), then confirm and cancel. Confirm hands
+    // the machine the text — it sends nothing for a blank or unchanged name
+    // and paints every refusal on `error-message`; cancel writes nothing.
+    // Reference: tui `settings/devices.rs`.
+    let rename_btn = gtk::Button::builder()
+        .icon_name("document-edit-symbolic")
+        .valign(gtk::Align::Center)
+        .css_classes(["flat"])
+        .build();
+    set_test_id(&rename_btn, ids::DEVICE_RENAME_BUTTON);
+    crate::offline_gate::declare_wire_kind(&rename_btn, "fauna.sync.devices.rename");
+
+    let editor = gtk::Box::builder()
+        .orientation(gtk::Orientation::Horizontal)
+        .spacing(6)
+        .build();
+    let rename_input = gtk::Entry::builder().hexpand(true).build();
+    rename_input.update_property(&[gtk::accessible::Property::Label(
+        strings::devices::RENAME_LABEL,
+    )]);
+    set_test_id(&rename_input, ids::DEVICE_RENAME_INPUT);
+    let confirm_btn = gtk::Button::with_label(strings::devices::RENAME_CONFIRM);
+    set_test_id(&confirm_btn, ids::DEVICE_RENAME_CONFIRM_BUTTON);
+    let cancel_btn = gtk::Button::with_label(common::CANCEL);
+    set_test_id(&cancel_btn, ids::DEVICE_RENAME_CANCEL_BUTTON);
+    editor.append(&rename_input);
+    editor.append(&confirm_btn);
+    editor.append(&cancel_btn);
+
+    let open_here = RENAMING.with(|r| {
+        r.borrow()
+            .as_ref()
+            .filter(|(id, _)| *id == device.device_id)
+            .map(|(_, text)| text.clone())
+    });
+    editor.set_visible(open_here.is_some());
+    if let Some(text) = open_here {
+        rename_input.set_text(&text);
+    }
+
+    {
+        let editor = editor.clone();
+        let input = rename_input.clone();
+        let machine = Arc::clone(machine);
+        let device_id = device.device_id.clone();
+        rename_btn.connect_clicked(move |_| {
+            let name = machine.device_name(device_id.clone()).unwrap_or_default();
+            RENAMING.with(|r| *r.borrow_mut() = Some((device_id.clone(), name.clone())));
+            input.set_text(&name);
+            editor.set_visible(true);
+            input.grab_focus();
+        });
+    }
+    {
+        let device_id = device.device_id.clone();
+        rename_input.connect_changed(move |e| {
+            RENAMING.with(|r| {
+                if let Some((id, text)) = r.borrow_mut().as_mut()
+                    && *id == device_id
+                {
+                    *text = e.text().to_string();
+                }
+            });
+        });
+    }
+    let do_confirm = {
+        let editor = editor.clone();
+        let input = rename_input.clone();
+        let machine = Arc::clone(machine);
+        let device_id = device.device_id.clone();
+        move || {
+            RENAMING.with(|r| *r.borrow_mut() = None);
+            editor.set_visible(false);
+            let text = input.text().to_string();
+            let machine = Arc::clone(&machine);
+            let device_id = device_id.clone();
+            async_helper::run_on_tokio(
+                async move { machine.rename_device(device_id, text).await },
+                |_| {},
+            );
+        }
+    };
+    {
+        let do_confirm = do_confirm.clone();
+        confirm_btn.connect_clicked(move |_| do_confirm());
+    }
+    rename_input.connect_activate(move |_| do_confirm());
+    {
+        let editor = editor.clone();
+        cancel_btn.connect_clicked(move |_| {
+            RENAMING.with(|r| *r.borrow_mut() = None);
+            editor.set_visible(false);
+        });
+    }
+
+    let actions = gtk::Box::builder()
+        .orientation(gtk::Orientation::Horizontal)
+        .spacing(4)
+        .valign(gtk::Align::Center)
+        .build();
+    actions.append(&rename_btn);
+    actions.append(&remove_btn);
+
+    info.append(&editor);
     card.append(&info);
-    card.append(&remove_btn);
+    card.append(&actions);
 
     gtk::ListBoxRow::builder()
         .child(&card)

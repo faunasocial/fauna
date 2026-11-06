@@ -529,7 +529,9 @@ def _wait_registry_count(driver, n, timeout=30):
             return last
         time.sleep(0.5)
     raise AssertionError(
-        f"registry never reached {n} accounts within {timeout}s; last index={last!r}"
+        f"registry never reached {n} accounts within {timeout}s; last index={last!r}\n"
+        f"error={driver.get_text('error-message') if driver.count('error-message') else None!r}\n"
+        "console tail:\n" + "\n".join(driver.console_log()[-40:])
     )
 
 
@@ -671,6 +673,91 @@ def test_web_add_account_appends_second_identity_to_registry(nest_instance, spa_
         driver.teardown()
 
 
+@pytest.mark.feature("join-a-nest")
+def test_web_add_account_offers_the_trust_to_an_admitted_identity(nest_instance, spa_url):
+    """Signed in as A, "Add account" with an identity an admin admitted on the
+    SAME nest reaches the one-tap trust offer (`onboarding.md` § 3b-ter).
+
+    The offer hangs on the nest's `first_sign_in` answer to the handle check's
+    verify (`login.md` § Direct Auth), so any session minted for B before that
+    check takes it away (`web.md`, *An identity that exists before its account
+    dials nothing*). This tab is pinned to A with A's nest beside the pin, and
+    a gate that reads that nest opens for B the moment the wizard imports it:
+    every root-layout handler then mints with B's secret against A's nest,
+    which is B's nest too here; the gate keys on the identity's own home nest
+    (`homeNestUrlOrNull`), which B does not have until the wizard's `LoggedIn`.
+    The handle check runs for real (no injected snapshot): its verify is where
+    the fact is read."""
+    from urllib.parse import urlparse
+
+    from actions.onboarding import OnboardingActions
+    from clients.ws_rpc_admin_client import WsRpcAdminClient
+
+    admin_sk = nest_instance["admin"]["signing_key"]
+    admitted = SigningKey.generate()
+    localpart = "admitted" + admitted.verify_key.encode().hex()[:6]
+    with WsRpcAdminClient(
+        nest_instance["url"], actor_id=bytes(admin_sk.verify_key),
+        signing_key=bytes(admin_sk),
+    ) as ws:
+        ws.call("fauna.admin.users.create", {
+            "actor_id": bytes(admitted.verify_key), "tier": "free",
+            "label": localpart, "handle": localpart,
+        })
+
+    seed, first_actor, first_secret = _seed_one_account(nest_instance, spa_url)
+    driver = create_driver("web")
+    driver.launch({"url": spa_url + "/app/", "seed_credentials": seed})
+    try:
+        _auth_on_account_page(driver, first_secret, "user", first_actor, spa_url)
+        driver.click(ADD_BUTTON)
+        driver.wait_for(IMPORT_IDENTITY_BUTTON, timeout=30)
+        # At identity_choice, as in the append test above: web's override is a
+        # reload, which a later step would answer with a fresh wizard. The REAL
+        # probe runs here, so it is routed through the SPA's own proxy to the
+        # nest (`spa_url`), as `test_trust_prompt.py`'s `joiner_nest` routes it.
+        driver.set_provider_base_urls({"nest": spa_url})
+        driver.wait_for(IMPORT_IDENTITY_BUTTON, timeout=30)
+
+        driver.click(IMPORT_IDENTITY_BUTTON)
+        driver.wait_for(PASTE_SECRET_FIELD, timeout=15)
+        driver.clear_and_type(PASTE_SECRET_FIELD, bytes(admitted).hex())
+        driver.click(IMPORT_SUBMIT_BUTTON)
+        driver.wait_for(HANDLE_INPUT, timeout=15)
+
+        handle = f"{localpart}@{urlparse(nest_instance['url']).netloc}"
+        driver.clear_and_type(HANDLE_INPUT, handle)
+        driver.click("handle-check-button")
+        wait_until(
+            lambda: driver.is_enabled(HANDLE_CONTINUE_BUTTON),
+            RPC_ROUNDTRIP_S, interval=0.5,
+            diagnose=lambda: (
+                f"the handle check for the admitted {handle!r} never enabled "
+                f"Continue (expected AlreadyOnNest). message: "
+                f"{driver.get_text('handle-message-area')!r}"
+            ),
+        )
+        driver.click(HANDLE_CONTINUE_BUTTON)
+
+        ob = OnboardingActions(driver)
+        wait_until(
+            ob.trust_prompt_showing, RPC_ROUNDTRIP_S, interval=0.5,
+            diagnose=lambda: (
+                "an admitted identity added beside a signed-in account must "
+                "reach the trust offer — a session minted for it before the "
+                "handle check spent its first_sign_in (the gate opened on the "
+                "active account's nest)\n" + driver.tree()
+            ),
+        )
+        assert ob.finish_trust_prompt(grant=False)
+        await_session_actor(
+            driver, admitted.verify_key.encode().hex(), budget_s=APP_RELAUNCH_S,
+            what="the append after the offer",
+        )
+    finally:
+        driver.teardown()
+
+
 @pytest.mark.feature("multiple-accounts")
 def test_web_add_account_pending_invite_submit_switches_the_live_session(nest_instance, spa_url):
     """A pending-invite submit during "Add account" registers the joiner, writes its
@@ -728,9 +815,20 @@ def test_web_add_account_pending_invite_submit_switches_the_live_session(nest_in
         assert index["active"] == joiner_actor, (
             "the pending-invite submit activates the joiner (onboarding.md § Multi-account)"
         )
-        assert driver.eval_js(
-            f"localStorage.getItem('fauna/{joiner_actor}/pending_invite')"
-        ), f"the joiner's per-actor pending-invite slot must be written; index={index!r}"
+        # The submit writes the slot after `accountsAdd` + `accountsSwitch`, so the
+        # active flip above can land first: wait for the slot, never read it once.
+        wait_until(
+            lambda: driver.eval_js(
+                f"localStorage.getItem('fauna/{joiner_actor}/pending_invite')"
+            ),
+            RPC_ROUNDTRIP_S,
+            interval=0.5,
+            diagnose=lambda: (
+                f"the joiner's per-actor pending-invite slot must be written; "
+                f"index={_read_registry_index(driver)!r}\n"
+                "console tail:\n" + "\n".join(driver.console_log()[-40:])
+            ),
+        )
         assert driver.eval_js(f"localStorage.getItem('fauna/{first_actor}/secret')") == first_secret, (
             "the outgoing account's secret must survive the switch"
         )
@@ -806,7 +904,11 @@ def test_web_add_account_abandon_recovers_prior_identity_on_current_load(nest_in
         #   - the in-memory session identity is back to account #1 (the discriminator).
         #   - the switcher still lists exactly the one original account, active on #1.
         _wait_session_actor(driver, first_actor, timeout=30)
-        assert driver.count(SWITCHER_ITEM) == 1, "still exactly the one original account"
+        # The rows fill after the list mounts: wait for the one row, never count once.
+        wait_until(lambda: driver.count(SWITCHER_ITEM) == 1, RPC_ROUNDTRIP_S,
+                   diagnose=lambda: "still exactly the one original account; the switcher "
+                   f"lists {driver.count(SWITCHER_ITEM)} row(s); "
+                   f"registry={_read_registry_index(driver)!r}")
         idx2 = _read_registry_index(driver)
         assert idx2 and idx2["active"] == first_actor and len(idx2["accounts"]) == 1, (
             "the registry is unchanged by an abandoned append"
@@ -1117,6 +1219,49 @@ def test_web_switching_to_an_identity_the_device_cannot_sign_in_as_is_refused(
         driver.teardown()
 
 
+@pytest.mark.feature("drafts-survive")
+def test_web_a_new_message_draft_never_shows_under_another_identity(nest_instance, spa_url):
+    """Each identity's half-written new message stays its own across switches —
+    the shared arc in `helpers/identity_switch_drafts.py`, which every app's
+    switcher module runs (tui's twin of the same name)."""
+    from helpers.identity_switch_drafts import assert_new_message_draft_never_crosses_identity
+
+    seed, user_actor, user_secret, admin_actor, admin_secret = _seed_two_accounts(
+        nest_instance, spa_url
+    )
+    driver = create_driver("web")
+    driver.launch({"url": spa_url + "/app/", "seed_credentials": seed})
+
+    def show_switcher():
+        def listed():
+            try:
+                driver.set_state(ACCOUNT_PAGE_NAV)
+                return driver.count(SWITCHER_ITEM) == 2
+            except Exception:
+                # A switch is a full reload; the read may race it.
+                return False
+
+        wait_until(
+            listed, APP_RELAUNCH_S,
+            diagnose=lambda: f"the switcher never listed both identities "
+            f"(rows {driver.count(SWITCHER_ITEM)!r})",
+        )
+
+    try:
+        _auth_on_account_page(driver, user_secret, "user", user_actor, spa_url)
+        assert_new_message_draft_never_crosses_identity(
+            driver, nest_instance["url"],
+            user=(user_actor, bytes.fromhex(user_secret)),
+            admin=(admin_actor, bytes.fromhex(admin_secret)),
+            show_switcher=show_switcher,
+            await_session=lambda actor, what: _wait_session_actor(
+                driver, actor, timeout=APP_RELAUNCH_S
+            ),
+        )
+    finally:
+        driver.teardown()
+
+
 @pytest.mark.feature("multiple-accounts")
 def test_web_abandoned_created_identity_never_shows_among_your_identities(
     nest_instance, spa_url
@@ -1331,5 +1476,110 @@ def test_web_switching_identity_keeps_device_settings_and_moves_drafts(nest_inst
             diagnose=lambda: f"the user's composer reads {feed.compose_body_text()!r}",
         )
         assert push_state() == "on", "the device setting must still hold after switching back"
+    finally:
+        driver.teardown()
+
+
+#: The draft-autosave window for the switch-door witness below: the same ten
+#: minutes `test_drafts_sign_out_flush.py` re-times every app to, written here
+#: into this one launch's own environment (the web driver puts it in the page
+#: origin's `localStorage`) rather than through the session-wide marker, so the
+#: rest of this module keeps the cadence its draft tests wait on.
+SWITCH_FLUSH_AUTOSAVE_WINDOW_MS = 600_000
+
+
+@pytest.mark.feature("multiple-accounts")
+def test_web_switching_identity_saves_the_draft_inside_its_autosave_window(
+    nest_instance, spa_url
+):
+    """Switching to another identity saves the draft still inside its autosave
+    window, and switching back brings it back as the user left it — the
+    account-switch door of `docs/goal/behavior/reserved-folders.md` § The
+    leave-flush promise ("Signing out, and switching to another account, is a
+    leave door too, on every app"), the switch twin of
+    `test_drafts_sign_out_flush.py`.
+
+    web's switch is a full reload, which retires the outgoing session; the
+    `pagehide` that reload delivers only fires the flush and forgets it, and a
+    browser grants no reliable async work after it. So `performSwitch` awaits
+    `#lib/drafts-leave-flush`'s `flushDraftRailsNow()` after the activation and
+    before the reload. The autosave debounce is re-timed past the whole test, so
+    a draft found on the nest after the switch can only be a leave flush's."""
+    from actions.feed import FeedActions
+    from clients.ws_rpc_admin_client import WsRpcAdminClient
+    from helpers.budgets import UI_SETTLE_S
+
+    seed, user_actor, user_secret, admin_actor, _admin_secret = _seed_two_accounts(
+        nest_instance, spa_url
+    )
+    draft = "half-written post that switching identity must not lose 4419"
+
+    def user_drafts_blob():
+        with WsRpcAdminClient(
+            nest_instance["url"], actor_id=bytes.fromhex(user_actor),
+            signing_key=bytes.fromhex(user_secret),
+        ) as dev:
+            return dev.call("fauna.drafts.get", {"path": "posts"}).get("blob")
+
+    driver = create_driver("web")
+    driver.launch({
+        "url": spa_url + "/app/",
+        "seed_credentials": seed,
+        "environment": {
+            "FAUNA_E2E_DRAFTS_AUTOSAVE_DEBOUNCE_MS": str(SWITCH_FLUSH_AUTOSAVE_WINDOW_MS),
+        },
+    })
+    feed = FeedActions(driver)
+
+    def switch_to(index, actor):
+        driver.set_state(ACCOUNT_PAGE_NAV)
+        driver.wait_for(SWITCHER_ITEM, timeout=30)
+        driver.click(SWITCHER_ITEM, index=index)
+        _wait_session_actor(driver, actor, timeout=60)
+
+    try:
+        _auth_on_account_page(driver, user_secret, "user", user_actor, spa_url)
+        baseline = user_drafts_blob()
+
+        # (1) As the user: a post typed and not submitted. Its autosave is ten
+        #     minutes out, so it saves nothing in this test.
+        feed.navigate()
+        feed.open_composer()
+        driver.type_text(COMPOSE_FIELD, draft)
+        wait_until(
+            lambda: feed.compose_body_text() == draft, UI_SETTLE_S,
+            diagnose=lambda: (
+                "the draft never reached the composer, so nothing below is a verdict "
+                f"on the switch door: composer reads {feed.compose_body_text()!r}"
+            ),
+        )
+
+        # (2) The door: the user's own switch to the other identity.
+        switch_to(1, admin_actor)
+
+        # (3) The user's draft is on the nest — reachable only through a leave
+        #     flush, since the debounce cannot have fired.
+        wait_until(
+            lambda: user_drafts_blob() not in (None, baseline), RPC_ROUNDTRIP_S,
+            diagnose=lambda: (
+                "the user's 'posts' drafts rail never changed on the nest after the "
+                "switch. The autosave window was re-timed to "
+                f"{SWITCH_FLUSH_AUTOSAVE_WINDOW_MS} ms for this launch, so only the "
+                "switch's own flush could have saved it — the outgoing session was "
+                "torn down unsaved"
+            ),
+        )
+
+        # (4) Switch back: by VALUE, the draft as the user left it.
+        switch_to(0, user_actor)
+        feed.navigate()
+        feed.open_composer()
+        wait_until(
+            lambda: feed.compose_body_text() == draft, RPC_ROUNDTRIP_S,
+            diagnose=lambda: (
+                "the user's draft did not come back after switching back "
+                f"(expected {draft!r}, composer reads {feed.compose_body_text()!r})"
+            ),
+        )
     finally:
         driver.teardown()

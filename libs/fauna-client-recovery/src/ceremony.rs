@@ -36,6 +36,12 @@ use serde::{Deserialize, Serialize};
 /// [`SweepView::kind`]'s three tokens — the human-facing vocabulary, hyphenated
 /// (the e2e state protocol's `no_engine` is a different vocabulary on purpose;
 /// see [`SweepStatus::state_json`]).
+/// How long the succession sweep waits for the successor's session to come
+/// up before it reports the sweep failed — the spec deadline a request would
+/// otherwise wait per group (`sweep_as_successor`'s connect note). A constant,
+/// not a knob: no user or admin would choose it.
+const SUCCESSOR_CONNECT_WITHIN: std::time::Duration = std::time::Duration::from_secs(30);
+
 pub const SWEEP_KIND_NO_ENGINE: &str = "no-engine";
 pub const SWEEP_KIND_FAILED: &str = "failed";
 pub const SWEEP_KIND_RAN: &str = "ran";
@@ -1826,8 +1832,10 @@ pub async fn sweep_as_successor(
     // having never reached the nest. That is exactly what killed the sweep on
     // its first real group — 30 s per group, no sign-in in the nest log, and a
     // per-group `Failed("transport error: rpc disconnected")` that reads like a
-    // nest refusal but never left the app.
-    if let Err(e) = nest.connect().await {
+    // nest refusal but never left the app. Waited to `Connected`, not just
+    // `connect()`: that returns `Ok` over a first mint that found no nest (its
+    // supervisor retries it), and an unreachable nest must fail here.
+    if let Err(e) = nest.connect_and_wait(SUCCESSOR_CONNECT_WITHIN).await {
         // The account has already moved; only propagation is lost. Reported as
         // a whole-sweep failure rather than per-group noise: nothing was
         // attempted, because the successor never got a session.
@@ -2365,8 +2373,10 @@ mod tests {
     /// Nothing listens on port 1, so a connected client is the only way this
     /// reaches the `Failed` arm: with the connect removed it returns `Ran` (the
     /// engine holds no groups, so the sweep makes no request to discover the
-    /// nest is dead).
-    #[tokio::test]
+    /// nest is dead). On a paused clock: the connect waits for `Connected` up to
+    /// [`SUCCESSOR_CONNECT_WITHIN`], and the supervisor retrying a nest that
+    /// never answers is what fills that wait.
+    #[tokio::test(start_paused = true)]
     async fn the_sweep_connects_the_successor_before_it_rides_the_client() {
         use fauna_core::data::Timestamp;
         use fauna_core::identity::ActorKeypair;

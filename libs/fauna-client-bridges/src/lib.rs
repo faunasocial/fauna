@@ -3153,17 +3153,9 @@ mod tests {
                     serving_port: 443,
                     fronted_by_router: false,
                     dkim_records: Vec::new(),
-                    os_host_status_present: false,
-                    os_security_updates_pending: 0,
-                    os_reboot_pending: false,
-                    os_reboot_deferred_since: None,
-                    os_last_patched_at: None,
-                    ssh_door_admitted_from: None,
                     web_app_origin: "bundled".into(),
-                    web_app_origin_target: None,
-                    web_app_origin_domainless: false,
                     node_mode: "public".into(),
-                    extra: Default::default(),
+                    ..Default::default()
                 })
             }
             _ => fauna_protocol::encode_canonical(&ProvisionReply {

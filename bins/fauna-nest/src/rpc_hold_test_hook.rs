@@ -282,6 +282,12 @@ pub struct HoldGate {
     /// Requests a held gate still lets through before it starts parking
     /// (`POST …/{kind}?pass=N`, module doc § Passing the first N).
     passing: AtomicUsize,
+    /// Cumulative parks that ended with no wake — the request's task was
+    /// aborted while parked, which is what a client `Cancel` (its own deadline
+    /// expiring) or a closed connection does. Without it such a request leaves
+    /// every other counter at zero and reads to the test as "never arrived",
+    /// when it arrived and was given up on by the client.
+    abandoned: AtomicUsize,
 }
 
 impl HoldGate {
@@ -293,6 +299,7 @@ impl HoldGate {
             refused: AtomicUsize::new(0),
             dropped: AtomicUsize::new(0),
             passing: AtomicUsize::new(0),
+            abandoned: AtomicUsize::new(0),
         }
     }
 
@@ -394,7 +401,7 @@ impl HoldGate {
                 // frame does. Without it a cancelled request leaves the count
                 // permanently high and the next test's arrival poll passes on a
                 // ghost.
-                let _guard = HoldingGuard::new(self);
+                let mut guard = HoldingGuard::new(self);
                 let mut rx = self.mode.subscribe();
                 let mut shutdown_gone = false;
                 // Both watches are re-read each pass with `borrow_and_update`,
@@ -429,6 +436,7 @@ impl HoldGate {
                         }
                     }
                 };
+                guard.woke = true;
                 self.released.fetch_add(1, Ordering::SeqCst);
                 match woke_to {
                     Mode::Refuse(refusal) => Verdict::Refuse(refusal),
@@ -490,19 +498,26 @@ impl HoldGate {
     }
 }
 
-/// Decrements `holding` on drop — see [`HoldGate::park`].
-struct HoldingGuard<'a>(&'a HoldGate);
+/// Decrements `holding` on drop — see [`HoldGate::park`] — and counts the park
+/// as `abandoned` when it ends without having woken (the task was aborted).
+struct HoldingGuard<'a> {
+    gate: &'a HoldGate,
+    woke: bool,
+}
 
 impl HoldingGuard<'_> {
     fn new(gate: &HoldGate) -> HoldingGuard<'_> {
         gate.holding.fetch_add(1, Ordering::SeqCst);
-        HoldingGuard(gate)
+        HoldingGuard { gate, woke: false }
     }
 }
 
 impl Drop for HoldingGuard<'_> {
     fn drop(&mut self) {
-        self.0.holding.fetch_sub(1, Ordering::SeqCst);
+        if !self.woke {
+            self.gate.abandoned.fetch_add(1, Ordering::SeqCst);
+        }
+        self.gate.holding.fetch_sub(1, Ordering::SeqCst);
     }
 }
 
@@ -688,7 +703,9 @@ async fn drop_reply_once_kind(
 /// `GET /api/v1/test/rpc-hold/{kind}` — the arrival observable.
 /// Returns `{"armed": bool, "until_shutdown": bool, "refusing": bool,
 /// "dropping": bool, "holding": N,
-/// "passing": P, "released": M, "refused": R, "dropped": D}`, where `passing` is
+/// "passing": P, "released": M, "refused": R, "dropped": D, "abandoned": A}`,
+/// where `abandoned` is the cumulative number of parks the client gave up on
+/// (its deadline's `Cancel`, or a closed connection), and `passing` is
 /// what is left of an armed hold's pass budget and `holding` is the number of
 /// requests of `kind` parked right now, `refused` the cumulative number turned
 /// away and `dropped` the cumulative number whose handler ran and whose reply
@@ -709,6 +726,7 @@ async fn hold_status(
             "released": gate.released.load(Ordering::SeqCst),
             "refused": gate.refused.load(Ordering::SeqCst),
             "dropped": gate.dropped.load(Ordering::SeqCst),
+            "abandoned": gate.abandoned.load(Ordering::SeqCst),
         })),
         // Never armed is a legitimate answer, not an error: a test polling a
         // kind it has not armed should see zeros, not a 404 it has to special-case.
@@ -722,6 +740,7 @@ async fn hold_status(
             "released": 0,
             "refused": 0,
             "dropped": 0,
+            "abandoned": 0,
         })),
     }
 }
@@ -919,6 +938,9 @@ mod tests {
         wait_for(|| gate.holding.load(Ordering::SeqCst) == 0).await;
         // The abort is not a release: nothing was let through.
         assert_eq!(gate.released.load(Ordering::SeqCst), 0);
+        // …but it is recorded: a client that gave up on a held request must not
+        // read to the test as one that never sent it.
+        assert_eq!(gate.abandoned.load(Ordering::SeqCst), 1);
     }
 
     /// Refusing wakes a parked request into a refusal, and turns later

@@ -208,4 +208,39 @@ class EventDraftsHostTest {
 
         assertNull(host.draft.value)
     }
+
+    /**
+     * Sign-out and switch are leave doors (`reserved-folders.md` § The
+     * leave-flush promise): the capture taken BEFORE the drop still saves the
+     * outgoing actor's last edit under the outgoing actor's own handle, even
+     * though the drop has already cleared the host's fields — and a handle from
+     * a later session is never written.
+     */
+    @Test
+    fun theLeaveFlushCapturedBeforeTheDropStillSavesUnderTheOutgoingHandle() = runTest {
+        val scope = hostScope()
+        val host = EventDraftsHost(scope)
+        val a = FakeEventDraftsSync(null)
+        host.startDraftsSync(a)
+        a.gate.complete(Unit)
+        host.onEdit("A's offsite", "2026-09-02T18:00", "2026-09-02T19:00", "", "")
+
+        val flush = host.captureLeaveFlush()
+        host.stopDraftsSync()
+        val b = FakeEventDraftsSync(null)
+        host.startDraftsSync(b)
+        flush!!.invoke()
+
+        assertEquals(listOf("A's offsite"), a.saved.map { it.summary })
+        assertTrue("the incoming actor's handle was written", b.saved.isEmpty())
+    }
+
+    @Test
+    fun noLeaveFlushIsCapturedWithNothingEditedOrNoSession() = runTest {
+        val host = EventDraftsHost(hostScope())
+        assertNull("no session", host.captureLeaveFlush())
+
+        host.startDraftsSync(FakeEventDraftsSync(null))
+        assertNull("nothing edited", host.captureLeaveFlush())
+    }
 }

@@ -72,8 +72,8 @@ from actions.api_actor import ApiActor
 from clients.ws_rpc_admin_client import RpcCallError, WsRpcAdminClient
 from clients.ws_rpc_federation_client import FederationChannelClient
 from common.auth import create_actor_and_register
-from helpers.admin_wire import admin_client
-from helpers.family_wire import actor_ws, admit_adult_directly, admit_ward
+from helpers.admin_wire import admin_client, admit_adult
+from helpers.family_wire import actor_ws, admit_ward
 from tests.api import ws_api
 
 pytestmark = pytest.mark.tier_3
@@ -370,7 +370,7 @@ def test_a_supervised_accounts_report_needs_no_guardian(report_nest):
     """Outcome 15. A ward's report lands on the admins' queue at once, and
     nothing waits in the guardian's approval queue."""
     nest = report_nest
-    guardian = admit_adult_directly(nest, f"abuse-guardian-{os.urandom(3).hex()}")
+    guardian = admit_adult(nest, f"abuse-guardian-{os.urandom(3).hex()}")
     ward = admit_ward(nest, guardian, f"abuse-ward-{os.urandom(3).hex()}")
     _, author_api = _actor(nest)
     post_id = author_api.post_to_feed("", f"reported by a ward {_token()}")

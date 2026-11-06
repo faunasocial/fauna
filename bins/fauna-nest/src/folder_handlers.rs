@@ -1658,6 +1658,7 @@ fn served_rows_adopt_handler() -> RpcHandler {
                     crate::change_signature::CarriedSignature {
                         signature: Some(&carried.signature[..]),
                         signer_key: Some(&req.signer_key[..]),
+                        deposited_by: None,
                     },
                     // The owner's own connection to the nest holding their
                     // grants: a delegated signer resolves by reference, as at
@@ -2423,6 +2424,40 @@ fn conflict_report_handler() -> RpcHandler {
             let device_bytes = hex::decode(&req.device_id)
                 .map_err(|_| coded(SYNC, "invalid_request", "invalid device_id hex"))?;
 
+            // A `catchup_failed` row asserts "this device skipped this change"
+            // and the nest dedupes on (set, device, path_hash) with no
+            // reporter recorded, so a `device_id` that is not the caller's own
+            // would let a writer member pre-file a row under another actor's
+            // device and suppress that device's genuine report (a wire param
+            // is attacker-controllable — `get_device_capabilities_for_actor`'s
+            // contract). Bind it to the authenticated actor's devices.
+            //
+            //
+            // The binding holds for EVERY report type, not only
+            // `catchup_failed`: a resolved report's `device_id` becomes the
+            // `winner_device_id` of the minted head change row and keys the
+            // retained loser, and a change row carrying a device id is read
+            // by that device's engine as its own write (`apply_self_echo`),
+            // so an unbound id would let a writer member attribute a merged
+            // winner to another actor's device. Candidate `device_id`s stay
+            // unbound — they name the devices whose versions diverged.
+            //
+            let own_device = parse_device_id(&req.device_id)
+                .ok_or_else(|| coded(SYNC, "invalid_request", "invalid device_id"))?;
+            if state
+                .db
+                .get_device_capabilities_for_actor(&actor_id, &own_device)
+                .await
+                .map_err(|e| internal(SYNC, e))?
+                .is_none()
+            {
+                return Err(coded(
+                    SYNC,
+                    "permission_denied",
+                    "a conflict report must name one of the caller's own devices",
+                ));
+            }
+
             // THE approved compat break (S9 flip — `encryption-at-rest.md`
             // § Carve-outs): a sealless conflict report is refused on a
             // sealed plane. Every production reporter seals (the S6-a
@@ -2536,6 +2571,100 @@ fn conflict_report_handler() -> RpcHandler {
                 .path_hash
                 .as_ref()
                 .and_then(|b| <[u8; 32]>::try_from(&b[..]).ok());
+            // A resolved report mints change rows (the winner head, and the
+            // retained loser): a row no change-log page could serve would end
+            // every reader's walk of the set at its seq, so it is refused here
+            // as at the record door (`sync_handlers::unservable_change_len`),
+            // before anything is verified, charged or written.
+            if let Some(r) = &resolution {
+                let routing = path_hash.unwrap_or_else(|| fauna_core::sync::path_hash(&req.path));
+                let minted = |manifest: &[u8],
+                              device: &[u8],
+                              derived_through: Option<i64>,
+                              signature: Option<&[u8]>| {
+                    crate::db::SyncChangeRow {
+                        seq: 0,
+                        path_hash: routing.to_vec(),
+                        manifest_hash: Some(manifest.to_vec()),
+                        size_bytes: i64::MIN,
+                        change_type: "modify".to_string(),
+                        created_at: 0,
+                        path: folder.rests_plaintext_paths().then(|| req.path.clone()),
+                        device_id: Some(device.to_vec()),
+                        content_key_version: Some(i64::MIN),
+                        thumbnail_hash: None,
+                        actor_id: actor_id.to_vec(),
+                        path_sealed: req.path_sealed.as_ref().map(|b| b.to_vec()),
+                        derived_through,
+                        is_resolution: Some(true),
+                        is_retention: None,
+                        item_class: None,
+                        origin_writer: None,
+                        origin_seq: None,
+                        entry_sealed: None,
+                        signature: signature.map(<[u8]>::to_vec),
+                        signer_key: req.winner_signer_key.as_ref().map(|b| b.to_vec()),
+                        deposited_by: None,
+                    }
+                };
+                let mut rows = vec![minted(
+                    &r.winning_manifest_hash,
+                    &r.winner_device_id,
+                    r.winning_derived_through,
+                    req.winner_signature.as_ref().map(|b| &b[..]),
+                )];
+                if let Some(l) = r.retained_loser(&candidates, &device_bytes) {
+                    rows.push(minted(
+                        &l.manifest_hash,
+                        &l.device_id,
+                        r.losing_derived_through,
+                        req.loser_signature.as_ref().map(|b| &b[..]),
+                    ));
+                }
+                if let Some(len) = rows
+                    .into_iter()
+                    .find_map(crate::sync_handlers::unservable_change_len)
+                {
+                    return Err(coded(
+                        SYNC,
+                        "change_too_large",
+                        crate::sync_handlers::change_too_large_detail(len),
+                    ));
+                }
+            } else if let Some(len) = candidates.iter().find_map(|c| {
+                // An unresolved report mints no row now, but the owner's
+                // choose-winner later mints the head row from exactly what
+                // lands here — the conflict's routing hash, label and rest
+                // path, a candidate's manifest and device. A conflict whose
+                // choose would be unservable is refused here, where nothing
+                // rests yet: refused only at the choose, it would sit open and
+                // unresolvable. The chooser's integers and signature are
+                // measured at their widest (a signature and its 32-byte key).
+                let routing = path_hash.unwrap_or_else(|| fauna_core::sync::path_hash(&req.path));
+                crate::sync_handlers::unservable_change_len(
+                    crate::db::CacheDb::choose_winner_change_row(
+                        &folder.actor_id,
+                        &routing,
+                        &c.manifest_hash,
+                        i64::MIN,
+                        folder.rests_plaintext_paths().then_some(req.path.as_str()),
+                        &c.device_id,
+                        Some(i64::MIN),
+                        req.path_sealed.as_ref().map(|b| &b[..]),
+                        Some(crate::db::RowSignature {
+                            signature: &[0u8; 64],
+                            signer_key: &[0u8; 32],
+                            deposited_by: None,
+                        }),
+                    ),
+                )
+            }) {
+                return Err(coded(
+                    SYNC,
+                    "change_too_large",
+                    crate::sync_handlers::change_too_large_detail(len),
+                ));
+            }
             let (verified, verified_loser) = match &resolution {
                 Some(r) => {
                     let routing =
@@ -2805,11 +2934,13 @@ async fn verify_choose_winner_signature(
         change_type: "modify".into(),
         size_bytes: facts.size_bytes,
         content_key_version: facts.content_key_version.map(|v| v as u64),
+        content_generation: None,
         path_sealed: facts.path_sealed,
         thumbnail_hash: None,
         derived_through: None,
         is_resolution: false,
         is_retention: false,
+        deposited_by: None,
     };
     crate::change_signature::verify_carried(
         &state.db,
@@ -2864,11 +2995,13 @@ async fn verify_report_winner_signature(
         change_type: "modify".into(),
         size_bytes: report.winning_size_bytes,
         content_key_version: report.winning_content_key_version,
+        content_generation: None,
         path_sealed,
         thumbnail_hash: None,
         derived_through: report.winning_derived_through,
         is_resolution: !report.winning_carries_novelty.unwrap_or(false),
         is_retention: false,
+        deposited_by: None,
     };
     crate::change_signature::verify_carried(
         &state.db,
@@ -2924,11 +3057,13 @@ async fn verify_report_loser_signature(
         change_type: "modify".into(),
         size_bytes: loser.size_bytes,
         content_key_version: loser.content_key_version,
+        content_generation: None,
         path_sealed,
         thumbnail_hash: None,
         derived_through: report.losing_derived_through,
         is_resolution: false,
         is_retention: true,
+        deposited_by: None,
     };
     crate::change_signature::verify_carried(
         &state.db,
@@ -2995,6 +3130,23 @@ fn conflict_resolve_handler() -> RpcHandler {
                             SYNC,
                             "bad_candidate",
                             "winning_manifest_hash is not one of the conflict's candidates",
+                        )),
+                        // The candidate names one of the chooser's own devices
+                        // for a version nothing attests that device wrote: the
+                        // head row would be its forged self-echo.
+                        // Nothing minted, the conflict stays open.
+                        ResolveWinner::UnattestedCandidate => Err(coded(
+                            SYNC,
+                            "bad_candidate",
+                            "the winning candidate names one of your devices for a version that device never recorded",
+                        )),
+                        // The head row would be unservable (a conflict at
+                        // rest from before the report door measured it):
+                        // nothing minted, the conflict stays open.
+                        ResolveWinner::TooLarge { len } => Err(coded(
+                            SYNC,
+                            "change_too_large",
+                            crate::sync_handlers::change_too_large_detail(len),
                         )),
                         ResolveWinner::Resolved { .. } => encode_reply(&ConflictResolveReply {
                             resolved: true,
@@ -3370,6 +3522,7 @@ async fn relayed_owner_label(
         domain,
         &peer_nest_id,
         CONTEXT,
+        state.peer_fetch_loopback.is_some(),
     ) else {
         return (None, None);
     };
@@ -6389,5 +6542,420 @@ mod tests {
         })
         .await
         .expect("a cold domain spawns its binding for the next poll");
+    }
+}
+
+#[cfg(test)]
+mod unservable_conflict_tests {
+    //! The conflict doors refuse a change row no change-log page could serve
+    //! (`transport.md` § Max frame, *count-paged serve replies are
+    //! byte-budgeted*). An unresolved
+    //! `fauna.sync.conflicts.report` writes the label, rest path and candidates
+    //! a later choose-winner mints its head row from, so it measures that row
+    //! and refuses one byte over the cap with nothing written; a choose of a
+    //! conflict already at rest over the cap is refused and mints nothing; a
+    //! resolved report over the cap is refused before its signatures are read.
+    use super::*;
+
+    use crate::sync_handlers::{MAX_SERVABLE_CHANGE_WIRE_BYTES, unservable_change_len};
+    use fauna_core::identity::ActorKeypair;
+
+    const SET_NONCE: [u8; 32] = [0x6b; 32];
+    const DEVICE: [u8; 32] = [0xd9; 32];
+    const MANIFEST: [u8; 32] = [0x23; 32];
+    const PATH: &str = "clash.txt";
+
+    async fn sealed_set(state: &AppState, owner: &[u8; 32]) -> crate::db::FolderRow {
+        state.db.create_user(owner, "free", "test").await.unwrap();
+        state
+            .db
+            .create_folder_with_options(
+                "clash",
+                owner,
+                crate::db::FolderOptions {
+                    set_nonce: Some(SET_NONCE.to_vec()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        // The report door binds `device_id` to the caller's own devices.
+        state
+            .db
+            .register_sync_device(owner, &DEVICE, "mine", None, "read,write")
+            .await
+            .unwrap();
+        state
+            .db
+            .get_folder("clash")
+            .await
+            .unwrap()
+            .expect("set exists")
+    }
+
+    fn report(seal: &[u8]) -> ConflictReportRequest {
+        ConflictReportRequest {
+            folder: "clash".into(),
+            device_id: hex::encode(DEVICE),
+            path: PATH.into(),
+            path_hash: Some(ByteBuf::from(fauna_core::sync::path_hash(PATH).to_vec())),
+            path_sealed: Some(ByteBuf::from(seal.to_vec())),
+            conflict_type: "concurrent_edit".into(),
+            candidates: vec![ConflictCandidate {
+                manifest_hash: hex::encode(MANIFEST),
+                device_id: hex::encode(DEVICE),
+                size_bytes: 10,
+                created_at: 100,
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+    }
+
+    async fn send_report(
+        state: &std::sync::Arc<AppState>,
+        owner: [u8; 32],
+        req: &ConflictReportRequest,
+    ) -> Result<Bytes, RpcError> {
+        let payload = Bytes::from(encode_canonical(req).unwrap().to_vec());
+        conflict_report_handler()(state.clone(), owner, payload).await
+    }
+
+    /// What the report door measures for a `seal`-byte label: the head row the
+    /// owner's choose of the candidate would mint, its integers and signature
+    /// at their widest; `None` under the cap.
+    fn measured(owner: &[u8; 32], seal_len: usize) -> Option<usize> {
+        unservable_change_len(crate::db::CacheDb::choose_winner_change_row(
+            owner,
+            &fauna_core::sync::path_hash(PATH),
+            &MANIFEST,
+            i64::MIN,
+            None,
+            &DEVICE,
+            Some(i64::MIN),
+            Some(&vec![7; seal_len]),
+            Some(crate::db::RowSignature {
+                signature: &[0u8; 64],
+                signer_key: &[0u8; 32],
+                deposited_by: None,
+            }),
+        ))
+    }
+
+    #[tokio::test]
+    async fn an_unresolved_report_whose_choose_would_be_unservable_is_refused() {
+        let state = crate::test_support::fixture_state();
+        let owner = [0xe5u8; 32];
+        sealed_set(&state, &owner).await;
+
+        // Past 64 KiB a byte string's head is a fixed five bytes, so the
+        // measure grows one byte per label byte: a 3 MiB probe (over the cap)
+        // places the label length that puts the row exactly at it.
+        let probe = 3 << 20;
+        let over_by = measured(&owner, probe).expect("the probe is over the cap")
+            - MAX_SERVABLE_CHANGE_WIRE_BYTES;
+        let at_cap = probe - over_by;
+        assert_eq!(
+            measured(&owner, at_cap + 1),
+            Some(MAX_SERVABLE_CHANGE_WIRE_BYTES + 1)
+        );
+        assert_eq!(measured(&owner, at_cap), None);
+
+        let err = send_report(&state, owner, &report(&vec![7; at_cap + 1]))
+            .await
+            .expect_err("a conflict whose choose would be one byte over is refused");
+        assert_eq!(err.code, "fauna.sync.change_too_large", "{err:?}");
+        assert!(
+            state
+                .db
+                .list_conflicts_for_actor(&owner, true)
+                .await
+                .unwrap()
+                .is_empty(),
+            "the refusal writes no conflict"
+        );
+
+        send_report(&state, owner, &report(&vec![7; at_cap]))
+            .await
+            .expect("a conflict whose choose lands at the cap is recorded");
+        assert_eq!(
+            state
+                .db
+                .list_conflicts_for_actor(&owner, false)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn a_stored_unservable_conflicts_choose_is_refused_and_mints_nothing() {
+        let state = crate::test_support::fixture_state();
+        let owner_kp = ActorKeypair::from_secret([0xe6u8; 32]);
+        let owner = owner_kp.actor_id().0;
+        let fs = sealed_set(&state, &owner).await;
+
+        // A conflict at rest from before the report door measured it: written
+        // straight into the store, past the door.
+        let seal = vec![7; crate::segments::SERVE_PAGE_BUDGET_BYTES];
+        let routing = fauna_core::sync::path_hash(PATH);
+        let id = state
+            .db
+            .report_conflict(
+                &owner,
+                fs.id,
+                &DEVICE,
+                PATH,
+                "concurrent_edit",
+                None,
+                &[ConflictCandidateRow {
+                    manifest_hash: MANIFEST.to_vec(),
+                    device_id: DEVICE.to_vec(),
+                    size_bytes: 10,
+                    created_at: 100,
+                    content_key_version: None,
+                }],
+                None,
+                crate::db::SealedConflictLabels {
+                    path_hash: Some(routing),
+                    path_sealed: Some(seal.clone()),
+                    details_sealed: None,
+                },
+                false,
+            )
+            .await
+            .unwrap();
+
+        // The owner's signature over exactly the head row the choose mints, so
+        // the refusal under test is the only one left.
+        let signature = fauna_protocol::sync_writer_sig::SignedChange {
+            set_nonce: SET_NONCE,
+            actor_id: owner,
+            device_id: DEVICE,
+            path_hash: routing,
+            manifest_hash: Some(MANIFEST),
+            change_type: "modify".into(),
+            size_bytes: 10,
+            content_key_version: None,
+            content_generation: None,
+            path_sealed: Some(seal),
+            thumbnail_hash: None,
+            derived_through: None,
+            is_resolution: false,
+            is_retention: false,
+            deposited_by: None,
+        }
+        .sign(owner_kp.signing_key());
+        let req = ConflictResolveRequest {
+            id,
+            winning_manifest_hash: Some(hex::encode(MANIFEST)),
+            winner_signature: Some(ByteBuf::from(signature.to_vec())),
+            winner_signer_key: Some(ByteBuf::from(owner.to_vec())),
+            ..Default::default()
+        };
+        let payload = Bytes::from(encode_canonical(&req).unwrap().to_vec());
+        let err = conflict_resolve_handler()(state.clone(), owner, payload)
+            .await
+            .expect_err("the choose of an over-cap conflict is refused");
+        assert_eq!(err.code, "fauna.sync.change_too_large", "{err:?}");
+        assert!(
+            state
+                .db
+                .get_sync_changes_for_folder(fs.id, 0, None)
+                .await
+                .unwrap()
+                .is_empty(),
+            "the refusal mints no change row"
+        );
+        assert_eq!(
+            state
+                .db
+                .list_conflicts_for_actor(&owner, false)
+                .await
+                .unwrap()
+                .len(),
+            1,
+            "the conflict stays open"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_resolved_report_over_the_cap_is_refused_before_its_signatures() {
+        let state = crate::test_support::fixture_state();
+        let owner = [0xe7u8; 32];
+        let fs = sealed_set(&state, &owner).await;
+
+        // Unsigned on purpose: past the size refusal the report would be
+        // refused `signature_required`, so the code names which door fired.
+        let req = ConflictReportRequest {
+            resolution: Some("latest_wins".into()),
+            winning_manifest_hash: Some(hex::encode(MANIFEST)),
+            ..report(&vec![7; crate::segments::SERVE_PAGE_BUDGET_BYTES])
+        };
+        let err = send_report(&state, owner, &req)
+            .await
+            .expect_err("a resolved report minting an unservable row is refused");
+        assert_eq!(err.code, "fauna.sync.change_too_large", "{err:?}");
+        assert!(
+            state
+                .db
+                .get_sync_changes_for_folder(fs.id, 0, None)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            state
+                .db
+                .list_conflicts_for_actor(&owner, true)
+                .await
+                .unwrap()
+                .is_empty(),
+            "the refusal writes nothing"
+        );
+    }
+}
+
+#[cfg(test)]
+mod catchup_failed_device_binding_tests {
+    //! A `catchup_failed` conflict report must name one of the CALLER's own
+    //! devices: the nest dedupes such rows on
+    //! (set, device, path_hash) and records no reporter, so a device id taken
+    //! off the wire unchecked lets any admitted reporter pre-file a row under
+    //! another actor's device and swallow that device's genuine report. The
+    //! check sits after the door's set gate, so the gate (owner or writer
+    //! member) and the binding are independent; the test drives the binding
+    //! with the owner as the caller and a device registered to someone else.
+    use super::*;
+
+    const SET_NONCE: [u8; 32] = [0x6c; 32];
+    const OWNER: [u8; 32] = [0xe7; 32];
+    const OTHER_ACTOR: [u8; 32] = [0xe8; 32];
+    const DEVICE: [u8; 32] = [0xda; 32];
+    const PATH: &str = "skipped.txt";
+
+    fn report() -> ConflictReportRequest {
+        ConflictReportRequest {
+            folder: "clash".into(),
+            device_id: hex::encode(DEVICE),
+            path: PATH.into(),
+            path_hash: Some(ByteBuf::from(fauna_core::sync::path_hash(PATH).to_vec())),
+            path_sealed: Some(ByteBuf::from(vec![7; 32])),
+            conflict_type: "catchup_failed".into(),
+            ..Default::default()
+        }
+    }
+
+    async fn send(
+        state: &std::sync::Arc<AppState>,
+        req: &ConflictReportRequest,
+    ) -> Result<Bytes, RpcError> {
+        let payload = Bytes::from(encode_canonical(req).unwrap().to_vec());
+        conflict_report_handler()(state.clone(), OWNER, payload).await
+    }
+
+    #[tokio::test]
+    async fn a_report_naming_another_actors_device_is_refused_then_the_owners_own_lands() {
+        let state = crate::test_support::fixture_state();
+        state.db.create_user(&OWNER, "free", "test").await.unwrap();
+        state
+            .db
+            .create_folder_with_options(
+                "clash",
+                &OWNER,
+                crate::db::FolderOptions {
+                    set_nonce: Some(SET_NONCE.to_vec()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        // The device belongs to another actor.
+        state
+            .db
+            .register_sync_device(&OTHER_ACTOR, &DEVICE, "theirs", None, "read,write")
+            .await
+            .unwrap();
+
+        let err = send(&state, &report())
+            .await
+            .expect_err("a device not the caller's own is refused");
+        assert_eq!(err.code, "fauna.sync.permission_denied", "{err:?}");
+        assert!(
+            state
+                .db
+                .list_conflicts_for_actor(&OWNER, true)
+                .await
+                .unwrap()
+                .is_empty(),
+            "the refusal files nothing, so nothing can shadow the real report"
+        );
+
+        // The caller's own device reports the same skip: it lands.
+        state
+            .db
+            .register_sync_device(&OWNER, &[0xdb; 32], "mine", None, "read,write")
+            .await
+            .unwrap();
+        let mut req = report();
+        req.device_id = hex::encode([0xdb; 32]);
+        send(&state, &req)
+            .await
+            .expect("the caller's own device reports");
+        assert_eq!(
+            state
+                .db
+                .list_conflicts_for_actor(&OWNER, false)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    ///  A RESOLVED report mints a head change
+    /// row whose `device_id` every device reads as its own write, so the
+    /// binding holds for it too: a merged report naming another actor's device
+    /// is refused before anything is written.
+    #[tokio::test]
+    async fn a_resolved_merged_report_naming_another_actors_device_is_refused() {
+        let state = crate::test_support::fixture_state();
+        state.db.create_user(&OWNER, "free", "test").await.unwrap();
+        state
+            .db
+            .create_folder_with_options(
+                "clash",
+                &OWNER,
+                crate::db::FolderOptions {
+                    set_nonce: Some(SET_NONCE.to_vec()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        state
+            .db
+            .register_sync_device(&OTHER_ACTOR, &DEVICE, "theirs", None, "read,write")
+            .await
+            .unwrap();
+
+        let mut req = report();
+        req.conflict_type = "concurrent_edit".into();
+        req.resolution = Some("merged".into());
+        req.winning_manifest_hash = Some(hex::encode([0x23u8; 32]));
+        let err = send(&state, &req)
+            .await
+            .expect_err("a merged report naming another actor's device is refused");
+        assert_eq!(err.code, "fauna.sync.permission_denied", "{err:?}");
+        assert!(
+            state
+                .db
+                .list_conflicts_for_actor(&OWNER, true)
+                .await
+                .unwrap()
+                .is_empty(),
+            "the refusal files nothing"
+        );
     }
 }

@@ -22,7 +22,12 @@ and everything after is read off the nest — its disk, its wire, its lookups.
   same table by username, so it adds no source) and ``fauna.search.query`` (the
   one free-text door).
 
-One dedicated nest and one import serve all three: the disk scan needs a nest
+* **17** — an imported post is never sent on to another network nor shown to
+  anonymous visitors from outside Fauna (§ Compatibility → *Slice-3 rulings*,
+  ruling 1). It needs a nest with ActivityPub built in and a fediverse follower,
+  so it runs its own import on its own nest (``archive_ap_nest``).
+
+One dedicated nest and one import serve 44, 45 and 49: the disk scan needs a nest
 no other test has written the fixture's names into.
 """
 
@@ -206,3 +211,121 @@ def test_nobody_can_look_the_importer_up_by_their_identity_on_the_other_service(
     ):
         hits = ws_api.search(nest["port"], stranger, query)
         assert not hits, f"search for {query!r} answered a stranger with {hits!r}"
+
+
+# ── 17: an import is never sent on, nor shown to anonymous outside visitors ──
+
+
+@pytest.fixture()
+def archive_ap_nest(ap_binary, tmp_path_factory):
+    """One nest with ActivityPub built in, on a free port."""
+    from drivers.port_util import find_free_port
+    from helpers.ap_nest import start_ap_nest
+
+    port = find_free_port()
+    nest = start_ap_nest(
+        ap_binary, tmp_path_factory.mktemp("archive-import-ap"), port,
+        f"127.0.0.1:{port}",
+    )
+    try:
+        yield nest
+    finally:
+        nest["proc"].kill()
+        nest["proc"].wait()
+
+
+@pytest.mark.feature("import-your-social-archive")
+def test_an_imported_post_is_never_sent_on_or_shown_to_anonymous_outside_visitors(
+    archive_ap_nest, tmp_path_factory
+):
+    """An importer federated with a fediverse follower imports an archive, then
+    writes one post of their own. Only that native post is queued for the
+    follower; the published history an anonymous outside server reads lists
+    and counts only it; and no imported post's note id resolves
+    (`archive-import.md` § Compatibility → *Slice-3 rulings*, ruling 1 — the
+    off-box predicate refuses every archive-platform ``source``).
+
+    The push half rides a positive signal, never a clock: the import is
+    finished before the native post is written, so by the time the native
+    ``Create`` is delivered a job for any import would already be queued."""
+    import json
+    import time
+    import urllib.error
+    import urllib.request
+
+    from helpers.ap_nest import AP_BRIDGE_ID, delivery_jobs_for, enable_ap
+    from helpers.fake_follower import FakeFollower
+    from drivers.port_util import find_free_port
+    from tests.api.bare import sign_and_encode_post
+
+    def anonymous_get(path: str) -> tuple[int, dict]:
+        req = urllib.request.Request(
+            f"{nest['url']}{path}", headers={"Accept": "application/activity+json"}
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                return resp.status, json.loads(resp.read())
+        except urllib.error.HTTPError as err:
+            return err.code, {}
+
+    nest = archive_ap_nest
+    owner = create_actor_and_register(nest["port"], admin_signing_key=nest["admin"]["signing_key"])
+    username, actor_url = enable_ap(nest, owner)
+    ws_api.bridge_set_settings(nest["port"], owner, AP_BRIDGE_ID, {"backfill": True})
+
+    with FakeFollower(find_free_port()) as follower:
+        code = follower.post_signed(
+            f"{nest['url']}/ap/users/{username}/inbox",
+            {
+                "@context": "https://www.w3.org/ns/activitystreams",
+                "type": "Follow",
+                "id": f"{follower.actor_uri}/activities/follow-1",
+                "actor": follower.actor_uri,
+                "object": actor_url,
+            },
+        )
+        assert code == 202, f"the inbox did not take the Follow: HTTP {code}"
+        follower.wait_for("Accept")
+
+        token = f"zq{uuid.uuid4().hex[:10]}"
+        archive = FakeFacebookArchive(owner=f"Owner {token}", tag=f" {token}")
+        zip_path = archive.write(tmp_path_factory.mktemp("archive") / "facebook-export.zip")
+        result = fauna_ffi.harness_archive_import(
+            nest["url"], bytes(owner["signing_key"]), str(zip_path)
+        )
+        assert result["step"] == "Done" and result["imported"] > 0, result
+        imported_ids = [
+            p["post_id"] for p in ws_api.local_feed_posts(nest["port"], owner, limit=100)
+        ]
+        assert imported_ids, "control: the import landed posts the owner can read"
+
+        native_id = ws_api.create_post(
+            nest["port"],
+            owner,
+            sign_and_encode_post(
+                owner["signing_key"], int(time.time() * 1_000_000), f"written here {token}"
+            ),
+        )
+        follower.wait_for("Create")  # control: the federation leg delivers
+
+    native_note = f"{actor_url}/notes/{native_id}"
+    queued = delivery_jobs_for(nest, follower.inbox_url)
+    creates = [json.loads(a) for a in queued if json.loads(a)["type"] == "Create"]
+    assert [a["object"]["id"] for a in creates] == [native_note], (
+        f"only the native post may be sent on: {[a['object']['id'] for a in creates]}"
+    )
+    sent_on = [pid for pid in imported_ids if any(pid in a for a in queued)]
+    assert not sent_on, f"imported posts queued for the fediverse: {sent_on}"
+
+    status, root = anonymous_get(f"/ap/users/{username}/outbox")
+    assert status == 200 and root["totalItems"] == 1, f"the outbox counts imports: {root}"
+    _, page = anonymous_get(f"/ap/users/{username}/outbox?page=0")
+    assert [i["object"]["id"] for i in page["orderedItems"]] == [native_note], page
+    assert anonymous_get(f"/ap/users/{username}/notes/{native_id}")[0] == 200, (
+        "control: the native post's note id resolves for an anonymous reader"
+    )
+    shown = [
+        pid for pid in imported_ids
+        if anonymous_get(f"/ap/users/{username}/notes/{pid}")[0] == 200
+    ]
+    assert not shown, f"imported posts resolve for an anonymous outside reader: {shown}"

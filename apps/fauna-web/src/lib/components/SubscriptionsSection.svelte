@@ -6,7 +6,7 @@
   // *offers*): this is what the user *consumes*.
   //
   // A dumb renderer over the shared `fauna-client-subscriptions` via the wasm
-  // `WsRpcClient.subscriptionsMineList` / `subscriptionsUnsubscribe` (rpc.ts
+  // `WsRpcClient.subscriptionsMineList` / `subscriptionsUnsubscribeAcrossNests` (rpc.ts
   // delegates → `SubscriptionsClient::mine_list` / `unsubscribe`; priority #2).
   // Observer-free (manual re-read): reloads on mount and after unsubscribe.
   // Unsubscribe in encrypted mode returns `Queued` (the row stays until the
@@ -17,7 +17,7 @@
   import { identity } from '#lib/store';
   import {
     subscriptionsMineList,
-    subscriptionsUnsubscribe,
+    subscriptionsUnsubscribeAcrossNests,
     type SubscriptionMine,
   } from '#lib/rpc';
   import { ensureWasm } from '#lib/wasm';
@@ -68,11 +68,14 @@
     }
   }
 
-  async function unsubscribe(authorIdHex: string): Promise<void> {
+  // The leave carries the row's tier and home: an author homed on another
+  // nest is left there (`federated-follow.md` § Decision 2); a blank home is
+  // the local leave.
+  async function unsubscribe(sub: SubscriptionMine): Promise<void> {
     const s = secret();
     if (!s) return;
     try {
-      await subscriptionsUnsubscribe(s, authorIdHex);
+      await subscriptionsUnsubscribeAcrossNests(s, sub.author_id, sub.tier, sub.home_nest_url ?? null);
       await loadMine();
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
@@ -100,7 +103,7 @@
         <button
           class="btn danger"
           data-testid={IDS.SUBSCRIPTION_MINE_UNSUBSCRIBE_BUTTON}
-          onclick={() => unsubscribe(sub.author_id)}
+          onclick={() => unsubscribe(sub)}
         >{t.subscriptions.unsubscribe}</button>
       </div>
     {/each}

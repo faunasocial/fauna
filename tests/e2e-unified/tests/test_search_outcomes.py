@@ -98,6 +98,7 @@ def _seed_a_post_and_a_profile_sharing(needle: str, nest_instance, test_user) ->
 @pytest.mark.windows
 @pytest.mark.macos
 @pytest.mark.ios
+@pytest.mark.android
 @pytest.mark.feature("search")
 def test_narrowing_a_search_to_one_kind_shows_only_that_kind(
     logged_in_app, nest_instance, test_user
@@ -157,6 +158,7 @@ def test_narrowing_a_search_to_one_kind_shows_only_that_kind(
 @pytest.mark.windows
 @pytest.mark.macos
 @pytest.mark.ios
+@pytest.mark.android
 @pytest.mark.feature("search")
 def test_each_search_result_shows_its_matching_snippet_and_its_kind(
     logged_in_app, nest_instance, test_user

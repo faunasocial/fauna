@@ -40,7 +40,7 @@ use fauna_ipc::oracle::{
 use fauna_protocol::principals::RecordedPrincipalOp;
 
 pub mod runtime;
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 pub mod serve;
 
 /// The record's detail for an operation that names no one room (the room

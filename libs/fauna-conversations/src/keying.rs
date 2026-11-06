@@ -2,6 +2,7 @@
 
 use crate::address::{Rail, TypedAddress};
 use crate::message::MessageId;
+use serde::{Deserialize, Serialize};
 
 const STRIP_PREFIXES: &[&str] = &["re:", "fwd:", "fw:", "sv:", "vs:", "aw:"];
 
@@ -23,7 +24,12 @@ pub fn normalize_subject(raw: &str) -> String {
     s
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+/// A thread's routing key — what the store matches an inbound message
+/// against, and, unlike the device-local [`crate::thread::ThreadId`] counter,
+/// what two devices of the same user agree on. Serialisable because it is also
+/// the at-rest key of a per-thread draft (`conversation-drafts.md`
+/// § Persistence, [`ThreadKey::names_the_same_thread_everywhere`]).
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ThreadKey {
     Participants {
         rail: Rail,
@@ -45,6 +51,44 @@ pub enum ThreadKey {
         rail: Rail,
         channel_id_hex: String,
     },
+    /// A key of a kind a newer build writes and this one does not name, read
+    /// out of a drafts blob another device wrote. Carried whole as its
+    /// canonical bytes, so the blob this build re-emits keeps the entry
+    /// byte-for-byte (`transport.md` § Schema and forward-compat discipline →
+    /// *Rule 3 in full*; the shape: [`fauna_core::carried::canonical_bytes`]).
+    ///
+    /// It matches no thread of this build, so a draft under it stays parked
+    /// and is never shown or sent. No build writes one except by passing a
+    /// carried value through.
+    #[serde(untagged, with = "fauna_core::carried::canonical_bytes")]
+    Unknown {
+        canonical: Vec<u8>,
+    },
+}
+
+impl ThreadKey {
+    /// Whether this key names the same conversation on every device of the
+    /// user, so state keyed on it may cross devices.
+    ///
+    /// A FaunaMls thread is portable only once it is channel-keyed: the
+    /// participant key `send_new_thread` gives a thread before its group
+    /// bootstraps is a local placeholder ([`crate::store::ThreadStore::rekey_to_channel`]
+    /// replaces it), and every other device materializes the same
+    /// conversation under [`ThreadKey::Channel`] at welcome-ingest. Mail keys
+    /// are derived from the messages themselves, so they are portable as they
+    /// stand.
+    pub fn names_the_same_thread_everywhere(&self) -> bool {
+        match self {
+            // An unknown key reached this build only inside a blob, which
+            // holds nothing but portable keys; keeping it there deletes nothing.
+            ThreadKey::Channel { .. }
+            | ThreadKey::ByMessageReference(_)
+            | ThreadKey::Unknown { .. } => true,
+            ThreadKey::Participants { rail, .. } | ThreadKey::SubjectKeyed { rail, .. } => {
+                *rail != Rail::FaunaMls
+            }
+        }
+    }
 }
 
 /// Compute the lookup key for an inbound message. The store then matches

@@ -40,14 +40,56 @@ fn row_from(r: &rusqlite::Row<'_>) -> rusqlite::Result<DmarcAggregateReportRow> 
     })
 }
 
+/// At most this many aggregate reports rest at once. A stranger on port 25 can
+/// mail reports at will — the dedupe key `(submitter, our_domain, report_id)`
+/// is three strings of the sender's own XML — and the processor address
+/// bypasses the mail quota, so the table bounds itself. A real reporter sends
+/// one report per domain a day: 100,000 rows hold a 90-day retention for
+/// ~1,100 (reporter, domain) pairs, far above a large deployment's — 50
+/// domains each reported on by 20 receivers is 90,000 rows.
+pub const DMARC_AGGREGATE_ROW_CAP: i64 = 100_000;
+
+/// At most this many archive bytes (`payload_xml_gz`) rest in the aggregate
+/// table at once — the row cap alone would still admit 100,000 reports parsed
+/// from up to 64 MiB of XML each. A real report gzips to a few KiB (tens for a
+/// busy domain at a large receiver), so 1 GiB holds the row cap at ~10 KiB a
+/// report.
+pub const DMARC_AGGREGATE_BYTE_CAP: i64 = 1 << 30;
+
 impl CacheDb {
-    /// Store one report. `false` when `(submitter, our_domain, report_id)` is
-    /// already stored — a peer re-sent it, and the first copy stands.
+    /// Store one report, unless `(submitter, our_domain, report_id)` is
+    /// already stored — a peer re-sent it, and the first copy stands — or the
+    /// table is at [`DMARC_AGGREGATE_ROW_CAP`] / [`DMARC_AGGREGATE_BYTE_CAP`].
     pub async fn insert_dmarc_aggregate_report(
         &self,
         row: &DmarcAggregateReportRow,
-    ) -> Result<bool> {
+    ) -> Result<ReportInsert> {
+        self.insert_dmarc_aggregate_report_capped(
+            row,
+            DMARC_AGGREGATE_ROW_CAP,
+            DMARC_AGGREGATE_BYTE_CAP,
+        )
+        .await
+    }
+
+    /// [`Self::insert_dmarc_aggregate_report`] at the given caps — the unit
+    /// tests reach the byte cap at a scale they can fill.
+    pub(crate) async fn insert_dmarc_aggregate_report_capped(
+        &self,
+        row: &DmarcAggregateReportRow,
+        row_cap: i64,
+        byte_cap: i64,
+    ) -> Result<ReportInsert> {
         let conn = self.conn.lock().await;
+        if report_table_full(
+            &conn,
+            "dmarc_inbound_aggregate_reports",
+            "payload_xml_gz",
+            row_cap,
+            byte_cap,
+        )? {
+            return Ok(ReportInsert::Full);
+        }
         let n = conn
             .execute(
                 &format!(
@@ -67,7 +109,45 @@ impl CacheDb {
                 ],
             )
             .context("insert dmarc aggregate report")?;
-        Ok(n == 1)
+        Ok(if n == 1 {
+            ReportInsert::Stored
+        } else {
+            ReportInsert::Duplicate
+        })
+    }
+
+    /// Test-only: fill the aggregate table with `n` empty-archive reports at
+    /// `received_at`, in one statement (the row cap is too many to insert one
+    /// by one).
+    #[cfg(test)]
+    pub(crate) async fn seed_dmarc_aggregate_reports_for_test(
+        &self,
+        n: i64,
+        received_at: i64,
+    ) -> Result<()> {
+        let conn = self.conn.lock().await;
+        conn.execute(
+            "WITH RECURSIVE seq(i) AS (SELECT 0 UNION ALL SELECT i + 1 FROM seq WHERE i + 1 < ?1) \
+             INSERT INTO dmarc_inbound_aggregate_reports \
+             (submitter, our_domain, report_id, begin_at, end_at, received_at, \
+              payload_xml_gz, parsed_summary_cbor, source_envelope_blob) \
+             SELECT 'seed', 'fauna.test', 'seed-' || i, 0, 1, ?2, x'', x'', x'' FROM seq",
+            rusqlite::params![n, received_at],
+        )
+        .context("seed dmarc aggregate reports")?;
+        Ok(())
+    }
+
+    /// Test-only: how many aggregate reports rest.
+    #[cfg(test)]
+    pub(crate) async fn count_dmarc_aggregate_reports_for_test(&self) -> Result<i64> {
+        let conn = self.conn.lock().await;
+        conn.query_row(
+            "SELECT COUNT(*) FROM dmarc_inbound_aggregate_reports",
+            [],
+            |r| r.get(0),
+        )
+        .context("count dmarc aggregate reports")
     }
 
     /// Reports received at or after `since`, optionally for one of our domains,
@@ -253,12 +333,64 @@ fn forensic_row_from(r: &rusqlite::Row<'_>) -> rusqlite::Result<DmarcForensicRep
     })
 }
 
+/// What one capped report insert did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReportInsert {
+    Stored,
+    /// The same report is already stored; the first copy stands.
+    Duplicate,
+    /// The table is at its row or byte cap; the report was dropped (never an
+    /// eviction — the caller counts it).
+    Full,
+}
+
+/// At most this many forensic reports rest at once. A stranger on port 25 can
+/// mail forensic-shaped reports at will (each differing by one byte defeats the
+/// digest dedupe), and the processor address bypasses the mail quota, so the
+/// table bounds itself.
+pub const DMARC_FORENSIC_ROW_CAP: i64 = 10_000;
+
+/// At most this many archive bytes (`payload_raw_gz`) rest in the forensic
+/// table at once — the row cap alone would still admit 10,000 reports of up to
+/// 10 MiB each.
+pub const DMARC_FORENSIC_BYTE_CAP: i64 = 512 << 20;
+
+/// Whether `table` is at `row_cap` rows or `byte_cap` bytes of `bytes_column`.
+pub(crate) fn report_table_full(
+    conn: &rusqlite::Connection,
+    table: &str,
+    bytes_column: &str,
+    row_cap: i64,
+    byte_cap: i64,
+) -> Result<bool> {
+    let (rows, bytes): (i64, i64) = conn
+        .query_row(
+            &format!("SELECT COUNT(*), COALESCE(SUM(length({bytes_column})), 0) FROM {table}"),
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .with_context(|| format!("count {table}"))?;
+    Ok(rows >= row_cap || bytes >= byte_cap)
+}
+
 impl CacheDb {
-    /// Store one forensic report. `false` when the same message
-    /// (`payload_sha256`) is already stored — a peer re-sent it, and the first
-    /// copy stands.
-    pub async fn insert_dmarc_forensic_report(&self, row: &DmarcForensicReportRow) -> Result<bool> {
+    /// Store one forensic report, unless the same message (`payload_sha256`)
+    /// is already stored — a peer re-sent it, and the first copy stands — or
+    /// the table is at [`DMARC_FORENSIC_ROW_CAP`] / [`DMARC_FORENSIC_BYTE_CAP`].
+    pub async fn insert_dmarc_forensic_report(
+        &self,
+        row: &DmarcForensicReportRow,
+    ) -> Result<ReportInsert> {
         let conn = self.conn.lock().await;
+        if report_table_full(
+            &conn,
+            "dmarc_inbound_forensic_reports",
+            "payload_raw_gz",
+            DMARC_FORENSIC_ROW_CAP,
+            DMARC_FORENSIC_BYTE_CAP,
+        )? {
+            return Ok(ReportInsert::Full);
+        }
         let n = conn
             .execute(
                 "INSERT OR IGNORE INTO dmarc_inbound_forensic_reports \
@@ -279,7 +411,11 @@ impl CacheDb {
                 ],
             )
             .context("insert dmarc forensic report")?;
-        Ok(n == 1)
+        Ok(if n == 1 {
+            ReportInsert::Stored
+        } else {
+            ReportInsert::Duplicate
+        })
     }
 
     /// Forensic reports received at or after `since`, optionally for one of

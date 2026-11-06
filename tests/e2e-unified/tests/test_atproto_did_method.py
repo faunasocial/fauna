@@ -13,8 +13,9 @@ is what "the same either way" means. The "same handle either way" line under
 the radios is untagged chrome, so the test reads the identity summary the mint
 produces, never that line.
 
-tui first; the other apps gain their markers in the cross-app lift (web's leg
-also needs a proxy onto this dedicated nest — `_login_app_as`'s `spa_url`).
+tui first, then linux and web (web through a proxy onto this dedicated nest —
+`_login_app_as`'s `spa_url`), the apple apps and windows; android follows in
+its own queue.
 """
 import pytest
 
@@ -41,7 +42,11 @@ def never_hosted_app(request, app, nest_mode, tmp_path_factory):
     )
     try:
         user = _make_user(nest)
-        _login_app_as(app, request, nest, user)
+        spa_url = (
+            request.getfixturevalue("spa_proxy_for")(nest["url"])
+            if app.driver.is_web() else None
+        )
+        _login_app_as(app, request, nest, user, spa_url=spa_url)
         if account_pump_role(app.driver) is not None:
             await_account_runtime_assembled(app.driver)
         yield app, nest, user
@@ -62,6 +67,11 @@ def _handle_preview(nest, user) -> str:
 
 
 @pytest.mark.tui
+@pytest.mark.linux
+@pytest.mark.web
+@pytest.mark.macos
+@pytest.mark.ios
+@pytest.mark.windows
 @pytest.mark.feature("atproto")
 @pytest.mark.parametrize("method", ["plc", "web"])
 def test_either_identity_choice_mints_the_same_handle(method, never_hosted_app):
@@ -82,14 +92,14 @@ def test_either_identity_choice_mints_the_same_handle(method, never_hosted_app):
     bs.select_depth("hosted_visible")
     assert bs.wait_for_card(), f"entering hosting must stage the card. error={bs.page_error_text()!r}"
     app.driver.wait_for("atproto-did-method-plc", timeout=8.0)
-    assert (bs.did_method_state("plc"), bs.did_method_state("web")) == ("on", "off"), (
+    assert (bs.did_method_state("plc"), bs.did_method_state("web")) == ("active", "inactive"), (
         "the portable identity is the recommended default and must be pre-selected; "
         f"plc={bs.did_method_state('plc')!r} web={bs.did_method_state('web')!r}"
     )
     if method != "plc":
         bs.select_did_method(method)
         wait_until(
-            lambda: bs.did_method_state(method) == "on",
+            lambda: bs.did_method_state(method) == "active",
             8.0,
             diagnose=lambda: (
                 f"choosing {method} must select it; plc={bs.did_method_state('plc')!r} "

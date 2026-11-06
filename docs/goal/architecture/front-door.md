@@ -76,6 +76,21 @@ Rejected alternatives, and why (decision record):
 Port 80 serves exactly two things: `/.well-known/acme-challenge/*` and a
 redirect to HTTPS — the same shape the nest's HTTP-01 listener has.
 
+**A `fauna.social` page URL carries no trailing slash** (owner ruling
+2026-10-26): `/privacy`, never `/privacy/`; the root is `/`, the one path
+that is all slash. The slashed form of every servable path answers a
+permanent redirect (301 or 308, the query kept) to the slash-less one, on
+every host that serves the site — Azure Static Web Apps today
+(`sites/fauna-social/public/staticwebapp.config.json`, `trailingSlash:
+"never"`), this door after the migration — and it is kept for good: slashed
+URLs already sit in submitted forms, store listings and release bodies nobody
+can edit. Pages stay directory pages (`privacy/index.html`), served at the
+slash-less URL; a file URL is untouched (`/apps/cli/client-metadata.json` is
+an OAuth `client_id` and stays byte-identical). The build emits only
+slash-less internal URLs — every link, the canonical, `og:url`, the sitemap —
+and no relative ones, which would resolve against a slash-less page's parent;
+`scripts/check-site-urls.py` refuses anything else at the end of `just site`.
+
 **`fauna.build` is the organisation's own zone, not a vhost of this box**
 (placed 2026-10-10; a registered domain since 2026-10-12, the apex zone
 carrying nothing for it): the organisation's three nests live in it in their
@@ -287,10 +302,19 @@ Built 2026-08-21 (the deciding session), NOT yet deployed:
   inside the canonical docroot. A link out of the tree, a FIFO, a socket and a
   device are all misses rather than opens; a link that stays inside the
   docroot is ordinary content. Directory pages keep working: a directory is
-  served through its own `index.html`, and one named without a trailing slash
-  still answers `307` to the slashed form. Pinned by the door's containment
-  tests and, receiver-side, by a real-rsync push of a link and a FIFO in
-  `tests/scripts/test_door_deploy_receive.py`.
+  served through its own `index.html` at its slash-less URL, and any servable
+  path named with a trailing slash (the root aside) answers `308` to the
+  slash-less form, leading slashes collapsed to one so the `Location` never
+  names another host; a slashed miss stays a miss (since 2026-10-27; until
+  then the door answered `307` toward the slashed form). Pinned by the door's
+  containment and redirect tests and, receiver-side, by a real-rsync push of a
+  link and a FIFO in `tests/scripts/test_door_deploy_receive.py`.
+- **The no-trailing-slash rule on the current host** (§ Public-vhost
+  topology): the site builds with `trailingSlash: 'never'` and the SWA config
+  carries `trailingSlash: "never"` since 2026-10-27, and `just site` runs the
+  URL check. Not yet proven live: the deployed site's slashed-URL `301` waits
+  on the next authorised site deploy and an HTTP probe of each top-level
+  page's two spellings.
 - **Deploy artifacts staged** in `services/fauna-front-door/deploy/`: the two
   hardened units, the forced-command deploy wrapper, and DRAFT push-triggered
   workflows — the migration track swaps them in at the cutover. The wrapper's

@@ -121,6 +121,10 @@ public sealed partial class AdminCalendarPage : Page
 
         _syncing = true;
         EnabledToggle.IsOn = _vm.CaldavEnabled;
+        // The toggle's `state` answer is the persisted flag (HelpText is what the
+        // bridge's attribute read returns).
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetHelpText(
+            EnabledToggle, _vm.CaldavEnabled ? "on" : "off");
         // Reflect the persisted port (or, after an invalid save, the typed value the
         // VM left in place). The TextBox doesn't dispatch on edit, so it's outside the
         // guard's concern — kept inside for symmetry with the toggle.

@@ -9,8 +9,9 @@ build's (the `web-tree-reproducibility.yml` probe prints it) and a local
 section with a changed size points at the optimizer (wasm-pack's binaryen
 `wasm-opt`), a changed `data` section at embedded strings. It also decodes the
 `producers` custom section (the tool versions the module records) and lists any
-absolute path the module embeds outside the remap placeholders (`/fauna`,
-`/cargo`, `/rustc/<hash>`) — a build-environment path that escaped the remap.
+absolute path the module embeds outside cargo's `trim-paths` placeholders
+(workspace-relative `./…`, `<name>-<version>/…`, `/cargo/build-dir/…`,
+`/rustc/<hash>/…`) — a build-environment path that escaped the trim.
 
 Usage: wasm-sections.py <file-or-dir> [...]   (a directory: every *.wasm under it)
 
@@ -28,10 +29,10 @@ SECTION_NAMES = {
     12: "datacount", 13: "tag",
 }
 
-# An absolute path a build environment could leak. The remap placeholders
-# (`/fauna/…`, `/cargo/…`) and rustc's own `/rustc/<hash>/…` are expected and
-# are not matched: none of them starts with one of these roots, and a root
-# segment INSIDE one (`/cargo/registry/src/…`) is not a path start.
+# An absolute path a build environment could leak. Cargo's `trim-paths`
+# placeholders (relative `./…` and `<name>-<version>/…`, `/cargo/build-dir/…`,
+# `/rustc/<hash>/…`) are expected and are not matched: none of them starts with
+# one of these roots, and a root segment INSIDE one is not a path start.
 LEAKED_PATH = re.compile(
     rb"(?<![\w.\-/])/(?:home|root|usr|src|work|tmp|build|runner|opt|var)/[\x21-\x7e]{1,100}"
 )

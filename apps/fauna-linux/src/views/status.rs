@@ -99,14 +99,6 @@ pub fn build_status_view() -> (gtk::Box, StatusHandles) {
     crate::testid::set_test_id(&heading_marker, ids::PAGE_HEADING);
     wrapper.append(&heading_marker);
 
-    // Zero-height marker so E2E tests can find the account settings area via
-    // the cross-platform `account-settings-link` element ID.
-    let account_marker = gtk::Label::new(None);
-    account_marker.set_height_request(0);
-    account_marker.set_overflow(gtk::Overflow::Hidden);
-    crate::testid::set_test_id(&account_marker, ids::ACCOUNT_SETTINGS_LINK);
-    wrapper.append(&account_marker);
-
     // --- Identity group ---
     let identity_group = adw::PreferencesGroup::new();
     identity_group.set_title(common::IDENTITY);
@@ -759,7 +751,7 @@ fn legs_text(loaded: &LoadedLegs, channels: u64, now_ms: i64) -> fauna_client_st
                 key_packages,
                 channels,
             }),
-        build: fauna_client_status::BuildLeg::from_stamp(option_env!("FAUNA_BUILD_COMMIT")),
+        build: fauna_client_status::BuildLeg::from_stamp(crate::build_commit()),
     };
     fauna_client_status::render(&snapshot, now_ms, crate::i18n::strings::lookup)
 }

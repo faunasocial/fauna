@@ -81,12 +81,23 @@ fn rule_type_options() -> Vec<fauna_client_feed::RuleTypeOption> {
 /// call, or a local form edit — never a navigation decision of its own.
 #[derive(Debug, Clone)]
 pub enum Action {
-    SelectFeed(String),
+    /// `feed-item` (`Some(feed_id)`) or `feed-local-item` (`None`, the nest's
+    /// local feed — `feed.md` § Persistence) — the shared
+    /// `FeedManager::select_feed`, whose argument this mirrors.
+    SelectFeed(Option<String>),
     /// `feed-trending-item` — select the built-in **Trending** virtual feed
     /// (`trending.md` § The Trending feed). Carries no id: the virtual feed has
     /// no feed row, so the shared manager keys it on `trending_selected` rather
     /// than a `selected_feed` value, mirroring `SelectFeed`'s `None` = local.
     SelectTrending,
+    /// The archive import's "View imported" (`archive-import-view-imported-button`)
+    /// — open the Feed page on the imported-posts selection for one platform
+    /// token (`feed.md` § State & data shape → *The imported-posts selection*),
+    /// the shared `FeedManager::select_imported`.
+    SelectImported(String),
+    /// `feed-imported-clear` — leave the imported-posts selection for Local
+    /// (`FeedManager::clear_imported`).
+    ClearImported,
     /// `feed-post-actions-button` — open (or re-open) a post card's ⋯ overflow.
     OpenPostActions(String),
     /// `feed-post-{more,less}-like-this` — train the open post into the
@@ -188,6 +199,15 @@ pub enum Action {
     Interact {
         post_id: String,
         action: String,
+    },
+    /// `post-reaction-pill` — toggle the viewer's own reaction of `emoji` on
+    /// the post through the shared `FeedManager::react` (`feed.md` § Layout &
+    /// flow → *Reaction posts count and paint*, ruling 4): composes a wordless
+    /// `React` post when the viewer has none of that emoji, deletes theirs
+    /// when they have.
+    React {
+        post_id: String,
+        emoji: String,
     },
     /// `feed-reply-button` — arm the reply-compose dialog (`feed-reply-dialog`)
     /// for this post. Purely local: nothing is sent until the dialog's own
@@ -623,27 +643,73 @@ impl FeedState {
     }
 }
 
-/// Forward manager notifications into the render loop's `UiMessage` channel.
-///
-/// `on_changed` fires **synchronously on whatever thread mutated** (a tokio
-/// worker for the async methods), so it must not touch `App`. `try_send`-style
-/// forwarding + a fresh snapshot read per tick makes coalescing safe: the
-/// receiver always reads current state, so a dropped duplicate loses nothing.
-struct TuiFeedObserver {
-    tx: UnboundedSender<UiMessage>,
-}
-
-impl FeedSnapshotObserver for TuiFeedObserver {
-    fn on_changed(&self) {
-        // A closed channel means the app is shutting down — nothing to notify.
-        let _ = self.tx.send(UiMessage::Data(DataMessage::FeedChanged));
-    }
+crate::app::tick_observer! {
+    /// Forward manager notifications into the render loop's `UiMessage` channel.
+    ///
+    /// `on_changed` fires **synchronously on whatever thread mutated** (a tokio
+    /// worker for the async methods), so it must not touch `App`. `try_send`-style
+    /// forwarding + a fresh snapshot read per tick makes coalescing safe: the
+    /// receiver always reads current state, so a dropped duplicate loses nothing.
+    TuiFeedObserver,
+    FeedSnapshotObserver,
+    UiMessage::Data(DataMessage::FeedChanged)
 }
 
 /// Attach the render loop's `FeedChanged` tick to a manager — the timeline's at
 /// [`init`], a profile's author window at mint (`crate::profile`).
 pub(crate) fn observe(manager: &CliFeedManager, tx: &UnboundedSender<UiMessage>) {
     manager.add_observer(Arc::new(TuiFeedObserver { tx: tx.clone() }));
+}
+
+/// The folded archive comments (`archive-import.md` § What each category
+/// becomes → *Placement under the owner's own post*): register the archive
+/// machine's read over this account's sealed archive folders as the manager's
+/// comment source, and read it once now. [`refresh_archive_comments`] re-reads
+/// it on every visit to the feed and when an import finishes. Needs this
+/// device's sync id (the folder reader's chunk store); without one nothing
+/// folds — the `Archive` rail's twin in `conv_backend`.
+pub(crate) fn wire_archive_comments(
+    manager: &Arc<CliFeedManager>,
+    nest: Arc<NestClient>,
+    secret: [u8; 32],
+    runtime: crate::settings::AccountRuntimeSlot,
+    mail: Arc<dyn fauna_client_config::MailStore>,
+) {
+    let Some(device_id) = crate::media::device_id_hex_for_secret(secret)
+        .as_deref()
+        .and_then(|hex| fauna_core::hex32::decode(hex).ok())
+    else {
+        return;
+    };
+    match fauna_archive_import_machine::rpc_glue::build_archive_nest(
+        nest,
+        device_id,
+        crate::settings::period_key_door(runtime.clone()),
+        crate::settings::folder_key_door(runtime),
+        mail,
+    ) {
+        Ok(archive) => {
+            fauna_archive_import_machine::comments::register_archive_comments(manager, archive);
+            refresh_archive_comments(manager);
+        }
+        Err(e) => tracing::warn!("feed: no archive comment source: {e}"),
+    }
+}
+
+/// Re-read the folded archive comments in the background; the projection
+/// re-emits through the observer when it changes.
+pub(crate) fn refresh_archive_comments(manager: &Arc<CliFeedManager>) {
+    // No runtime means no session to read for (a synchronous unit test of the
+    // nav edge): nothing to refresh, and `tokio::spawn` would panic.
+    let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+        return;
+    };
+    let manager = Arc::clone(manager);
+    runtime.spawn(async move {
+        if let Err(e) = manager.refresh_archive_comments().await {
+            tracing::warn!("feed: archive comments: {e}");
+        }
+    });
 }
 
 /// Build the feed manager over the authed transport + the local actor's signing
@@ -996,6 +1062,9 @@ impl Action {
             // locally and synced as data.
             Action::SubmitPost => Some("fauna.posts.create"),
             Action::Interact { .. } => Some("fauna.posts.interact"),
+            // `FeedManager::react` COMPOSES a `React` post (or deletes the
+            // viewer's own) — the create door, as a repost's on-tap.
+            Action::React { .. } => Some("fauna.posts.create"),
             // Reply is COMPOSED, not recorded — the same door `SubmitPost`
             // uses (`FeedManager::reply` → `compose_referencing_post` →
             // `PostsClient::posts_create`), never `fauna.posts.interact`.
@@ -1045,6 +1114,8 @@ impl Action {
             Action::ToggleSellSubscribersFree | Action::OpenPaymentLink(_) => None,
             Action::SelectFeed(_)
             | Action::SelectTrending
+            | Action::SelectImported(_)
+            | Action::ClearImported
             | Action::ClearSearch
             | Action::LoadMore
             | Action::OpenPostDetail(_)
@@ -1159,6 +1230,20 @@ pub(crate) fn apply_on(app: &mut App, manager: Arc<CliFeedManager>, action: Acti
             }
             Some(Op::SelectTrending { manager })
         }
+        // The imported-posts selection is painted on the Feed page itself, so
+        // the gesture (fired from the archive import's Done step) lands there,
+        // and like every selection switch it closes a stale overflow.
+        Action::SelectImported(token) => {
+            app.set_page(crate::pages::Page::Feed);
+            app.clamp_focus();
+            app.feed.mode = Mode::List;
+            app.feed.actions_open = None;
+            Some(Op::SelectImported { manager, token })
+        }
+        Action::ClearImported => {
+            app.feed.actions_open = None;
+            Some(Op::ClearImported { manager })
+        }
         // ── the own-post web-publishing verbs ──
         //
         // Each arm re-checks the gate the paint applied rather than trusting it:
@@ -1266,6 +1351,11 @@ pub(crate) fn apply_on(app: &mut App, manager: Arc<CliFeedManager>, action: Acti
                 action,
             })
         }
+        Action::React { post_id, emoji } => Some(Op::React {
+            manager,
+            post_id,
+            emoji,
+        }),
         // --- the reply-compose dialog (`feed-reply-dialog`) ---
         Action::OpenReplyDialog(post_id) => {
             app.feed.reply_draft = Some(ReplyDraft {
@@ -1714,7 +1804,8 @@ pub enum CopiedKind {
 pub enum Op {
     SelectFeed {
         manager: Arc<CliFeedManager>,
-        id: String,
+        /// `None` = the nest's local feed (`feed-local-item`).
+        id: Option<String>,
     },
     /// `fauna.web.publish.set` on an own post, then a re-read of the feed so the
     /// card's `web_slug` — and with it the whole verb family — repaints from the
@@ -1760,6 +1851,15 @@ pub enum Op {
     SelectTrending {
         manager: Arc<CliFeedManager>,
     },
+    /// The imported-posts selection — the shared `FeedManager::select_imported`.
+    SelectImported {
+        manager: Arc<CliFeedManager>,
+        token: String,
+    },
+    /// `feed-imported-clear` — the shared `FeedManager::clear_imported`.
+    ClearImported {
+        manager: Arc<CliFeedManager>,
+    },
     ClearSearch {
         manager: Arc<CliFeedManager>,
     },
@@ -1781,6 +1881,12 @@ pub enum Op {
         manager: Arc<CliFeedManager>,
         post_id: String,
         action: String,
+    },
+    /// `post-reaction-pill` — the shared `FeedManager::react` toggle.
+    React {
+        manager: Arc<CliFeedManager>,
+        post_id: String,
+        emoji: String,
     },
     /// `feed-reply-submit-button` — through the shared `FeedManager::reply`,
     /// never the raw `interact` door (`ui/feed.md` § Implementation status
@@ -2007,11 +2113,19 @@ impl Op {
     pub async fn run(self) -> Outcome {
         match self {
             Op::SelectFeed { manager, id } => {
-                manager.select_feed(Some(id)).await;
+                manager.select_feed(id).await;
                 Outcome::Done
             }
             Op::SelectTrending { manager } => {
                 manager.select_trending_feed().await;
+                Outcome::Done
+            }
+            Op::SelectImported { manager, token } => {
+                manager.select_imported(token).await;
+                Outcome::Done
+            }
+            Op::ClearImported { manager } => {
+                manager.clear_imported().await;
                 Outcome::Done
             }
             Op::RefreshCurrentFeed { manager } => {
@@ -2164,6 +2278,14 @@ impl Op {
                     None => Outcome::Done,
                 }
             }
+            Op::React {
+                manager,
+                post_id,
+                emoji,
+            } => match manager.react(post_id, emoji).await {
+                Ok(()) => Outcome::Done,
+                Err(e) => Outcome::Error(refusal_copy(e)),
+            },
             Op::Reply {
                 manager,
                 content,
@@ -2295,18 +2417,17 @@ impl Op {
                 undo,
             } => {
                 // The manager re-seals, puts, re-ranks the loaded window and
-                // notifies on its own — the shell owes nothing but the error
-                // bridge. Without that bridge a refused train would be a silent
-                // no-op (testing.md point 11).
-                let failed = if undo {
-                    manager.untrain_post(post_id, factor).await.err()
+                // notifies on its own — and reports a refusal on its own page
+                // error (`feed.error_train`, read by `page_error`), the one slot
+                // every app paints. So the op owes no error bridge: an
+                // `Outcome::Error` here would shadow that line with the raw
+                // message (`app.errors` wins over the snapshot).
+                let _ = if undo {
+                    manager.untrain_post(post_id, factor).await
                 } else {
-                    manager.train_post(post_id, factor, verb).await.err()
+                    manager.train_post(post_id, factor, verb).await.map(|_| ())
                 };
-                match failed {
-                    Some(e) => Outcome::Error(e),
-                    None => Outcome::Done,
-                }
+                Outcome::Done
             }
             Op::SubmitPost {
                 manager,
@@ -3144,6 +3265,7 @@ pub fn elements(app: &App) -> Vec<Element> {
                 &withheld,
                 Gesture::Feed(Action::RevealContent(post_id.clone())),
                 Some((ids::FEED_POST_DETAIL_DIALOG, 0)),
+                false,
             ));
             return out;
         }
@@ -3206,6 +3328,27 @@ pub fn elements(app: &App) -> Vec<Element> {
             Gesture::Feed(Action::ClearSearch),
         ));
     }
+    // The imported-posts selection's notice + clear, the search pair's twin
+    // above the list (`feed.md` § State & data shape → *The imported-posts
+    // selection*): present only while the shared snapshot names a platform.
+    if let Some(token) = &snapshot.imported_selected {
+        let platform = fauna_feed::SourceKind::classify(token).label();
+        out.push(Element::label(
+            ids::FEED_IMPORTED_NOTICE,
+            fauna_core::localized::LocalizedText::key_arg(
+                "feed.imported_notice",
+                "platform",
+                platform,
+            )
+            .resolve(fauna_i18n::strings::lookup),
+        ));
+        out.push(Element::gesture_button(
+            ids::FEED_IMPORTED_CLEAR,
+            feed::IMPORTED_CLEAR,
+            true,
+            Gesture::Feed(Action::ClearImported),
+        ));
+    }
     // The built-in Trending virtual feed, **above** the user's own feeds
     // (`trending.md` § The Trending feed; ui.yaml's `feed-trending-item` note).
     // A pseudo-entry, not a `feed-item`: it has no feed row, so it carries no id
@@ -3218,12 +3361,23 @@ pub fn elements(app: &App) -> Vec<Element> {
         true,
         Gesture::Feed(Action::SelectTrending),
     ));
+    // The built-in Local entry, directly below Trending and above the user's own
+    // feeds (`feed.md` § Layout & flow, region 1; ui.yaml `feed-local-item`): the
+    // one gesture back to the nest's local feed once a custom feed or Trending is
+    // selected. Like Trending it is a pseudo-entry with no feed row, and like
+    // every row here it paints no selected state.
+    out.push(Element::gesture_button(
+        ids::FEED_LOCAL_ITEM,
+        feed::list::LOCAL,
+        true,
+        Gesture::Feed(Action::SelectFeed(None)),
+    ));
     for (i, f) in snapshot.feeds.iter().enumerate() {
         out.push(Element::gesture_button(
             ids::FEED_ITEM,
             f.name.clone(),
             true,
-            Gesture::Feed(Action::SelectFeed(f.feed_id.clone())),
+            Gesture::Feed(Action::SelectFeed(Some(f.feed_id.clone()))),
         ));
         // Scoped under its own `feed-item` row — the `feed-post-actions-button`
         // idiom under `post-card[i]` — since `feed-delete-button` is itself
@@ -4317,36 +4471,17 @@ fn tip_list_elements(state: &FeedState, snapshot: &FeedSnapshot) -> Vec<Element>
     out
 }
 
-/// The `image-lightbox` overlay: the open post image, re-rasterized from the
-/// cached pixels at [`crate::thumbnail::LIGHTBOX_COLS`], or nothing when no
-/// image is open.
-///
-/// A **full-screen viewer** is what ui.yaml's component asks for, and on a
-/// terminal that is a cell grid several times the inline card preview. The
-/// bytes are long gone by now (they are dropped when the fetch op completes), so
-/// the bigger art comes from [`crate::thumbnail::rasterize_rgb`] over the
-/// cached [`crate::thumbnail::Thumbnail::pixels`] — no second GET.
-///
-/// Painted flat, not scoped: the test reads `is_visible("image-lightbox")`
-/// unscoped, and there is exactly one at a time.
+/// The `image-lightbox` overlay over the open post image, or nothing when no
+/// image is open — the one painter [`crate::lightbox::elements`] the
+/// conversations page shares, resolving the hash through this page's
+/// [`ImageCache`].
 pub(crate) fn lightbox_elements(state: &FeedState) -> Vec<Element> {
-    let Some(hash) = &state.lightbox else {
-        return Vec::new();
-    };
-    // A picture whose bytes never arrived still opens — as the placeholder the
-    // card showed. The alternative (a click that silently does nothing while
-    // the fetch is in flight) is the drop-an-action shape testing.md point 11
-    // forbids.
-    let enlarged = match state.images.get(hash) {
-        Some(ImageState::Ready(thumb)) => {
-            crate::thumbnail::rasterize_rgb(&thumb.pixels, crate::thumbnail::LIGHTBOX_COLS)
+    crate::lightbox::elements(state.lightbox.as_deref(), |hash| {
+        match state.images.get(hash) {
+            Some(ImageState::Ready(thumb)) => Some(thumb),
+            _ => None,
         }
-        _ => None,
-    };
-    vec![match enlarged {
-        Some(thumb) => Element::thumbnail(ids::IMAGE_LIGHTBOX, thumb),
-        None => Element::label(ids::IMAGE_LIGHTBOX, crate::thumbnail::PLACEHOLDER),
-    }]
+    })
 }
 
 /// The `feed-reply-dialog` overlay — the armed [`FeedState::reply_draft`], or
@@ -4643,6 +4778,7 @@ fn region_post_card(
         withheld,
         Gesture::Feed(Action::RevealContent(post.post_id.clone())),
         Some((ids::POST_CARD, i)),
+        false,
     ));
     els
 }
@@ -4731,11 +4867,8 @@ fn post_card(
     // attribution + the embedded original, and **activation opens the
     // ORIGINAL's detail** — the repost post itself is empty by construction, so
     // its own detail would be the blank-dialog class this design killed.
-    let is_repost_row = post.reposted_post_id.is_some();
-    let detail_target = post
-        .reposted_post_id
-        .clone()
-        .unwrap_or_else(|| post.post_id.clone());
+    let is_repost_row = post.is_repost_row();
+    let detail_target = post.detail_target_id().to_string();
     let mut out = vec![
         // `text` is the body plaintext so the harness's find-a-post-by-its-text
         // helper can locate a card; clicking it opens `post_detail` (ui.yaml
@@ -5118,8 +5251,70 @@ fn post_card(
             }
             out.push(el.within(ids::POST_CARD, i));
         }
+        // The reaction tally under the bar, in the card's focus order after
+        // the quote button. Inside the `!is_repost_row` arm on purpose: a
+        // repost row paints no bar, so no pills either (ruling 4).
+        out.extend(reaction_pills(post, Some((ids::POST_CARD, i))));
     }
+    out.extend(archive_comment_elements(post, i));
     out
+}
+
+/// `post-reaction-pill` — one tap-to-toggle pill per [`PostSummary::reactions`]
+/// group, in its order (`feed.md` § Layout & flow → *Reaction posts count and
+/// paint*, ruling 4; the feed twin of `dm-reaction-pill`). Text = the emoji and
+/// its count; the viewer's own (`viewer_react_id` present) is highlighted the
+/// DM pill's way — a trailing ✓, since a terminal has no fill to vary — and
+/// carries `state` `on`/`off` (the toggle-button convention the like and
+/// repost buttons use). Which groups paint is the shared
+/// [`PostSummary::paintable_reactions`]; the caller keeps a repost row out.
+fn reaction_pills(post: &PostSummary, scope: Option<(&str, usize)>) -> Vec<Element> {
+    post.paintable_reactions()
+        .into_iter()
+        .map(|g| {
+            let mine = g.viewer_react_id.is_some();
+            let el = Element::gesture_button(
+                ids::POST_REACTION_PILL,
+                format!(
+                    "{} {}{}",
+                    g.emoji,
+                    g.count,
+                    if mine { " \u{2713}" } else { "" }
+                ),
+                true,
+                Gesture::Feed(Action::React {
+                    post_id: post.post_id.clone(),
+                    emoji: g.emoji.clone(),
+                }),
+            )
+            .attr("state", if mine { "on" } else { "off" });
+            match scope {
+                Some((parent, i)) => el.within(parent, i),
+                None => el,
+            }
+        })
+        .collect()
+}
+
+/// The folded archive comments under an imported post — owner-only context
+/// from the owner's own archive, never published (`archive-import.md` § What
+/// each category becomes → *Placement under the owner's own post*). The
+/// shared [`PostSummary::archive_comments`] is filled only on the owner's
+/// own archive-origin posts; anything else paints nothing.
+fn archive_comment_elements(post: &PostSummary, i: usize) -> Vec<Element> {
+    if post.archive_comments.is_empty() {
+        return Vec::new();
+    }
+    std::iter::once(Element::label(ids::POST_ARCHIVE_COMMENTS, "").within(ids::POST_CARD, i))
+        .chain(post.archive_comments.iter().map(|c| {
+            Element::label(
+                ids::POST_ARCHIVE_COMMENT_ITEM,
+                format!("{}: {}", c.author_name, c.text),
+            )
+            .within(ids::POST_ARCHIVE_COMMENTS, 0)
+            .within(ids::POST_CARD, i)
+        }))
+        .collect()
 }
 
 /// ui.yaml `feed.sub_pages.post_detail`, triggers `click post-card` and
@@ -5282,6 +5477,12 @@ fn post_detail_contents(
     // `feed.sub_pages.post_detail` for exactly this.
     #[cfg(feature = "payments")]
     out.extend(tip_elements(post, None));
+    // The same reaction pills the list card paints, unscoped (one post) — but
+    // never for a repost row, which the detail never opens anyway (its
+    // activation opens the original).
+    if !post.is_repost_row() {
+        out.extend(reaction_pills(post, None));
+    }
     out
 }
 
@@ -6845,6 +7046,9 @@ mod tests {
             // user's own feeds (`trending.md` § The Trending feed). Unlike
             // `feed-item` it is not data-driven: there is no feed row to drive it.
             "feed-trending-item",
+            // The built-in Local entry, always painted below Trending
+            // (`feed.md` § Layout & flow, region 1).
+            "feed-local-item",
             "feed-create-feed-button",
             "compose-text-field",
             "compose-tags-field",
@@ -7720,7 +7924,7 @@ mod tests {
         let post_id = "aa".repeat(32);
         assert!(apply_local(&mut app, Action::OpenPostActions(post_id)).is_none());
         assert!(app.feed.actions_open.is_some());
-        let _ = apply_local(&mut app, Action::SelectFeed("other".to_string()));
+        let _ = apply_local(&mut app, Action::SelectFeed(Some("other".to_string())));
         assert!(
             app.feed.actions_open.is_none(),
             "a stale menu must not reappear under a different composition"
@@ -7764,6 +7968,48 @@ mod tests {
         );
     }
 
+    /// `feed.md` § Layout & flow, region 1: the built-in Local entry sits
+    /// directly below Trending and above the user's own feeds, and its gesture is
+    /// the shared `select_feed(None)` — the one way back to the nest's local feed
+    /// once a custom feed is selected (`feed.md` § Persistence).
+    #[test]
+    fn the_local_entry_sits_below_trending_and_selects_the_local_feed() {
+        let mut snapshot = feed_snapshot_with_posts(vec![post("hot")]);
+        snapshot.feeds = vec![FeedSummaryView {
+            feed_id: "cc".repeat(32),
+            name: "My feed".to_string(),
+            combination: "all".to_string(),
+            scope: "local".to_string(),
+            contributor_seeds: Vec::new(),
+        }];
+        let app = feed_app_with(snapshot);
+        let elements = crate::feed::elements(&app);
+
+        let selector: Vec<&str> = elements
+            .iter()
+            .map(|e| e.id.as_str())
+            .filter(|id| matches!(*id, "feed-trending-item" | "feed-local-item" | "feed-item"))
+            .collect();
+        assert_eq!(
+            selector,
+            vec!["feed-trending-item", "feed-local-item", "feed-item"],
+            "Local is one pseudo-entry between Trending and the user's own feeds"
+        );
+
+        let local = elements
+            .iter()
+            .find(|e| e.id == "feed-local-item")
+            .expect("feed-local-item is always present");
+        assert!(
+            matches!(
+                &local.role,
+                crate::element::Role::Button(Gesture::Feed(Action::SelectFeed(None)))
+            ),
+            "feed-local-item must run select_feed(None), got {:?}",
+            local.role
+        );
+    }
+
     /// The Trending row fires the shared `select_trending_feed`, never
     /// `select_feed` — the two are different manager methods, and only the former
     /// sets `trending_selected`. Also proves it closes a stale overflow for the
@@ -7784,6 +8030,48 @@ mod tests {
             app.feed.actions_open.is_none(),
             "a stale menu must not survive the composition switch"
         );
+    }
+
+    /// "View imported" lands on the Feed page and runs the shared
+    /// `select_imported` for the token; the notice + clear paint only while
+    /// the snapshot names a platform, the notice naming it by its label, and
+    /// the clear runs `clear_imported` (`feed.md` § State & data shape → *The
+    /// imported-posts selection*).
+    #[test]
+    fn the_imported_selection_lands_on_the_feed_and_paints_its_notice_and_clear() {
+        let mut app = feed_app(vec![post("mine")]);
+        assert!(!ids(&app).contains(ids::FEED_IMPORTED_NOTICE));
+        assert!(!ids(&app).contains(ids::FEED_IMPORTED_CLEAR));
+        app.page = Page::Settings;
+        let op = apply_local(&mut app, Action::SelectImported("instagram".into()));
+        assert!(
+            matches!(&op, Some(Op::SelectImported { token, .. }) if token == "instagram"),
+            "View imported runs the imported-posts selection"
+        );
+        assert_eq!(
+            app.page,
+            Page::Feed,
+            "the selection is painted on the Feed page"
+        );
+
+        let mut app = feed_app_with(FeedSnapshot {
+            imported_selected: Some("instagram".into()),
+            status: fauna_feed::FeedStatus::Loaded,
+            ..FeedSnapshot::default()
+        });
+        let rendered = crate::feed::elements(&app);
+        let notice = rendered
+            .iter()
+            .find(|e| e.id == ids::FEED_IMPORTED_NOTICE)
+            .expect("the notice paints while the selection is set");
+        assert!(
+            notice.text.contains("Instagram"),
+            "the notice names the platform: {:?}",
+            notice.text
+        );
+        assert!(ids(&app).contains(ids::FEED_IMPORTED_CLEAR));
+        let op = apply_local(&mut app, Action::ClearImported);
+        assert!(matches!(op, Some(Op::ClearImported { .. })));
     }
 
     #[test]
@@ -8783,11 +9071,12 @@ mod tests {
     #[test]
     fn a_guardian_block_floor_replaces_the_body_and_leaks_nothing() {
         let app = feed_app(vec![flagged_post("p-blocked", "buy zzcheappills now")]);
-        app.content_policy
-            .set_ward_content_policy(Some(fauna_core::obligation::ContentPolicy {
-                spam: fauna_core::obligation::ContentFloor::Block,
-                ..Default::default()
-            }));
+        app.content_policy.set_ward_content_policy(Some(
+            fauna_core::obligation::ContentPolicy::category_rules(&[(
+                "spam",
+                fauna_core::content_policy::ContentVerdict::Block,
+            )]),
+        ));
         let els = crate::feed::elements(&app);
 
         assert_eq!(
@@ -9003,14 +9292,14 @@ mod tests {
         );
     }
 
-    /// A floor invents no reason: the per-category `block` select paints the
-    /// frame alone.
+    /// A fail-closed block invents no reason: a guardian document this build
+    /// cannot apply paints the frame alone.
     #[test]
-    fn a_guardian_floor_block_paints_no_reason() {
+    fn a_fail_closed_guardian_block_paints_no_reason() {
         let app = feed_app(vec![flagged_post("p-blocked", "buy zzcheappills now")]);
         app.content_policy
             .set_ward_content_policy(Some(fauna_core::obligation::ContentPolicy {
-                spam: fauna_core::obligation::ContentFloor::Block,
+                document: Some(fauna_core::content_policy::ContentPolicyDocument::unreadable()),
                 ..Default::default()
             }));
         let els = crate::feed::elements(&app);
@@ -9439,11 +9728,12 @@ mod tests {
     #[test]
     fn a_blocked_post_offers_no_reveal() {
         let app = feed_app(vec![flagged_post("p-blocked", "buy zzcheappills now")]);
-        app.content_policy
-            .set_ward_content_policy(Some(fauna_core::obligation::ContentPolicy {
-                spam: fauna_core::obligation::ContentFloor::Block,
-                ..Default::default()
-            }));
+        app.content_policy.set_ward_content_policy(Some(
+            fauna_core::obligation::ContentPolicy::category_rules(&[(
+                "spam",
+                fauna_core::content_policy::ContentVerdict::Block,
+            )]),
+        ));
         let els = crate::feed::elements(&app);
         assert!(
             !els.iter()
@@ -9463,11 +9753,12 @@ mod tests {
             vec![flagged_post("p-both", "the finale twist zzspoiler ends")],
             &["zzspoiler"],
         );
-        app.content_policy
-            .set_ward_content_policy(Some(fauna_core::obligation::ContentPolicy {
-                spam: fauna_core::obligation::ContentFloor::Block,
-                ..Default::default()
-            }));
+        app.content_policy.set_ward_content_policy(Some(
+            fauna_core::obligation::ContentPolicy::category_rules(&[(
+                "spam",
+                fauna_core::content_policy::ContentVerdict::Block,
+            )]),
+        ));
         let els = crate::feed::elements(&app);
         assert_eq!(
             els.iter()
@@ -9854,6 +10145,105 @@ mod tests {
             .into_iter()
             .filter(|e| e.id == id)
             .collect()
+    }
+
+    // ── `post-reaction-pill` (`feed.md` § Layout & flow → *Reaction posts
+    //    count and paint*, ruling 4) ─────────────────────────────────────────
+
+    fn reacted(body: &str) -> TestPostSpec {
+        TestPostSpec {
+            reactions: vec![
+                fauna_feed::PostReactionGroup {
+                    emoji: "\u{2764}\u{fe0f}".into(),
+                    count: 2,
+                    viewer_react_id: None,
+                },
+                fauna_feed::PostReactionGroup {
+                    emoji: "\u{1f525}".into(),
+                    count: 1,
+                    viewer_react_id: Some("dd".repeat(32)),
+                },
+            ],
+            ..post(body)
+        }
+    }
+
+    /// A post nobody reacted to paints no pill.
+    #[test]
+    fn a_post_with_no_reactions_paints_no_reaction_pill() {
+        let app = feed_app(vec![post("quiet")]);
+        assert!(painted(&app, "post-reaction-pill").is_empty());
+    }
+
+    /// One pill per group, in the tally's order, text = emoji and count, the
+    /// viewer's own marked and `state` on; the pills sit in the card after the
+    /// quote button (the card's focus order).
+    #[test]
+    fn reaction_pills_paint_in_order_with_counts_and_the_viewers_own_highlighted() {
+        let app = feed_app(vec![reacted("loved")]);
+        let pills = painted(&app, "post-reaction-pill");
+        let texts: Vec<&str> = pills.iter().map(|e| e.text.as_str()).collect();
+        assert_eq!(texts, ["\u{2764}\u{fe0f} 2", "\u{1f525} 1 \u{2713}"]);
+        let state = |e: &Element| {
+            e.attrs
+                .iter()
+                .find(|(k, _)| k == "state")
+                .map(|(_, v)| v.clone())
+                .unwrap_or_default()
+        };
+        assert_eq!(state(&pills[0]), "off");
+        assert_eq!(state(&pills[1]), "on");
+
+        let ids: Vec<String> = crate::feed::elements(&app)
+            .into_iter()
+            .map(|e| e.id)
+            .collect();
+        let quote = ids.iter().position(|i| i == "feed-quote-button").unwrap();
+        let first_pill = ids.iter().position(|i| i == "post-reaction-pill").unwrap();
+        assert!(first_pill > quote, "pills follow the interaction bar");
+    }
+
+    /// A repost row paints no bar, so no pills; a bluesky row paints none
+    /// either (its counters live at the origin — ruling 5).
+    #[test]
+    fn a_repost_row_and_a_bluesky_row_paint_no_reaction_pill() {
+        let mut repost = reacted("");
+        repost.reposted_post_id = Some("cc".repeat(32));
+        assert!(painted(&feed_app(vec![repost]), "post-reaction-pill").is_empty());
+
+        let mut bsky = reacted("from bluesky");
+        bsky.source = "bluesky".into();
+        assert!(painted(&feed_app(vec![bsky]), "post-reaction-pill").is_empty());
+    }
+
+    /// A tap on a pill toggles the viewer's own reaction of THAT emoji through
+    /// the shared `FeedManager::react` (the create door).
+    #[test]
+    fn a_reaction_pill_tap_dispatches_react_with_its_emoji() {
+        let spec = reacted("loved");
+        let post_id = spec.post_id.clone();
+        let mut app = feed_app(vec![spec]);
+        let action = match painted(&app, "post-reaction-pill")
+            .into_iter()
+            .nth(1)
+            .expect("painted")
+            .role
+        {
+            crate::element::Role::Button(Gesture::Feed(a)) => a,
+            other => panic!("not a feed gesture: {other:?}"),
+        };
+        match &action {
+            Action::React { post_id: p, emoji } => {
+                assert_eq!(p, &post_id);
+                assert_eq!(emoji, "\u{1f525}");
+            }
+            other => panic!("not a react: {other:?}"),
+        }
+        assert_eq!(action.wire_kind(), Some("fauna.posts.create"));
+        assert!(matches!(
+            apply_local(&mut app, action),
+            Some(Op::React { .. })
+        ));
     }
 
     // ── `c2pa-badge` (content-provenance badge) ──────────────────────────────

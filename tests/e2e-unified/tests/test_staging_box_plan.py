@@ -8,7 +8,7 @@ from __future__ import annotations
 import json
 import stat
 import sys
-from datetime import timedelta
+from datetime import date, timedelta
 
 import pytest
 
@@ -476,6 +476,113 @@ def test_an_unreadable_time_is_refused_not_admitted():
                                     purpose="sign-in", at=T1)
 
 
+# ── The reports-pass exemption (`org-nests.md` § fauna.build → *Disposable*,
+#    ruled 2026-11-01) ───────────────────────────────────────────────────────
+#
+# While the store-review record holds an `in-review` submission of the version
+# the box serves, the headless reports pass connects without spending the one
+# complex connection — and nothing else does.
+
+PASS_SERVED = "0.1.6"
+
+
+def _pass_box(**extra):
+    return sb.record_recreation({"domain": ACCEPT}, at=T0, image=IMAGE, version=PASS_SERVED) | extra
+
+
+def _pass_sub(version=PASS_SERVED, state="in-review", store="app-store"):
+    return {"store": store, "version": version, "state": state}
+
+
+def test_the_recreation_record_keeps_the_version_the_box_serves():
+    assert _pass_box()["recreated_version"] == PASS_SERVED
+    assert sb.record_recreation({"domain": ACCEPT}, at=T0, image=IMAGE)["recreated_version"] is None
+
+
+def test_the_reports_pass_inside_an_open_review_spends_no_connection():
+    first = sb.admit_complex_connection(_pass_box(), purpose=sb.REPORTS_PASS, at=T1,
+                                        submissions=[_pass_sub()])
+    assert first["complex_connection"] is None
+    assert first["reports_pass"] == {"at": T1}
+    again = sb.admit_complex_connection(first, purpose=sb.REPORTS_PASS, at=T2,
+                                        submissions=[_pass_sub()])
+    assert again["reports_pass"] == {"at": T2}
+    # The box's one complex connection is still there to spend.
+    full = sb.admit_complex_connection(again, purpose="tester sign-in", at=T2)
+    assert full["complex_connection"]["purpose"] == "tester sign-in"
+
+
+def test_the_reports_pass_runs_after_the_connection_is_spent_and_past_the_cadence():
+    """Exemption (b) holds the calendar while a review is open, so the box may
+    be older than a week; and duty 1 runs daily whatever else was connected."""
+    used = sb.admit_complex_connection(_pass_box(), purpose="tester sign-in", at=T1)
+    late = "2026-10-30T10:00:00Z"
+    state = sb.admit_complex_connection(used, purpose=sb.REPORTS_PASS, at=late,
+                                        submissions=[_pass_sub(store="microsoft-store")])
+    assert state["reports_pass"] == {"at": late}
+    assert state["complex_connection"] == used["complex_connection"]
+
+
+@pytest.mark.parametrize("submissions, why", [
+    ([], "no submission"),
+    ([_pass_sub(state="approved"), _pass_sub(state="serving")], "no open review"),
+    ([_pass_sub(version="0.1.5")], "an open review of another version"),
+])
+def test_the_reports_pass_outside_an_open_review_of_the_served_version_is_refused(
+        submissions, why):
+    with pytest.raises(sb.StaleBoxError, match="in-review"):
+        sb.admit_complex_connection(_pass_box(), purpose=sb.REPORTS_PASS, at=T1,
+                                    submissions=submissions)
+
+
+def test_the_reports_pass_without_the_record_is_refused():
+    with pytest.raises(sb.StaleBoxError, match="store-review record"):
+        sb.admit_complex_connection(_pass_box(), purpose=sb.REPORTS_PASS, at=T1)
+
+
+def test_the_reports_pass_on_a_box_whose_served_version_is_unrecorded_is_refused():
+    """A re-creation recorded before the version was kept, or one whose image
+    label could not be read, vouches for no version: fail closed."""
+    state = sb.record_recreation({"domain": ACCEPT}, at=T0, image=IMAGE)
+    with pytest.raises(sb.StaleBoxError, match="version"):
+        sb.admit_complex_connection(state, purpose=sb.REPORTS_PASS, at=T1,
+                                    submissions=[_pass_sub()])
+    with pytest.raises(sb.StaleBoxError, match="no re-creation"):
+        sb.admit_complex_connection({"domain": ACCEPT}, purpose=sb.REPORTS_PASS, at=T1,
+                                    submissions=[_pass_sub()])
+
+
+def test_the_reports_pass_mid_recreation_is_refused():
+    state = _pass_box(recreation_started_at=T1)
+    with pytest.raises(sb.StaleBoxError, match="re-creation"):
+        sb.admit_complex_connection(state, purpose=sb.REPORTS_PASS, at=T2,
+                                    submissions=[_pass_sub()])
+
+
+def test_an_open_review_admits_nothing_but_the_reports_pass():
+    """The exemption is the client's, not the review's: any other purpose still
+    spends — and is still refused after — the one connection."""
+    used = sb.admit_complex_connection(_pass_box(), purpose="admin app sign-in", at=T1,
+                                       submissions=[_pass_sub()])
+    assert used["complex_connection"]["purpose"] == "admin app sign-in"
+    with pytest.raises(sb.StaleBoxError):
+        sb.admit_complex_connection(used, purpose="admin app sign-in", at=T2,
+                                    submissions=[_pass_sub()])
+
+
+def test_the_refused_reports_pass_records_nothing():
+    state = _pass_box()
+    snapshot = json.loads(json.dumps(state))
+    with pytest.raises(sb.StaleBoxError):
+        sb.admit_complex_connection(state, purpose=sb.REPORTS_PASS, at=T1, submissions=[])
+    assert state == snapshot
+
+
+def test_a_staging_box_takes_the_reports_pass_unguarded():
+    state = {"domain": "dev.fauna.build"}
+    assert sb.admit_complex_connection(state, purpose=sb.REPORTS_PASS, at=T1) is state
+
+
 # ── The re-creation (`org-nests.md` § fauna.build) ──────────────────────────
 #
 # Teardown → the provisioning drive → the firewall → the serving gate → the
@@ -557,6 +664,26 @@ def test_finish_teardown_lets_the_drive_provision_afresh():
     assert sb.decide_start(state=state, servers=[], rrsets=[], rel=REL_APEX) == sb.PROVISION
 
 
+def test_the_drive_waits_out_the_removed_records_ttl():
+    """A resolver that cached the old box's address keeps answering it for the
+    removed records' TTL; the drive's handle check reaching for that dead
+    address reads "nest unreachable" and the run dies before anything is
+    bought (2026-10-23, records at the old 3600 s TTL)."""
+    removed = [{"name": "@", "type": "A", "ttl": 300}, {"name": "mail", "type": "A", "ttl": None},
+               {"name": "_dmarc", "type": "TXT", "ttl": 86400}]
+    state = sb.finish_teardown(_built(), removed=removed, at=T1)
+    # A record with no TTL of its own carries the zone's default; only the
+    # address records count — the drive never resolves a TXT.
+    assert state["dns_clear_at"] == "2026-10-17T12:00:00Z"
+    short = sb.finish_teardown(_built(), removed=removed[:1] + removed[2:], at=T1)
+    assert short["dns_clear_at"] == "2026-10-17T11:05:00Z"
+    assert sb.dns_clear_wait_s(state, at=T1) == 3600
+    assert sb.dns_clear_wait_s(state, at=T2) == 0
+    # A rerun that removes nothing keeps the first run's wait.
+    assert sb.finish_teardown(state, removed=[], at=T1)["dns_clear_at"] == state["dns_clear_at"]
+    assert sb.dns_clear_wait_s(_built(), at=T1) == 0
+
+
 def test_a_teardown_mints_a_mail_password_the_drive_can_use():
     state = sb.begin_recreation(state=_built(mail_password=None), servers=[OLD],
                                 rrsets=[], rel=REL_APEX, at=T1)["state"]
@@ -598,3 +725,392 @@ def test_the_drive_resuming_a_running_box_is_a_complex_connection():
 def test_the_drive_resuming_a_staging_box_is_unguarded():
     state = {"domain": "dev.fauna.build", "server_id": 3}
     assert sb.admit_drive_resume(state, at=T1) is state
+
+
+# ── The acceptance nest's org-minted accounts (org-nests.md § fauna.build) ──
+
+def test_the_org_nests_have_one_reviewer_per_store_and_a_tester():
+    assert sb.org_accounts_for("fauna.build") == (
+        "microsoft-reviewer", "apple-reviewer", "google-reviewer", "tester")
+    # The staging boxes hold the same set, so the reviewer journey runs there.
+    assert sb.org_accounts_for("dev.fauna.build") == sb.org_accounts_for("fauna.build")
+    assert sb.org_accounts_for("test.fauna.build") == sb.org_accounts_for("fauna.build")
+    assert sb.org_accounts_for("example.net") == ()
+    assert sb.REVIEWER_ACCOUNTS == ("microsoft-reviewer", "apple-reviewer", "google-reviewer")
+
+
+@pytest.mark.parametrize("localpart", sb.org_accounts_for("fauna.build"))
+def test_every_org_account_handle_passes_the_format_rule(localpart):
+    # Lowercase alphanumerics and hyphens, 3–63 characters (public-mode.md
+    # § Registration).
+    assert 3 <= len(localpart) <= 63
+    assert all(c.islower() or c.isdigit() or c == "-" for c in localpart)
+    assert not localpart.startswith("-") and not localpart.endswith("-")
+
+
+def test_an_account_identity_is_minted_once_and_reused(tmp_path, monkeypatch):
+    monkeypatch.setattr(sb, "STATE_DIR", str(tmp_path / "staging-box"))
+    first = sb.load_or_create_account(ACCEPT, "tester")
+    path = sb.account_path(ACCEPT, "tester")
+    assert path == tmp_path / "staging-box" / ACCEPT / "accounts" / "tester.json"
+    if sys.platform != "win32":  # POSIX mode bits; see the state test above
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600
+        assert stat.S_IMODE(path.parent.stat().st_mode) == 0o700
+    assert first["localpart"] == "tester" and first["domain"] == ACCEPT
+    assert len(bytes.fromhex(first["secret_hex"])) == 32
+    assert sb.load_or_create_account(ACCEPT, "tester") == first
+
+
+def test_an_account_file_for_another_identity_is_refused(tmp_path, monkeypatch):
+    monkeypatch.setattr(sb, "STATE_DIR", str(tmp_path / "staging-box"))
+    sb.load_or_create_account(ACCEPT, "tester")
+    sb.account_path(ACCEPT, "tester").write_text(json.dumps(
+        {"domain": ACCEPT, "localpart": "apple-reviewer", "secret_hex": "00" * 32}))
+    with pytest.raises(sb.StagingPlanError):
+        sb.load_or_create_account(ACCEPT, "tester")
+
+
+def test_the_actor_id_is_the_seeds_ed25519_public_key():
+    from nacl.signing import SigningKey
+
+    seed = "11" * 32
+    assert sb.actor_hex_for(seed) == bytes(SigningKey(bytes.fromhex(seed)).verify_key).hex()
+
+
+def test_an_account_is_admitted_by_its_public_half_when_that_is_all_it_carries():
+    # A witness host's tester reaches the drive as a registry entry — public
+    # key and handle, no seed; the drive's own accounts carry the seed.
+    assert sb.account_actor({"localpart": "macos-tester", "actor_hex": "ab" * 32}) == "ab" * 32
+    assert sb.account_actor({"localpart": "tester", "secret_hex": "11" * 32}) \
+        == sb.actor_hex_for("11" * 32)
+
+
+# ── The witness hosts' testers (org-nests.md § fauna.build → Accounts) ──────
+
+def test_the_witness_tester_is_named_after_the_host_platform():
+    assert sb.witness_tester_localpart("darwin") == "macos-tester"
+    assert sb.witness_tester_localpart("win32") == "windows-tester"
+    assert sb.witness_tester_localpart("linux") == "linux-tester"
+    assert sb.witness_tester_localpart() == sb.witness_tester_localpart(sys.platform)
+    # The handle format rule, as for every org account.
+    for lp in ("macos-tester", "windows-tester", "linux-tester"):
+        assert 3 <= len(lp) <= 63 and all(c.islower() or c == "-" for c in lp)
+
+
+def test_registering_a_witness_tester_mints_once_and_publishes_only_the_public_half(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(sb, "STATE_DIR", str(tmp_path / "staging-box"))
+    registry = tmp_path / "org-testers.toml"
+    first = sb.register_witness_tester("test.fauna.build", platform="darwin",
+                                       registry=registry, now=T1)
+    kept = sb.account_path("test.fauna.build", "macos-tester")
+    assert kept.is_file() and first["changed"]
+    secret = json.loads(kept.read_text())["secret_hex"]
+    assert first["actor_hex"] == sb.actor_hex_for(secret)
+    text = registry.read_text()
+    assert secret not in text and first["actor_hex"] in text
+    assert sb.witness_testers_for("test.fauna.build", registry) == {
+        "macos-tester": {"domain": "test.fauna.build", "localpart": "macos-tester",
+                         "actor_hex": first["actor_hex"], "registered_at": T1}}
+    # A rerun reuses the kept identity and writes nothing.
+    again = sb.register_witness_tester("test.fauna.build", platform="darwin",
+                                       registry=registry, now="2030-01-01T00:00:00Z")
+    assert not again["changed"] and again["actor_hex"] == first["actor_hex"]
+    assert registry.read_text() == text
+    # Another host's tester joins the same registry, sorted, both kept.
+    other = sb.register_witness_tester("test.fauna.build", platform="linux",
+                                       registry=registry, now=T1)
+    assert other["changed"]
+    assert [e["localpart"] for e in sb.load_witness_testers(registry)] \
+        == ["linux-tester", "macos-tester"]
+    # The registry of one box says nothing about another.
+    assert sb.witness_testers_for("dev.fauna.build", registry) == {}
+
+
+def test_a_kept_identity_that_differs_from_the_registered_one_wins(tmp_path, monkeypatch):
+    # The machine holding the secret is the one the entry must describe: a
+    # kept file minted anew replaces the registered key.
+    monkeypatch.setattr(sb, "STATE_DIR", str(tmp_path / "staging-box"))
+    registry = tmp_path / "org-testers.toml"
+    first = sb.register_witness_tester("test.fauna.build", platform="darwin",
+                                       registry=registry, now=T1)
+    sb.account_path("test.fauna.build", "macos-tester").unlink()
+    second = sb.register_witness_tester("test.fauna.build", platform="darwin",
+                                        registry=registry, now="2030-01-01T00:00:00Z")
+    assert second["changed"] and second["actor_hex"] != first["actor_hex"]
+    assert sb.witness_testers_for("test.fauna.build", registry)["macos-tester"] == {
+        "domain": "test.fauna.build", "localpart": "macos-tester",
+        "actor_hex": second["actor_hex"], "registered_at": "2030-01-01T00:00:00Z"}
+
+
+def test_a_witness_tester_is_never_registered_for_the_acceptance_nest(tmp_path, monkeypatch):
+    monkeypatch.setattr(sb, "STATE_DIR", str(tmp_path / "staging-box"))
+    with pytest.raises(sb.StagingPlanError, match="humans-only"):
+        sb.register_witness_tester("fauna.build", platform="darwin",
+                                   registry=tmp_path / "org-testers.toml")
+    assert not sb.account_path("fauna.build", "macos-tester").exists()
+
+
+@pytest.mark.parametrize("text, why", [
+    ('[[tester]]\ndomain = "fauna.build"\nlocalpart = "macos-tester"\nactor_hex = "%s"\n'
+     % ("ab" * 32), "not a staging box"),
+    ('[[tester]]\ndomain = "test.fauna.build"\nlocalpart = "apple-reviewer"\nactor_hex = "%s"\n'
+     % ("ab" * 32), "not a witness tester"),
+    ('[[tester]]\ndomain = "test.fauna.build"\nlocalpart = "macos-tester"\nactor_hex = "zz"\n',
+     "no 64-hex actor id"),
+    ('[[tester]]\ndomain = "test.fauna.build"\nlocalpart = "macos-tester"\nactor_hex = "%s"\n'
+     '[[tester]]\ndomain = "test.fauna.build"\nlocalpart = "macos-tester"\nactor_hex = "%s"\n'
+     % ("ab" * 32, "cd" * 32), "registered twice"),
+    ("not = [toml", "not valid TOML"),
+])
+def test_a_malformed_registry_is_refused_with_its_reason(tmp_path, text, why):
+    registry = tmp_path / "org-testers.toml"
+    registry.write_text(text)
+    with pytest.raises(sb.StagingPlanError, match=why):
+        sb.load_witness_testers(registry)
+
+
+def test_an_absent_registry_registers_nobody(tmp_path):
+    assert sb.load_witness_testers(tmp_path / "none.toml") == []
+
+
+def test_the_seeding_mark_satisfies_the_recreation_record():
+    rebuilt = _rebuilt()
+    assert sb.recreation_record_refusal(rebuilt) is not None
+    assert sb.recreation_record_refusal(sb.mark_accounts_seeded(rebuilt, at=T2)) is None
+
+
+# ── The calendar: the trigger's DUE and the miss check's OVERDUE ─────────────
+# org-nests.md § fauna.build: weekly and at every UAT entry, a miss a red. T0
+# plus 6 d is the trigger's lead, plus 7 d the cadence the guard enforces.
+
+_DAY6 = "2026-10-23T10:00:00Z"
+_DAY7_EDGE = "2026-10-24T10:00:00Z"
+_DAY7_PAST = "2026-10-24T10:00:01Z"
+
+
+def _verdict(state, at, **kw):
+    return sb.recreation_verdict(state, at=at, **kw)[0]
+
+
+def test_no_state_file_is_no_box_and_never_a_red():
+    assert _verdict(None, _DAY7_PAST) == "NO-BOX"
+
+
+def test_a_box_inside_the_cadence_is_fresh_until_the_lead():
+    assert _verdict(_fresh(), T1) == "FRESH"
+    assert _verdict(_fresh(), "2026-10-23T09:59:59Z") == "FRESH"
+    assert _verdict(_fresh(), _DAY6) == "DUE"
+    assert _verdict(_fresh(), _DAY7_EDGE) == "DUE"
+
+
+def test_a_box_past_the_cadence_is_overdue():
+    verdict, why = sb.recreation_verdict(_fresh(), at=_DAY7_PAST)
+    assert verdict == "OVERDUE" and "7-day cadence" in why, why
+
+
+def test_the_lead_and_cadence_are_constants_and_the_trigger_leads_the_red():
+    assert sb.RECREATION_CADENCE == timedelta(days=7)
+    assert timedelta(0) < sb.RECREATION_LEAD < sb.RECREATION_CADENCE
+
+
+def test_a_new_release_on_test_makes_the_box_due_but_not_overdue():
+    other = "ghcr.io/faunasocial/nest@sha256:" + "cd" * 32
+    verdict, why = sb.recreation_verdict(_fresh(), at=T1, test_image=other)
+    assert verdict == "DUE" and "entered UAT" in why, why
+    assert _verdict(_fresh(), T1, test_image=IMAGE) == "FRESH"
+    # the calendar still wins: a stale box is a red whatever `:test` names
+    assert _verdict(_fresh(), _DAY7_PAST, test_image=other) == "OVERDUE"
+
+
+def test_a_box_with_no_record_is_overdue():
+    assert _verdict({"domain": ACCEPT}, T1) == "OVERDUE"
+
+
+def test_a_running_recreation_is_neither_due_nor_red_until_its_bound():
+    running = {"domain": ACCEPT, "recreation_started_at": T0}
+    assert _verdict(running, T2) == "RUNNING"
+    assert _verdict(running, "2026-10-17T16:00:00Z") == "RUNNING"
+
+
+def test_a_recreation_dead_part_way_is_dead_never_overdue():
+    """org-nests.md § fauna.build → Disposable, rule (2): a death is not retried
+    by the timer. Read OVERDUE, it was re-created every 6 h and bought six
+    boxes 2026-10-29 → 10-31; DEAD is a verdict the trigger does not act on."""
+    running = {"domain": ACCEPT, "recreation_started_at": T0}
+    verdict, why = sb.recreation_verdict(running, at="2026-10-17T16:00:01Z")
+    assert verdict == "DEAD" and "died" in why and "by hand" in why, why
+    assert "DEAD" in sb.RECREATION_VERDICTS
+    # however long it has lain dead: still DEAD, never re-graded into a retry
+    assert _verdict(running, "2026-11-30T00:00:00Z") == "DEAD"
+
+
+def test_an_unreadable_record_is_refused_never_fresh():
+    with pytest.raises(sb.StagingPlanError):
+        sb.recreation_verdict({"domain": ACCEPT, "recreated_at": "last week"}, at=T1)
+
+
+
+# ── The calendar holds while a store review is open ─────────────────────────
+# org-nests.md § fauna.build → *Disposable* (ruled 2026-11-01) and
+# store-review.md § During a review, exemption (b): while the store-review
+# record holds an `in-review` submission of the version the box serves, the
+# trigger defers and the miss check exempts the window; a re-creation the
+# review itself calls for (duty 2, a re-creation run by hand) never reads
+# the calendar, so nothing here can hold it.
+
+SERVED = "0.1.6"
+
+
+def _served():
+    return sb.record_recreation({"domain": ACCEPT}, at=T0, image=IMAGE, version=SERVED)
+
+
+def _sub(version=SERVED, state="in-review", since="2026-10-18", store="app-store"):
+    day = date.fromisoformat(since)
+    return {"store": store, "version": version, "build": "106", "track": "app-store",
+            "flavour": "store-safe", "state": state, "since": day, "read": day,
+            "note": "a review."}
+
+
+def test_the_record_names_the_version_the_box_serves():
+    assert _served()["recreated_version"] == SERVED
+
+
+def test_an_open_review_of_the_served_version_holds_the_trigger_and_the_miss_check():
+    open_review = [_sub()]
+    assert _verdict(_served(), _DAY6, reviews=open_review) == "HELD"
+    verdict, why = sb.recreation_verdict(_served(), at=_DAY7_PAST, reviews=open_review)
+    assert verdict == "HELD" and "app-store" in why and SERVED in why, why
+    # weeks past the cadence, still held: the window lasts as long as the review
+    assert _verdict(_served(), "2026-11-20T00:00:00Z", reviews=open_review) == "HELD"
+    assert "HELD" in sb.RECREATION_VERDICTS
+
+
+def test_a_same_version_restage_on_test_is_held_too():
+    # duty 2's re-creation is the only one a review sees (store-review.md § During a review)
+    other = "ghcr.io/faunasocial/nest@sha256:" + "cd" * 32
+    assert _verdict(_served(), T1, test_image=other, reviews=[_sub()]) == "HELD"
+
+
+def test_a_fresh_box_stays_fresh_under_a_review():
+    assert _verdict(_served(), T1, reviews=[_sub()]) == "FRESH"
+
+
+@pytest.mark.parametrize("state", ["approved", "rejected", "withdrawn", "uploaded", "serving"])
+def test_a_review_no_longer_open_does_not_hold(state):
+    gone = [_sub(state=state, since="2026-10-18")]
+    assert _verdict(_served(), _DAY6, reviews=gone) == "DUE"
+    assert _verdict(_served(), "2026-11-20T00:00:00Z", reviews=gone) == "OVERDUE"
+
+
+def test_an_open_review_of_another_version_does_not_hold():
+    assert _verdict(_served(), _DAY6, reviews=[_sub(version="0.1.5")]) == "DUE"
+    assert _verdict(_served(), _DAY7_PAST, reviews=[_sub(version="0.1.5")]) == "OVERDUE"
+
+
+def test_a_box_whose_served_version_is_unrecorded_is_never_held():
+    assert _verdict(_fresh(), _DAY7_PAST, reviews=[_sub()]) == "OVERDUE"
+
+
+def test_no_record_read_means_no_hold():
+    assert _verdict(_served(), _DAY7_PAST) == "OVERDUE"
+
+
+def test_a_running_or_dead_recreation_is_never_held():
+    running = {**_served(), "recreation_started_at": T0}
+    assert _verdict(running, T2, reviews=[_sub()]) == "RUNNING"
+    assert _verdict(running, "2026-10-17T16:00:01Z", reviews=[_sub()]) == "DEAD"
+
+
+def test_the_window_ends_when_the_review_closes_and_the_trigger_gets_its_lead():
+    # held past the cadence; the store answers on 2026-11-02 and the record says so
+    assert _verdict(_served(), "2026-11-02T08:00:00Z", reviews=[_sub()]) == "HELD"
+    answered = [_sub(state="approved", since="2026-11-02")]
+    verdict, why = sb.recreation_verdict(_served(), at="2026-11-02T08:00:00Z", reviews=answered)
+    assert verdict == "DUE" and "2026-11-02" in why, why
+    # the lead runs from the end of the answer's day: the trigger re-creates, the check stays quiet
+    assert _verdict(_served(), "2026-11-04T00:00:00Z", reviews=answered) == "DUE"
+    assert _verdict(_served(), "2026-11-04T00:00:01Z", reviews=answered) == "OVERDUE"
+
+
+def test_an_answer_older_than_the_cadence_gives_no_grace():
+    # answered before the box fell due: nothing held it, so the miss is the trigger's
+    answered = [_sub(state="approved", since="2026-10-20")]
+    assert _verdict(_served(), _DAY7_PAST, reviews=answered) == "OVERDUE"
+
+
+# ── The certificate budget: a ledger the teardown enforces ───────────────────
+# org-nests.md § fauna.build → Disposable, rule (3): each box bought requests a
+# certificate for the box's exact name set; the issuer allows five per seven days.
+
+_BUYS = ["2026-10-29T17:01:00Z", "2026-10-29T23:01:00Z", "2026-10-30T05:01:00Z",
+         "2026-10-30T11:01:00Z", "2026-10-31T22:49:00Z"]
+
+
+def test_the_budget_is_five_buys_per_seven_days_held_in_the_tree():
+    assert sb.CERTIFICATE_BUDGET == 5
+    assert sb.CERTIFICATE_WINDOW == timedelta(days=7)
+
+
+def test_a_buy_is_recorded_and_the_window_pruned_on_write():
+    state = {"domain": ACCEPT, "box_buys": ["2026-10-01T00:00:00Z", _BUYS[0]]}
+    out = sb.note_box_bought(state, at=_BUYS[1])
+    assert out["box_buys"] == [_BUYS[0], _BUYS[1]]
+    assert state["box_buys"][0] == "2026-10-01T00:00:00Z"  # the input is not mutated
+    assert sb.note_box_bought({"domain": ACCEPT}, at=_BUYS[0])["box_buys"] == [_BUYS[0]]
+
+
+def test_a_sixth_buy_within_the_window_is_refused_with_the_refill_instant():
+    state = {**_built(), "box_buys": list(_BUYS)}
+    assert sb.certificate_budget_refusal({**_built(), "box_buys": _BUYS[:4]},
+                                         at="2026-11-01T00:00:00Z") is None
+    refusal = sb.certificate_budget_refusal(state, at="2026-11-01T00:00:00Z")
+    assert refusal and "2026-11-05T17:01:00Z" in refusal, refusal
+    with pytest.raises(sb.CertificateBudgetWait, match="2026-11-05T17:01:00Z"):
+        sb.begin_recreation(state=state, servers=[OLD], rrsets=APEX_RRSETS,
+                            rel=REL_APEX, at="2026-11-01T00:00:00Z")
+
+
+def test_the_first_buy_after_the_oldest_falls_out_is_admitted():
+    state = {**_built(), "box_buys": list(_BUYS)}
+    assert sb.certificate_budget_refusal(state, at="2026-11-05T17:00:59Z") is not None
+    assert sb.certificate_budget_refusal(state, at="2026-11-05T17:01:00Z") is None
+    plan = sb.begin_recreation(state=state, servers=[OLD], rrsets=APEX_RRSETS,
+                               rel=REL_APEX, at="2026-11-05T17:01:00Z")
+    assert plan["state"]["recreation_started_at"] == "2026-11-05T17:01:00Z"
+
+
+def test_an_unreadable_buy_is_refused_never_read_as_outside_the_window():
+    with pytest.raises(sb.StagingPlanError):
+        sb.certificate_budget_refusal({"box_buys": ["last tuesday"]}, at=T1)
+
+
+def test_the_hand_run_clears_a_dead_recreation():
+    """Only a re-creation run by hand clears DEAD: its teardown accepts the
+    started state and starts afresh."""
+    dead = {**_built(), "recreation_started_at": T0}
+    dead.pop("recreated_at")
+    plan = sb.begin_recreation(state=dead, servers=[OLD], rrsets=APEX_RRSETS,
+                               rel=REL_APEX, at="2026-10-18T10:00:00Z")
+    assert plan["state"]["recreation_started_at"] == "2026-10-18T10:00:00Z"
+
+
+# ── The post-claim connect: one cold relaunch, then the resume path ────────
+
+
+def test_a_fresh_box_whose_post_claim_session_never_connects_is_relaunched_once():
+    # 2026-11-02: the claiming process's session stayed Disconnected while a
+    # fresh process on the same box connected — so the drive relaunches and
+    # signs in as the admin, the resume path, instead of spending the box.
+    assert sb.post_claim_relaunch_owed(sb.PROVISION, relaunched=False)
+
+
+def test_the_relaunch_is_spent_at_most_once():
+    assert not sb.post_claim_relaunch_owed(sb.PROVISION, relaunched=True)
+
+
+def test_a_resume_that_never_connects_fails_as_it_is():
+    # The resume already IS a fresh process signing in; a relaunch adds nothing.
+    assert not sb.post_claim_relaunch_owed(sb.RESUME, relaunched=False)

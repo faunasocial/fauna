@@ -86,3 +86,82 @@ pub fn should_suppress(
     }
     None
 }
+
+impl InboundVerdictsSnapshot {
+    /// The snapshot of a message's inbound verdicts, in the vocabulary
+    /// [`should_suppress`] reads. Built where an outbound row is composed on
+    /// behalf of inbound mail — a forward — so the bounce decision sees the
+    /// source message's real SPF and DMARC outcome.
+    pub fn from_auth(v: &fauna_core::mail_auth::AuthVerdicts) -> Self {
+        use fauna_core::mail_auth::{DmarcPolicy, DmarcVerdict, SpfVerdict};
+        let spf = match v.spf {
+            SpfVerdict::None => "none",
+            SpfVerdict::Pass => "pass",
+            SpfVerdict::Fail => "fail",
+            SpfVerdict::SoftFail => "softfail",
+            SpfVerdict::Neutral => "neutral",
+            SpfVerdict::PermError => "permerror",
+            SpfVerdict::TempError => "temperror",
+        };
+        let (dmarc, dmarc_policy) = match v.dmarc {
+            DmarcVerdict::None => ("none", ""),
+            DmarcVerdict::Pass => ("pass", ""),
+            DmarcVerdict::Fail { policy } => (
+                "fail",
+                match policy {
+                    DmarcPolicy::None => "none",
+                    DmarcPolicy::Quarantine => "quarantine",
+                    DmarcPolicy::Reject => "reject",
+                },
+            ),
+            DmarcVerdict::PermError => ("permerror", ""),
+            DmarcVerdict::TempError => ("temperror", ""),
+        };
+        Self {
+            spf: spf.into(),
+            dmarc: dmarc.into(),
+            dmarc_policy: dmarc_policy.into(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use fauna_core::mail_auth::{AuthVerdicts, DmarcPolicy, DmarcVerdict, SpfVerdict};
+
+    #[test]
+    fn a_failing_sender_s_verdicts_suppress_its_bounce() {
+        let toggles = SuppressorToggles::default();
+        let spf = InboundVerdictsSnapshot::from_auth(&AuthVerdicts {
+            spf: SpfVerdict::Fail,
+            ..Default::default()
+        });
+        assert_eq!(
+            should_suppress(&spf, "a@b.test", false, true, &toggles),
+            Some(SuppressReason::SpfHardfail)
+        );
+        let dmarc = InboundVerdictsSnapshot::from_auth(&AuthVerdicts {
+            dmarc: DmarcVerdict::Fail {
+                policy: DmarcPolicy::Quarantine,
+            },
+            ..Default::default()
+        });
+        assert_eq!(
+            should_suppress(&dmarc, "a@b.test", false, true, &toggles),
+            Some(SuppressReason::DmarcRejectQuarantine)
+        );
+        // A softfail, and a DMARC fail under p=none, are not grounds.
+        let soft = InboundVerdictsSnapshot::from_auth(&AuthVerdicts {
+            spf: SpfVerdict::SoftFail,
+            dmarc: DmarcVerdict::Fail {
+                policy: DmarcPolicy::None,
+            },
+            ..Default::default()
+        });
+        assert_eq!(
+            should_suppress(&soft, "a@b.test", false, true, &toggles),
+            None
+        );
+    }
+}

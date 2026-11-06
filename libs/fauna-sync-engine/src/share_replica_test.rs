@@ -171,7 +171,7 @@ async fn a_wanted_body_lands_over_a_placeholder() {
             0,
             36,
             3,
-            Some(1),
+            Some(fauna_core::blob_seal::SealStamp::Version(1)),
         )
         .unwrap();
 
@@ -266,6 +266,100 @@ async fn the_storage_floor_leaves_a_placeholder_and_a_later_pass_lands_the_body(
     assert_eq!(r.state("big.bin"), Some(SyncState::Synced));
 }
 
+/// **A pending row the nest has answered lands nothing — on an on-demand root
+/// too.** A sibling yet to hear the nest still serves its pending row, and an
+/// on-demand replica WANTS an un-sequenced body, so left alone the row's stale
+/// bytes would land in the kept root: over a settled delete the file comes
+/// back, over a newer head history is written over it. The resident arm's
+/// rule holds here: the row is history, no overlay row names it and it is not
+/// relayed onward.
+#[tokio::test]
+async fn an_on_demand_root_lands_no_pending_row_over_a_settled_delete() {
+    let r = replica();
+    let rel = "cabin/draft.mp4";
+    let blob = sealed_blob(&holiday_bytes());
+    // The nest's delete of exactly this head has applied here.
+    r.engine
+        .db()
+        .upsert_entry(
+            rel,
+            None,
+            None,
+            Some(blob.manifest_hash),
+            SyncState::Deleted,
+            0,
+            0,
+            0,
+            2,
+            Some(fauna_core::blob_seal::SealStamp::Version(1)),
+        )
+        .unwrap();
+
+    let report = r
+        .ingest(
+            &[pending_row(rel, blob.manifest_hash)],
+            &FixtureFetcher::serving(&[&blob]),
+            &roomy,
+        )
+        .await;
+    assert_eq!(report.materialized, 0, "report: {report:?}");
+    assert_eq!(
+        report.skipped,
+        [(rel.to_string(), "pending row the ledger already holds")]
+    );
+    assert_eq!(r.kept(rel), None, "a settled delete stays settled");
+    assert_eq!(r.state(rel), Some(SyncState::Deleted));
+    assert!(r.engine.db().get_share_overlay(rel).unwrap().is_none());
+    assert!(r.engine.db().relayed_pending_changes(4).unwrap().is_empty());
+}
+
+/// The same rule's ledger half: the pending row's bytes are ones the ledger
+/// holds at or below the path's frontier, so the nest has recorded them and a
+/// newer head since — the placeholder for that head stays as it is.
+#[tokio::test]
+async fn an_on_demand_root_lands_no_pending_row_the_ledger_holds() {
+    let r = replica();
+    let rel = "notes.txt";
+    let stale = b"the first draft, recorded at seq 4".to_vec();
+    let stale_blob = sealed_blob(&stale);
+    let head = sealed_blob(b"the head the nest recorded at seq 5");
+    r.engine.causal().hold(rel, 4, &stale);
+    r.engine.causal().advance_frontier(rel, 5);
+    r.engine
+        .db()
+        .upsert_entry(
+            rel,
+            None,
+            None,
+            Some(head.manifest_hash),
+            SyncState::Placeholder,
+            0,
+            0,
+            35,
+            2,
+            Some(fauna_core::blob_seal::SealStamp::Version(1)),
+        )
+        .unwrap();
+
+    let report = r
+        .ingest(
+            &[pending_row(rel, stale_blob.manifest_hash)],
+            &FixtureFetcher::serving(&[&stale_blob]),
+            &roomy,
+        )
+        .await;
+    assert_eq!(report.materialized, 0, "report: {report:?}");
+    assert_eq!(
+        report.skipped,
+        [(rel.to_string(), "pending row the ledger already holds")]
+    );
+    assert_eq!(r.kept(rel), None, "no history over the head");
+    let entry = r.engine.db().get_entry(rel).unwrap().unwrap();
+    assert_eq!(entry.state, SyncState::Placeholder);
+    assert_eq!(entry.manifest_hash, Some(head.manifest_hash));
+    assert!(r.engine.db().get_share_overlay(rel).unwrap().is_none());
+}
+
 /// The reconcile on the populate fold, CONFIRM half: the nest's row for the
 /// path names the manifest the peer's body landed under — the proof is
 /// stamped, the overlay retires, and the body is demoted from the kept root
@@ -335,7 +429,10 @@ async fn the_populate_fold_supersedes_a_landed_body_and_the_nests_row_stands() {
     r.tree
         .settle_peer_bodies(&r.engine, &fold.overlay)
         .expect("settle");
-    r.engine.apply_refresh_fold(&fold).expect("apply");
+    r.engine
+        .apply_refresh_fold(&fold, None)
+        .await
+        .expect("apply");
     assert_eq!(r.kept(rel), None, "the landed body yielded");
     let entry = r.engine.db().get_entry(rel).unwrap().unwrap();
     assert_eq!(entry.state, SyncState::Placeholder);

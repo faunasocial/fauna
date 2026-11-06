@@ -53,7 +53,9 @@ from helpers.macos_artifact import (
     set_quarantine,
 )
 
-pytestmark = [pytest.mark.tier_4, pytest.mark.macos]
+# Every test here reaches `macos_artifact_bundle`, the build this suite witnesses
+# (e2e-conventions.md point 9: a subject build stays in its test, on a 3600 s clock).
+pytestmark = [pytest.mark.tier_4, pytest.mark.macos, pytest.mark.timeout(3600)]
 
 
 @pytest.fixture(scope="module")

@@ -202,10 +202,10 @@ impl IdentityOpClass {
                 "Ask your nest to issue short-lived tokens for the Bluesky services this app names, signed with your Bluesky account's key (the key itself is never shared)"
             }
             IdentityOpClass::ConversationRead => {
-                "Read your conversations through the Fauna app open on this device (your conversation keys are never shared)"
+                "Read your conversations through a Fauna app open on the computer this app runs on (your conversation keys are never shared)"
             }
             IdentityOpClass::ConversationSend => {
-                "Send messages as you into your conversations through the Fauna app open on this device (your conversation keys are never shared)"
+                "Send messages as you into your conversations through a Fauna app open on the computer this app runs on (your conversation keys are never shared)"
             }
         }
     }
@@ -410,6 +410,22 @@ impl RateWindow {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The card shows on whichever device approves — a phone included — while
+    /// the custodian is a Fauna app beside the principal
+    /// (`conversations-oracle.md` § The custodian and the door), so the rows
+    /// name the principal's computer, never "this device".
+    #[test]
+    fn conversation_card_rows_name_the_principals_computer() {
+        for class in [
+            IdentityOpClass::ConversationRead,
+            IdentityOpClass::ConversationSend,
+        ] {
+            let row = class.card_row();
+            assert!(row.contains("a Fauna app open on the computer this app runs on"));
+            assert!(!row.contains("this device"));
+        }
+    }
 
     #[test]
     fn every_class_parses_from_its_own_name_and_names_a_custodian() {

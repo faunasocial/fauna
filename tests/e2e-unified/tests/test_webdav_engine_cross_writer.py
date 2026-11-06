@@ -61,7 +61,7 @@ from pathlib import Path
 
 import pytest
 
-from helpers.app_surface import skip_unbuilt
+from helpers.app_surface import require_surface
 from helpers.folder_content import (
     SYNC_WINDOW_SECS,
     agent_diagnosis,
@@ -164,22 +164,7 @@ def test_engine_and_webdav_mda_are_one_chunk_writer(
     WebDAV-written file (first byte `0x00`) hydrates into the bound location
     byte-identically — the two writers seal, and both readers open, one shape.
     """
-    if not (
-        app.driver.is_linux()
-        or app.driver.is_tui()
-        or app.driver.is_macos()
-        or app.driver.is_windows()
-    ):
-        skip_unbuilt(
-            app.driver,
-            surface="the bound-location + agent-stderr upload witness choreography",
-            detail="helpers/folder_content is the linux+tui+macOS+windows shape "
-            "(each app runs the real fauna-sync-agent and its driver reads the "
-            "engine log back: off the app's stderr for the three that direct-spawn "
-            "it, off the isolated agent's own log for windows); web/iOS/Android "
-            "have no bound local folder at all",
-            tracked="",
-        )
+    require_surface(app.driver, "bound-location-upload-witness")
 
     handle = dedicated_mail_nest
     handle.assert_mta_running()
@@ -245,21 +230,7 @@ def test_engine_and_webdav_mda_are_one_chunk_writer(
 
 
 def _require_bound_folder_apps(app):
-    if not (
-        app.driver.is_linux()
-        or app.driver.is_tui()
-        or app.driver.is_macos()
-        or app.driver.is_windows()
-    ):
-        skip_unbuilt(
-            app.driver,
-            surface="the bound-location + agent-stderr upload witness choreography",
-            detail="helpers/folder_content is the linux+tui+macOS+windows shape; "
-            "web/iOS/Android have no bound local folder at all — an app without "
-            "one witnesses these outcomes through its own folder view "
-            "(test_webdav_folder_view.py)",
-            tracked="",
-        )
+    require_surface(app.driver, "bound-location-upload-witness")
 
 
 def _await_gone(path: Path, *, app, seat: str, window: float = SYNC_WINDOW_SECS) -> None:

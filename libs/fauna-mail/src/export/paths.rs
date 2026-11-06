@@ -228,33 +228,11 @@ pub(super) fn extraction_key(component: &str) -> String {
         .collect()
 }
 
-/// Whether Windows would open a device instead of creating this component.
-///
-/// Windows reserves these names **with any extension** and ignoring trailing
-/// spaces, so the test reads the part before the first `.` — which matters
-/// here twice over: the mbox serializer appends `.mbox`, and the `/` fold turns
-/// `Aux/Reports` into `Aux.Reports`. The superscript digits are reserved too.
-pub(super) fn is_windows_device_name(component: &str) -> bool {
-    let stem = component
-        .split('.')
-        .next()
-        .unwrap_or(component)
-        .trim_end_matches(' ');
-    let numbered = |prefix: &str| {
-        let mut rest = stem.chars().skip(prefix.len());
-        stem.get(..prefix.len())
-            .is_some_and(|head| head.eq_ignore_ascii_case(prefix))
-            && matches!(
-                (rest.next(), rest.next()),
-                (Some('0'..='9' | '¹' | '²' | '³'), None)
-            )
-    };
-    ["CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$"]
-        .iter()
-        .any(|device| stem.eq_ignore_ascii_case(device))
-        || numbered("COM")
-        || numbered("LPT")
-}
+// Whether Windows would open a device instead of creating a component — the
+// one implementation in `fauna-core`. It reads the part before the first `.`,
+// which matters here twice over: the mbox serializer appends `.mbox`, and the
+// `/` fold turns `Aux/Reports` into `Aux.Reports`.
+pub(super) use fauna_core::windows_names::is_windows_device_name;
 
 /// Cut an over-long component to [`MAX_COMPONENT_BYTES`]: the longest prefix
 /// that splits neither a character nor a `%XX` escape, then [`CUT_MARKER`] and

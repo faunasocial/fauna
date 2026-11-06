@@ -11,7 +11,9 @@
 //! its seam's `serve` over **the object the native seats wire** (decision
 //! (d)) — the fleet seam over `RuntimeFleetRemoval` and the ATProto
 //! identity seam over `RuntimeAtprotoIdentity`, the folder-key custody seam
-//! (`fauna_client_folders::port`) over `PlaneFolderKeys`, each of whose sources reads the
+//! (`fauna_client_folders::port`) over `PlaneFolderKeys`, the period-key
+//! custody seam (`fauna_client_subscriptions::port`) over `PlanePeriodKeys`,
+//! each of whose sources reads the
 //! runtime fresh on every call and answers `None` when no runtime runs *or*
 //! the running one serves another account ([`crate::account_runtime::handle_for`],
 //! decision (e)); the adapter's own rule then refuses, so an absent or
@@ -39,16 +41,25 @@ use fauna_account_seams::atproto_credentials::RuntimeAtprotoCredentials;
 use fauna_account_seams::atproto_identity::RuntimeAtprotoIdentity;
 use fauna_account_seams::fleet_removal::RuntimeFleetRemoval;
 use fauna_account_seams::folder_keys::PlaneFolderKeys;
+use fauna_account_seams::period_keys::PlanePeriodKeys;
 use wasm_bindgen::prelude::*;
 
 use crate::account_runtime;
 
-/// Answer one door for the account `actor_id_hex`.
+/// Answer one door for the account `actor_id_hex`, first waiting for its
+/// runtime while `coming` says one is on its way (decision (j)) — every door
+/// alike, so no seam's read can meet a tab that is still starting.
 pub(crate) async fn dispatch(
     actor_id_hex: String,
     door: &str,
     payload: &[u8],
+    coming: impl Fn() -> bool,
 ) -> Result<Vec<u8>, PortFault> {
+    fauna_account_seams::port_wait::wait_for_coming_handle(
+        || account_runtime::handle_for(&actor_id_hex),
+        coming,
+    )
+    .await;
     // The custody-ceremony and followed-folders seams, served by the handle's
     // own implementations — but only for the account the port was minted for
     // (decision (e)).
@@ -134,6 +145,17 @@ pub(crate) async fn dispatch(
     if let Some(answered) = fauna_client_folders::port::serve(&folder_keys, door, payload).await {
         return answered;
     }
+    // The period-key custody seam — the archive-import chunk's tier seals
+    // (`fauna.state.subscriptions`, through `SubscriptionsAuthor`).
+    let period_keys = {
+        let actor_id_hex = actor_id_hex.clone();
+        PlanePeriodKeys::new(move || account_runtime::handle_for(&actor_id_hex))
+    };
+    if let Some(answered) =
+        fauna_client_subscriptions::port::serve(&period_keys, door, payload).await
+    {
+        return answered;
+    }
     // The ATProto identity seam — the ATProto settings chunk's custody reads
     // and joins (`fauna.state.atproto-identity`).
     let identity = {
@@ -159,11 +181,23 @@ pub(crate) async fn dispatch(
 /// export `sharedAccountPort` (`#lib/account-runtime`) forwards every call
 /// to. Resolves with the answer's canonical bytes (a seam method's refusal
 /// included, which is data); rejects with the tagged object
-/// `PortFault::to_js` writes when the crossing itself fails.
+/// `PortFault::to_js` writes when the crossing itself fails. `coming` is the
+/// SPA's answer to "is a runtime on its way for this account?", asked at every
+/// poll of the wait; a throw reads as no.
 #[wasm_bindgen(js_name = accountPortCall, unchecked_return_type = "Promise<Uint8Array>")]
-pub fn account_port_call(actor_id_hex: String, door: String, payload: Vec<u8>) -> js_sys::Promise {
+pub fn account_port_call(
+    actor_id_hex: String,
+    door: String,
+    payload: Vec<u8>,
+    #[wasm_bindgen(unchecked_param_type = "() => boolean")] coming: js_sys::Function,
+) -> js_sys::Promise {
     wasm_bindgen_futures::future_to_promise(async move {
-        match dispatch(actor_id_hex, &door, &payload).await {
+        let coming = || {
+            coming
+                .call0(&JsValue::NULL)
+                .is_ok_and(|answer| answer.is_truthy())
+        };
+        match dispatch(actor_id_hex, &door, &payload, coming).await {
             Ok(bytes) => Ok(js_sys::Uint8Array::from(&bytes[..]).into()),
             Err(fault) => Err(fault.to_js()),
         }

@@ -11,31 +11,39 @@ what a crash leaves behind, then the driver's own cold relaunch.
 
 from __future__ import annotations
 
-from helpers.app_surface import skip_unbuilt
+from helpers.app_surface import require_surface
 
 
 def require_relaunchable(driver) -> None:
     """The relaunch journeys need the app back, signed in, on the same store —
     a restart of the same app, not a new device (the
     `test_settings.py::test_inbox_mode_pre_selects_the_accounts_real_mode_after_a_relaunch`
-    gates)."""
-    if not driver.preserve_state_across_relaunch():
-        skip_unbuilt(
-            driver,
-            surface="a client store that can be pinned across a relaunch",
-            detail="the driver hands the relaunched process a fresh store, so the "
-                   "app returns as a new device rather than the one that was running "
-                   "the job",
-            tracked="drivers/http_bridge.py::preserve_state_across_relaunch",
-        )
-    if not driver.relaunch_preserves_injected_identity():
-        skip_unbuilt(
-            driver,
-            surface="a login that survives a relaunch",
-            detail="logged_in_app injects the session with set_state, and on this app "
-                   "the injection does not reach a store the relaunch keeps",
-            tracked="drivers/http_bridge.py::relaunch_preserves_injected_identity",
-        )
+    gates).
+
+    Which drivers can promise that is the surface registry's two harness
+    entries, `relaunch-store-pin` and `relaunch-injected-identity`, each pinned
+    against the drivers' own predicates by `test_app_surface_declarations.py`.
+    The store pin is still CALLED, because it is what pins the store: on a
+    driver the registry declares able, a refusal is this launch's failure."""
+    pin_store_across_relaunch(driver)
+    require_surface(driver, "relaunch-injected-identity")
+
+
+def pin_store_across_relaunch(driver) -> None:
+    """Pin this launch's client-local store so the next relaunch reads back what
+    this process wrote — the gate a client-side durability journey takes first.
+
+    Which drivers can pin is the registry's `relaunch-store-pin` (pinned against
+    every leaf driver's override); the pin itself is still CALLED, because the
+    call is what pins, and on a driver the registry declares able a refusal is
+    this launch's failure, never a skip — a fresh store would make "the slot did
+    not survive" indistinguishable from "the client never wrote it"."""
+    require_surface(driver, "relaunch-store-pin")
+    assert driver.preserve_state_across_relaunch(), (
+        "the driver could not pin this launch's client-local store, so the "
+        "relaunched app would return as a new device rather than the one that "
+        "wrote it (drivers/http_bridge.py::preserve_state_across_relaunch)"
+    )
 
 
 def relaunch(driver, *, crash: bool = False) -> None:

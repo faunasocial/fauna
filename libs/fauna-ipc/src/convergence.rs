@@ -30,6 +30,10 @@ pub const DEFAULT_TICK_INTERVAL: Duration = Duration::from_secs(30);
 /// matches the C# `DefaultSpawnGrace`.
 pub const DEFAULT_SPAWN_GRACE: Duration = Duration::from_millis(300);
 
+/// The floor of the start-up re-probe's first wait, so a zero spawn grace
+/// cannot turn [`run`]'s doubling backoff into a busy loop.
+const MIN_STARTUP_REPROBE: Duration = Duration::from_millis(100);
+
 /// The tri-state outcome of pushing a `RefreshBearer` to the agent — the Rust twin
 /// of C#'s `RefreshBearerOutcome` (`SyncServicePipeClient.cs`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -99,8 +103,16 @@ pub trait ProvisioningDelegate: Send + Sync {
     /// [`needs_reprovision`] must advance it here, and only on a successful push,
     /// so a failed re-provision is retried on the next tick.
     ///
+    /// Returns whether the agent **took** the capability. On the
+    /// [`NoCapability`](RefreshBearerOutcome::NoCapability) path that answer is
+    /// the tick's reachability: an agent holding no capability serves no
+    /// account's binding store, so the rising edge
+    /// ([`agent_became_reachable`](Self::agent_became_reachable)) waits for a
+    /// provision it took (`sync-agent.md` § Control plane split, *the binding
+    /// store is an account's*).
+    ///
     /// [`Accepted`]: RefreshBearerOutcome::Accepted
-    fn full_provision(&self, bearer: &BearerToken) -> impl Future<Output = ()> + Send;
+    fn full_provision(&self, bearer: &BearerToken) -> impl Future<Output = bool> + Send;
 
     /// Whether the agent's currently-provisioned capability is **stale in its
     /// content** — the bearer is still valid (so [`refresh_bearer`] returns
@@ -130,10 +142,14 @@ pub trait ProvisioningDelegate: Send + Sync {
     /// bindings *once* at attach uses this to re-drive that reconcile the moment
     /// the agent actually answers, closing the first-launch race
     /// where attach's single reconcile beats the just-spawned agent's socket
-    /// coming up (`sync-agent.md` § Control plane split). Plain reachability is
-    /// enough to re-drive folder binding — `AddLocation` is a config write that
-    /// needs no capability. Default: no-op (clients that don't reconcile at
-    /// attach — e.g. fauna-tui — need not implement it).
+    /// coming up (`sync-agent.md` § Control plane split). **Reachable here means
+    /// the agent holds a capability** — `RefreshBearer` accepted, or a
+    /// provision it took — because a binding write needs the account's store,
+    /// which only a provision opens: an agent with no account refuses it
+    /// (`fauna_ipc::sync::BINDINGS_NEED_AN_ACCOUNT_PREFIX`), so an edge fired
+    /// on mere reachability would push the pending binds into a refusal and
+    /// leave them there until the next gesture. Default: no-op (clients that
+    /// don't reconcile at attach — e.g. fauna-tui — need not implement it).
     fn agent_became_reachable(&self) -> impl Future<Output = ()> + Send {
         async {}
     }
@@ -153,28 +169,64 @@ pub trait ProvisioningDelegate: Send + Sync {
 /// [`NoCapability`]: RefreshBearerOutcome::NoCapability
 /// [`Unreachable`]: RefreshBearerOutcome::Unreachable
 pub async fn tick<D: ProvisioningDelegate>(delegate: &D, spawn_grace: Duration) -> bool {
-    let was_running = delegate.ensure_agent_running().await;
-    if was_running {
+    tick_once(delegate, spawn_grace, true).await.reachable
+}
+
+/// What one pass did: whether the agent answered (see [`tick`]) and whether
+/// the pass spawned it.
+struct TickOutcome {
+    reachable: bool,
+    spawned: bool,
+}
+
+/// [`tick`]'s body. `may_spawn` is `false` while [`run`] is re-probing an
+/// agent it spawned that has not answered yet: the probe-and-spawn is skipped
+/// and the pass goes straight to the `RefreshBearer`, whose connect is the
+/// probe — a socket missing during start-up means *still starting*, and a
+/// second spawn then only starts a duplicate the instance lock turns away.
+async fn tick_once<D: ProvisioningDelegate>(
+    delegate: &D,
+    spawn_grace: Duration,
+    may_spawn: bool,
+) -> TickOutcome {
+    let mut spawned = false;
+    if !may_spawn {
+        tracing::debug!("convergence tick: re-probing the agent it spawned");
+    } else if delegate.ensure_agent_running().await {
         tracing::debug!("convergence tick: agent already running");
     } else {
         // The agent was just spawned — give its IPC seam a moment to come up
         // before the RefreshBearer, exactly as the C# service does.
         tracing::info!("convergence tick: agent was not running, spawned it; granting spawn grace");
         tokio::time::sleep(spawn_grace).await;
+        spawned = true;
     }
 
     let Some(bearer) = delegate.bearer().await else {
         tracing::debug!("convergence tick: no bearer (not authenticated) — skipping");
-        return false; // not authenticated — nothing to push this tick, not reachable
+        // Not authenticated — nothing to push this tick, not reachable.
+        return TickOutcome {
+            reachable: false,
+            spawned,
+        };
     };
     tracing::debug!("convergence tick: bearer present");
 
-    match delegate.refresh_bearer(&bearer).await {
+    let reachable = match delegate.refresh_bearer(&bearer).await {
         RefreshBearerOutcome::NoCapability => {
             tracing::warn!("convergence tick: RefreshBearer -> NoCapability, full-provisioning");
-            delegate.full_provision(&bearer).await;
-            tracing::info!("convergence tick: full_provision complete (NoCapability path)");
-            true // agent answered (it just holds no capability yet)
+            // Reachable only once the agent took it: until then it serves no
+            // account's binding store, and the edge's reconcile would meet a
+            // refusal (`ProvisioningDelegate::agent_became_reachable`).
+            let took = delegate.full_provision(&bearer).await;
+            if took {
+                tracing::info!("convergence tick: full_provision complete (NoCapability path)");
+            } else {
+                tracing::warn!(
+                    "convergence tick: the agent did not take the capability; retrying next tick"
+                );
+            }
+            took
         }
         RefreshBearerOutcome::Accepted => {
             tracing::debug!("convergence tick: RefreshBearer -> Accepted");
@@ -196,13 +248,39 @@ pub async fn tick<D: ProvisioningDelegate>(delegate: &D, spawn_grace: Duration) 
             tracing::debug!("convergence tick: RefreshBearer -> Unreachable");
             false
         }
+    };
+    TickOutcome { reachable, spawned }
+}
+
+/// The wait before the next start-up re-probe, or `None` once the start-up is
+/// over — the agent answered, or the doubled wait would reach `tick_interval`,
+/// after which ordinary ticks resume (and may spawn again: an agent that has
+/// not come up by then is not coming).
+fn next_startup_reprobe(
+    current: Option<Duration>,
+    outcome: &TickOutcome,
+    spawn_grace: Duration,
+    tick_interval: Duration,
+) -> Option<Duration> {
+    if outcome.reachable || !(outcome.spawned || current.is_some()) {
+        return None;
     }
+    let next = current.map_or(spawn_grace.max(MIN_STARTUP_REPROBE), |wait| wait * 2);
+    (next < tick_interval).then_some(next)
 }
 
 /// Run the convergence loop until `cancel` is notified. Ticks every
 /// `tick_interval`, or immediately when `poke` is notified (sign-in, a new
 /// binding, a nest move). Each tick is best-effort — the delegate absorbs its own
 /// errors and the loop just retries.
+///
+/// **After a spawn the loop re-probes, not re-ticks** (`sync-agent.md` § Control
+/// plane split, *the binding store is an account's*): while the agent it spawned
+/// has not answered, it waits the spawn grace doubled per miss rather than a
+/// whole `tick_interval`, and spawns nothing more — a poke included. A
+/// slow-starting agent is so provisioned within a beat of its socket coming up,
+/// where the windows app used to start a duplicate 0.3 s after the first spawn
+/// and then leave the agent unprovisioned for the rest of a 30 s tick.
 pub async fn run<D: ProvisioningDelegate>(
     delegate: D,
     tick_interval: Duration,
@@ -215,8 +293,11 @@ pub async fn run<D: ProvisioningDelegate>(
     // again after a down→up bounce). Starts `false`: the first reachable tick is
     // a rising edge and fires the hook.
     let mut was_reachable = false;
+    // `Some(wait)` while an agent this loop spawned has not answered yet.
+    let mut startup: Option<Duration> = None;
     loop {
-        let reachable = tick(&delegate, spawn_grace).await;
+        let outcome = tick_once(&delegate, spawn_grace, startup.is_none()).await;
+        let reachable = outcome.reachable;
         if reachable && !was_reachable {
             tracing::info!("convergence: agent became reachable (rising edge)");
             delegate.agent_became_reachable().await;
@@ -224,8 +305,9 @@ pub async fn run<D: ProvisioningDelegate>(
             tracing::warn!("convergence: agent became unreachable (falling edge)");
         }
         was_reachable = reachable;
+        startup = next_startup_reprobe(startup, &outcome, spawn_grace, tick_interval);
         tokio::select! {
-            _ = tokio::time::sleep(tick_interval) => {}
+            _ = tokio::time::sleep(startup.unwrap_or(tick_interval)) => {}
             _ = poke.notified() => {}
             _ = cancel.notified() => break,
         }
@@ -289,10 +371,11 @@ mod tests {
                 outcome
             }
         }
-        fn full_provision(&self, _bearer: &BearerToken) -> impl Future<Output = ()> + Send {
+        fn full_provision(&self, _bearer: &BearerToken) -> impl Future<Output = bool> + Send {
             let calls = self.calls.clone();
             async move {
                 calls.lock().unwrap().provision += 1;
+                true
             }
         }
         fn needs_reprovision(&self) -> impl Future<Output = bool> + Send {
@@ -473,7 +556,13 @@ mod tests {
     /// interval is set long enough to never fire).
     struct EdgeFake {
         script: Mutex<std::collections::VecDeque<RefreshBearerOutcome>>,
-        edge_calls: Arc<Mutex<usize>>,
+        /// Whether each `full_provision` call is taken, in order; `true` once
+        /// the script runs out.
+        provisions: Mutex<std::collections::VecDeque<bool>>,
+        /// The ticks run so far (one `RefreshBearer` each).
+        ticks: Mutex<usize>,
+        /// The tick each rising edge fired on, 1-based.
+        edge_ticks: Arc<Mutex<Vec<usize>>>,
         poke: Arc<Notify>,
         cancel: Arc<Notify>,
     }
@@ -492,6 +581,7 @@ mod tests {
             // Pop this tick's scripted outcome and steer the loop synchronously
             // (this runs when `tick` *builds* the future, before the await), so the
             // poke/cancel permit is set before `run` reaches its select.
+            *self.ticks.lock().unwrap() += 1;
             let (outcome, exhausted) = {
                 let mut s = self.script.lock().unwrap();
                 let outcome = s.pop_front().unwrap_or(RefreshBearerOutcome::Unreachable);
@@ -504,11 +594,15 @@ mod tests {
             }
             async move { outcome }
         }
-        async fn full_provision(&self, _bearer: &BearerToken) {}
+        fn full_provision(&self, _bearer: &BearerToken) -> impl Future<Output = bool> + Send {
+            let took = self.provisions.lock().unwrap().pop_front().unwrap_or(true);
+            async move { took }
+        }
         fn agent_became_reachable(&self) -> impl Future<Output = ()> + Send {
-            let calls = self.edge_calls.clone();
+            let tick = *self.ticks.lock().unwrap();
+            let edges = self.edge_ticks.clone();
             async move {
-                *calls.lock().unwrap() += 1;
+                edges.lock().unwrap().push(tick);
             }
         }
     }
@@ -516,12 +610,24 @@ mod tests {
     /// Run `run` over a scripted outcome sequence and return how many times the
     /// rising-edge `agent_became_reachable` hook fired.
     async fn edge_fires_for(script: Vec<RefreshBearerOutcome>) -> usize {
-        let edge_calls = Arc::new(Mutex::new(0usize));
+        edge_ticks_for(script, Vec::new()).await.len()
+    }
+
+    /// Run `run` over a scripted outcome sequence, each `full_provision` taken
+    /// or not as `provisions` says, and return the tick each rising edge fired
+    /// on.
+    async fn edge_ticks_for(
+        script: Vec<RefreshBearerOutcome>,
+        provisions: Vec<bool>,
+    ) -> Vec<usize> {
+        let edge_ticks = Arc::new(Mutex::new(Vec::new()));
         let poke = Arc::new(Notify::new());
         let cancel = Arc::new(Notify::new());
         let fake = EdgeFake {
             script: Mutex::new(script.into_iter().collect()),
-            edge_calls: edge_calls.clone(),
+            provisions: Mutex::new(provisions.into_iter().collect()),
+            ticks: Mutex::new(0),
+            edge_ticks: edge_ticks.clone(),
             poke: poke.clone(),
             cancel: cancel.clone(),
         };
@@ -538,7 +644,7 @@ mod tests {
         )
         .await
         .expect("scripted run must terminate via the fake's cancel");
-        *edge_calls.lock().unwrap()
+        edge_ticks.lock().unwrap().clone()
     }
 
     #[tokio::test]
@@ -546,8 +652,33 @@ mod tests {
         use RefreshBearerOutcome::*;
         // Reachable from the first tick and staying reachable ⇒ exactly one edge.
         assert_eq!(edge_fires_for(vec![Accepted, Accepted, Accepted]).await, 1);
-        // NoCapability also counts as "the agent answered" ⇒ still an edge.
+        // NoCapability followed by a provision the agent took ⇒ still an edge.
         assert_eq!(edge_fires_for(vec![NoCapability, NoCapability]).await, 1);
+    }
+
+    /// The edge waits for a provision the agent TOOK: an agent holding no
+    /// capability serves no account's binding store and refuses a binding
+    /// write, so an edge fired on its mere answer would push the app's pending
+    /// binds into a refusal and leave them there (`sync-agent.md` § Control
+    /// plane split, *the binding store is an account's*).
+    #[tokio::test]
+    async fn the_rising_edge_waits_for_a_provision_the_agent_took() {
+        use RefreshBearerOutcome::*;
+        assert_eq!(
+            edge_ticks_for(
+                vec![NoCapability, NoCapability, Accepted],
+                vec![false, true]
+            )
+            .await,
+            vec![2],
+            "a provision the agent did not take fires no edge; the one it took does"
+        );
+        // A re-provision on a valid bearer that fails leaves the agent holding
+        // its capability: still reachable, the edge fired once at the start.
+        assert_eq!(
+            edge_ticks_for(vec![Accepted, Accepted], vec![false]).await,
+            vec![1]
+        );
     }
 
     #[tokio::test]
@@ -568,6 +699,131 @@ mod tests {
         assert_eq!(
             edge_fires_for(vec![Unreachable, Unreachable, NoCapability]).await,
             1
+        );
+    }
+
+    /// An agent that takes several probes to come up after its spawn: every
+    /// probe-and-spawn finds no socket (as a probe during start-up does), and
+    /// `RefreshBearer` answers only from its `answers_on`-th call. The first
+    /// refresh pokes the loop, as the windows app's session install did 0.3 s
+    /// after the first spawn; the rising edge cancels it.
+    struct SlowStartFake {
+        spawns: Arc<Mutex<usize>>,
+        refreshes: Mutex<usize>,
+        answers_on: usize,
+        poke: Arc<Notify>,
+        cancel: Arc<Notify>,
+    }
+
+    impl ProvisioningDelegate for SlowStartFake {
+        fn ensure_agent_running(&self) -> impl Future<Output = bool> + Send {
+            *self.spawns.lock().unwrap() += 1;
+            async { false }
+        }
+        async fn bearer(&self) -> Option<BearerToken> {
+            Some(BearerToken::new("tok".into(), 4_000_000_000))
+        }
+        fn refresh_bearer(
+            &self,
+            _bearer: &BearerToken,
+        ) -> impl Future<Output = RefreshBearerOutcome> + Send {
+            let n = {
+                let mut n = self.refreshes.lock().unwrap();
+                *n += 1;
+                *n
+            };
+            if n == 1 {
+                self.poke.notify_one();
+            }
+            let outcome = if n >= self.answers_on {
+                RefreshBearerOutcome::Accepted
+            } else {
+                RefreshBearerOutcome::Unreachable
+            };
+            async move { outcome }
+        }
+        async fn full_provision(&self, _bearer: &BearerToken) -> bool {
+            true
+        }
+        fn agent_became_reachable(&self) -> impl Future<Output = ()> + Send {
+            self.cancel.notify_one();
+            async {}
+        }
+    }
+
+    /// The loop re-probes a spawned agent promptly and never spawns it twice —
+    /// not on a poke, not on a miss — where it used to spawn a duplicate on
+    /// the poke and then sleep a whole tick (`sync-agent.md` § Control plane
+    /// split, *the binding store is an account's*). The tick interval is an
+    /// hour: only the start-up re-probe can reach the answering call in time.
+    #[tokio::test]
+    async fn a_spawned_agent_is_reprobed_promptly_and_never_spawned_twice() {
+        let spawns = Arc::new(Mutex::new(0usize));
+        let poke = Arc::new(Notify::new());
+        let cancel = Arc::new(Notify::new());
+        let fake = SlowStartFake {
+            spawns: spawns.clone(),
+            refreshes: Mutex::new(0),
+            answers_on: 5,
+            poke: poke.clone(),
+            cancel: cancel.clone(),
+        };
+        tokio::time::timeout(
+            Duration::from_secs(20),
+            run(
+                fake,
+                Duration::from_secs(3600),
+                Duration::from_millis(1),
+                poke,
+                cancel,
+            ),
+        )
+        .await
+        .expect("the start-up re-probe must reach the agent long before the hour's tick");
+        assert_eq!(
+            *spawns.lock().unwrap(),
+            1,
+            "a probe during start-up must never spawn a second agent"
+        );
+    }
+
+    #[test]
+    fn the_startup_reprobe_doubles_from_the_grace_and_ends_at_the_tick_interval() {
+        let grace = Duration::from_millis(300);
+        let tick = Duration::from_secs(30);
+        let missed = |spawned| TickOutcome {
+            reachable: false,
+            spawned,
+        };
+        let answered = TickOutcome {
+            reachable: true,
+            spawned: false,
+        };
+        let mut waits = Vec::new();
+        let mut wait = next_startup_reprobe(None, &missed(true), grace, tick);
+        while let Some(w) = wait {
+            waits.push(w.as_millis());
+            wait = next_startup_reprobe(wait, &missed(false), grace, tick);
+        }
+        assert_eq!(
+            waits,
+            vec![300, 600, 1_200, 2_400, 4_800, 9_600, 19_200],
+            "doubling from the grace, ending before the tick interval"
+        );
+        assert_eq!(
+            next_startup_reprobe(Some(grace), &answered, grace, tick),
+            None,
+            "an answer ends the start-up"
+        );
+        assert_eq!(
+            next_startup_reprobe(None, &missed(false), grace, tick),
+            None,
+            "a miss with no spawn behind it is an ordinary tick"
+        );
+        assert_eq!(
+            next_startup_reprobe(None, &missed(true), Duration::ZERO, tick),
+            Some(MIN_STARTUP_REPROBE),
+            "a zero grace still waits the floor"
         );
     }
 }

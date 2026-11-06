@@ -33,6 +33,7 @@ import requests
 from actions.api_actor import ApiActor
 from helpers import budgets
 from helpers.connection import wait_until_online
+from helpers.contacts_knocks import knock_row, open_people, read_racy
 from helpers.waiting import wait_until
 from i18n.strings import S
 
@@ -59,46 +60,13 @@ def _store_knock(nest_instance, test_user, sender_hex: str) -> None:
     assert resp.json().get("ok") is True, resp.text
 
 
-def _open_people(app) -> None:
-    """The Contacts page on its People half. The segment is sticky across
-    navigation, so an earlier Address Book visit would otherwise leave the
-    roster and the knock list unpainted."""
-    app.contacts.navigate()
-    app.contacts.switch_to_people()
-
-
-def _read(fn):
-    """One poll's read of a list the page may re-render under it. A read racing
-    a re-render answers ``None`` and the next poll reads the whole list again;
-    one that never succeeds times out into the caller's diagnosis."""
-    try:
-        return fn()
-    except Exception:  # noqa: BLE001 — see the docstring
-        return None
-
-
-def _knock_row(app, sender_hex: str) -> int:
-    """Wait for ``sender_hex``'s knock to list, and return its row index."""
-    found = wait_until(
-        lambda: (lambda i: (i,) if i is not None else None)(
-            _read(lambda: app.contacts.knock_index_for(sender_hex))
-        ),
-        budgets.PUSH_REFRESH_S,
-        diagnose=lambda: (
-            f"the knock from {sender_hex} never listed; knock-sender texts="
-            f"{_read(app.contacts.knock_senders)!r}; error={app.error_text()!r}"
-        ),
-    )
-    return found[0]
-
-
 def _wait_knock_gone(app, sender_hex: str, verb: str) -> None:
     wait_until(
-        lambda: _read(lambda: app.contacts.knock_index_for(sender_hex) is None),
+        lambda: read_racy(lambda: app.contacts.knock_index_for(sender_hex) is None),
         budgets.RPC_ROUNDTRIP_S,
         diagnose=lambda: (
             f"{verb} left the knock from {sender_hex} on the list; knock-sender "
-            f"texts={_read(app.contacts.knock_senders)!r}; error={app.error_text()!r}"
+            f"texts={read_racy(app.contacts.knock_senders)!r}; error={app.error_text()!r}"
         ),
     )
 
@@ -109,11 +77,11 @@ def _wait_row_statuses(app, peer_hex: str, allowed: list[list[str]], why: str) -
     ``[]`` when there is no edge at all."""
     app.contacts.narrow_roster(peer_hex)
     wait_until(
-        lambda: _read(app.contacts.contact_statuses) in allowed,
+        lambda: read_racy(app.contacts.contact_statuses) in allowed,
         budgets.RPC_ROUNDTRIP_S,
         diagnose=lambda: (
             f"{why}: the roster filtered to {peer_hex} should read one of "
-            f"{allowed!r}; got {_read(app.contacts.contact_statuses)!r} "
+            f"{allowed!r}; got {read_racy(app.contacts.contact_statuses)!r} "
             f"(contact-name count {app.contacts.contact_count()}); "
             f"error={app.error_text()!r}"
         ),
@@ -137,20 +105,20 @@ def test_accepting_a_knock_adds_the_person_and_blocking_or_dismissing_clears_it(
     accepted, blocked, dismissed = (_fresh_actor_hex() for _ in range(3))
     for sender in (accepted, blocked, dismissed):
         _store_knock(nest_instance, test_user, sender)
-    _open_people(app)
+    open_people(app)
     for sender in (accepted, blocked, dismissed):
-        _knock_row(app, sender)
+        knock_row(app, sender)
 
     # Row indices are re-read before every click: each verb re-reads the list,
     # so the rows below it move up.
-    app.contacts.accept_knock(_knock_row(app, accepted))
+    app.contacts.accept_knock(knock_row(app, accepted))
     _wait_knock_gone(app, accepted, "accepting")
     _wait_row_status(
         app, accepted, S.common.accepted, "accepting a knock must add that person"
     )
     app.contacts.narrow_roster("")
 
-    app.contacts.block_knock(_knock_row(app, blocked))
+    app.contacts.block_knock(knock_row(app, blocked))
     _wait_knock_gone(app, blocked, "blocking")
     # A block writes a `blocked` edge (so the sender cannot knock again), which
     # the roster may list — but never as a contact the viewer accepted.
@@ -159,7 +127,7 @@ def test_accepting_a_knock_adds_the_person_and_blocking_or_dismissing_clears_it(
     )
     app.contacts.narrow_roster("")
 
-    app.contacts.dismiss_knock(_knock_row(app, dismissed))
+    app.contacts.dismiss_knock(knock_row(app, dismissed))
     _wait_knock_gone(app, dismissed, "dismissing")
     # Dismiss clears the knock and any edge with it, so the sender may knock again.
     _wait_row_statuses(
@@ -185,8 +153,8 @@ def test_confirming_an_accepted_contact_promotes_it_and_confirm_shows_only_where
 
     peer = _fresh_actor_hex()
     _store_knock(nest_instance, test_user, peer)
-    _open_people(app)
-    app.contacts.accept_knock(_knock_row(app, peer))
+    open_people(app)
+    app.contacts.accept_knock(knock_row(app, peer))
     _wait_row_status(app, peer, S.common.accepted, "accepting the knock")
     assert app.contacts.confirm_count() == 1, (
         f"an accepted row must offer contact-confirm; "
@@ -207,7 +175,7 @@ def test_confirming_an_accepted_contact_promotes_it_and_confirm_shows_only_where
     # The whole roster: one confirm per Accepted row, none anywhere else.
     app.contacts.narrow_roster("")
     wait_until(
-        lambda: _read(app.contacts.contact_statuses),
+        lambda: read_racy(app.contacts.contact_statuses),
         budgets.UI_SETTLE_S,
         diagnose=lambda: f"the unfiltered roster never repainted; error={app.error_text()!r}",
     )
@@ -242,7 +210,7 @@ def test_each_contact_row_says_where_the_relationship_stands(
     viewer.confirm_contact(confirmed)
     viewer.block_knock(blocked)
 
-    _open_people(app)
+    open_people(app)
     for peer, label in (
         (accepted, S.common.accepted),
         (confirmed, S.common.confirmed),
@@ -252,7 +220,7 @@ def test_each_contact_row_says_where_the_relationship_stands(
 
     app.contacts.narrow_roster("")
     wait_until(
-        lambda: _read(app.contacts.contact_statuses),
+        lambda: read_racy(app.contacts.contact_statuses),
         budgets.UI_SETTLE_S,
         diagnose=lambda: f"the unfiltered roster never repainted; error={app.error_text()!r}",
     )

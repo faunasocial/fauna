@@ -116,27 +116,44 @@ def test_windows_ffi_cargo_stamp_is_scoped_by_features_not_just_profile_dir():
     )
 
 
-def test_windows_ffi_flavor_guard_also_invalidates_the_cargo_stamp():
-    """The pre-existing flavor guard drops the STAGED .dll on a
-    `$PROFILE:$FEATURES` mismatch. It must ALSO remove `$CARGO_STAMP` in the
-    same branch: a features-scoped stamp alone still reads "fresh" when
-    switching back to a flavor whose stamp survives from an earlier run, while
-    the shared cargo output path holds the other flavor's dll. The marker
-    mismatch is itself the proof a rebuild is owed, independent of any stamp."""
+def test_a_flavor_switch_keeps_the_flavors_own_cargo_stamp():
+    """The flavor guard drops the STAGED .dll on a marker mismatch and nothing
+    else. The stamp sits beside the flavor-private dll it vouches for, and
+    nothing but this flavor's gated command writes that slot, so a switch owes
+    no cargo run. Dropping it predated the private slot and made every switch a
+    real `build` acquire, which the in-hold re-check refuses."""
     body = _flavor_body()
-    guard = re.search(r"FLAVOR_MARKER=.*?\n\s*\}", body, re.DOTALL)
-    assert guard, (
-        "flavor-mismatch guard block not found — it must be a braced block so "
-        "it can drop both the staged .dll and the cargo stamp"
-    )
+    guard = re.search(r'\[ "\$\(cat "\$FLAVOR_MARKER".*?\n\s*\}', body, re.DOTALL)
+    assert guard, "flavor-mismatch guard block not found"
     guard_block = guard.group(0)
     assert "fauna_ffi.dll" in guard_block, (
         "sanity: this must be the flavor-mismatch guard block"
     )
-    assert "CARGO_STAMP" in guard_block, (
-        "the flavor guard's mismatch branch must also remove $CARGO_STAMP — "
-        "leaving a stale stamp means a flavor switch can silently skip the "
-        "cargo rebuild it requires, staging the other flavor's core"
+    assert "CARGO_STAMP" not in guard_block, (
+        "the guard must leave $CARGO_STAMP alone: the dll it vouches for is the "
+        "flavor's private one, untouched by the other flavor's build"
+    )
+
+
+def test_a_warm_flavor_switch_restores_the_stash_outside_every_slot():
+    """`_windows-ffi-bindgen` takes a slot unconditionally, so a dropped staged
+    .dll reaching the bindgen gate is a `build` acquire. Between the gates the
+    recipe asks the bindgen stamp alone whether this flavor's generation is
+    still current and restores its stash: the bindgen gate then finds its
+    targets back and reads up to date."""
+    joined = " ".join(_flavor_body().split())
+    cargo_slot = joined.index("{{slot_build}}")
+    restore = joined.index("scripts/win-ffi-stash.sh restore")
+    gate = joined.index('--label "windows-ffi-bindgen-$RID"')
+    save = joined.index("scripts/win-ffi-stash.sh save")
+    marker = joined.index('echo "$RID:$PROFILE:$FEATURES" > "$FLAVOR_MARKER"')
+    check = joined.rindex("build-if-stale.py --check", 0, restore)
+    assert cargo_slot < check < restore < gate < save < marker, (
+        "order must be cargo gate, then the bindgen stamp's own check, then the "
+        "restore, then the bindgen gate, then the save, then the marker"
+    )
+    assert "{{slot_build}}" not in joined[check:gate], (
+        "the restore's check and the restore itself must take no slot"
     )
 
 

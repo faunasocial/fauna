@@ -32,7 +32,7 @@
 1. **Pick your cloud provider and enter your token**, then choose **Verify
    credentials**. For a provider you sign in to (rather than paste a token),
    type the provider's address and choose **Sign in at the provider…**.
-2. **Pick the server.** The list shows only the servers Fauna created in that account — a server someone else made there is never shown. The exception is OVH, where the app no longer builds servers but can still retire one: OVH has no way to mark a server as Fauna's, so every server your OVH credentials can reach is listed, a server you built there by hand included, each with the note **Not marked as created by Fauna — check the name carefully before deleting it**. Each row shows the
+2. **Pick the server.** The list shows only the servers Fauna created in that account — a server someone else made there is never shown. The exception is OVH: OVH has no way to mark a server as Fauna's, so every server your OVH credentials can reach is listed, a server you built there by hand included, each with the note **Not marked as created by Fauna — check the name carefully before deleting it**. Each row shows the
    server's name, its address, and the domain it served, when the app could
    confirm it (the domain's address has to match the server's; the app never
    guesses from the name). The server you are signed into is labelled as such.

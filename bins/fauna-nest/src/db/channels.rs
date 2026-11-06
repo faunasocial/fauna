@@ -1204,6 +1204,66 @@ impl CacheDb {
             .collect())
     }
 
+    /// The pull leg's work list **in visit order** — the identities of
+    /// [`Self::succession_residue_actors`], front of the `succession_pull_queue`
+    /// first. An identity not yet queued joins behind every queued one (all of
+    /// one pass's newcomers share a turn, ordered by id); an identity no longer
+    /// on the work list leaves the queue. Paired with
+    /// [`Self::mark_succession_pulled`], which sends a visited identity to the
+    /// back, this is what bounds the wait of every identity by the number queued
+    /// ahead of it when it joined — whatever a caller adds later.
+    pub async fn succession_pull_worklist(&self) -> Result<Vec<[u8; 32]>> {
+        const RESIDUE: &str = "SELECT actor_id FROM channel_foreign_members
+             UNION SELECT author_id FROM remote_follows
+             UNION SELECT subscriber_id FROM subscribers WHERE home_nest_id IS NOT NULL
+             UNION SELECT subscriber_id FROM subscribe_requests WHERE home_nest_id IS NOT NULL";
+        let conn = self.conn.lock().await;
+        let next_turn: i64 = conn
+            .query_row(
+                "SELECT COALESCE(MAX(turn), 0) + 1 FROM succession_pull_queue",
+                [],
+                |row| row.get(0),
+            )
+            .context("succession_pull_worklist: next turn")?;
+        conn.execute(
+            &format!(
+                "INSERT OR IGNORE INTO succession_pull_queue (actor_id, turn)
+                 SELECT actor_id, ?1 FROM ({RESIDUE})"
+            ),
+            [next_turn],
+        )
+        .context("succession_pull_worklist: enqueue newcomers")?;
+        conn.execute(
+            &format!("DELETE FROM succession_pull_queue WHERE actor_id NOT IN ({RESIDUE})"),
+            [],
+        )
+        .context("succession_pull_worklist: drop departed")?;
+        let mut stmt =
+            conn.prepare("SELECT actor_id FROM succession_pull_queue ORDER BY turn, actor_id")?;
+        let rows = stmt
+            .query_map([], |row| row.get::<_, Vec<u8>>(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .context("succession_pull_worklist")?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|id| <[u8; 32]>::try_from(id.as_slice()).ok())
+            .collect())
+    }
+
+    /// Send `actor` to the back of the succession pull's visit order: a pass
+    /// finished its candidate walk for it (see [`Self::succession_pull_worklist`]).
+    pub async fn mark_succession_pulled(&self, actor: &[u8; 32]) -> Result<()> {
+        let conn = self.conn.lock().await;
+        conn.execute(
+            "UPDATE succession_pull_queue
+                SET turn = (SELECT COALESCE(MAX(turn), 0) + 1 FROM succession_pull_queue)
+              WHERE actor_id = ?1",
+            [actor.as_slice()],
+        )
+        .context("mark_succession_pulled")?;
+        Ok(())
+    }
+
     /// Resolve the **candidate** dialable URLs for a nest identity — every
     /// address the `nest_addresses` directory holds for `nest_id`,
     /// **dial-proven first, then oldest first**, capped at `limit`. The

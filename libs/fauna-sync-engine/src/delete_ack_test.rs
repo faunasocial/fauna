@@ -202,3 +202,54 @@ async fn an_unproven_synced_row_is_not_skipped() {
          unreachable nest) instead of skipping: got {result:?}"
     );
 }
+
+/// An upload whose NETWORK half fails (the nest down, or refusing this
+/// device's credential) must leave the row pending — `LocallyModified`, the
+/// state `upload_pending` re-drives — never parked in `Uploading`. The upload
+/// path marks the row `Uploading` with the new bytes' hash before the network
+/// half; left there, reconcile reads the matching hash as *unchanged* and no
+/// pass lists the row again, so the edit never reaches the nest (files-on-demand
+/// outcome 5: one upload refused across a nest restart, then every later
+/// converge pass reported the file unchanged).
+#[tokio::test]
+async fn a_failed_upload_stays_pending_for_the_next_pass() {
+    let dir = tempfile::tempdir().unwrap();
+    // Keyed, so the seal succeeds and the upload reaches its network half — a
+    // keyless engine refuses before the row is marked at all.
+    let engine = crate::pull_remote_changes_test::test_engine_with_keys(
+        dir.path().to_path_buf(),
+        Some(fauna_core::crypto::OwnerSealKey::Client(
+            fauna_core::crypto::BackupKey::from_bytes([0x33; 32]),
+        )),
+        None,
+        None,
+    );
+    seed_tracked_file(&engine, dir.path(), "edit.txt", b"before");
+    std::fs::write(dir.path().join("edit.txt"), b"after, with the nest down").unwrap();
+
+    let result = engine.upload_file("edit.txt").await;
+    assert!(
+        result.is_err(),
+        "the nest is unreachable — the upload cannot have landed: got {result:?}"
+    );
+
+    let entry = engine
+        .db()
+        .get_entry("edit.txt")
+        .unwrap()
+        .expect("the row survives a failed upload");
+    assert_eq!(
+        entry.state,
+        SyncState::LocallyModified,
+        "a failed upload leaves the row where the next converge pass re-drives it \
+         (the upload failed with {result:?})"
+    );
+    let pending = engine
+        .db()
+        .list_by_state(SyncState::LocallyModified)
+        .unwrap();
+    assert!(
+        pending.iter().any(|e| e.path == "edit.txt"),
+        "upload_pending must list the edit again"
+    );
+}

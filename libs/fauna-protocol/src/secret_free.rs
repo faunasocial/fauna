@@ -41,6 +41,7 @@ use fauna_core::data::{
     DelegationConfig, ModerationConfig, MutedKeyword, ParticipantRef, PersonalizationConfig,
     SyncPrefsConfig, TaskAssignment, TrainedFactorMeta,
 };
+use fauna_core::moderation_rows::HiddenContentMark;
 use fauna_core::read_marker::ReadMarker;
 use fauna_core::seen_set::{SeenRef, SeenScopeSet, SeenWatermark};
 
@@ -129,6 +130,13 @@ fn pin_muted_keyword(v: &MutedKeyword) {
     let MutedKeyword { keyword, weight } = v;
     assert_secret_free(keyword);
     assert_secret_free(weight);
+}
+
+/// A `hidden/` row's value (`fauna_core::moderation_rows`) — the moderation
+/// kind's second row family, pinned through the kind's probe.
+fn pin_hidden_content_mark(v: &HiddenContentMark) {
+    let HiddenContentMark { id } = v;
+    assert_secret_free(id);
 }
 
 fn pin_trained_factor_meta(v: &TrainedFactorMeta) {
@@ -268,6 +276,7 @@ delegable_payload_pins! {
         || {
             pin_moderation(&ModerationConfig::default());
             pin_muted_keyword(&MutedKeyword::new(""));
+            pin_hidden_content_mark(&HiddenContentMark { id: String::new() });
         }
     ),
     crate::merge_policy::records::SYNC_PREFS => (

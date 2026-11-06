@@ -49,7 +49,7 @@ def test_delete_account_via_confirm_field(delete_account_app, delete_account_nes
     assert "Export My Data" in reminder and "Settings → Account" in reminder, (
         f"settings-delete-confirm-text must name the account data export: {reminder!r}"
     )
-    assert "Settings → Mail" in reminder, (
+    assert "Export mailbox" in reminder, (
         f"settings-delete-confirm-text must name the mail export: {reminder!r}"
     )
 

@@ -19,13 +19,6 @@ import SwiftUI
 /// same localized `contactStatusLabel` text this badge paints (fixed: it used to read the raw wire `status`, which drifted
 /// from what was on screen and from every other app's `contact-status` read).
 public struct ContactStatusBadge: View {
-    /// The roster-grouping display order (`docs/goal/ui/contacts.md` § Contact
-    /// roster filter) — was independently hardcoded in `ContactsView` (iOS) and
-    /// `MacContactListView` (macOS), a third copy of the same four-status list
-    /// this file's own `color` switch already carries; one door so a status
-    /// added to one list can't silently miss the others.
-    public static let displayOrder: [String] = ["confirmed", "accepted", "pending", "blocked"]
-
     let status: String
 
     public init(status: String) {

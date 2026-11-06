@@ -1,11 +1,13 @@
 //! tier_1: the runtime account over fakes of its four seams — the roster, the
 //! owner's grant log, the account store's meta rows, the nest's record kind —
-//! and two apps' runtimes taking the door in turn over one socket
+//! and two apps' runtimes taking the door in turn over one endpoint (a
+//! socket on unix, a named pipe on windows)
 //! (`conversations-oracle.md` § Done definition, items 2–3).
 
 use std::collections::HashMap;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(any(unix, windows))]
 use std::time::Duration;
 
 use fauna_client_config::test_helpers::FakeSuccessionLedgerStore;
@@ -15,12 +17,17 @@ use fauna_conversations::backends::mock::MockRailBackend;
 use fauna_core::grant_event::{GrantEvent, GrantEventKind, GrantEventScope};
 use fauna_core::identity::ActorId;
 use fauna_core::identity_op::IdentityOpClass;
-use fauna_ipc::oracle::{OracleClient, OracleEndpoint, OracleOp, OracleRefusal, OracleReply};
-use fauna_ipc::unix_transport::InstanceLock;
+use fauna_ipc::oracle::OracleRefusal;
+// The door is a unix socket or a windows pipe (`serve` is
+// `#[cfg(any(unix, windows))]`): its test and helpers are gated alike.
+#[cfg(any(unix, windows))]
+use fauna_ipc::oracle::{OracleClient, OracleEndpoint, OracleOp, OracleReply};
 use fauna_protocol::ByteBuf;
 
 use super::*;
-use crate::{AdmittedPrincipal, ConversationsCustodian, open_challenge, serve};
+use crate::{AdmittedPrincipal, ConversationsCustodian};
+#[cfg(any(unix, windows))]
+use crate::{open_challenge, serve};
 
 const ACTOR: [u8; 32] = [0x42; 32];
 const PRINCIPAL: &[u8] = b"principal-1";
@@ -371,13 +378,51 @@ async fn a_stale_or_overflowing_outbox_lets_its_oldest_rows_go() {
     assert_eq!(left, vec![2], "the week-old row is let go");
 }
 
-fn held(path: &std::path::Path) -> bool {
+/// Whether an app holds `endpoint` — and so serves it, since the door is
+/// bound under the lock before the keeper answers.
+#[cfg(any(unix, windows))]
+fn held(endpoint: &OracleEndpoint) -> bool {
     matches!(
-        InstanceLock::acquire(path),
+        endpoint.lock(),
         Err(e) if e.kind() == std::io::ErrorKind::AddrInUse
     )
 }
 
+/// Whether an app serves `endpoint` as a principal sees it: held, and — on
+/// unix — the socket accepting. The holder takes the lock and then binds, so
+/// [`held`] read from this thread can be true in the instant between the two,
+/// when a connect still meets no socket (`NotFound`) or one not yet listening
+/// (`ConnectionRefused`). The probe connection closes unread; the door drops
+/// it at its missing hello. On windows the pipe instance a probe would take
+/// is the one the principal needs, so there the lock alone is read.
+#[cfg(any(unix, windows))]
+fn serving(endpoint: &OracleEndpoint) -> bool {
+    if !held(endpoint) {
+        return false;
+    }
+    match endpoint {
+        #[cfg(unix)]
+        OracleEndpoint::Unix(path) => std::os::unix::net::UnixStream::connect(path).is_ok(),
+        #[cfg(windows)]
+        OracleEndpoint::Pipe(_) => true,
+    }
+}
+
+/// An endpoint of this test's own: a socket in `dir` on unix, a pipe name
+/// unique to this process on windows.
+#[cfg(any(unix, windows))]
+#[cfg_attr(windows, allow(unused_variables))]
+fn test_endpoint(dir: &std::path::Path, name: &str) -> OracleEndpoint {
+    #[cfg(unix)]
+    return OracleEndpoint::Unix(dir.join(format!("{name}.sock")));
+    #[cfg(windows)]
+    return OracleEndpoint::Pipe(format!(
+        r"\\.\pipe\fauna-oracle-test-{}-{name}",
+        std::process::id()
+    ));
+}
+
+#[cfg(any(unix, windows))]
 async fn until(what: &str, mut f: impl FnMut() -> bool) {
     for _ in 0..200 {
         if f() {
@@ -391,33 +436,33 @@ async fn until(what: &str, mut f: impl FnMut() -> bool) {
 /// Two signed-in apps over one account: exactly one serves; the other takes
 /// the door over within a tick of the first signing out; an operation's record
 /// reaches the nest; a revoke from another app refuses the next operation.
+#[cfg(any(unix, windows))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn two_apps_take_the_door_in_turn_and_a_revoke_bites_at_the_next_operation() {
     let (secret, holder) = fauna_mls::wrapped_blob::generate_x25519_keypair();
     let world = World::granted(holder, &[IdentityOpClass::ConversationRead]);
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("oracle-runtime.sock");
+    let endpoint = test_endpoint(dir.path(), "runtime");
     let tick = Duration::from_millis(50);
 
     let (first_up, first_rx) = tokio::sync::watch::channel(true);
     let first = Arc::new(custodian(world.account()));
     let first_task = tokio::spawn(serve::keep_door_every(
-        serve::DoorKeeper::at(path.clone(), first.clone()),
+        serve::DoorKeeper::at(endpoint.clone(), first.clone()),
         first_rx,
         tick,
     ));
-    until("the first app serves", || path.exists()).await;
+    until("the first app serves", || serving(&endpoint)).await;
     let (second_up, second_rx) = tokio::sync::watch::channel(true);
     let second = Arc::new(custodian(world.account()));
     let second_task = tokio::spawn(serve::keep_door_every(
-        serve::DoorKeeper::at(path.clone(), second.clone()),
+        serve::DoorKeeper::at(endpoint.clone(), second.clone()),
         second_rx,
         tick,
     ));
     tokio::time::sleep(tick * 3).await;
-    assert!(held(&path), "exactly one serves: the endpoint is held");
+    assert!(held(&endpoint), "exactly one serves: the endpoint is held");
 
-    let endpoint = OracleEndpoint::Unix(path.clone());
     let list = {
         let endpoint = endpoint.clone();
         move || {
@@ -438,10 +483,7 @@ async fn two_apps_take_the_door_in_turn_and_a_revoke_bites_at_the_next_operation
     // The first app signs out: its sender drops, and the second takes over.
     drop(first_up);
     first_task.await.unwrap();
-    until("the second app takes the door over", || {
-        path.exists() && held(&path)
-    })
-    .await;
+    until("the second app takes the door over", || serving(&endpoint)).await;
     let listed = tokio::task::spawn_blocking(list.clone()).await.unwrap();
     assert_eq!(
         listed,
@@ -465,5 +507,5 @@ async fn two_apps_take_the_door_in_turn_and_a_revoke_bites_at_the_next_operation
 
     drop(second_up);
     second_task.await.unwrap();
-    assert!(!held(&path), "the door is free once no app may serve");
+    assert!(!held(&endpoint), "the door is free once no app may serve");
 }

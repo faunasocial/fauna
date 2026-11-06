@@ -20,7 +20,6 @@ visibly (the shared-box carve-out, ``testing.md`` § The shared-box rule).
 
 from __future__ import annotations
 
-import os
 import smtplib
 import socket
 import ssl
@@ -28,7 +27,7 @@ import time
 
 import pytest
 
-from helpers.live_handle import sign_in_handle
+from helpers.live_handle import handle_override, sign_in_handle
 
 
 def dump(app, ids) -> str:
@@ -72,22 +71,27 @@ def wait_connected(app, timeout: float = 90.0) -> None:
 def wait_logged_in(app, timeout: float = 150.0) -> None:
     """Wait for the feed view, driving the launch screen's retry on a
     transient connect error (a cold launch against a remote nest can surface
-    one)."""
+    one), and declining the one-tap trust offer a sign-in can end on
+    (onboarding.md § 3b-ter: whether it shows depends on what the box runs;
+    2026-10-23 a fauna.build sign-in parked there and never reached the feed).
+    Declining is the default every journey helper takes."""
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if app.driver.is_visible("feed-view") or app.driver.is_visible("feed-tab"):
             return
-        if app.driver.is_visible("launch-retry-button"):
-            try:
-                app.driver.click("launch-retry-button")
-            except Exception:
-                pass
+        for button in ("launch-retry-button", "trust-box-skip-button"):
+            if app.driver.is_visible(button):
+                try:
+                    app.driver.click(button)
+                except Exception:
+                    pass
         time.sleep(2.0)
     pytest.fail(
         f"client never reached the feed view within {timeout:.0f}s.\n"
         + dump(app, ("feed-view", "feed-tab", "launch-retry-button",
                      "launch-transient-error", "error-message",
-                     "nat-mode-confirm-button", "claim-code-input"))
+                     "nat-mode-confirm-button", "claim-code-input",
+                     "trust-box-skip-button"))
     )
 
 
@@ -97,6 +101,7 @@ def reach_admin_shell(
     nest_url: str,
     secret_hex: str,
     claim_code: str = "",
+    claim_handle: str = "",
     nat_mode: str | None = None,
 ) -> str:
     """Import the admin identity and reach the logged-in shell purely through
@@ -110,11 +115,16 @@ def reach_admin_shell(
     wizard signs in as that one, so what gets typed is a routing input, not an
     identity claim (``helpers/live_handle.py``).
 
+    ``claim_handle`` is an explicit handle to type instead — the one the box
+    was provisioned under (``live_box_door.mailbox``, the staging-box file's
+    ``handle``), so a claim-fresh run claims under the box's own identity with
+    nothing exported. It is typed on a claimed box too, where it signs in.
+
     ``nat_mode`` (``"public"``/``"private"``) is the NAT-mode choice made on a
     claim; ``None`` accepts the page's pre-selected seed.
     """
     ob = app.onboarding
-    typed = sign_in_handle(nest_url)
+    typed = claim_handle.strip() or sign_in_handle(nest_url)
     ob.navigate_to_status()
     ob.import_key(secret_hex)        # → handle_entry
     ob.fill_handle(typed)
@@ -130,15 +140,14 @@ def reach_admin_shell(
             # probe in as the admin's real handle — and, through its domain
             # suffix, as the deployment's identity (claim_core.rs) — which is
             # damage no teardown can undo. Claiming is an explicit-handle act.
-            if not os.environ.get("FAUNA_LIVE_HANDLE") and not os.environ.get(
-                "FAUNA_LIVE_MAIL_ADDRESS"
-            ):
+            if not claim_handle.strip() and not handle_override():
                 pytest.fail(
                     "the nest is UNCLAIMED (claim-code page reached) and the "
                     f"handle typed was the derivation probe {typed!r}. Claiming "
                     "would register that probe as the admin's real handle — "
-                    "refusing. A claim-fresh run must name its handle: set "
-                    "FAUNA_LIVE_HANDLE (plus FAUNA_LIVE_CLAIM_CODE)."
+                    "refusing. A claim-fresh run must name its handle: pass "
+                    "claim_handle (the box file's handle) or set FAUNA_LIVE_HANDLE "
+                    "(plus FAUNA_LIVE_CLAIM_CODE)."
                 )
             if not claim_code:
                 pytest.fail(

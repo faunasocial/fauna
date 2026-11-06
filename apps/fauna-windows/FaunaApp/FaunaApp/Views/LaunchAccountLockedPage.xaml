@@ -1,0 +1,68 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Page
+    x:Class="FaunaApp.Views.LaunchAccountLockedPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:controls="using:FaunaApp.Controls"
+    xmlns:ids="using:FaunaApp.UiIds">
+    <ScrollViewer VerticalScrollBarVisibility="Auto">
+        <Grid Padding="48" HorizontalAlignment="Center" VerticalAlignment="Center" MaxWidth="560">
+
+            <!-- `launch_account_locked` (ui.yaml; ui/sessions.md § The locked
+                 surface): the standing notice and its ONE action. No retry and no
+                 fallthrough — nothing clears the lock before its time, and the
+                 launch machine's own refresh at that time signs back in. -->
+            <StackPanel x:Name="NoticePanel" Spacing="16" HorizontalAlignment="Center">
+                <FontIcon Glyph="&#xE72E;" FontSize="44"
+                          Foreground="{ThemeResource SystemFillColorCautionBrush}" />
+                <TextBlock x:Name="TitleText"
+                           Style="{StaticResource SubtitleTextBlockStyle}"
+                           TextWrapping="Wrap" TextAlignment="Center" />
+                <!-- One element, the three sentences in the ratified order; its own
+                     id, so no other error text can satisfy the witness. -->
+                <TextBlock x:Name="NoticeText"
+                           AutomationProperties.AutomationId="{x:Bind ids:Ids.LaunchAccountLockedNotice}"
+                           TextWrapping="Wrap" TextAlignment="Center" />
+                <Button x:Name="StolenButton"
+                        AutomationProperties.AutomationId="{x:Bind ids:Ids.LaunchAccountLockedStolenButton}"
+                        Style="{StaticResource AccentButtonStyle}"
+                        HorizontalAlignment="Center"
+                        Click="OnStolenClick" />
+            </StackPanel>
+
+            <!-- `identity_stolen_entry` (ui.yaml): composed of existing elements only
+                 — the Settings Recovery kit section's kit field, type-to-confirm
+                 field and button, the restore's back button and error-message — so
+                 the ceremony has one set of ids wherever it is offered. Nothing
+                 typed here is persisted. -->
+            <StackPanel x:Name="StolenPanel" Spacing="12" Visibility="Collapsed">
+                <controls:CopyableInfoBar
+                    x:Name="ErrorBar"
+                    Severity="Error"
+                    IsOpen="False"
+                    IsClosable="False" />
+                <TextBlock x:Name="StolenTitleText"
+                           Style="{StaticResource TitleTextBlockStyle}" />
+                <TextBlock x:Name="StolenWarningText"
+                           TextWrapping="Wrap" Opacity="0.8" />
+                <!-- A PasswordBox: the kit outranks the identity secret itself. -->
+                <PasswordBox x:Name="PhraseBox"
+                             AutomationProperties.AutomationId="{x:Bind ids:Ids.RecoveryEntryPhraseField}"
+                             PasswordChanged="PhraseBox_PasswordChanged" />
+                <TextBox x:Name="ConfirmBox"
+                         AutomationProperties.AutomationId="{x:Bind ids:Ids.IdentityStolenConfirmField}"
+                         TextChanged="ConfirmBox_TextChanged" />
+                <StackPanel Orientation="Horizontal" Spacing="8" Margin="0,8,0,0">
+                    <Button x:Name="BackButton"
+                            AutomationProperties.AutomationId="{x:Bind ids:Ids.RecoveryEntryBackButton}"
+                            Click="OnBackClick" />
+                    <Button x:Name="SucceedButton"
+                            AutomationProperties.AutomationId="{x:Bind ids:Ids.IdentityStolenButton}"
+                            Style="{StaticResource AccentButtonStyle}"
+                            IsEnabled="False"
+                            Click="OnSucceedClick" />
+                </StackPanel>
+            </StackPanel>
+        </Grid>
+    </ScrollViewer>
+</Page>

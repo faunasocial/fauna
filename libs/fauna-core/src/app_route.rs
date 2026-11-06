@@ -179,46 +179,17 @@ fn is_relative_path(path: &str) -> bool {
 }
 
 fn percent_encode(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for b in s.bytes() {
-        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~' | b'/') {
-            out.push(b as char);
-        } else {
-            out.push_str(&format!("%{b:02X}"));
-        }
-    }
-    out
+    crate::format::percent_encode_except(s, |b| matches!(b, b'-' | b'.' | b'_' | b'~' | b'/'))
 }
 
 /// One path segment: unreserved characters and `:` pass through, `/` and
 /// everything else is `%XX`.
 fn percent_encode_segment(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for b in s.bytes() {
-        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~' | b':') {
-            out.push(b as char);
-        } else {
-            out.push_str(&format!("%{b:02X}"));
-        }
-    }
-    out
+    crate::format::percent_encode_except(s, |b| matches!(b, b'-' | b'.' | b'_' | b'~' | b':'))
 }
 
 fn percent_decode(s: &str) -> Option<String> {
-    let bytes = s.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'%' {
-            let hex = s.get(i + 1..i + 3)?;
-            out.push(u8::from_str_radix(hex, 16).ok()?);
-            i += 3;
-        } else {
-            out.push(bytes[i]);
-            i += 1;
-        }
-    }
-    String::from_utf8(out).ok()
+    crate::web::percent_decode_strict(s)
 }
 
 #[cfg(test)]

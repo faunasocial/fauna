@@ -173,11 +173,13 @@ pub struct RpcConnection {
     /// spared by *sign out everywhere else*.
     pub token_id: Option<String>,
     /// The device this connection is **bound to**: the renewal device key that
-    /// minted its bearer over `fauna.auth.device_handshake` — the same key the
-    /// device's `sync_devices` row carries as `auth_device_key` (the roster's
+    /// minted its bearer over `fauna.auth.device_handshake`, or that proved
+    /// itself in band over `fauna.auth.device_bind` — the same key the device's
+    /// `sync_devices` row carries as `auth_device_key` (the roster's
     /// `principal`). What `fauna.sync.devices.list` joins on to answer
-    /// `online` for the app seats and per-user sync agents (`devices.md`
-    /// § Listing Devices → *The binding*).
+    /// `online` for the app seats, per-user sync agents and web's one socket
+    /// (`devices.md` § Listing Devices → *The binding*). Read through
+    /// [`Self::bound_device_key`].
     ///
     /// Captured at the upgrade beside [`Self::token_id`], for the same reason:
     /// the bearer is validated once and its row is never re-read, and a socket
@@ -187,14 +189,21 @@ pub struct RpcConnection {
     /// entry** ([`WsState::has_connection_bound_to`]), so a key on another
     /// actor's connection reaches nothing here.
     ///
-    /// Nest-verified by construction: the mint that set the tag verified the
-    /// device key's signature over the domain-tagged handshake message. No
-    /// client asserts a device id anywhere on this path. `None` for a
-    /// seed-minted bearer (handshake, challenge/verify — an identity, not a
-    /// device), for the custody handshake's overloaded tag (excluded by
-    /// [`bound_device_key_for`]), on the anonymous connection, and on
-    /// test-subscribed connections.
-    pub bound_device_key: Option<[u8; 32]>,
+    /// Nest-verified by construction: the mint that set the tag, or the bind
+    /// itself, verified the device key's signature over a domain-tagged
+    /// message. No client asserts a device id anywhere on this path. `None`
+    /// for a seed-minted bearer (handshake, challenge/verify — an identity,
+    /// not a device) until it binds in band, for the custody handshake's
+    /// overloaded tag (excluded by [`bound_device_key_for`]), on the anonymous
+    /// connection, and on test-subscribed connections.
+    ///
+    /// Set once: a connection carries one key, the one it upgraded with or
+    /// the first it bound ([`WsState::bind_device_key`]), and the sole later
+    /// write is the bind that newly set it taking itself back when it raced
+    /// its own revocation ([`WsState::clear_device_key`]) — a repeat bind
+    /// never unbinds, it revokes the connection
+    /// ([`WsState::revoke_connection`]).
+    bound_device_key: std::sync::Mutex<Option<[u8; 32]>>,
     /// The push `device_id` this connection **announced** it serves, over
     /// `fauna.push.presence` — `None` until it does. The input to the per-device push decision
     /// ([`WsState::device_presence`]; `apps/common.md` § Dispatch Logic).
@@ -422,6 +431,22 @@ pub fn bound_device_key_for(
     minted_by_device.filter(|key| key != actor_id)
 }
 
+/// What [`WsState::bind_device_key`] did with a connection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeviceBindOutcome {
+    /// The connection did not carry a key and now carries this one.
+    Bound,
+    /// The connection already carried this very key: a repeat naming the same
+    /// key is idempotent, and the binding is not this call's — so a caller
+    /// that must take the bind back cannot unbind it without unbinding a key
+    /// some earlier call set ([`crate::auth_core::device_bind_core`]).
+    AlreadyBound,
+    /// The connection carries a different key, which stays.
+    AlreadyBoundElsewhere,
+    /// No such connection is registered — the caller's socket is already gone.
+    ConnectionGone,
+}
+
 /// What one connection announced over `fauna.sync.serve.announce`, after the
 /// handler admitted it ([`RpcConnection::announced_serving`]).
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -468,7 +493,7 @@ impl RpcConnection {
             anonymous,
             principal,
             token_id,
-            bound_device_key,
+            bound_device_key: std::sync::Mutex::new(bound_device_key),
             announced_device: std::sync::Mutex::new(None),
             announced_serving: std::sync::Mutex::new(None),
             foreign_renewal: std::sync::Mutex::new(None),
@@ -487,6 +512,12 @@ impl RpcConnection {
             loopback_peer,
             served_name,
         }
+    }
+
+    /// The device key this connection is bound to, if any
+    /// ([`Self::bound_device_key`]).
+    pub fn bound_device_key(&self) -> Option<[u8; 32]> {
+        *self.bound_device_key.lock().unwrap()
     }
 
     /// The push `device_id` this connection announced, if any
@@ -529,10 +560,35 @@ impl RpcConnection {
         self.ws_tx.clone().reserve_owned().await.ok()
     }
 
-    /// Hold `slot` for the Reply to `correlation_id`. A client reusing a
-    /// correlation id still in flight replaces the earlier slot, whose Reply
-    /// then falls back to a plain `try_send` — the client's own bug, and the
-    /// queue's capacity is still never over-promised.
+    /// Is a request at `correlation_id` still in flight on this connection —
+    /// holding the Reply slot it was admitted with, or a registered handler?
+    ///
+    /// The reader loop asks this before admitting a Request and closes 4400
+    /// on `true` (`transport.md` § Request lifecycle, step 1). Without it a
+    /// peer sending every Request at one id would drop each earlier slot as
+    /// the next one replaced it, so it would never park and the per-connection
+    /// cap would bound nothing. Both maps are read so the refusal does not
+    /// rest on either alone: the slot is held from admission to the Reply's
+    /// send, the handler entry from spawn to the handler's end.
+    pub async fn correlation_in_flight(&self, correlation_id: u64) -> bool {
+        if self
+            .reply_slots
+            .lock()
+            .unwrap()
+            .contains_key(&correlation_id)
+        {
+            return true;
+        }
+        self.pending_handlers
+            .lock()
+            .await
+            .contains_key(&correlation_id)
+    }
+
+    /// Hold `slot` for the Reply to `correlation_id`. The reader refuses a
+    /// reused in-flight id before it gets here
+    /// ([`Self::correlation_in_flight`]), so an insert never replaces a slot
+    /// another request still holds.
     pub fn hold_reply_slot(&self, correlation_id: u64, slot: mpsc::OwnedPermit<Bytes>) {
         self.reply_slots
             .lock()
@@ -1070,6 +1126,28 @@ impl ServerHeartbeat {
 /// Principal sessions by `(account, principal_id)`.
 type PrincipalRegistry = HashMap<([u8; 32], Vec<u8>), Vec<Arc<RpcConnection>>>;
 
+/// One held HTTP events long-poll slot ([`WsState::event_poll_begin`]); the
+/// slot is given back when this drops.
+pub struct EventPollSlot {
+    polls: Arc<std::sync::Mutex<HashMap<([u8; 32], Vec<u8>), usize>>>,
+    key: ([u8; 32], Vec<u8>),
+}
+
+impl Drop for EventPollSlot {
+    fn drop(&mut self) {
+        let mut polls = self
+            .polls
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(held) = polls.get_mut(&self.key) {
+            *held = held.saturating_sub(1);
+            if *held == 0 {
+                polls.remove(&self.key);
+            }
+        }
+    }
+}
+
 /// Manages WebSocket connections keyed by ActorId. Lives in `AppState`.
 pub struct WsState {
     next_conn_id: std::sync::Mutex<u64>,
@@ -1089,6 +1167,10 @@ pub struct WsState {
     /// landed while it ran, owing one more delivery when it ends — so a burst
     /// of writes costs the publisher's server at most two notifications.
     webhook_inflight: std::sync::Mutex<HashMap<Vec<u8>, bool>>,
+    /// How many HTTP events long-polls each `(account, principal_id)` holds
+    /// open right now — the door's per-principal in-flight cap
+    /// ([`Self::event_poll_begin`], `crate::events_doors::MAX_LONG_POLLS`).
+    event_polls: Arc<std::sync::Mutex<HashMap<([u8; 32], Vec<u8>), usize>>>,
     /// Flips `true` once `begin_shutdown` is called. Each live `run_connection`
     /// watches this; on the flip it stops reading new requests, drains its
     /// in-flight handlers, then closes the socket with WS 1001 (Going Away).
@@ -1101,6 +1183,70 @@ pub struct WsState {
     /// [`WsState::new`] (unit tests — the per-connection LRU alone, the
     /// pre-tier behavior); production wires it with [`WsState::with_durable`].
     durable: Option<std::sync::Arc<crate::db::CacheDb>>,
+    /// The live web mail-import tunnels, by actor (`mail_import_tunnel.rs`).
+    /// A tunnel is no `RpcConnection` — it dispatches nothing and joins no
+    /// Push walk — but it is a socket a bearer opened, so the one teardown
+    /// body ([`Self::disconnect_where`]) reaches it with the same selection
+    /// it applies to the actor's RPC sockets, and no revocation site needs to
+    /// know tunnels exist (`transport-connection.md` § *Revocation teardown*).
+    tunnels: TunnelRegistry,
+}
+
+/// What a teardown selects an actor's live socket by: the session it was
+/// upgraded with. One view over an `RpcConnection` and a byte tunnel alike,
+/// so every per-actor, per-token and per-device form sweeps both.
+#[derive(Clone, Copy)]
+struct SessionView<'a> {
+    token_id: Option<&'a str>,
+    bound_device_key: Option<[u8; 32]>,
+}
+
+struct TunnelEntry {
+    id: u64,
+    token_id: String,
+    bound_device_key: Option<[u8; 32]>,
+    cancel: tokio_util::sync::CancellationToken,
+}
+
+type TunnelRegistry = Arc<std::sync::Mutex<HashMap<[u8; 32], Vec<TunnelEntry>>>>;
+
+/// A live byte tunnel's place in the per-actor teardown: cancelled when any
+/// teardown selecting its session runs, deregistered on drop.
+pub struct TunnelLease {
+    registry: TunnelRegistry,
+    actor: [u8; 32],
+    id: u64,
+    cancel: tokio_util::sync::CancellationToken,
+}
+
+impl TunnelLease {
+    /// Resolves once a teardown has selected this tunnel.
+    pub async fn revoked(&self) {
+        self.cancel.cancelled().await;
+    }
+
+    /// Whether a teardown has selected this tunnel.
+    pub fn is_revoked(&self) -> bool {
+        self.cancel.is_cancelled()
+    }
+
+    /// Close this tunnel as a teardown would — the upgrade window's re-read
+    /// found its session already gone.
+    pub fn revoke(&self) {
+        self.cancel.cancel();
+    }
+}
+
+impl Drop for TunnelLease {
+    fn drop(&mut self) {
+        let mut tunnels = self.registry.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(list) = tunnels.get_mut(&self.actor) {
+            list.retain(|t| t.id != self.id);
+            if list.is_empty() {
+                tunnels.remove(&self.actor);
+            }
+        }
+    }
 }
 
 impl Default for WsState {
@@ -1124,10 +1270,58 @@ impl WsState {
             principals: std::sync::Mutex::new(HashMap::new()),
             event_waiters: std::sync::Mutex::new(HashMap::new()),
             webhook_inflight: std::sync::Mutex::new(HashMap::new()),
+            event_polls: Arc::new(std::sync::Mutex::new(HashMap::new())),
             shutdown_tx: tokio::sync::watch::channel(false).0,
             heartbeat,
             durable: None,
+            tunnels: Arc::default(),
         }
+    }
+
+    /// Register a live byte tunnel of `actor_id`, opened with the bearer filed
+    /// under `token_id` and bound (by that bearer's mint) to
+    /// `bound_device_key`. The returned lease is cancelled by every teardown
+    /// whose selection the session matches; the caller re-reads the session
+    /// after registering, exactly as [`crate::routes::AppState::register_upgraded_connection`]
+    /// does, so a revoke racing the upgrade is caught too.
+    pub fn register_tunnel(
+        &self,
+        actor_id: [u8; 32],
+        token_id: String,
+        bound_device_key: Option<[u8; 32]>,
+    ) -> TunnelLease {
+        let id = {
+            let mut next = self.next_conn_id.lock().unwrap();
+            *next += 1;
+            *next
+        };
+        let cancel = tokio_util::sync::CancellationToken::new();
+        self.tunnels
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .entry(actor_id)
+            .or_default()
+            .push(TunnelEntry {
+                id,
+                token_id,
+                bound_device_key,
+                cancel: cancel.clone(),
+            });
+        TunnelLease {
+            registry: Arc::clone(&self.tunnels),
+            actor: actor_id,
+            id,
+            cancel,
+        }
+    }
+
+    /// How many byte tunnels `actor_id` holds registered right now.
+    pub fn tunnel_count(&self, actor_id: &[u8; 32]) -> usize {
+        self.tunnels
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(actor_id)
+            .map_or(0, Vec::len)
     }
 
     /// [`WsState::new`] with the durable idempotency tier wired — what
@@ -1396,6 +1590,28 @@ impl WsState {
         }
     }
 
+    /// Take one of `(account, principal_id)`'s `cap` HTTP events long-poll
+    /// slots: `None` when all are held — the door answers 429 — else a guard
+    /// that gives the slot back when dropped, however the poll ends.
+    pub fn event_poll_begin(
+        &self,
+        account: &[u8; 32],
+        principal_id: &[u8],
+        cap: usize,
+    ) -> Option<EventPollSlot> {
+        let key = (*account, principal_id.to_vec());
+        let mut polls = self.event_polls.lock().unwrap();
+        let held = polls.entry(key.clone()).or_insert(0);
+        if *held >= cap {
+            return None;
+        }
+        *held += 1;
+        Some(EventPollSlot {
+            polls: Arc::clone(&self.event_polls),
+            key,
+        })
+    }
+
     /// The wake an HTTP events long-poll for `account` waits on — see
     /// [`Self::wake_event_waiters`]. The caller enables its `Notified`
     /// BEFORE reading, so a change landing between the read and the wait is
@@ -1571,6 +1787,66 @@ impl WsState {
         true
     }
 
+    /// Bind `actor_id`'s live connection `conn_id` to `device_key`
+    /// (`fauna.auth.device_bind`, whose handler has verified the key's proof).
+    /// The check and the write sit under one lock, so two binds racing on one
+    /// connection leave it with exactly one key.
+    pub fn bind_device_key(
+        &self,
+        actor_id: &[u8; 32],
+        conn_id: u64,
+        device_key: [u8; 32],
+    ) -> DeviceBindOutcome {
+        let subs = self.subs.lock().unwrap();
+        let Some(conn) = subs
+            .get(actor_id)
+            .and_then(|conns| conns.iter().find(|c| c.conn_id == conn_id))
+        else {
+            return DeviceBindOutcome::ConnectionGone;
+        };
+        let mut bound = conn.bound_device_key.lock().unwrap();
+        match *bound {
+            Some(key) if key != device_key => DeviceBindOutcome::AlreadyBoundElsewhere,
+            Some(_) => DeviceBindOutcome::AlreadyBound,
+            None => {
+                *bound = Some(device_key);
+                DeviceBindOutcome::Bound
+            }
+        }
+    }
+
+    /// Take a bind back: `fauna.auth.device_bind` found the key revoked after
+    /// the write ([`crate::auth_core::device_bind_core`]). A connection already
+    /// gone has nothing to clear. Only for a binding that call newly set
+    /// ([`DeviceBindOutcome::Bound`]); a pre-existing one is never unbound —
+    /// [`Self::revoke_connection`] closes its socket instead.
+    pub fn clear_device_key(&self, actor_id: &[u8; 32], conn_id: u64) {
+        let subs = self.subs.lock().unwrap();
+        if let Some(conn) = subs
+            .get(actor_id)
+            .and_then(|conns| conns.iter().find(|c| c.conn_id == conn_id))
+        {
+            *conn.bound_device_key.lock().unwrap() = None;
+        }
+    }
+
+    /// Revoke `actor_id`'s live connection `conn_id` ([`RpcConnection::revoke`],
+    /// WS 4401). `fauna.auth.device_bind` does this when a repeat bind of a key
+    /// the connection already carried finds that key revoked after the write:
+    /// a removal racing it may already have swept, and an unbound socket would
+    /// slip past that sweep, so the socket closes instead
+    /// ([`crate::auth_core::device_bind_core`]). A connection already gone has
+    /// nothing to revoke.
+    pub fn revoke_connection(&self, actor_id: &[u8; 32], conn_id: u64) {
+        let subs = self.subs.lock().unwrap();
+        if let Some(conn) = subs
+            .get(actor_id)
+            .and_then(|conns| conns.iter().find(|c| c.conn_id == conn_id))
+        {
+            conn.revoke();
+        }
+    }
+
     /// Replace what `actor_id`'s live connection `conn_id` serves for the relay
     /// (`fauna.sync.serve.announce`) with the already-admitted `announce`.
     /// `false` when no such connection is registered — the socket is gone, and
@@ -1697,7 +1973,7 @@ impl WsState {
                 (
                     c.conn_id,
                     c.announced_device(),
-                    c.bound_device_key.is_some(),
+                    c.bound_device_key().is_some(),
                 )
             })
             .collect()
@@ -1715,7 +1991,7 @@ impl WsState {
         subs.get(actor_id).is_some_and(|conns| {
             conns
                 .iter()
-                .any(|c| c.bound_device_key.as_ref() == Some(device_key))
+                .any(|c| c.bound_device_key().as_ref() == Some(device_key))
         })
     }
 
@@ -1820,7 +2096,7 @@ impl WsState {
     ) -> usize {
         self.disconnect_where(
             actor_id,
-            |conn| conn.token_id.as_deref() == Some(token_id),
+            |conn| conn.token_id == Some(token_id),
             spare,
             "session revoked",
         )
@@ -1849,14 +2125,15 @@ impl WsState {
     ) -> usize {
         self.disconnect_where(
             actor_id,
-            |conn| conn.token_id.as_deref() != Some(keep_token_id),
+            |conn| conn.token_id != Some(keep_token_id),
             spare,
             "other sessions revoked",
         )
     }
 
-    /// Close every live connection of `actor_id` whose bearer `device_key`
-    /// minted ([`RpcConnection::bound_device_key`]) — the socket half of device
+    /// Close every live connection of `actor_id` bound to `device_key`, by the
+    /// bearer it minted or in band ([`RpcConnection::bound_device_key`]) — the
+    /// socket half of device
     /// removal (`fauna.sync.devices.delete`, `fauna.sync.device_grant.revoke`,
     /// graduation's severance of a marked guardian device), and the
     /// **per-device twin** of [`Self::disconnect_token_id`].
@@ -1897,18 +2174,42 @@ impl WsState {
     /// actor and this never widens past that entry, which is what keeps a
     /// teardown keyed on a `token_id` (a 16-hex string carrying no actor) from
     /// reaching another identity's socket.
+    ///
+    /// It sweeps the actor's byte tunnels with the same selection: a tunnel is
+    /// a socket its bearer opened, and the teardown is about the sockets that
+    /// already exist. A tunnel is never spared — no
+    /// handler runs on one.
     fn disconnect_where(
         &self,
         actor_id: &[u8; 32],
-        select: impl Fn(&RpcConnection) -> bool,
+        select: impl Fn(SessionView<'_>) -> bool,
         spare: Option<(u64, u64)>,
         reason: &'static str,
     ) -> usize {
         let conns: Vec<_> = self
             .connections_for(actor_id)
             .into_iter()
-            .filter(|c| select(c))
+            .filter(|c| {
+                select(SessionView {
+                    token_id: c.token_id.as_deref(),
+                    bound_device_key: c.bound_device_key(),
+                })
+            })
             .collect();
+        let tunnels = {
+            let registry = self.tunnels.lock().unwrap_or_else(|e| e.into_inner());
+            let mut n = 0usize;
+            for t in registry.get(actor_id).into_iter().flatten() {
+                if select(SessionView {
+                    token_id: Some(&t.token_id),
+                    bound_device_key: t.bound_device_key,
+                }) {
+                    t.cancel.cancel();
+                    n += 1;
+                }
+            }
+            n
+        };
         let mut spared = 0usize;
         for conn in &conns {
             match spare {
@@ -1919,16 +2220,17 @@ impl WsState {
                 _ => conn.revoke(),
             }
         }
-        if !conns.is_empty() {
+        if !conns.is_empty() || tunnels > 0 {
             tracing::info!(
                 actor = %hex::encode(actor_id),
                 connections = conns.len(),
+                tunnels,
                 spared,
                 reason,
                 "closing live connections with 4401"
             );
         }
-        conns.len()
+        conns.len() + tunnels
     }
 
     /// Snapshot the live connection set for `actor_id`. Returns a clone

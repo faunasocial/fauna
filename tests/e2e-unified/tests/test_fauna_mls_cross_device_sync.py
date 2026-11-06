@@ -1,4 +1,4 @@
-"""Tier_3 cross-device MLS group-state sync GUI proof on ``--client linux`` / ``macos`` / ``windows`` / ``tui``.
+"""Tier_3 cross-device MLS group-state sync GUI proof on ``--client linux`` / ``macos`` / ``ios`` / ``windows`` / ``tui``.
 
 The end-to-end validation that a client's **cross-device MLS state-sync leg**
 actually FIRES on login — linux: slice 5 leg 1
@@ -15,7 +15,7 @@ MLS group-state sync; design tracked internally, §5
 (restore-before-first-poll) + §1 (a sender cannot MLS-decrypt its own
 application messages ⇒ own history rides the replica, never log replay).
 
-⚠ Run this module in its OWN pytest invocation on macOS / windows: the
+⚠ Run this module in its OWN pytest invocation on macOS / iOS / windows: the
 ``real_conversations`` marker flips ``FAUNA_E2E_REAL_CONVERSATIONS`` session-wide
 for every native (apple / windows) config built that session
 (``_apply_real_conversations_env``), which would flip mock-inject DM tests
@@ -31,6 +31,7 @@ backend is a runtime toggle).
   device A) with alice's *same* secret key (⇒ same ``ActorId`` + ``BackupKey``)
   but a fresh, EMPTY MLS state db (linux: per-launch ``mkdtemp`` HOME; macOS: a
   pinned fresh ``home`` → ``CFFIXED_USER_HOME`` isolating Application Support;
+  iOS: a second simulator, whose fresh install is an empty app container;
   windows: a pinned fresh ``data_dir`` → ``FAUNA_E2E_DATA_DIR``. Windows launches
   are isolated by default now, but device B still PINS its dir — the two-device
   claim rests on a root this fixture owns and knows is empty, not on a driver
@@ -50,7 +51,7 @@ The nest-wire replica plane is proven at the API tier
 ``twin_device_takeover_resyncs_the_other_device``). THIS test is the only one
 that drives the whole leg through two real GUI apps over a real nest — the
 success bar for slice 5 leg 1 (linux) and the native FFI-factory leg
-(macOS + windows).
+(macOS + iOS + windows).
 
 The web second-device leg is ``test_fauna_mls_web_cross_device_sync.py``;
 android runs this same shape from its own machine. ``alice_second_device`` skips
@@ -65,9 +66,10 @@ from pathlib import Path
 import pytest
 
 from clients.ws_rpc_admin_client import WsRpcAdminClient
-from helpers.app_surface import skip_unbuilt
+from helpers.app_surface import require_surface
 from helpers.budgets import MLS_COMMIT_FOLD_S, MLS_HANDSHAKE_S
 from helpers.waiting import (
+    await_channel_bound,
     await_folded_commit_after,
     mls_folded_commits,
     wait_rail_blob_settled,
@@ -166,7 +168,7 @@ def _wait_channel_grows(port, peer, channel_hex, baseline, timeout=45.0):
 # so this witness is MARKED for the apps it can drive rather than gated by
 # declared_absence on web — an absence names a behaviour a platform lacks, a mark names
 # the apps a test can drive (feature-catalog.md § Cell semantics). ios and android stay
-# listed so their skip_unbuilt below keeps recording the build gap.
+# listed so their require_surface below keeps recording the build gap.
 @pytest.mark.linux
 @pytest.mark.macos
 @pytest.mark.windows
@@ -178,20 +180,7 @@ def test_fauna_mls_cross_device_sync(
     real_faunamls_app, nest_instance, test_user, request
 ):
     alice = real_faunamls_app  # device A
-    if not (
-        alice.driver.is_linux()
-        or alice.driver.is_macos()
-        or alice.driver.is_windows()
-        or alice.driver.is_tui()
-    ):
-        skip_unbuilt(
-            alice.driver,
-            surface="the cross-device MLS-sync GUI proof",
-            detail="runs on linux (slice 5 leg 1), macOS + windows (the "
-            "shared native FFI-factory leg), and tui (the shared tokio "
-            "launcher consumed directly); android is pending on its machine",
-            tracked="devices.md",
-        )
+    require_surface(alice.driver, "mls-cross-device-sync-proof")
 
     port = nest_instance["port"]
     node_url = nest_instance["url"]
@@ -260,6 +249,13 @@ def test_fauna_mls_cross_device_sync(
     # ── device B: alice's SECOND device (same secret, empty mls_state.db). Launch
     # it ON-DEMAND now — after the replica exists — so its login restore finds it.
     device_b, _driver_b = request.getfixturevalue("alice_second_device")
+
+    # Device B binds every channel it restores from the replica at launch; the
+    # bound set is the latency-independent restore witness (convention 14).
+    await_channel_bound(
+        _driver_b, channel_hex, budget_s=MLS_HANDSHAKE_S,
+        who="device B (restoring alice's 1:1 from the replica)",
+    )
 
     # ── CRUX: device B's login restore materialised alice's 1:1, and — the thing
     # log replay could NEVER give it (a sender cannot MLS-decrypt its own

@@ -237,6 +237,26 @@ public static class SessionInstance
     }
 
     /// <summary>
+    /// Stop serving: the process holder puts down its instance lock and its
+    /// shared-root serving lock and forgets the account. Called by every erasing
+    /// gesture that keeps the process alive (sign-out, start-over, the e2e
+    /// reset) <b>after</b> the erase — never by a remove-account of another
+    /// account, which goes on serving this one. A fault is logged, never thrown:
+    /// the sign-out it follows has already happened.
+    /// </summary>
+    public static void Release()
+    {
+        try
+        {
+            FaunaFfiMethods.ReleaseProcessSessionInstance();
+        }
+        catch (Exception ex)
+        {
+            ShellLog.Warn(LogSource, $"[instance-lock] release threw ({ex.Message}) — the lock stays up until exit");
+        }
+    }
+
+    /// <summary>
     /// Those of <paramref name="actorIds"/> that <b>no live instance currently
     /// serves</b>, order preserved — the launch-collision chooser's list.
     ///

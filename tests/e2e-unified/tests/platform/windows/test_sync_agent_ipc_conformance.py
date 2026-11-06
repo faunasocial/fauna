@@ -65,3 +65,22 @@ GOLDEN_RECONCILE_ACCOUNT_RUNTIME_PAYLOAD_HEX = "".join((
 def test_reconcile_account_runtime_matches_rust_golden():
     req = ipc.reconcile_account_runtime_request(15)
     assert ipc.encode_payload(req).hex() == GOLDEN_RECONCILE_ACCOUNT_RUNTIME_PAYLOAD_HEX
+
+
+@pytest.mark.host_platform("windows")
+def test_a_failed_open_names_its_real_win32_error():
+    """A pipe open that fails reports the OS's own error number (convention 6).
+
+    The helper read ``ctypes.get_last_error()`` after a ``ctypes.windll`` call, which
+    only a ``use_last_error`` handle feeds, so every failed open said "Win32 error 0"
+    whatever the cause. A pipe nothing serves is ``ERROR_FILE_NOT_FOUND`` (2), waited
+    out for the open's short deadline and then raised. In-process: no agent, no
+    pipe is created.
+    """
+    import uuid
+
+    unserved = rf"\\.\pipe\fauna-e2e-unserved-{uuid.uuid4().hex}"
+    with pytest.raises(OSError) as failed:
+        ipc.send_request(unserved, ipc.encode_frame(ipc.get_service_status_request(1)), timeout=0.3)
+    assert failed.value.errno == 2, f"expected ERROR_FILE_NOT_FOUND (2), got {failed.value!r}"
+    assert "Win32 error 2" in str(failed.value), str(failed.value)

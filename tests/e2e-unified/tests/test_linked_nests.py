@@ -227,3 +227,72 @@ def test_admin_knob_off_rejects_link(admin_app):
             time.sleep(0.3)
         if app.admin.service_status_text("pairing").strip() != before:
             app.admin.toggle_service("pairing")
+
+
+@pytest.mark.feature("take-your-account-back")
+def test_link_refuses_two_nests_holding_different_recovery_keys(
+    succeedable_app, nest_instance, pairing_nest_b
+):
+    """Linking two nests that hold different recovery keys for this identity is
+    refused with the reason, and neither nest gains a pairing row
+    (succession-linked-nests.md § Every nest the identity is linked to, clause
+    (a): a fork is never linked silently).
+
+    The link action reconciles the two RecoveryKey registration chains before
+    it writes either row (`LinkBoth`'s `reconcile_recovery_chain`,
+    libs/fauna-client-pair); two first registrations under different keys are a
+    fork neither extends. The two kits are fixture state, registered through
+    shared Rust (`helpers/succession.py`, convention 8's carve-out); the link is
+    the UI gesture under test. DEDICATED actor (`succeedable_app`), never the
+    shared session user: a kit on that identity outlives the test.
+    """
+    from clients.ws_rpc_admin_client import WsRpcAdminClient
+    from helpers.succession import register_recovery_kit
+    from i18n.strings import S
+
+    app, user = succeedable_app
+    nest_b = pairing_nest_b
+    seed_hex = bytes(user["signing_key"]).hex()
+    register_user(
+        nest_b["port"],
+        user["actor_id_hex"],
+        admin_signing_key=nest_b["admin"]["signing_key"],
+    )
+    # One identity, a different recovery kit at each nest: a fork.
+    kit_a = register_recovery_kit(
+        nest_instance["url"], actor_id_hex=user["actor_id_hex"], identity_seed_hex=seed_hex
+    )
+    kit_b = register_recovery_kit(
+        nest_b["url"], actor_id_hex=user["actor_id_hex"], identity_seed_hex=seed_hex
+    )
+    assert kit_a != kit_b, "control: the two nests must hold different kits"
+
+    app.linked_nests.navigate()
+    assert app.linked_nests.is_page_visible(), (
+        f"Nests page not reachable. error: {app.error_text()!r}"
+    )
+    assert app.linked_nests.wait_for_pairing_count(0, timeout=8.0), (
+        "control: a fresh actor has no linked nests"
+    )
+
+    app.linked_nests.link(nest_b["url"])
+    err = app.linked_nests.page_error_text(timeout=15.0)
+    assert S.nests.link_recovery_keys_differ in (err or ""), (
+        "linking two nests that hold different recovery kits must be refused "
+        f"with that reason on error-message; it reads {err!r}"
+    )
+
+    # Nothing written at either end.
+    assert app.linked_nests.pairing_count() == 0, (
+        "the refused link must add no pairing on the connected nest"
+    )
+    for nest in (nest_instance, nest_b):
+        with WsRpcAdminClient(
+            nest["url"],
+            actor_id=bytes.fromhex(user["actor_id_hex"]),
+            signing_key=bytes(user["signing_key"]),
+        ) as ws:
+            pairings = ws.call("fauna.pair.list", {}).get("pairings", [])
+        assert pairings == [], (
+            f"the refused link wrote a pairing row at {nest['url']}: {pairings!r}"
+        )

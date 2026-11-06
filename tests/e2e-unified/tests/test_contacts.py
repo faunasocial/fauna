@@ -124,7 +124,7 @@ def test_roster_filter_narrows_by_handle(handled_logged_in_app):
     import secrets
 
     from clients.ws_rpc_admin_client import WsRpcAdminClient
-    from common.auth import register_handled_actor
+    from helpers.admin_wire import admit_adult
     from conftest import MAIL_PRIMARY_DOMAIN
 
     app = handled_logged_in_app
@@ -135,7 +135,7 @@ def test_roster_filter_narrows_by_handle(handled_logged_in_app):
     # the sole row in her roster. Search "rosterbob" can only match his handle
     # (hex actor-ids have no letters > 'f'), isolating the handle dimension.
     bob_handle = "rosterbob" + secrets.token_hex(2)
-    bob = register_handled_actor(nest["port"], handle=bob_handle, domain=MAIL_PRIMARY_DOMAIN)
+    bob = admit_adult(nest, bob_handle, domain=MAIL_PRIMARY_DOMAIN, token=True)
     with WsRpcAdminClient(
         nest["url"],
         actor_id=alice["actor_id_bytes"],
@@ -203,7 +203,6 @@ def test_find_result_open_profile_button_opens_the_found_actor(logged_in_app, ne
     from common.auth import create_actor_and_register
 
     app = logged_in_app
-    app.contacts.require_find_result_opens_profile()
     other = create_actor_and_register(
         nest_instance["port"],
         base_url=nest_instance["url"],

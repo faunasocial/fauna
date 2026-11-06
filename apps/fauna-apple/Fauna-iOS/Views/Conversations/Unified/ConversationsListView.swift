@@ -57,6 +57,7 @@ struct ConversationsListView: View {
     @Environment(FaunaClient.self) private var client: FaunaClient?
 
     @State private var path: [Route] = []
+    @State private var mountedOnce = false
 
     /// `newThread` carries a per-push `UUID` rather than being a bare
     /// no-payload case, so two `.newThread` pushes are never the same `Route`
@@ -190,6 +191,20 @@ struct ConversationsListView: View {
             if isComposing { presentComposerIfNeeded() }
         }
         .onAppear { presentComposerIfNeeded() }
+        // A selection made before this tab ever mounted (a Search hit opened from
+        // another tab). Once only: the pop back to this list can fire `onAppear`
+        // ahead of the detail's `clearSelection`, which would push it straight back.
+        .onAppear {
+            guard !mountedOnce else { return }
+            mountedOnce = true
+            if let id = vm.selectedThreadId, vm.newThreadCompose == nil { presentSelection(id) }
+        }
+        // Each visit re-reads the `Archive` rail's imported threads. Driven off
+        // `selectedTab`, not `.onAppear`: the TabView keeps this tab mounted, so
+        // `.onAppear` fires only once (`FeedListView`'s re-pull, same reason).
+        .onChange(of: appState.selectedTab) {
+            if appState.selectedTab == "conversations" { Task { await vm.refreshArchiveThreads() } }
+        }
         // `send_new_thread` materializes the thread and selects it BEFORE the send
         // even attempts (`manager.rs::send_new_thread`) — success or failure alike,
         // so `newThreadCompose` going nil is not on its own proof the user chose to
@@ -208,8 +223,11 @@ struct ConversationsListView: View {
         // touches `selectedThreadId` — `ConversationDetailView.onDisappear`
         // already cleared it, since the `+` button is only reachable from the list.
         .onChange(of: vm.selectedThreadId) { _, newId in
-            guard let newId, vm.newThreadCompose == nil,
-                  let idx = path.firstIndex(where: { $0.isNewThread }) else { return }
+            guard let newId, vm.newThreadCompose == nil else { return }
+            guard let idx = path.firstIndex(where: { $0.isNewThread }) else {
+                presentSelection(newId)
+                return
+            }
             // No-animation, like the push/pop above — this swap races the send's
             // own outcome (the error banner rendering moments later on the very
             // screen this mounts), and an animated NavigationStack transition is a
@@ -247,6 +265,12 @@ struct ConversationsListView: View {
             withTransaction(txn) {
                 path.removeAll()
             }
+            // Returning to the list closes the thread, and the selection goes with
+            // it. Left standing, a thread popped on the way back from another tab
+            // is re-pushed by `presentSelection` in the same pass, and SwiftUI builds
+            // a second instance of the screen that UIKit never hosts, whose `.sheet`
+            // can then never present.
+            if vm.selectedThreadId != nil { vm.clearSelection() }
         }
         // The test agent's `nav_back` (the back gesture): pop the top screen, as the
         // nav-bar back does — for a `.newThread` composer that fires its
@@ -277,6 +301,20 @@ struct ConversationsListView: View {
         // outgoing account's and is itself dropped by the shell's teardown.
         .onChange(of: SessionKey(client)) {
             path.removeAll()
+        }
+    }
+
+    /// A selection this list's own rows did not make (`SearchNav`'s mail and draft
+    /// arms select through the manager) has nothing else to open it: every other
+    /// app's detail pane follows the selection, and this stack follows `path`.
+    /// Replaces rather than appends, so a hit opened over another thread comes back
+    /// to the list in one step, as a row tap does.
+    private func presentSelection(_ id: ThreadId) {
+        guard path.last != .thread(id) else { return }
+        var txn = Transaction()
+        txn.disablesAnimations = true
+        withTransaction(txn) {
+            path = [.thread(id)]
         }
     }
 

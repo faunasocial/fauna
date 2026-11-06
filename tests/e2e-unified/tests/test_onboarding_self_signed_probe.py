@@ -35,8 +35,9 @@ Acceptance for `installers/windows.md` § Implementation status → *Network-rea
 nest* (`test@<ip>` → `https://<ip>` → Reachable, ratified 2026-06-20): the
 shared-Rust client fix this proves is the same one the Windows network-reachable
 nest relies on. Native-only — a browser cannot programmatically trust a self-signed
-cert (web is single-origin), so this is `--client linux` (the Linux workhorse client);
-macOS/iOS use the same shared client but are macOS-machine-gated.
+cert (web is single-origin), so this runs on the native apps that drive the shared
+onboarding machine through their test bridge: linux, tui, windows, android, and macOS/iOS
+(the same shared client, macOS-machine-gated).
 """
 
 from __future__ import annotations
@@ -47,7 +48,7 @@ from pathlib import Path
 
 import pytest
 
-from helpers.app_surface import declared_absence, skip_unbuilt
+from helpers.app_surface import require_surface
 
 # Mirror the sys.path bootstrap of the sibling local-onboarding e2e files so the
 # shared `common` package (tests/common/) and the e2e-unified helpers resolve.
@@ -58,14 +59,13 @@ _e2e_dir = str(Path(__file__).resolve().parent.parent)  # tests/e2e-unified/
 if _e2e_dir not in sys.path:
     sys.path.insert(0, _e2e_dir)
 
-from common.nest import CLAIM_CODE  # noqa: E402
 from conftest import get_available_apps  # noqa: E402
 
 _avail_clients = get_available_apps()
-if "linux" not in _avail_clients:
+if not {"android", "linux", "macos", "ios", "tui", "windows"} & set(_avail_clients):
     pytest.skip(
-        "drives the linux client onboarding handle-check over a real self-signed "
-        "TLS nest (web cannot trust a self-signed cert; apple is mac-gated)",
+        "drives the android/linux/macos/ios/tui/windows app onboarding handle-check over a real "
+        "self-signed TLS nest (web cannot trust a self-signed cert; apple is mac-gated)",
         allow_module_level=True,
     )
 
@@ -74,28 +74,13 @@ pytestmark = [pytest.mark.tier1, pytest.mark.tier_3]
 
 def _require_native_self_signed_probe(driver) -> None:
     """The self-signed-tolerant onboarding handle-check probe is native-only
-    (a browser cannot programmatically trust a self-signed cert — structural,
-    testing.md § Cross-app e2e conventions, point 7); linux is the sole app
-    that has lifted the driver-side onboarding flow this test drives so far,
-    apple is separately mac-machine-gated fleet-wide."""
-    if driver.is_web():
-        declared_absence(
-            driver,
-            capability="a self-signed-cert-trusting TLS onboarding probe",
-            doc="testing.md § Cross-app e2e conventions, point 7 (web is "
-            "single-origin and cannot be told to trust a self-signed cert)",
-        )
-    elif not driver.is_linux():
-        skip_unbuilt(
-            driver,
-            surface="the self-signed-tolerant onboarding handle-check e2e drive",
-            detail="linux proves the shared-Rust "
-            "OnboardingMachine::local_nest_probe_client fix end to end; "
-            "windows/tui/android are the remaining cross-app follow-on "
-            "(macOS/iOS use the same shared client but are mac-machine-gated "
-            "fleet-wide, not unbuilt)",
-            tracked="onboarding.md",
-        )
+    (the browser terminates TLS and hands the page no certificate, so web has no
+    probe to tolerate anything, and the test is MARKED off it: feature-catalog.md
+    § Cell semantics, the marked-witness rule); linux, tui, windows and android
+    have lifted the driver-side onboarding flow this test drives (android reaches
+    the nest's port through `adb reverse`), apple is separately
+    mac-machine-gated fleet-wide."""
+    require_surface(driver, "self-signed-handle-check-drive")
 
 
 # A bare LAN-IP handle: `resolve_handle_domain` classifies it `is_local=true` AND
@@ -142,6 +127,12 @@ def self_signed_tls_nest(request, nest_mode, tmp_path_factory):
 
 
 @pytest.mark.feature("connect-and-sign-in")
+@pytest.mark.linux
+@pytest.mark.windows
+@pytest.mark.macos
+@pytest.mark.ios
+@pytest.mark.android
+@pytest.mark.tui
 def test_onboarding_handle_check_tolerates_self_signed_local_nest(
     app, self_signed_tls_nest
 ):
@@ -206,7 +197,7 @@ def test_onboarding_handle_check_tolerates_self_signed_local_nest(
     # ratified 2026-07-12). Stop here — the post-login session connect would
     # target the persisted typed-handle URL (192.168.1.57), which isn't where
     # the nest listens. ──
-    app.driver.clear_and_type("claim-code-input", CLAIM_CODE)
+    app.driver.clear_and_type("claim-code-input", nest["claim_code"])
     app.driver.click("claim-code-submit-button")
     app.driver.wait_for("nat-mode-confirm-button", timeout=45)
     assert app.is_visible("nat-mode-confirm-button"), (

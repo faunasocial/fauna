@@ -25,7 +25,6 @@ import time
 import pytest
 
 from clients.ws_rpc_admin_client import WsRpcAdminClient
-from helpers.app_surface import app_name, skip_unbuilt
 from helpers.copy_button import read_clipboard_or_copied
 from helpers.mail_aliases import default_alias_domain
 from helpers.mail_client_ui import plain_message, route_inbound_mail_to_app
@@ -386,11 +385,6 @@ def test_row_shows_hit_count_and_last_hit_after_real_inbound(
                 api.call("fauna.bridges.delete_account_alias", {"alias_id": row["alias_id"]})
 
 
-#: The apps whose rows open the per-address history (tui leads; the six follow
-#: from their per-app lifts).
-_AUDIT_BUILT_APPS = {"tui", "linux", "web", "android"}
-
-
 @pytest.mark.feature("mail-aliases")
 def test_an_address_shows_where_its_mail_came_from(
     logged_in_app, mail_bridge_mta, nest_instance, test_user
@@ -401,13 +395,6 @@ def test_an_address_shows_where_its_mail_came_from(
     (only the nest's recipient resolver ever does); the nest's own
     `list_account_alias_hits` is the ground truth the page must match."""
     app = logged_in_app
-    if app_name(app.driver) not in _AUDIT_BUILT_APPS:
-        skip_unbuilt(
-            app.driver,
-            surface="mail-aliases-audit-item",
-            detail="the row's show-audit disclosure is still inert on this app",
-            tracked="docs/goal/behavior/mail-aliases.md § Still deferred (the Show audit disclosure)",
-        )
     local = "audit" + secrets.token_hex(3)
     quiet = "quiet" + secrets.token_hex(3)
     addr = route_inbound_mail_to_app(app, mail_bridge_mta, nest_instance, test_user, local)

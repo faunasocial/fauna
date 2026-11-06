@@ -14,8 +14,10 @@
 # No launchd stdout/stderr redirect: the agent writes its own size-capped log
 # under its data dir (`fauna_log`, observability.md § Persistence & privacy),
 # and launchd never rotates a redirect — the old `sync-agent.log` copy reached
-# 6.6 GB. The app's self-install (`SyncAgentSpawner.swift`) writes the same
-# redirect-free plist.
+# 6.6 GB. The apps' self-install (the shared Rust launchd writer,
+# libs/fauna-client-sync/src/agent_spawner.rs) writes these SAME bytes — keep the
+# heredoc byte-identical to its `launchd_plist_contents` (both sides pinned by
+# test_apple_identifier_pins.py), or every .pkg box is rewritten on its first tick.
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "$SCRIPT_DIR/common.sh"

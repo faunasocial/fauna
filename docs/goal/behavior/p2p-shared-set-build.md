@@ -1,12 +1,12 @@
 # Cross-user shared-set transfer — the build (target state + build ledger)
 
 Owns: p2p-shared-set-build, phone-peer
-Status: ratified — split verbatim out of [`p2p.md`](p2p.md) on 2026-09-27; the share leg's serve/pull core, byte plane, pump, discovery carriage, row half and shared driver are built, with the tui and linux legs landed; the phone-peer shared arm is built (2026-10-01), the android and iOS legs are unbuilt
-Authority: **building the cross-user shared-set transfer plane** — the share leg's build contract (its first design pass), the row-half build design (B2) and its same-account leg (the 2026-10-14 design pass: the two pull kinds, the mint pinned as it stands, the one ingest by page origin, the engine-side pull), the build ledger (every *Built — …* record of what a build measured, including the per-app status paragraphs), and the **phone-peer design** (android and iOS as foreground partial peers: the replica access, the body source, the wanted-body landing policy, the lifecycle, the iOS door). **NOT owned here** — the plane's contract (the scenario and its contract points), § Offline share initiation, § Peer-served change-row provenance, the wormability walk and posture, the transport seam and everything else about P2P → [`p2p.md`](p2p.md); the replicas themselves and the keys a capability host holds → [`on-demand-files.md`](on-demand-files.md). On conflict with the contract, the contract in [`p2p.md`](p2p.md) wins.
+Status: ratified — split verbatim out of [`p2p.md`](p2p.md) on 2026-09-27; the share leg's serve/pull core, byte plane, pump, discovery carriage, row half and shared driver are built, with the tui and linux legs landed; the phone-peer shared arm is built (2026-10-01), the android and iOS legs are unbuilt; the group set's design moved to [`group-set.md`](group-set.md) on 2026-10-30
+Authority: **building the cross-user shared-set transfer plane** — the share leg's build contract (its first design pass), the row-half build design (B2) and its same-account leg (the 2026-10-14 design pass: the two pull kinds, the mint pinned as it stands, the one ingest by page origin, the engine-side pull), the build ledger (every *Built — …* record of what a build measured, including the per-app status paragraphs), and the **phone-peer design** (android and iOS as foreground partial peers: the replica access, the body source, the wanted-body landing policy, the lifecycle, the iOS door). **NOT owned here** — the group-set build design (a folder bound under an in-person share) → [`group-set.md`](group-set.md); the plane's contract (the scenario and its contract points), § Offline share initiation, § Peer-served change-row provenance and the wormability walk → [`p2p-shared-set.md`](p2p-shared-set.md); the wormability posture, the transport seam and everything else about P2P → [`p2p.md`](p2p.md); the replicas themselves and the keys a capability host holds → [`on-demand-files.md`](on-demand-files.md). On conflict with the contract, the contract in [`p2p-shared-set.md`](p2p-shared-set.md) wins.
 
 ---
 
-Split verbatim out of [`p2p.md`](p2p.md) § Cross-user shared-set transfer on 2026-09-27, when that doc reached 240,363 B — two days from the 262,144 B whole-file read ceiling, with five build rows about to append their *Built* records to the same section. Nothing was reworded. **Pointers in the text below keep their original meaning:** a bare `§` pointer, or an "above"/"below", naming a section this doc does not hold — "the contract above", "the provenance ruling above", § Implementation status today, § Inbound authorization, § Offline share initiation, § *Wormability walk* — resolves in [`p2p.md`](p2p.md); one naming a section of this doc resolves here.
+Split verbatim out of [`p2p.md`](p2p.md) § Cross-user shared-set transfer on 2026-09-27, when that doc reached 240,363 B — two days from the 262,144 B whole-file read ceiling, with five build rows about to append their *Built* records to the same section. Nothing was reworded. **Pointers in the text below keep their original meaning:** a bare `§` pointer, or an "above"/"below", naming a section this doc does not hold — "the contract above", "the provenance ruling above", § Implementation status today, § Inbound authorization — resolves in [`p2p.md`](p2p.md), and the contract, the provenance ruling, § Offline share initiation and § *Wormability walk* — since that section's own split on 2026-11-04 — in [`p2p-shared-set.md`](p2p-shared-set.md); one naming a section of this doc resolves here.
 
 ## Cross-user shared-set transfer — the build
 
@@ -682,10 +682,13 @@ construction point both the production launch and the e2e session patch share, t
 latter skipping `FaunaClient.start()` — into a shared FaunaKit `SharePlaneModel` that
 the six ids paint from (`SharePlaneSectionView`, directly under the offline-share panel
 on the Folders page; nothing renders while no plane runs; every reading resolves
-nested, pinned by `SharePlaneReadingsTests`). Its live witness is the member seat of a
-tui owner — apple's owner-side access-grant surface is declared absent
-(`folder-member-role-select`; `../ui/folders.md`), so macOS cannot own the journey's
-set and its own serving half is not yet witnessed live. windows calls it since 2026-10-10 (detached from its sync-agent session install, readings nested, pinned by its own `SharePlaneReadingsTests`); iOS and android do not call it yet, and the
+nested, pinned by `SharePlaneReadingsTests`). Both of its halves are witnessed live
+(2026-10-24): the member seat of a tui owner, and — since apple's owner-side
+access-grant surface landed (`folder-member-role-select`; `../ui/folders.md` §
+Implementation status today) — the serving seat for a tui member, each a passing arm of
+`test_share_pump_two_actor.py` — and so is the macOS × macOS arm, transfer surface
+included (four green runs on macOS, 2026-10-24, after one red the same day that did not
+reproduce). windows calls it since 2026-10-10 (detached from its sync-agent session install, readings nested, pinned by its own `SharePlaneReadingsTests`); iOS and android do not call it yet, and the
 shared FaunaKit surface is already compiled into iOS but never started there: iOS
 runs no sync agent, so it hits the same provisioner gap as android (next paragraph)
 — that, and not its account runtime, which it hosts. web stays the declared structural
@@ -910,7 +913,7 @@ the close of the ratify-or-refute row.
 
 ### Phone peers — design (2026-09-26; the direction is user-ruled, the decisions below are refutable at build time; the shared arm BUILT 2026-10-01, the app legs UNBUILT)
 
-**What this is.** The joint design the ruling above called for: android and iOS take part in this plane as **foreground partial peers** — one classification, one shared-Rust arm, one policy, and per-app code only in the two shells. The shared arm is built (2026-10-01 — *Built — the phone-peer shared arm* below, which also records what the build corrected in the decisions here); no app leg is, and both phones still read *unbuilt, not absent*. The working (alternatives weighed, the platform facts still to be measured) is in the design record; the claims are here.
+**What this is.** The joint design the ruling above called for: android and iOS take part in this plane as **foreground partial peers** — one classification, one shared-Rust arm, one policy, and per-app code only in the two shells. The shared arm is built (2026-10-01 — *Built — the phone-peer shared arm* below, which also records what the build corrected in the decisions here); no app leg is, and both phones still read *unbuilt, not absent*. The working (alternatives weighed, the platform facts still to be measured) is in the design record; the claims are here. **A group set — a folder bound under an in-person share — takes this same seat on a phone:** its presence-plan entry, its landing into the kept root, the ring's carriage to the app-dead host and its witness are ruled in [`group-set.md`](group-set.md) § Build design — the group set, decision 11 (2026-10-30), on top of the two app legs below; nothing here is restated there.
 
 **Three gates, and iOS's account runtime is not one of them.** iOS has hosted the runtime since 2026-08-25 ([`../architecture/account-runtime.md`](../architecture/account-runtime.md) § Implementation status today). What both phones wait on: **(1) a replica of a *shared* set.** This plane moves M2-bound sets only (`share_glue::compose_specs` skips every unbound one), and an on-demand host is built through the capability constructor, which since 2026-09-27 loads a bound set's keys from custody itself and follows its rotations ([`on-demand-files-shared-sets.md`](on-demand-files-shared-sets.md) § Shared sets on a capability host, decisions 1 and 2); a member's replica needs shared-with-me sets in the presence plan — in the shared plan and on android since 2026-10-01, apple's leg owed — and what is still missing outright is an owner's pre-bind files, which need the pre-bind re-seal enabled. Both gaps are declared by their owner — that section's implementation status. **(2) The platform's replica itself** — android's binding ([`on-demand-files-android.md`](on-demand-files-android.md) § Android SAF DocumentsProvider binding, unbuilt); iOS's is built, but iOS refuses the domain identifier of every real set, so it has never registered one (measured 2026-09-27, decision 3). **(3) The shared arm below**, and on iOS the carriage to its extension.
 
@@ -973,7 +976,7 @@ retrying-forever-noisily state — correct across version skew.
 
 ### Build design — the row half (B2 scoping pass, 2026-08-17; refutable at build time)
 
-> **Superseded in part 2026-09-29 — the relayed-row lift.** The author-direct rules this pass and the ledger above record (serve own rows only, refuse relayed rows, a pending row served stampless) are the pre-lift posture; the current one is [`p2p.md`](p2p.md) § Peer-served change-row provenance's. In code: the serve filter is `fauna_peer_share::provenance::serves_held_row` (own rows, plus every writer-signed row this replica's reader verified, kept in `relayed_change_log`), the pump's binding-free screen `screen_peer_row`, the engine door's authoritative judge `judge_peer_row` over the shared `fauna_protocol::sync_row_verify::RowReader`; a retained own row — pending included — carries its writer and the signature made over it as served. The overlay, the cached roster (now consulted for the SIGNED actor), the retention and the delete posture below stand.
+> **Superseded in part 2026-09-29 — the relayed-row lift.** The author-direct rules this pass and the ledger above record (serve own rows only, refuse relayed rows, a pending row served stampless) are the pre-lift posture; the current one is [`p2p-shared-set.md`](p2p-shared-set.md) § Peer-served change-row provenance's. In code: the serve filter is `fauna_peer_share::provenance::serves_held_row` (own rows, plus every writer-signed row this replica's reader verified, kept in `relayed_change_log`), the pump's binding-free screen `screen_peer_row`, the engine door's authoritative judge `judge_peer_row` over the shared `fauna_protocol::sync_row_verify::RowReader`; a retained own row — pending included — carries its writer and the signature made over it as served. The overlay, the cached roster (now consulted for the SIGNED actor), the retention and the delete posture below stand.
 
 The provenance ruling above and the serve/pull core's ROW-half finding bound
 this pass; it rules the at-rest shapes and the four invariant-preserving
@@ -1039,7 +1042,16 @@ store**, and **a provisional delete never destroys local bytes**.
   tail. Deliberately out of scope: an offline DELETE mints no pending row —
   the mint point is the upload paths' manifest computation, a delete has no
   manifest to compute, and the delete's own record retires the path's stale
-  pending row at reconnect through the retire-by-path widening.
+  pending row at reconnect through the retire-by-path widening. **A relayer's
+  copy ends the same way:** the nest's sequenced row for a writer-device's path
+  retires that writer-device's pending relayed row, a same-account sibling's
+  included, whose sequenced row no relay retains. And because a sibling that has
+  not heard the nest yet still serves such a row, a receiver — resident or
+  on-demand, which wants exactly such an un-sequenced body — lands no
+  pending row naming the head a settled delete ended here, or whose bytes its
+  causal ledger holds at or below the path's frontier, and does not relay it: the
+  row is history there, and the author's record carries any real return to those
+  bytes.
 - **Consumer — the cached writer roster is its own small table, fail-closed
   by absence.** `share_writer_roster` (actor, writer?, refreshed-at; per-set
   by the store's own scoping), read by ingest as the
@@ -1076,7 +1088,9 @@ store**, and **a provisional delete never destroys local bytes**.
   overlay row (below) is what remembers the head is provisional.
   **Build refinements (B2.3, 2026-08-17):** the write gate is a pure judge
   (`judge_materialization`) deliberately FAR more conservative than the nest
-  apply's licensed folds — it writes only onto a locally-absent path or one
+  apply's licensed folds — it writes only onto a locally-absent path (a
+  settled `Deleted` tombstone with nothing on disk counts as absent: a
+  recreate another author lifted loses nothing here) or one
   clean at its tracked state, and skips (overlay row still landing,
   unmaterialized) every ambiguous shape: untracked-but-present bytes,
   disk drifted from tracked state, tracked-but-missing, any non-Synced
@@ -1087,7 +1101,14 @@ store**, and **a provisional delete never destroys local bytes**.
   per-row fetch failure skips that row, never the page.
 - **The overlay is a provenance ledger over `sync_entries`, not a second
   fold.** `share_overlay` keeps latest-per-path provisional rows (set, path,
-  the peer row verbatim, the channel-proven author, ingested-at). Reads
+  the peer row verbatim, the channel-proven author, ingested-at). **A row
+  served again keeps what its version landed** (built 2026-11-05): a pending row is re-served on every pass, so the same
+  version re-ingested keeps the overlay's landed-body mark and hash, and an
+  already-current pass that fetched nothing erases neither; only a new
+  version starts unlanded. The hash is what the upload door reads to tell a
+  peer's provisional body from this replica's edit, and what the confirm
+  compares against — wiping it on the second pass let a receiver record the
+  writer's file as its own (measured on tui-on-windows). Reads
   annotate from it (provisional badge; a provisional delete hides the path
   from listings while disk and `sync_entries` stay untouched). The fold in
   `apply_remote_changes` never consults it — carrier/covering licensing is
@@ -1154,7 +1175,11 @@ The ruling in [`p2p.md`](p2p.md) § Same-account nest-down folder transfer lifts
 **4. The dial pass — the walk fills the registry; the ENGINE pulls.**
 
 - **Not in `walk_sibling`.** The leg's walk holds the account store and drives no engine (a `SyncEngine` is owned by its own loop, `!Sync`), and the cursor, the overlay and the ingest are the engine's. The pull rides the seam the chunk pull rides: `SiblingChannels` — the registry the dial pass fills, every engine's `SiblingChunkSource` — grows a row page pull and a manifest fetch per admitted sibling, and `SyncEngine::pull_sibling_changes()` is the engine's own pass: for each sibling in the registry's snapshot, page from `since = max(cursor, anchor)` → `changes.list` → `ingest_peer_page_landing(Sibling { device })` with a `SiblingBlobFetcher` (a `BlobFetcher`: `fetch_manifest` asks the sibling's `manifests.get` first, then the nest's fetcher; chunks go through the existing `sibling_first` with the nest remainder and `bytes_may_ride`) — in-task, no spool, no command door. A sibling that errs is `dropped` and the next asked; a page that claims `more` without advancing the cursor stops that sibling, as the share pump stops.
-- **Triggers, in `run_watch_loop` after `pull_remote_changes`** (the nest is the sequencer — its rows first, so a sibling's copy of a row the nest just confirmed is already current): the rescan tick, the wake nudge, the `Connected` arm, and a fourth — the registry's admission signal, bumped by the dial pass when it admits a sibling (a new or replaced channel), so a freshly admitted sibling is pulled within seconds, not a tick. Built as a `watch` counter (`SiblingChunkSource::admissions`), not a `Notify`: every engine of the host holds its own receiver, and a loop busy in another arm when the pass admits still sees the change at its next select. The sibling-first fetcher is the engine's own `EngineBlobFetcher` with manifests asked of the siblings too (`SyncEngine::sibling_blob_fetcher`), not a second type. With no nest answering, the tick and the admission notify are the only triggers (the e2e rescan override bounds the witness); no push kind is added for the latency (walk rule 3). Hosts: wherever `PeerFileSync` is handed — the agent today (`PeerFiles`); tui's in-session runtime passes `None` and runs no engine (its agent does); phone replicas inherit when the phone-peer leg lands, with `landing = Some`.
+- **Triggers, in `run_watch_loop` after `pull_remote_changes`** (the nest is the sequencer — its rows first, so a sibling's copy of a row the nest just confirmed is already current): the rescan tick, the wake nudge, the `Connected` arm, and a fourth — the registry's admission signal, bumped by the dial pass when it admits a sibling (a new or replaced channel), so a freshly admitted sibling is pulled within seconds, not a tick. Built as a `watch` counter (`SiblingChunkSource::admissions`), not a `Notify`: every engine of the host holds its own receiver, and a loop busy in another arm when the pass admits still sees the change at its next select. The sibling-first fetcher is the engine's own `EngineBlobFetcher` with manifests asked of the siblings too (`SyncEngine::sibling_blob_fetcher`), not a second type. With no nest answering, the tick and the admission notify are the only triggers (the e2e rescan override bounds the witness); no push kind is added for the latency (walk rule 3). Hosts: wherever `PeerFileSync` is handed — the agent today (`PeerFiles`); tui's in-session runtime passes `None` and runs no engine (its agent does); phone replicas inherit when the phone-peer leg lands, with `landing = Some`. **Both of the agent's engine loops run the pass, on the same triggers** (the on-demand one since 2026-11-05): the on-demand hydration loop (`serve_hydration_root` — every bound folder on windows, and linux's FUSE roots) runs it behind its startup fold and behind every re-pull of its placeholder fold (the rescan tick, the reconnect edge, the nudge), and at each admission. **An agent-hosted on-demand root lands a sibling's row the way its share leg's ingest already lands a share peer's on that root** — the resident landing, `landing = None`: the overlay row always, the body written whole where the root holds no row for the path or a clean `Synced` one, and a path the root holds only as a placeholder row left unwritten by the judge's storage-policy skip; when the nest returns, the placeholder fold's reconcile (`record_placeholders_from_changes` → `retire_share_overlay`) confirms the landed body or supersedes it, exactly as the resident apply does. The owned-tree landing (rows always, bodies by want — § *Phone peers — design*, decision 1) stays the phone and app-dead hosts'.
 - **Both directions.** An engine serves its folder and pulls it, so two siblings converge symmetrically; nothing a sibling served enters `sync_entries` as sequenced, and the nest's return confirms or supersedes as the row half rules.
 
 **Build order** (the build row's): the wire and the serve doors with the server pins → the mint pin → the origin parameterisation and the feature-plane lift → the registry pull and the engine pass → the two-engine no-nest convergence pin.
+
+### Build design — the group set: a folder bound under an in-person share (design pass 2026-10-29; refutable at build time)
+
+**Moved to [`group-set.md`](group-set.md) on 2026-10-30, verbatim and under this same heading** — the group set's design pass (2026-10-29): decisions 1–10 (path state as `GenerationTip`-sealed group-plane entries, the three kinds, the `GenerationTip` seal path, the content schedule, who may write and how a reader knows, the feed on the share serve set, the engine seat, endpoints and the bootstrap, the losing replica's retention, the base a row names) and its *Implementation status today* paragraph. A citation of this section, or of one of its numbered decisions, resolves there.

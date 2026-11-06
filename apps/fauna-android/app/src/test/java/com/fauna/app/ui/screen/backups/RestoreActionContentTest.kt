@@ -69,9 +69,10 @@ class RestoreActionContentTest {
         render()
         composeTestRule.onNodeWithTag("restore-kinds-checkboxes").assertIsDisplayed()
         val checks = composeTestRule.onAllNodesWithTag("restore-kind-checkbox")
-        checks.assertCountEquals(2)
-        checks[0].assertIsOn()
-        checks[1].assertIsOn()
+        // Five kinds since the Backups page grew its kind entries (mail, calendar,
+        // contacts, posts, conversations), all checked by default.
+        checks.assertCountEquals(5)
+        for (i in 0 until 5) checks[i].assertIsOn()
         checks[0].performClick()
         checks[0].assertIsOff()
     }
@@ -107,7 +108,9 @@ class RestoreActionContentTest {
     @Test
     fun progress_rendersStepText() {
         render(progress = RestoreProgress.RUNNING)
-        composeTestRule.onNodeWithTag("restore-progress").assertIsDisplayed()
+        // Exists, not displayed: the card is a plain Column inside the page's
+        // scroller, so the row sits below Robolectric's small viewport.
+        composeTestRule.onNodeWithTag("restore-progress").assertExists()
     }
 
     /** `restore-warning` renders only after a restore whose reply said

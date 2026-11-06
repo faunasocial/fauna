@@ -70,10 +70,18 @@ pytestmark = [
     # a marker alone silently keeps driving tui underneath, the trap
     # `test_share_pump_two_actor.py`'s own marker block records.
     pytest.mark.tui,
+    pytest.mark.macos,
+    pytest.mark.linux,
 ]
 
 #: Apps whose leg has landed. Grow this — and the markers above — together.
-_SUPPORTED_APPS = ("tui",)
+_SUPPORTED_APPS = ("tui", "macos", "linux")
+
+#: What a leg's launch needs beyond the module's markers. macOS' production
+#: spawner is launchd, so an e2e launch runs an agent only under
+#: `real_sync_agent` (`test_folder_agent_content_sync.py`'s macOS leg); linux,
+#: like tui, spawns the real agent as a per-launch child by default.
+_APP_MARKS = {"macos": (pytest.mark.real_sync_agent,)}
 
 #: The excluded directory, and the file under it that must be held back. The
 #: matcher adds a `{pat}/**` twin per configured pattern (`ignore.rs`), so the
@@ -98,7 +106,11 @@ def _seat_pairs():
     the square of the app count for combinations no leg owes.
     """
     available = get_available_apps()
-    return [(app, app) for app in _SUPPORTED_APPS if app in available]
+    return [
+        pytest.param(app, app, marks=_APP_MARKS.get(app, ()))
+        for app in _SUPPORTED_APPS
+        if app in available
+    ]
 
 
 def _read_or_none(path):
@@ -218,7 +230,7 @@ def test_an_excluded_path_stops_syncing_until_the_exclusion_is_cleared(
     # and back after each miss — polling without the toggle reads an empty list
     # forever (the proven pattern in the content-sync twin).
     def _accepted_set_listed():
-        titles = [mb.folder_title(i) for i in range(mb.folder_count())]
+        titles = mb.folder_titles()
         if any(set_name in title for title in titles):
             return True
         mb.navigate_devices()

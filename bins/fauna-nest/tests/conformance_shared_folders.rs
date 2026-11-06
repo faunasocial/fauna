@@ -727,6 +727,7 @@ async fn removed_member_reads_pre_removal_but_fails_closed_post_removal_real_nes
             None,
             None,
             None,
+            None,
         )
         .await
         .expect("record gen-1 change");
@@ -778,7 +779,9 @@ async fn removed_member_reads_pre_removal_but_fails_closed_post_removal_real_nes
     let read_pre = b_engine_gen1
         .download_file_bytes_by_manifest(
             manifest_gen1,
-            listed.changes[0].content_key_version,
+            listed.changes[0]
+                .content_key_version
+                .map(fauna_core::blob_seal::SealStamp::Version),
             "gen1.bin",
         )
         .await
@@ -857,6 +860,7 @@ async fn removed_member_reads_pre_removal_but_fails_closed_post_removal_real_nes
             None,
             None,
             None,
+            None,
         )
         .await
         .expect("record gen-2 change");
@@ -883,7 +887,11 @@ async fn removed_member_reads_pre_removal_but_fails_closed_post_removal_real_nes
 
     // ── (crypto layer) B still reads gen-1 (history) but FAILS CLOSED on gen-2 ──
     let read_history = b_engine_gen1
-        .download_file_bytes_by_manifest(manifest_gen1, Some(1), "gen1.bin")
+        .download_file_bytes_by_manifest(
+            manifest_gen1,
+            Some(fauna_core::blob_seal::SealStamp::Version(1)),
+            "gen1.bin",
+        )
         .await
         .expect("a removed member still reads pre-removal content (history-on-join)");
     assert_eq!(read_history, bytes_gen1);
@@ -893,7 +901,11 @@ async fn removed_member_reads_pre_removal_but_fails_closed_post_removal_real_nes
     // the read fails closed rather than fall through to plaintext. This is the
     // crypto-layer basis OBS-1 says the guarantee rests on, never the roster.
     let read_post = b_engine_gen1
-        .download_file_bytes_by_manifest(manifest_gen2, Some(2), "gen2.bin")
+        .download_file_bytes_by_manifest(
+            manifest_gen2,
+            Some(fauna_core::blob_seal::SealStamp::Version(2)),
+            "gen2.bin",
+        )
         .await;
     assert!(
         read_post.is_err(),
@@ -2137,6 +2149,7 @@ async fn a_succession_rotates_the_inherited_sets_content_key_over_the_real_sweep
             None,
             None,
             None,
+            None,
         )
         .await
         .expect("the successor records the upload");
@@ -2159,7 +2172,13 @@ async fn a_succession_rotates_the_inherited_sets_content_key_over_the_real_sweep
         created.raw_group_id.clone(),
         m_keys,
     )
-    .download_file_bytes_by_manifest(manifest, change.content_key_version, "after.bin")
+    .download_file_bytes_by_manifest(
+        manifest,
+        change
+            .content_key_version
+            .map(fauna_core::blob_seal::SealStamp::Version),
+        "after.bin",
+    )
     .await
     .expect("the member reads the successor's upload");
     assert_eq!(read, bytes_gen2);
@@ -2190,7 +2209,11 @@ async fn a_succession_rotates_the_inherited_sets_content_key_over_the_real_sweep
             created.raw_group_id.clone(),
             retired_keys,
         )
-        .download_file_bytes_by_manifest(manifest, Some(2), "after.bin")
+        .download_file_bytes_by_manifest(
+            manifest,
+            Some(fauna_core::blob_seal::SealStamp::Version(2)),
+            "after.bin"
+        )
         .await
         .is_err(),
         "the retired custody fails closed on the post-succession file"
@@ -3104,6 +3127,7 @@ async fn writer_member_and_owner_round_trip_edits_both_ways_two_engines() {
             None,
             None,
             None,
+            None,
         )
         .await
         .expect("WRITER records — the writable_folder gate admits B");
@@ -3138,7 +3162,13 @@ async fn writer_member_and_owner_round_trip_edits_both_ways_two_engines() {
         a_keys.clone(),
     );
     let a_read = a_engine_r
-        .download_file_bytes_by_manifest(b_manifest, b_change.content_key_version, "from-b.bin")
+        .download_file_bytes_by_manifest(
+            b_manifest,
+            b_change
+                .content_key_version
+                .map(fauna_core::blob_seal::SealStamp::Version),
+            "from-b.bin",
+        )
         .await
         .expect("owner reads the writer's content");
     assert_eq!(
@@ -3172,6 +3202,7 @@ async fn writer_member_and_owner_round_trip_edits_both_ways_two_engines() {
             None,
             None,
             None,
+            None,
         )
         .await
         .expect("owner records");
@@ -3185,7 +3216,13 @@ async fn writer_member_and_owner_round_trip_edits_both_ways_two_engines() {
         .find(|c| c.path_hash == hex::encode(fauna_core::sync::path_hash("from-a.bin")))
         .expect("B sees A's change");
     let b_read = b_engine_w
-        .download_file_bytes_by_manifest(a_manifest, a_change.content_key_version, "from-a.bin")
+        .download_file_bytes_by_manifest(
+            a_manifest,
+            a_change
+                .content_key_version
+                .map(fauna_core::blob_seal::SealStamp::Version),
+            "from-a.bin",
+        )
         .await
         .expect("writer reads the owner's content");
     assert_eq!(
@@ -4197,7 +4234,7 @@ async fn an_anchorless_writer_members_prebind_pass_leaves_an_owner_declassified_
         .unwrap()
         .expect("the member materialized the owner's file");
     assert_eq!(
-        (row.state, row.content_key_version),
+        (row.state, row.content_stamp),
         (fauna_sync_engine::db::SyncState::Synced, None),
         "a materialized copy of a plaintext head, no generation"
     );
@@ -4636,6 +4673,7 @@ async fn content_uploaded_before_a_second_share_stays_readable_after_it_real_nes
             None,
             None,
             None,
+            None,
         )
         .await
         .expect("record the pre-share change");
@@ -4679,7 +4717,11 @@ async fn content_uploaded_before_a_second_share_stays_readable_after_it_real_nes
         keys_after.clone(),
     );
     let owner_read = a_read_engine
-        .download_file_bytes_by_manifest(pre_manifest, Some(1), "pre.bin")
+        .download_file_bytes_by_manifest(
+            pre_manifest,
+            Some(fauna_core::blob_seal::SealStamp::Version(1)),
+            "pre.bin",
+        )
         .await
         .expect("the OWNER still decrypts content uploaded before the second share");
     assert_eq!(
@@ -4705,7 +4747,11 @@ async fn content_uploaded_before_a_second_share_stays_readable_after_it_real_nes
         c_keys,
     );
     let member_read = c_read_engine
-        .download_file_bytes_by_manifest(pre_manifest, Some(1), "pre.bin")
+        .download_file_bytes_by_manifest(
+            pre_manifest,
+            Some(fauna_core::blob_seal::SealStamp::Version(1)),
+            "pre.bin",
+        )
         .await
         .expect("the newly-admitted member decrypts pre-existing content");
     assert_eq!(
@@ -5738,7 +5784,13 @@ async fn a_bound_writer_engine_records_into_the_shared_row_beside_an_own_namesak
         w.b_keys.clone(),
     );
     let read = a_reader
-        .download_file_bytes_by_manifest(manifest, change.content_key_version, rel)
+        .download_file_bytes_by_manifest(
+            manifest,
+            change
+                .content_key_version
+                .map(fauna_core::blob_seal::SealStamp::Version),
+            rel,
+        )
         .await
         .expect("owner reads the writer's content");
     assert_eq!(read, bytes, "the edit round-trips into the owner's replica");

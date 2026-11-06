@@ -122,6 +122,10 @@ public sealed partial class AdminContactsPage : Page
 
         _syncing = true;
         EnabledToggle.IsOn = _vm.CarddavEnabled;
+        // The toggle's `state` answer is the persisted flag (HelpText is what the
+        // bridge's attribute read returns).
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetHelpText(
+            EnabledToggle, _vm.CarddavEnabled ? "on" : "off");
         _syncing = false;
     }
 

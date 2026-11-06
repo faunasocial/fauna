@@ -46,9 +46,7 @@
 //! writer: a harvest seeds no anchor from it, and the owner's next sign-in
 //! restores them.
 
-use fauna_core::data::{Capability, Timestamp};
-use fauna_core::encoding::{EmbedAsBytes, canonical_encode, sign_envelope};
-use fauna_core::identity::ActorId;
+use fauna_core::data::Capability;
 use fauna_core::identity_op::IdentityOpClass;
 use fauna_protocol::RpcError;
 use fauna_protocol::profile_author::{KIND_SET, ProfileAuthorSetReply, ProfileAuthorSetRequest};
@@ -183,18 +181,17 @@ pub(crate) fn principal_set_handler() -> crate::principal_handlers::PrincipalHan
                 Ok(s) => s,
                 Err(r) => return Err(r.rpc(KIND_SET, CLASS.ns)),
             };
-            let mut profile =
-                crate::profile_handlers::current_or_fresh_profile(&state, &caller.account).await?;
-            apply(&mut profile, req);
-            profile.actor_id = ActorId(caller.account);
-            profile.updated_at = Timestamp::now();
-            let (bytes, env) = sign_envelope(&signer, &profile)
-                .map_err(|e| internal(format!("sign delegated profile: {e}")))?;
-            let wire =
-                canonical_encode(&EmbedAsBytes::from_signed(bytes, env).with_signer_auth(cert))
-                    .map_err(|e| internal(format!("encode delegated profile: {e}")))?;
-            // The one profile write door, on the real bytes — no second door.
-            crate::profile_handlers::ingest_profile_core(&state, caller.account, &wire).await?;
+            // The one delegated editor over the one profile write door, on the
+            // real bytes — no second door; it stores only over the base it
+            // read, so an owner's write landing meanwhile is kept.
+            let wire = crate::profile_handlers::write_delegated_profile(
+                &state,
+                &caller.account,
+                &signer,
+                &cert,
+                |p| apply(p, req.clone()),
+            )
+            .await?;
             let conn = state.db.conn().await;
             record(&conn, &caller.account, &caller.principal_id, &fields, now).map_err(internal)?;
             drop(conn);
@@ -236,7 +233,8 @@ pub fn register_profile_author_handlers(b: &mut RpcRouterBuilder) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fauna_core::data::{InboxMode, Profile, ProfileLink};
+    use fauna_core::data::{InboxMode, Profile, ProfileLink, Timestamp};
+    use fauna_core::identity::ActorId;
 
     fn base() -> Profile {
         Profile {

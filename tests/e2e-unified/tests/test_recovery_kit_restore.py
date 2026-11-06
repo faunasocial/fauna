@@ -62,8 +62,12 @@ import secrets
 
 import pytest
 
-from helpers.app_surface import skip_unbuilt
-from helpers.inherited_corpus import CORPUS_READ_S, seed_an_image_under_this_identity
+from helpers.inherited_corpus import (
+    CORPUS_READ_S,
+    restore_the_predecessors_version,
+    seed_under_a_then_succeed,
+    the_owners_host,
+)
 from helpers.recovery_restore import (
     RESTORE_OUTCOME_S,
     assert_landing_left_no_error,
@@ -73,16 +77,10 @@ from helpers.recovery_restore import (
     point_the_restore_at,
     qualified_account,
     sign_in_after_restore,
-    skip_unless_restore_is_built,
+    require_restore_button,
     wait_for_restore_landing,
 )
 from helpers.succession import register_recovery_kit, succeed_identity
-from helpers.succession_ceremony import (
-    SUCCESSION_AND_RELAUNCH_S,
-    kit_on_screen,
-    require_stolen_gate,
-    settled_actor_id,
-)
 from helpers.waiting import wait_until
 from i18n.strings import S
 
@@ -147,7 +145,7 @@ def test_the_phrase_alone_restores_the_account_after_losing_every_device(
 
     # ── Phase 1: mint a kit on the signed-in device ─────────────────────────
     app.settings.navigate()
-    app.settings.open_recovery_kit_or_skip()
+    app.settings.open_recovery_kit()
 
     app.settings.create_recovery_kit()
     app.wait_for("recovery-kit-secret-display", timeout=30.0)
@@ -164,7 +162,7 @@ def test_the_phrase_alone_restores_the_account_after_losing_every_device(
     # exists for.
     app.driver.reset()
     app.onboarding.navigate_to_status()
-    skip_unless_restore_is_built(app)
+    require_restore_button(app)
 
     # The tier_3 nest override, the same seam `test_onboarding_localhost.py`
     # uses. The kit's handle resolves to `https://<host>:<port>` (uniform https
@@ -231,7 +229,7 @@ def test_a_phrase_that_names_no_account_asks_for_one_instead_of_failing(app):
     as a product bug, and the machine test cannot see either.
     """
     app.onboarding.navigate_to_status()
-    skip_unless_restore_is_built(app)
+    require_restore_button(app)
     app.onboarding.open_recovery_entry()
 
     app.onboarding.restore_from_recovery_kit(_UNREGISTERED_ROOT)
@@ -266,7 +264,7 @@ def test_an_identity_secret_is_never_taken_for_a_recovery_phrase(app):
     pins that the refusal is what the user sees.
     """
     app.onboarding.navigate_to_status()
-    skip_unless_restore_is_built(app)
+    require_restore_button(app)
     app.onboarding.open_recovery_entry()
 
     app.onboarding.restore_from_recovery_kit(
@@ -313,7 +311,7 @@ def test_after_a_replace_the_new_phrase_restores_and_the_old_one_does_not(
     _assert_direct_address_account(account)
 
     app.settings.navigate()
-    app.settings.open_recovery_kit_or_skip()
+    app.settings.open_recovery_kit()
     app.settings.create_recovery_kit()
     app.wait_for("recovery-kit-secret-display", timeout=30.0)
     old_phrase = app.settings.recovery_kit_secret()
@@ -361,95 +359,53 @@ def test_after_a_replace_the_new_phrase_restores_and_the_old_one_does_not(
     assert_restored_the_same_account(app)
 
 
-# ── After a succession, a replaced kit still carries the predecessor seed ───
+# ── After a succession, the restored phrase still opens the predecessor corpus ──
 
 
-def _seed_under_a_then_succeed(app, tmp_path) -> tuple[str, str]:
-    """upload an image under A → A → B through the UI → read B's closing-act kit.
-
-    Returns ``(inherited_file, successor_kit)``. The steps both post-succession
-    restore journeys share, so the one that replaces the kit and the one that
-    does not stay the same journey up to their fork.
-
-    - **An image is uploaded under A BEFORE the ceremony** and proven listed and
-      painted (``seed_an_image_under_this_identity``): "content sealed under A
-      opens" is otherwise satisfied by an empty corpus.
-    - **The successor's kit is read off the screen before any navigation**
-      (``kit_on_screen``): entering Account clears a kit on screen (shown-once
-      custody), and A's kit retired with A, so this is the one kit the user
-      holds once the ceremony ends.
-    """
-    _, inherited_file = seed_an_image_under_this_identity(app, tmp_path)
-
-    old_actor = settled_actor_id(app)
-    assert len(old_actor) == _SECRET_HEX_LEN, (
-        f"the Status page must render A's actor id first; got {old_actor!r}"
-    )
-    app.settings.navigate()
-    app.settings.open_recovery_kit_or_skip()
-    app.settings.create_recovery_kit()
-    app.wait_for("recovery-kit-secret-display", timeout=30.0)
-    held = app.settings.recovery_kit_secret()
-    assert len(held) == _SECRET_HEX_LEN
-
-    app.settings.navigate()
-    app.settings.open_recovery_kit()
-    require_stolen_gate(app)
-    app.settings.succeed_identity_with_held_kit(held)
-
-    # The closing act's kit — read FIRST and with no navigation of our own.
-    wait_until(
-        lambda: kit_on_screen(app) not in ("", held),
-        SUCCESSION_AND_RELAUNCH_S,
-        diagnose=lambda: (
-            f"no fresh kit on screen for the successor (reads "
-            f"{kit_on_screen(app)!r}), error={app.error_text()!r}"
-        ),
-    )
-    successor_kit = kit_on_screen(app)
-    assert len(successor_kit) == _SECRET_HEX_LEN
-
-    wait_until(
-        lambda: settled_actor_id(app) not in ("", old_actor),
-        SUCCESSION_AND_RELAUNCH_S,
-        diagnose=lambda: (
-            f"still reads actor={settled_actor_id(app)!r} (old={old_actor!r}) "
-            f"error={app.error_text()!r}"
-        ),
-    )
-    return inherited_file, successor_kit
+def _lose_the_owners_host(app, host, seats) -> None:
+    """Quit a helper seat before the restore: "every device" includes it, and a
+    restored device must not be reading through a host still alive beside it."""
+    if host is not app:
+        seats.retire(host)
 
 
 def _restore_sign_in_and_open_the_predecessor_corpus(
     app, nest_instance, *, phrase: str, account: str, inherited_file: str,
-    window: str, which_blob: str,
+    before: list[tuple[str, str]], which_blob: str,
 ) -> None:
     """lose every device → restore from ``phrase`` → sign in → A's corpus opens.
 
     ``Restored`` alone is not enough: ``machine.rs`` maps only an *unreadable*
     predecessor section to ``RestoredPredecessorsLost``, and an *absent* one
     lands plain ``Restored``. So the no-error landing is necessary and the
-    positive half is the corpus: after sign-in the item's NAME lists and its
-    thumbnail PAINTS, both opened with A's ``BackupKey`` recovered from the
-    blob, and the corpus re-seal line does not read *owed elsewhere*, the arm
-    rendered exactly when this device holds no predecessor material.
+    positive half is the corpus. The item's name listing and its tile painting
+    read what the take-over re-sealed under B, so they need no retired root
+    and only rule out a lost container. The discriminating read is **A's own
+    version**, still sealed under A's root beside the take-over's
+    (``succession-cut.md`` ruling (11)(f)): it LISTS only on a device that
+    attests A, and restoring it opens its bytes and thumbnail under A's
+    ``BackupKey`` — on a device that lost everything, both exist only because
+    the blob carried A's seed (``restore_the_predecessors_version``; the
+    listing half is the one measured red with the seeds dropped). Last, the
+    corpus re-seal line must
+    not read *owed elsewhere*, the arm rendered exactly when this device holds
+    no predecessor material.
 
-    ``window`` is the corpus re-seal line the caller read before losing the
-    device, quoted on failure; ``which_blob`` names the blob under test.
+    ``before`` is the item's versions read before the ceremony;
+    ``which_blob`` names the blob under test.
     """
     lose_every_device_and_open_restore(app, nest_instance)
     app.onboarding.restore_from_recovery_kit(phrase, account=account)
     # No error on landing: rules out `RestoredPredecessorsLost` (an unreadable
-    # section). An ABSENT one is what the corpus half below catches.
+    # section). An ABSENT one is what the version restore below catches.
     wait_for_restore_landing(app)
     assert_restored_the_same_account(app)
     sign_in_after_restore(app)
 
-    def _window() -> str:
+    def _blob() -> str:
         return (
-            f" (corpus re-seal line before the device was lost read {window!r}; "
-            "if the re-seal had already moved the corpus under B, this read "
-            "would not need A's seed at all)"
+            f"(on the restored device: A's root can only have come from "
+            f"{which_blob})"
         )
 
     app.media.navigate()
@@ -458,42 +414,54 @@ def _restore_sign_in_and_open_the_predecessor_corpus(
         CORPUS_READ_S,
         diagnose=lambda: (
             f"the restored device lists {app.media.item_names()!r}, not the "
-            f"{inherited_file!r} sealed under the retired identity — "
-            f"{which_blob} did not carry A's seed, so the names under A "
-            f"cannot open; error={app.error_text()!r}" + _window()
+            f"{inherited_file!r} the take-over re-recorded under the successor "
+            "before the device was lost — this read needs no retired root, so "
+            "the container or the take-over's head is gone, not A's seed; "
+            f"error={app.error_text()!r}"
         ),
     )
     painted = app.media.wait_for_painted_thumbnails(1, timeout=CORPUS_READ_S)
     if painted is not None:
         assert painted == 1, (
-            "the restored device must OPEN the bytes sealed under A, but "
-            f"{painted} of 1 thumbnails painted; error={app.error_text()!r}"
-            + _window()
+            "the restored device must OPEN the bytes the take-over re-sealed "
+            f"under the successor, but {painted} of 1 thumbnails painted; "
+            f"error={app.error_text()!r}"
         )
+
+    restore_the_predecessors_version(app, inherited_file, before, context=_blob)
 
     app.settings.navigate()
     app.settings.open_recovery_kit()
     corpus_line = app.settings.aftermath_corpus_reseal_status()
     assert corpus_line != S.settings.recovery_kit.corpus_reseal_owed_elsewhere, (
         f"the restored device reports it holds no predecessor material — "
-        f"{which_blob} came back without A's seed" + _window()
+        f"{which_blob} came back without A's seed"
     )
 
 
 @pytest.mark.feature("recovery-kit")
+# The cut and the take-over these journeys wait for run, on windows, macOS and
+# iOS, only inside the real conversations receive loop's post-restore hook —
+# the aftermath corpus journey's marker, for the same reason.
+@pytest.mark.real_conversations
+# The bound set's engine is the sync agent: macOS' production spawner is launchd,
+# which an e2e launch must not bootstrap, so no agent runs (and the seed never
+# uploads) unless this marker swaps in the child spawner
+# (`test_folder_agent_content_sync.py::test_macos_agent_uploads_bound_folder_file`).
+@pytest.mark.real_sync_agent
 def test_a_kit_replaced_after_a_succession_still_restores_the_predecessor_corpus(
-    ungranted_app, nest_instance, tmp_path
+    succeedable_app, nest_instance, tmp_path, alice_builder_seats
 ):
-    """upload under A → succeed A→B → replace B's kit → lose every device →
+    """seed under A → succeed A→B → replace B's kit → lose every device →
     restore from the NEW phrase → A's corpus still opens.
 
-    ``identity-succession.md`` § Seed escrow: after a succession the corpus
-    stays sealed under the retired identity A until B's re-seal drains, and the
-    only copies of A's seed are on the user's devices — so every escrow blob
-    write, **kit replacement included**, carries the predecessor chain. The
-    replace re-puts the blob, which REPLACES the one the succession's closing
-    act sealed; a replace that sealed ``&[]`` (the pre-2026-08-05 defect) hands
-    a lost-every-device restore B alone, and the corpus under A goes dark for
+    ``identity-succession.md`` § Seed escrow: after a succession part of the
+    corpus stays sealed under the retired identity A, and the only copies of
+    A's seed are on the user's devices — so every escrow blob write, **kit
+    replacement included**, carries the predecessor chain. The replace re-puts
+    the blob, which REPLACES the one the succession's closing act sealed; a
+    replace that sealed ``&[]`` (the pre-2026-08-05 defect) hands a
+    lost-every-device restore B alone, and what rests under A goes dark for
     good. The op layer pins that both ways; this is the end-to-end witness.
 
     **Why each assertion is shaped the way it is:**
@@ -501,33 +469,22 @@ def test_a_kit_replaced_after_a_succession_still_restores_the_predecessor_corpus
     - **The kit replaced is the SUCCESSOR's closing-act kit**, read off the
       screen before any navigation (``kit_on_screen``): A's kit retired with A,
       so "replace with the held kit" means the one the ceremony just showed.
-    - **An image is uploaded under A BEFORE the ceremony** and proven listed and
-      painted (``seed_an_image_under_this_identity``): "content sealed under A
-      opens" is otherwise satisfied by an empty corpus.
-    - **``Restored`` alone is not enough.** ``machine.rs`` maps only an
-      *unreadable* predecessor section to ``RestoredPredecessorsLost``; an
-      *absent* one — exactly what the defect produces — lands plain
-      ``Restored``. So the no-error landing is necessary and the positive half
-      is the corpus: after sign-in the item's NAME lists and its thumbnail
-      PAINTS, both opened with A's ``BackupKey`` recovered from the blob — and
-      the corpus re-seal line does not read *owed elsewhere*, the arm rendered
-      exactly when this device holds no predecessor material.
+    - **The corpus is seeded into a bound set and taken over before the
+      loss** (``seed_under_a_then_succeed``): the shape the succession cut
+      promises carries across, since 2026-10-26.
+    - **``Restored`` alone is not enough, and neither is the listing.** An
+      *absent* predecessor section — exactly what the defect produces — lands
+      plain ``Restored``, and after the take-over the item lists and paints
+      under B. What still rests under A is A's own version row; restoring it
+      is the read that needs A's seed
+      (``_restore_sign_in_and_open_the_predecessor_corpus``).
 
-    ⚠ **The window.** No deterministic hold on B's corpus re-seal exists, so
-    this journey observes the window rather than holding it: it reads the
-    corpus re-seal line at the replace and quotes it on failure. The carrying
-    rule holds regardless of window state; what depends on it is only whether
-    the corpus assertions *discriminate* (a corpus already moved under B opens
-    without A's seed). **Measured 2026-09-26 on tui: the line reads ``''`` at
-    the replace** (no agent record yet), and the Media item is still sealed
-    under A when the device is lost — the mutation matrix below is the proof.
-
-    **Mutation-verified 2026-09-26, and the matrix is the point** (each reverted
-    after). The replaced blob has TWO carriers of A's seed — the app's registry
-    resolution (``escrow_predecessor_seeds`` in the replace arm) and the shared
-    replace's union with the resting blob's own section
-    (``kit.rs::carry_forward_predecessors``) — so severing either alone stays
-    green by design:
+    **Mutation-verified 2026-09-26, on the Media-page seed this journey used
+    before the cut** (each reverted after). The replaced blob has TWO carriers
+    of A's seed — the app's registry resolution (``escrow_predecessor_seeds``
+    in the replace arm) and the shared replace's union with the resting blob's
+    own section (``kit.rs::carry_forward_predecessors``) — so severing either
+    alone stays green by design:
 
     =====================================================  ======  =====
     severance                                              landing names
@@ -538,91 +495,99 @@ def test_a_kit_replaced_after_a_succession_still_restores_the_predecessor_corpus
     =====================================================  ======  =====
 
     Row 3's clean landing is the ``Restored``-on-an-absent-section trap made
-    visible: the outcome alone would have passed it.
+    visible: the outcome alone would have passed it. On the bound seed the
+    names column reads under B, so the discriminating leg is A's own version,
+    which lists and restores only where A's seed came back (the no-replace
+    journey below re-measured that 2026-10-26).
     """
-    app = ungranted_app
+    app, user = succeedable_app
     account = qualified_account(app, nest_instance)
     _assert_direct_address_account(account)
+    host = the_owners_host(app, user, nest_instance, alice_builder_seats)
 
-    inherited_file, successor_kit = _seed_under_a_then_succeed(app, tmp_path)
+    inherited_file, successor_kit, before = seed_under_a_then_succeed(host, tmp_path)
 
-    # ── Replace B's kit inside the window ───────────────────────────────────
-    app.settings.navigate()
-    app.settings.open_recovery_kit()
-    window_at_replace = app.settings.aftermath_corpus_reseal_status()
-    print(f"[window] corpus re-seal line at the replace: {window_at_replace!r}")
-    app.settings.replace_kit_with_held(successor_kit)
+    # ── Replace B's kit ─────────────────────────────────────────────────────
+    host.settings.navigate()
+    host.settings.open_recovery_kit()
+    host.settings.replace_kit_with_held(successor_kit)
     wait_until(
-        lambda: app.settings.recovery_kit_secret() not in ("", successor_kit),
+        lambda: host.settings.recovery_kit_secret() not in ("", successor_kit),
         30.0,
         diagnose=lambda: (
             "the replace never showed its new kit; status reads "
-            f"{app.settings.recovery_kit_status()!r}, error surface: "
-            f"{app.error_text()!r}"
+            f"{host.settings.recovery_kit_status()!r}, error surface: "
+            f"{host.error_text()!r}"
         ),
     )
-    new_phrase = app.settings.recovery_kit_secret()
+    new_phrase = host.settings.recovery_kit_secret()
     assert len(new_phrase) == _SECRET_HEX_LEN
 
     # ── Lose every device; the NEW phrase brings B back, and A's corpus ─────
+    _lose_the_owners_host(app, host, alice_builder_seats)
     _restore_sign_in_and_open_the_predecessor_corpus(
         app,
         nest_instance,
         phrase=new_phrase,
         account=account,
         inherited_file=inherited_file,
-        window=window_at_replace,
+        before=before,
         which_blob="the replaced kit's blob",
     )
 
 
 @pytest.mark.feature("take-your-account-back")
+@pytest.mark.real_conversations
+@pytest.mark.real_sync_agent
 def test_after_a_succession_the_successors_own_phrase_restores_the_predecessor_corpus(
-    ungranted_app, nest_instance, tmp_path
+    succeedable_app, nest_instance, tmp_path, alice_builder_seats
 ):
-    """upload under A → succeed A→B → lose every device → restore from the
+    """seed under A → succeed A→B → lose every device → restore from the
     phrase the ceremony SHOWED → sign in → A's corpus still opens.
 
     Outcome 21 of *Take your account back*, and the no-replace sibling of the
     journey above. ``identity-succession.md`` § Seed escrow: the kit mint the
-    succession owes seals ``[B's seed, A's seed…]``, because the corpus stays
-    sealed under A until B's re-seal drains and the only other copies of A's
-    seed are on the devices the user just lost. That mint is the ONE site whose
-    predecessor slice must be non-empty (the status row names it), and nothing
-    else writes the blob this journey restores from: the succession deletes A's
-    blob, and no replace runs. So here the blob has exactly one carrier of A's
-    seed, where the replace journey's has two (its matrix), and this is the
+    succession owes seals ``[B's seed, A's seed…]``, because part of the corpus
+    stays sealed under A and the only other copies of A's seed are on the
+    devices the user just lost. That mint is the ONE site whose predecessor
+    slice must be non-empty (the status row names it), and nothing else writes
+    the blob this journey restores from: the succession deletes A's blob, and
+    no replace runs. So here the blob has exactly one carrier of A's seed,
+    where the replace journey's has two (its matrix), and this is the
     end-to-end witness that can tell the owed mint's slice from ``&[]``.
 
-    The assertions are the replace journey's, for the same reasons
-    (``_restore_sign_in_and_open_the_predecessor_corpus``). The window is
-    observed, not held: the re-seal line is read on the section the closing
-    act left on screen, and quoted on failure.
+    The seeding and the assertions are the replace journey's, for the same
+    reasons (``seed_under_a_then_succeed``,
+    ``_restore_sign_in_and_open_the_predecessor_corpus``).
 
-    **Mutation-verified 2026-09-27 on tui** (reverted after): with the owed
-    mint's predecessor slice emptied (``session::succession_kit_discharge_op``
-    passing no seeds), the restore still LANDS cleanly and the file-name
-    assertion goes red. The clean landing is the ``Restored``-on-an-absent-
-    section trap: the outcome alone would have passed it.
+    **Mutation-verified 2026-09-27 on tui, on the Media-page seed this journey
+    used before the cut** (reverted after): with the owed mint's predecessor
+    slice emptied (``session::succession_kit_discharge_op`` passing no seeds),
+    the restore still LANDS cleanly and the file-name assertion went red. The
+    clean landing is the ``Restored``-on-an-absent-section trap: the outcome
+    alone would have passed it.
+
+    **Re-verified 2026-10-26 on tui, on the bound seed** (reverted after): the
+    same severance still lands cleanly, and the item lists and paints (under
+    B), but its version history holds only the take-over's row — a device
+    holding no A material attests no retired identity, so the row A signed
+    never lists, and the journey reds before the restore is even offered.
     """
-    app = ungranted_app
+    app, user = succeedable_app
     account = qualified_account(app, nest_instance)
     _assert_direct_address_account(account)
+    host = the_owners_host(app, user, nest_instance, alice_builder_seats)
 
-    inherited_file, successor_kit = _seed_under_a_then_succeed(app, tmp_path)
+    inherited_file, successor_kit, before = seed_under_a_then_succeed(host, tmp_path)
 
-    app.settings.navigate()
-    app.settings.open_recovery_kit()
-    window_at_loss = app.settings.aftermath_corpus_reseal_status()
-    print(f"[window] corpus re-seal line before the loss: {window_at_loss!r}")
-
+    _lose_the_owners_host(app, host, alice_builder_seats)
     _restore_sign_in_and_open_the_predecessor_corpus(
         app,
         nest_instance,
         phrase=successor_kit,
         account=account,
         inherited_file=inherited_file,
-        window=window_at_loss,
+        before=before,
         which_blob="the blob the succession's closing act sealed",
     )
 
@@ -689,7 +654,7 @@ def test_a_restore_of_an_identity_that_moved_on_routes_to_the_import(
     app, user = succeedable_app
 
     app.settings.navigate()
-    app.settings.open_recovery_kit_or_skip()
+    app.settings.open_recovery_kit()
     app.settings.create_recovery_kit()
     app.wait_for("recovery-kit-secret-display", timeout=30.0)
     phrase = app.settings.recovery_kit_secret()
@@ -745,7 +710,7 @@ def test_a_copied_kit_restores_the_account_with_nothing_typed_but_the_kit(
     assert bare_handle, "the fixture must be signed in with a real nest handle"
 
     app.settings.navigate()
-    app.settings.open_recovery_kit_or_skip()
+    app.settings.open_recovery_kit()
     app.settings.create_recovery_kit()
     app.wait_for("recovery-kit-secret-display", timeout=30.0)
     copied = copy_the_shown_kit(app, app.settings.recovery_kit_secret())

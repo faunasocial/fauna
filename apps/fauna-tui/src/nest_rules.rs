@@ -24,9 +24,13 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use fauna_client_policy::{NestRulesBook, NestRulesRead, SignedNestRules, StoredNestRules};
+pub use fauna_client_policy::NestPlaceholder;
+use fauna_client_policy::{
+    NestRuleLine, NestRulesBook, NestRulesRead, NestRulesSummary, SignedNestRules, StoredNestRules,
+    nest_placeholder,
+};
 use fauna_core::content_category::ContentLabelEntry;
-use fauna_core::obligation::{ComposedVerdict, RenderVerdict};
+use fauna_core::obligation::ComposedVerdict;
 use fauna_i18n::strings::nest_rules as t;
 use fauna_protocol::discovery::NestInfoReply;
 use fauna_ui_ids as ids;
@@ -240,29 +244,10 @@ pub fn apply_info(app: &mut App, generation: u64, info: &NestInfoReply) {
     apply_rule_sets(app);
 }
 
-/// The nest placeholder a composed verdict paints, when a nest rule drove it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NestPlaceholder {
-    pub verdict: RenderVerdict,
-    pub domain: String,
-    /// The admin's reason, verbatim, in the app's language where written.
-    pub reason: String,
-}
-
-impl NestPlaceholder {
-    pub fn is_block(&self) -> bool {
-        self.verdict == RenderVerdict::Block
-    }
-}
-
-/// The placeholder a composed verdict paints, when the nest drove it.
+/// The placeholder a composed verdict paints, when the nest drove it
+/// (`fauna_client_policy::nest_placeholder`, in the app's language).
 pub fn nest_verdict(verdict: &ComposedVerdict) -> Option<NestPlaceholder> {
-    let source = verdict.nest()?;
-    Some(NestPlaceholder {
-        verdict: verdict.verdict,
-        domain: source.domain.clone(),
-        reason: fauna_core::content_policy::reason_text(&source.reason, UI_LANG).to_string(),
-    })
+    nest_placeholder(verdict, UI_LANG)
 }
 
 /// The app's frame naming the nest, in the verb's words
@@ -352,11 +337,9 @@ pub fn settings_elements(app: &App) -> Vec<Element> {
         return Vec::new();
     };
     let summary = accepted.summary(UI_LANG);
-    if summary.rules.is_empty() {
+    if !summary.is_shown() {
         return Vec::new();
     }
-    let resolve =
-        |text: &fauna_core::localized::LocalizedText| text.resolve(fauna_i18n::strings::lookup);
     let mut els = vec![
         Element::label(
             ids::SETTINGS_NEST_RULES_SECTION,
@@ -370,14 +353,16 @@ pub fn settings_elements(app: &App) -> Vec<Element> {
             ),
         ),
     ];
+    // The whole document's note, unscoped — a rule's own sits in its item.
+    if let Some(why) = summary.not_applied {
+        els.push(Element::label(
+            ids::SETTINGS_NEST_RULES_INERT_NOTICE,
+            resolve(&why.sentence()),
+        ));
+    }
     let item = ids::SETTINGS_NEST_RULES_ITEM;
     for (i, rule) in summary.rules.iter().enumerate() {
-        let verdict = resolve(&rule.verdict);
-        let line = match &rule.level {
-            Some(level) => t::rule_line(&verdict, &resolve(level), &rule.reason),
-            None => t::rule_line_no_level(&verdict, &rule.reason),
-        };
-        els.push(Element::label(item, line).within(item, i));
+        els.push(Element::label(item, rule_line(rule)).within(item, i));
         if let Some(inert) = &rule.inert {
             els.push(
                 Element::label(ids::SETTINGS_NEST_RULES_INERT_NOTICE, resolve(inert))
@@ -386,4 +371,152 @@ pub fn settings_elements(app: &App) -> Vec<Element> {
         }
     }
     els
+}
+
+/// The joining surface (`onboarding-nest-rules`, `nest-rules.md`
+/// § Acceptance at joining) — a paint of the shared summary the wizard
+/// machine read before sign-in (`OnboardingMachine::joining_nest_rules`, which
+/// already decided whether this page shows it): the heading naming the nest,
+/// the not-applied sentence under it when none of the document applies here,
+/// then one `onboarding-nest-rules-item` per rule. Painted directly above the
+/// terms notice.
+pub fn joining_elements(summary: &NestRulesSummary) -> Vec<Element> {
+    let heading = t::joining_heading(&summary.domain);
+    let text = match summary.not_applied {
+        Some(why) => format!("{heading} {}", resolve(&why.sentence())),
+        None => heading,
+    };
+    let item = ids::ONBOARDING_NEST_RULES_ITEM;
+    let mut els = vec![Element::label(ids::ONBOARDING_NEST_RULES, text)];
+    els.extend(
+        summary
+            .rules
+            .iter()
+            .enumerate()
+            .map(|(i, rule)| Element::label(item, rule_line(rule)).within(item, i)),
+    );
+    els
+}
+
+fn resolve(text: &fauna_core::localized::LocalizedText) -> String {
+    text.resolve(fauna_i18n::strings::lookup)
+}
+
+/// One rule as both rules surfaces list it: verdict, level where the rule has
+/// one, and the nest's own reason verbatim.
+fn rule_line(rule: &NestRuleLine) -> String {
+    let verdict = resolve(&rule.verdict);
+    match &rule.level {
+        Some(level) => t::rule_line(&verdict, &resolve(level), &rule.reason),
+        None => t::rule_line_no_level(&verdict, &rule.reason),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use fauna_client_policy::NestRulesNotApplied;
+    use fauna_core::content_policy::{
+        ContentPolicyDocument, ContentRule, ContentVerdict, GRAMMAR_VERSION, REASON_DEFAULT_KEY,
+        encode_document, sign_nest_policy,
+    };
+    use fauna_core::identity::ActorKeypair;
+
+    use super::*;
+
+    const DOMAIN: &str = "rules.test";
+
+    fn one_rule() -> ContentPolicyDocument {
+        let mut doc = ContentPolicyDocument::empty();
+        doc.rules.push(ContentRule {
+            factor: "spam".to_string(),
+            min_permille: 350,
+            verdict: ContentVerdict::Collapse,
+            reason_code: "rule-1".to_string(),
+            reason: [(REASON_DEFAULT_KEY.to_string(), "No spam".to_string())].into(),
+            extra: Default::default(),
+        });
+        doc
+    }
+
+    fn newer_and_empty() -> ContentPolicyDocument {
+        let mut doc = ContentPolicyDocument::empty();
+        doc.version = GRAMMAR_VERSION + 1;
+        doc
+    }
+
+    /// An app whose session nest's verified self-description carries `doc` —
+    /// the book both rules surfaces summarise.
+    fn bound(doc: &ContentPolicyDocument) -> App {
+        let mut app = crate::app::tests::test_app();
+        let keypair = ActorKeypair::from_secret([5; 32]);
+        let bytes = encode_document(doc).unwrap();
+        let signature = sign_nest_policy(keypair.signing_key(), &bytes, 1, 1_700_000_001).unwrap();
+        let read = app.nest_rules.bind_for_test(
+            &keypair.actor_id_hex(),
+            DOMAIN,
+            SignedNestRules {
+                document: &bytes,
+                sequence: 1,
+                issued_at: 1_700_000_001,
+                signature: &signature,
+            },
+        );
+        assert!(matches!(read, NestRulesRead::First { .. }), "{read:?}");
+        app
+    }
+
+    fn summary_of(app: &App) -> NestRulesSummary {
+        let id = app.nest_rules.nest_id.as_deref().unwrap();
+        app.nest_rules.book.get(id).unwrap().summary(UI_LANG)
+    }
+
+    fn count(els: &[Element], id: &str) -> usize {
+        els.iter().filter(|e| e.id == id).count()
+    }
+
+    #[test]
+    fn joining_paints_the_heading_and_one_item_per_rule() {
+        let els = joining_elements(&summary_of(&bound(&one_rule())));
+        assert_eq!(els[0].id, ids::ONBOARDING_NEST_RULES);
+        assert_eq!(els[0].text, t::joining_heading(DOMAIN));
+        assert_eq!(count(&els, ids::ONBOARDING_NEST_RULES_ITEM), 1);
+        assert!(els[1].text.contains("No spam"), "{}", els[1].text);
+    }
+
+    /// A newer grammar's document decodes to no rules here; joining still
+    /// accepts it, so the heading carries the not-applied sentence.
+    #[test]
+    fn joining_a_newer_version_with_no_rules_paints_heading_and_sentence() {
+        let summary = summary_of(&bound(&newer_and_empty()));
+        assert_eq!(summary.not_applied, Some(NestRulesNotApplied::NewerVersion));
+        let els = joining_elements(&summary);
+        assert_eq!(count(&els, ids::ONBOARDING_NEST_RULES_ITEM), 0);
+        assert_eq!(els[0].id, ids::ONBOARDING_NEST_RULES);
+        assert!(els[0].text.starts_with(&t::joining_heading(DOMAIN)));
+        assert!(
+            els[0].text.ends_with(t::NOT_APPLIED_NEWER_VERSION),
+            "{}",
+            els[0].text
+        );
+    }
+
+    /// The settings surface paints the same document: the section, its
+    /// version and the whole document's not-applied note, no rule listed.
+    #[test]
+    fn settings_paints_a_newer_version_with_no_rules() {
+        let els = settings_elements(&bound(&newer_and_empty()));
+        assert_eq!(count(&els, ids::SETTINGS_NEST_RULES_SECTION), 1);
+        assert_eq!(count(&els, ids::SETTINGS_NEST_RULES_VERSION), 1);
+        assert_eq!(count(&els, ids::SETTINGS_NEST_RULES_ITEM), 0);
+        let note = els
+            .iter()
+            .find(|e| e.id == ids::SETTINGS_NEST_RULES_INERT_NOTICE)
+            .expect("the whole document's note");
+        assert_eq!(note.text, t::NOT_APPLIED_NEWER_VERSION);
+    }
+
+    #[test]
+    fn settings_paints_nothing_for_an_applied_empty_document() {
+        assert!(settings_elements(&bound(&ContentPolicyDocument::empty())).is_empty());
+    }
 }

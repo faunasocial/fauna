@@ -1,5 +1,8 @@
 package com.fauna.app.core.conversations
 
+import androidx.lifecycle.DefaultLifecycleObserver
+import androidx.lifecycle.LifecycleOwner
+import androidx.lifecycle.ProcessLifecycleOwner
 import com.fauna.app.core.NotificationHelper
 import com.fauna.app.core.ShellLog
 import com.fauna.app.testing.TestAgent
@@ -49,7 +52,7 @@ import javax.inject.Singleton
 class ConversationsManagerHost @Inject constructor(
     notifications: NotificationHelper,
     private val widget: WidgetUnreadPublisher,
-) {
+) : DefaultLifecycleObserver {
     private val _snapshot = MutableStateFlow<ConversationsSnapshot?>(null)
 
     /**
@@ -140,6 +143,7 @@ class ConversationsManagerHost @Inject constructor(
     private val draftsScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var draftsSync: FfiDraftsSync? = null
     private var draftsSaveJob: Job? = null
+    private var registeredForLifecycle = false
 
     // ── Conversations receive session ──────────────────────────────────────
     //
@@ -454,7 +458,16 @@ class ConversationsManagerHost @Inject constructor(
      * the capture and is pinned by `DraftsRestoreCaptureTest`.
      */
     fun startDraftsSync(sync: FfiDraftsSync) {
-        synchronized(this) { draftsSync = sync }
+        val register = synchronized(this) {
+            draftsSync = sync
+            (!registeredForLifecycle).also { registeredForLifecycle = true }
+        }
+        // The leave-flush door (reserved-folders.md § The leave-flush promise):
+        // the OS may kill a backgrounded app at any moment, so a pending
+        // debounced save must not wait for its timer. Registered once for the
+        // process lifetime — `draftsSync == null` between sessions makes
+        // [onStop] a no-op rather than needing to unregister.
+        if (register) ProcessLifecycleOwner.get().lifecycle.addObserver(this)
         launchDraftsRestore(draftsScope, sync) { ManagerDraftsRestoreTarget(manager) }
     }
 
@@ -497,6 +510,47 @@ class ConversationsManagerHost @Inject constructor(
         synchronized(this) {
             // A `stopDraftsSync` may have raced in between; don't resurrect it.
             if (draftsSync != null) draftsSaveJob = job else job.cancel()
+        }
+    }
+
+    /**
+     * The sign-out / account-switch leave door (`reserved-folders.md` § The
+     * leave-flush promise: "signing out, and switching to another account, is
+     * a leave door too"). Captures the OUTGOING session's sync handle and
+     * snapshot NOW, synchronously, and returns the save for the caller to run
+     * before it tears the client down — [stopDraftsSync] nulls the handle
+     * right after, so a flush that read the host's fields later would find
+     * nothing. `null` when no session is wired. Same `saveIfChanged` launch
+     * gate and dedup as [onStop].
+     */
+    fun captureLeaveFlush(): (suspend () -> Unit)? {
+        val sync = synchronized(this) { draftsSync } ?: return null
+        val snapshot = manager.draftsSnapshotBytes()
+        return { sync.saveIfChanged(snapshot) }
+    }
+
+    /**
+     * The leave-flush: force an immediate `saveIfChanged` of the shared
+     * manager's drafts snapshot, bypassing the debounce, on the app's
+     * background transition — the android leg of `drafts-survive` outcome 5,
+     * the twin of apple's `ConversationsVM.flushDraftsNow` and of
+     * [com.fauna.app.core.events.EventDraftsHost.onStop]. Best-effort like any
+     * such handler (no async work is guaranteed after `onStop`).
+     * `saveIfChanged` keeps its launch gate and unchanged-snapshot dedup, so a
+     * flush before the restore completes, or with nothing new, is a no-op.
+     */
+    override fun onStop(owner: LifecycleOwner) {
+        val sync = synchronized(this) {
+            draftsSaveJob?.cancel()
+            draftsSaveJob = null
+            draftsSync ?: return
+        }
+        draftsScope.launch {
+            try {
+                sync.saveIfChanged(manager.draftsSnapshotBytes())
+            } catch (e: Exception) {
+                ShellLog.d("ConversationsDrafts", "leave-flush drafts failed: ${e.message}")
+            }
         }
     }
 }

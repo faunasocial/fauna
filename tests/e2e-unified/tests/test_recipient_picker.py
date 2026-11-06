@@ -2,6 +2,7 @@
 import pytest
 
 from helpers import real_rail_control
+from helpers.agent_refusal import refusal_from
 from helpers.budgets import UI_SETTLE_S
 from helpers.waiting import wait_until
 from tests.api import conv_api
@@ -153,6 +154,73 @@ def test_far_network_shape_reads_not_found(logged_in_app):
         f"a bare did:plc: shape no rail claims should read 'not-found', got {state!r}. "
         f"{logged_in_app.driver.diagnose('recipient-resolve-status')}"
     )
+
+@pytest.mark.feature("conversations")
+def test_home_nest_account_without_key_packages_reads_not_reachable(
+    logged_in_app, nest_instance, test_user
+):
+    """A neighbour the home nest FINDS but who has never opened Fauna (an
+    admitted account with no key package) reads the terminal ``not-reachable``
+    — never a mail chip for ``localpart@<home domain>``, never ``not-found`` —
+    and Enter commits nothing; once their key packages are on the nest the same
+    input resolves on the Fauna rail (``docs/goal/ui/conversations.md`` § Errors
+    & edge cases → *The picker tells the truth*, rule 2, ruled 2026-10-23).
+
+    The neighbour's first sign-in is stood in for by its key-package upload:
+    that upload is the one effect of ``start_receive_loop`` the rule names, it
+    is the NEIGHBOUR's act rather than the journey's user's (convention 8 binds
+    the latter), and a second app seat on this box would add a launch without
+    adding an observable."""
+    from common.auth import create_actor_and_register
+
+    port = nest_instance["port"]
+    neighbour = create_actor_and_register(
+        port, admin_signing_key=nest_instance["admin"]["signing_key"]
+    )
+    served = conv_api.actor_by_handle(port, test_user, neighbour["handle"])
+    assert served and not served.get("addressable"), (
+        f"precondition: the nest should FIND {neighbour['handle']!r} and report it "
+        f"not addressable before any key-package upload, got {served!r}"
+    )
+    address = f"{neighbour['handle']}@{served['domain']}"
+
+    app = logged_in_app
+    conv = app.conversations
+    _fresh_composer(app)
+    conv._type_recipient(address)
+    state = app.driver.get_attr("recipient-resolve-status", "state")
+    assert state == "not-reachable", (
+        f"{address!r} is a home-nest account with no key package, so the FaunaMls "
+        f"rail's answer is terminal 'not-reachable'; got {state!r} — 'resolved' "
+        "means the mail rail claimed it by shape. "
+        f"{app.driver.diagnose('recipient-resolve-status')} "
+        f"error: {app.error_text()!r}"
+    )
+    # Enter commits nothing: the accept DECLINES loudly (convention 11) on
+    # whichever channel the app has — web throws out of the driver call, the
+    # native apps stamp their refusal slot — so read both, as the cross-nest
+    # roundtrip test does; a bare `call_command` raised on web for the very
+    # decline this step expects.
+    refusal = refusal_from(app, "conversations_accept_recipient", {})
+    assert "conversations_accept_recipient" in refusal and "nothing committed" in refusal, (
+        f"accepting a not-reachable resolve must DECLINE and name why "
+        f"(convention 11), got {refusal!r}"
+    )
+    assert app.driver.count("recipient-picker-chip") == 0, (
+        "a not-reachable resolve must commit no chip: "
+        f"{app.driver.diagnose('recipient-picker-chip')}"
+    )
+
+    conv_api.keypackage_upload(
+        port, neighbour, conv_api.mint_key_packages(bytes(neighbour["signing_key"]), 3)
+    )
+    _fresh_composer(app)
+    room_class = _commit_and_read_class(app, address)
+    assert room_class == "end-to-end", (
+        f"with key packages published, {address!r} should resolve on the FaunaMls "
+        f"rail (end-to-end); got {room_class!r}. error: {app.error_text()!r}"
+    )
+
 
 # `test_rail_locks_after_first_chip` was RETIRED 2026-10-13: it asserted that no
 # `recipient-picker-suggestion` row appears after a first chip, a rule no doc

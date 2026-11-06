@@ -40,7 +40,7 @@ pub mod provenance;
 pub mod server;
 
 pub use admission::{
-    GroupRosterState, SetMembership, evaluate_share_witness, folder_scope_string,
+    GroupRosterState, RosterReading, SetMembership, evaluate_share_witness, folder_scope_string,
     group_scope_string, verdict_admits_group, verdict_admits_set, verdict_for_group_membership,
     verdict_for_m2_membership,
 };

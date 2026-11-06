@@ -901,15 +901,9 @@ fn rendered_set_bytes(set: &ExpandedSet) -> usize {
 /// becoming `%23` — exactly the form `authz::GRANTABLE_SCOPES`' exemplar
 /// carries, and the form `authz`'s own `percent_decode` reverses.
 fn percent_encode_audience(aud: &str) -> String {
-    let mut out = String::with_capacity(aud.len());
-    for byte in aud.bytes() {
-        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~' | b':') {
-            out.push(byte as char);
-        } else {
-            out.push_str(&format!("%{byte:02X}"));
-        }
-    }
-    out
+    fauna_core::format::percent_encode_except(aud, |b| {
+        matches!(b, b'-' | b'.' | b'_' | b'~' | b':')
+    })
 }
 
 /// Append a scope, skipping duplicates so a document that names the same

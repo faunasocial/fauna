@@ -52,12 +52,12 @@ use chacha20poly1305::{
 /// Frozen: every group content envelope ever sealed opens through this
 /// string, so editing it would make every stored community-room message
 /// unopenable by every member and by the home nest alike.
-const GROUP_CONTENT_SEAL_CONTEXT: &str = "fauna.group.content.seal.v1 2026-09-09";
+pub(crate) const GROUP_CONTENT_SEAL_CONTEXT: &str = "fauna.group.content.seal.v1 2026-09-09";
 
 /// Domain-separation context for a group content kind's **nonce-derivation
 /// key**, separate from the AEAD key's so neither derivation constrains the
 /// other. Frozen for the same reason.
-const GROUP_CONTENT_NONCE_CONTEXT: &str = "fauna.group.content.nonce.v1 2026-09-09";
+pub(crate) const GROUP_CONTENT_NONCE_CONTEXT: &str = "fauna.group.content.nonce.v1 2026-09-09";
 
 /// The content kind a community conversation room's message log seals under —
 /// the scheme's first content kind. Kept beside the derivation rather than in
@@ -102,6 +102,82 @@ pub const ROOM_POST_CONTENT_KIND: &str = "fauna.conversations.room.post";
 #[must_use]
 pub fn room_post_base_key(gen_key: &GenerationKey) -> [u8; 32] {
     group_content_key(gen_key, ROOM_POST_CONTENT_KIND)
+}
+
+/// The content kind a **group set's file bodies** (manifests and chunks) key
+/// under — the root the folder family's `chunk_crypto` derives from,
+/// re-targeted to a group generation (`p2p-shared-set-build.md` § Build
+/// design — the group set, decision 4). A kind of its own, so a set's path
+/// state (the `fauna.group.file` entries, sealed under the same generation's
+/// entry key) and its bodies never share a key.
+pub const GROUP_FILE_CONTENT_KIND: &str = "fauna.group.file.content";
+
+/// A group set's content key for one generation: the root its manifests and
+/// chunks seal under. One spelling for every reader — the writer sealing, a
+/// member pulling, a custodian serving — so none can pick the wrong kind.
+#[must_use]
+pub fn group_file_content_key(gen_key: &GenerationKey) -> [u8; 32] {
+    group_content_key(gen_key, GROUP_FILE_CONTENT_KIND)
+}
+
+/// A group set's content keys — one per generation this member holds,
+/// keyed by generation id (`p2p-shared-set-build.md` § Build design — the
+/// group set, decision 4): the tip is what new manifests and chunks seal
+/// under; every retained one still opens what it sealed. Built by
+/// `fauna_account_plane::group_set::group_set_keys`, the one reader; here so
+/// the download keys ([`crate::file_download::FileDownloadKeys`]) and the
+/// engine can carry it.
+#[derive(Default, Clone)]
+pub struct GroupContentKeys {
+    tip: Option<[u8; 32]>,
+    keys: std::collections::BTreeMap<[u8; 32], zeroize::Zeroizing<[u8; 32]>>,
+}
+
+impl std::fmt::Debug for GroupContentKeys {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GroupContentKeys")
+            .field("tip", &self.tip.map(|t| hex::encode(&t[..8])))
+            .field("generations", &self.keys.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl GroupContentKeys {
+    /// The ring from each held generation's **generation key** — every content
+    /// key derived through [`group_file_content_key`], so no holder can pick
+    /// the wrong kind. A `tip` this ring holds no key for answers no tip.
+    #[must_use]
+    pub fn from_generation_keys<'a>(
+        tip: Option<[u8; 32]>,
+        held: impl IntoIterator<Item = (&'a [u8; 32], &'a GenerationKey)>,
+    ) -> Self {
+        GroupContentKeys {
+            tip,
+            keys: held
+                .into_iter()
+                .map(|(id, k)| (*id, zeroize::Zeroizing::new(group_file_content_key(k))))
+                .collect(),
+        }
+    }
+
+    /// The tip generation's id and content key.
+    #[must_use]
+    pub fn tip(&self) -> Option<([u8; 32], &[u8; 32])> {
+        let id = self.tip?;
+        self.keys.get(&id).map(|k| (id, &**k))
+    }
+
+    /// The content key for `generation`.
+    #[must_use]
+    pub fn key(&self, generation: &[u8; 32]) -> Option<&[u8; 32]> {
+        self.keys.get(generation).map(|k| &**k)
+    }
+
+    /// Every generation this ring holds, ascending by id (an id order, never a
+    /// generation order — the family has none).
+    pub fn generations(&self) -> impl Iterator<Item = &[u8; 32]> {
+        self.keys.keys()
+    }
 }
 
 /// Derive one kind's AEAD key from a generation key.
@@ -348,6 +424,65 @@ mod tests {
             "3a373cd677e84038a767857d78445e3c1fbbd4d3239f240c3726220274dd69ea",
             "the group content key derivation is frozen"
         );
+    }
+
+    #[test]
+    fn the_group_set_file_content_key_is_pinned_and_apart_from_the_entry_keys() {
+        // Frozen: every manifest and chunk a group set ever sealed derives its
+        // key here, so this vector failing means every stored body of every
+        // group set is unopenable.
+        let gen_key = GenerationKey::from_bytes([1u8; 32]);
+        let k = group_file_content_key(&gen_key);
+        assert_eq!(k, group_content_key(&gen_key, GROUP_FILE_CONTENT_KIND));
+        assert_eq!(
+            hex::encode(k),
+            "e36002dd4e87d19c43e4e4d6691df986c5c3f6a9a5a859ce5f832834a8d4eda1",
+            "the group set content key derivation is frozen"
+        );
+        // Decision 4: the bodies' key is never the path-state entries' key,
+        // nor any room kind's.
+        let schedule = crate::crypto::GroupContentSchedule::derive(&gen_key);
+        for kind in [
+            "fauna.group.file",
+            "fauna.group.name",
+            ROOM_MESSAGE_CONTENT_KIND,
+            ROOM_ATTACHMENT_CONTENT_KIND,
+            ROOM_POST_CONTENT_KIND,
+        ] {
+            assert_ne!(k, group_content_key(&gen_key, kind), "{kind}");
+            assert_ne!(&k, schedule.for_kind(kind).entry_key(), "{kind}");
+        }
+    }
+
+    #[test]
+    fn the_content_schedule_is_the_content_key_two_step_and_rotates_with_the_generation() {
+        // Decision 3: no new context strings — a content kind's entry key IS
+        // its group content key, and its item blind is the kind's nonce key.
+        let gen_key = GenerationKey::from_bytes([3u8; 32]);
+        let keys =
+            crate::crypto::GroupContentSchedule::derive(&gen_key).for_kind("fauna.group.file");
+        assert_eq!(
+            *keys.entry_key(),
+            group_content_key(&gen_key, "fauna.group.file")
+        );
+        assert_eq!(
+            keys.item_key(b"k"),
+            *blake3::keyed_hash(&group_content_nonce_key(&gen_key, "fauna.group.file"), b"k")
+                .as_bytes()
+        );
+        // A later generation seals under unrelated keys.
+        let next =
+            crate::crypto::GroupContentSchedule::derive(&GenerationKey::from_bytes([4u8; 32]))
+                .for_kind("fauna.group.file");
+        assert_ne!(keys.entry_key(), next.entry_key());
+        assert_ne!(keys.item_key(b"k"), next.item_key(b"k"));
+        // And the content branch is not the machinery branch of the same bytes.
+        let machinery = crate::crypto::GroupMachinerySchedule::derive(
+            &crate::crypto::GroupMachineryRoot::from_bytes([3u8; 32]),
+        )
+        .for_kind("fauna.group.file");
+        assert_ne!(keys.entry_key(), machinery.entry_key());
+        assert_ne!(keys.item_key(b"k"), machinery.item_key(b"k"));
     }
 
     #[test]

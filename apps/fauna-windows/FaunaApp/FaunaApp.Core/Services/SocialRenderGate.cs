@@ -14,12 +14,26 @@ public enum SocialRenderArm
     /// item 1) — DM only; the feed's takedown arm lives on the quoted-post embed.</summary>
     LegalTakedown,
 
+    /// <summary>The nest's admin blocked the item after a report and withheld it
+    /// (takedown-and-block.md § Admin block of a reported item, decision 4): the shared
+    /// notice in place of the body — DM only; the feed's arm lives on the quoted-post
+    /// embed and the post detail. The author's own kept body is <see cref="Live"/> with
+    /// the notice beside it.</summary>
+    AdminBlocked,
+
     /// <summary>The region content policy withholds the item (region-blocking.md
     /// § The blocked render): the <c>region-blocked-notice</c> placeholder — frame,
     /// authority, the authority's reason verbatim — in place of the body; a
     /// <c>collapse</c> adds the <c>region-collapsed-reveal-button</c>, a
     /// <c>block</c> has no reveal.</summary>
     RegionWithheld,
+
+    /// <summary>A rule of the nest the item was read through withholds it
+    /// (nest-rules.md § The nest source in the engine): the
+    /// <c>nest-blocked-notice</c> placeholder — frame naming the nest, its domain,
+    /// the admin's reason verbatim — in place of the body; a <c>collapse</c> adds
+    /// the <c>nest-collapsed-reveal-button</c>, a <c>block</c> has no reveal.</summary>
+    NestWithheld,
 
     /// <summary>Content-policy <c>block</c>: the policy-naming
     /// <c>content-policy-blocked-notice</c> in place of the body, with NO reveal.</summary>
@@ -88,18 +102,33 @@ public static class SocialRenderGate
     /// <c>collapse</c> shares the family reveal set, so once revealed the composed
     /// <c>"collapse"</c> verdict falls through to the family collapse arm, which
     /// the same reveal has already lifted.</param>
+    /// <param name="adminBlockInPlace">DM only: the nest's admin blocked this record and
+    /// withheld it (<c>MessageSnapshot::admin_block_in_place</c> — the marker with an
+    /// empty document). Next to the legal takedown, and for the same reason it outranks
+    /// the content policy: it is the nest's act, not a preference the viewer can relax.
+    /// The author's kept body is not in place and falls through.</param>
+    /// <param name="nestVerb">The nest placeholder's verb when a rule of the nest the
+    /// item was read through drove the composed verdict (<c>"block"</c> /
+    /// <c>"collapse"</c>, <c>RegionRenderDecision.NestPlaceholder</c>), else
+    /// <c>null</c> — the region's twin, checked right after it (the two never both
+    /// set: one source wins a verdict), sharing the same reveal set.</param>
     public static SocialRenderArm Decide(
         string contentVerdict,
         bool contentRevealed,
         bool muted,
         bool deleted = false,
         string? legalTakedownRef = null,
-        string? regionVerb = null)
+        string? regionVerb = null,
+        bool adminBlockInPlace = false,
+        string? nestVerb = null)
     {
         if (deleted) return SocialRenderArm.Deleted;
         if (!string.IsNullOrEmpty(legalTakedownRef)) return SocialRenderArm.LegalTakedown;
+        if (adminBlockInPlace) return SocialRenderArm.AdminBlocked;
         if (regionVerb == "block" || (regionVerb == "collapse" && !contentRevealed))
             return SocialRenderArm.RegionWithheld;
+        if (nestVerb == "block" || (nestVerb == "collapse" && !contentRevealed))
+            return SocialRenderArm.NestWithheld;
         // ⚠ Do NOT move this below the muted arm, and do NOT gate it on
         // contentRevealed: either change silently makes a blocked item revealable.
         if (contentVerdict == "block") return SocialRenderArm.ContentBlocked;

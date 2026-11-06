@@ -133,8 +133,8 @@ fun FamilyContent(
     onDeclineIncomingTransfer: (ByteArray) -> Unit,
     featureAuthoring: FeatureAuthoringState = FeatureAuthoringState(),
     featureEditor: FeatureEditorActions = FeatureEditorActions.None,
-    // `family-policy-rules-section` for the selected ward, where the four floor
-    // selects stood — a slot, so a host test renders the page without the
+    // `family-policy-rules-section` for the selected ward (the guardian's
+    // content rules) — a slot, so a host test renders the page without the
     // editor's Hilt host.
     rulesSection: @Composable (FfiFamilyWardInfo) -> Unit = {},
 ) {
@@ -551,7 +551,7 @@ private fun PolicyEditor(
         )
         // ── Content rules (nest-rules.md § The shared rule editor (b);
         // family-safety.md § App surface → *Content rules*) — the shared rule
-        // editor stands where the four per-category floor selects stood, with its
+        // editor is the guardian's content-rules surface, with its
         // own save; the Notify toggle below stays this form's.
         rulesSection(ward)
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -631,7 +631,7 @@ private fun PolicyEditor(
                         // The content pillar is the rule editor's own save
                         // (`FfiFamilyClient.saveContentRules`), so this form sends it
                         // ABSENT — "leave unchanged" — and never overwrites the
-                        // guardian's document with floors (tui's and web's twin).
+                        // guardian's document (tui's and web's twin).
                         contentPolicy = null,
                         // v1.x screen-time pillar (Slice E) — the editor now
                         // builds it too, so it sends it present (replace

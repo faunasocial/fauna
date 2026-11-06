@@ -24,11 +24,7 @@ pub fn is_safe_relative_path(relative_path: &str) -> bool {
     }
 
     // Reject empty paths
-    if relative_path.is_empty() {
-        return false;
-    }
-
-    true
+    !relative_path.is_empty()
 }
 
 /// Resolve `root.join(relative_path)` and confirm the target stays **within

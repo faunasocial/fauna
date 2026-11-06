@@ -35,8 +35,10 @@ import pytest
 
 from common import create_actor_and_register
 from helpers.budgets import MLS_HANDSHAKE_S
+from helpers import waiting
 from helpers.waiting import await_account_runtime_assembled, wait_until
 from tests.api import conv_api
+from tests.test_conversations_message_banner import _require_banner_leg
 
 pytestmark = [pytest.mark.tier_3, pytest.mark.real_conversations]
 
@@ -64,11 +66,9 @@ def _thread(app, channel_hex: str):
     )
 
 
-@pytest.mark.feature("conversations")
-def test_a_native_message_sent_while_the_app_was_closed_is_unread_at_launch(
-    logged_in_app, nest_instance, test_user
-):
-    app = logged_in_app
+def _arrive_while_closed_then_relaunch(app, nest_instance, test_user) -> str:
+    """Steps 1–4 of the module docstring; returns the channel's hex id once the
+    relaunched app reads exactly one unread message in it."""
     if not app.driver.preserve_state_across_relaunch():
         pytest.skip(
             "driver cannot preserve the client's long-term store across a relaunch, "
@@ -95,15 +95,14 @@ def test_a_native_message_sent_while_the_app_was_closed_is_unread_at_launch(
         bytes(sender["signing_key"]), my_kp, [FIRST_BODY, SECOND_BODY]
     )
     conv_api.accept_contact(port, test_user, sender["actor_id_hex"])
-    conv_api.welcome_deliver(port, sender, me, channel_hex, welcome)
-    wait_until(
-        lambda: _thread(app, channel_hex) is not None,
-        MLS_HANDSHAKE_S,
-        diagnose=lambda: "waiting for the app to join the sender's Welcome",
-    )
+    inbox_id = conv_api.welcome_deliver(port, sender, me, channel_hex, welcome)
+    # The acked Welcome is the join witness: a Welcome-only 1:1 is listed on
+    # no rail until its first message, so the thread appears only below.
+    conv_api.await_welcome_applied(port, test_user, inbox_id, MLS_HANDSHAKE_S)
     conv_api.channel_send(port, sender, channel_hex, first)
     wait_until(
-        lambda: _thread(app, channel_hex).message_count >= 1,
+        lambda: (_thread(app, channel_hex) is not None)
+        and _thread(app, channel_hex).message_count >= 1,
         MLS_HANDSHAKE_S,
         diagnose=lambda: "waiting for the app to decrypt message one",
     )
@@ -141,7 +140,10 @@ def test_a_native_message_sent_while_the_app_was_closed_is_unread_at_launch(
         # (bridge included), leaving `hard_reload()` nothing to reopen.
         app.driver.kill_uncleanly()
     else:
-        app.driver.teardown()
+        # The user quits and the machine stays: `teardown()` discards it (and on
+        # windows kills the bridge and the pinned store), leaving `hard_reload()`
+        # nothing to reopen.
+        app.driver.quit_app()
     conv_api.channel_send(port, sender, channel_hex, second)
 
     # ── 4. Relaunch against the pinned store. ──
@@ -156,4 +158,47 @@ def test_a_native_message_sent_while_the_app_was_closed_is_unread_at_launch(
         f"message (the one above the marker, through={read_through}); the thread "
         f"reads {getattr(_thread(app, channel_hex), 'unread_count', None)!r} — 0 means "
         "the launch floor decided it (the read-position seam never delivered)",
+    )
+    return channel_hex
+
+
+@pytest.mark.feature("conversations")
+def test_a_native_message_sent_while_the_app_was_closed_is_unread_at_launch(
+    logged_in_app, nest_instance, test_user
+):
+    _arrive_while_closed_then_relaunch(logged_in_app, nest_instance, test_user)
+
+
+@pytest.mark.feature("conversations")
+def test_a_message_that_arrived_while_the_app_was_closed_raises_no_banner(
+    logged_in_app, nest_instance, test_user
+):
+    """``docs/goal/behavior/message-banners.md`` § Where logic lives: a message
+    that arrived while the app was closed is history to the banner tracker,
+    whichever snapshot delivers it — the unread mark carries it, a banner does
+    not. Same arc as the test above; then a banner diff tick that began after
+    the relaunched app showed the unread message has finished, and none fired
+    for that thread (the negative is anchored on that tick, never a clock)."""
+    app = logged_in_app
+    _require_banner_leg(app.driver)
+    waiting.require_message_banners(app.driver)
+    channel_hex = _arrive_while_closed_then_relaunch(app, nest_instance, test_user)
+    thread_id = _thread(app, channel_hex).thread_id
+
+    # The barrier: a tick that BEGAN after the unread message was on screen. A
+    # quiet app runs no tick, so make one — opening the thread reads it, a
+    # snapshot change — and wait for it to finish; every snapshot that carried
+    # the arrival was diffed before it. (An open thread raises nothing new, but
+    # a banner the arrival raised earlier is already in the log.)
+    planted = waiting.message_banners(app.driver)["started"]
+    app.conversations.navigate()
+    app.conversations.open_thread_by_channel(channel_hex)
+    waiting.await_banner_pass_after(
+        app.driver, planted, what="opening the thread the relaunch delivered into"
+    )
+    fired = waiting.fired_banner_threads(app.driver)
+    assert thread_id not in fired, (
+        f"thread {thread_id} raised a banner for a message that arrived while the "
+        f"app was closed (fired this run: {fired}); it should be carried by the "
+        "unread mark alone"
     )

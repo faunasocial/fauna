@@ -287,14 +287,108 @@ Stamped 2026-08-26 at 8213688bbc.
     assert {fc.compute_cell(page, app, ledger).state for app in fc.APPS} == {"full"}
 
 
-def test_skip_unbuilt_is_partial_not_failing(tmp_path):
-    pages, ledger = _catalog(tmp_path, {"tui": ledger_file("tui", {"feed-read": {
-        "cell": cell_entry(),
-        "tests": {
-            "tests/e2e-unified/tests/test_feed.py::test_own_post_appears": rec(),
-            "tests/e2e-unified/tests/test_feed.py::test_refresh": rec("skipped", skip_class="unbuilt"),
-        }}})})
-    assert fc.compute_cell(pages[0], "tui", ledger).state == "partial"
+# ── the unbuilt state (§ Cell semantics, the *unbuilt* row) ─────────────────
+OWN = "tests/e2e-unified/tests/test_feed.py::test_own_post_appears"
+REFRESH = "tests/e2e-unified/tests/test_feed.py::test_refresh"
+DELETE = "tests/e2e-unified/tests/api/test_delete.py::test_delete"
+
+
+def _tui_cell(tmp_path, tests, nest_tests=None, nest_witness=False):
+    """tui's cell over PAGE — outcome 3 witnessed by DELETE when `nest_witness`."""
+    text = PAGE.replace("   - (none)", f"   - `{DELETE}`") if nest_witness else PAGE
+    ledger = {"tui": ledger_file("tui", {"feed-read": {"cell": cell_entry(), "tests": tests}})}
+    if nest_tests is not None:
+        ledger["nest"] = ledger_file("nest", {"feed-read": {"cell": cell_entry(),
+                                                            "tests": nest_tests}})
+    features = write_catalog(tmp_path, {"feed-read": text}, ledger)
+    return fc.compute_cell(fc.load_pages(features)[0], "tui", fc.load_ledger(features))
+
+
+def test_an_unbuilt_witness_beside_a_pass_is_unbuilt_not_partial(tmp_path):
+    cell = _tui_cell(tmp_path, {OWN: rec(), REFRESH: rec("skipped", skip_class="unbuilt")})
+    assert cell.state == "unbuilt"
+    assert cell.stamp == "0.1.2-dev+8213688b standalone"
+
+
+def test_every_witness_unbuilt_is_unbuilt_not_failing(tmp_path):
+    cell = _tui_cell(tmp_path, {OWN: rec("skipped", skip_class="unbuilt"),
+                                REFRESH: rec("skipped", skip_class="unbuilt")})
+    assert cell.state == "unbuilt"
+
+
+def test_an_unrun_witness_beside_an_unbuilt_one_changes_nothing(tmp_path):
+    assert _tui_cell(tmp_path, {OWN: rec("skipped", skip_class="unbuilt")}).state == "unbuilt"
+
+
+def test_an_absence_skip_beside_an_unbuilt_witness_is_not_a_real_red(tmp_path):
+    cell = _tui_cell(tmp_path, {OWN: rec("skipped", skip_class="unbuilt"),
+                                REFRESH: rec("skipped", skip_class="absence")})
+    assert cell.state == "unbuilt"
+
+
+@pytest.mark.parametrize("outcome,skip_class", [
+    ("failed", None), ("error", None), ("xfailed", None), ("skipped", None)])
+def test_a_real_red_beside_an_unbuilt_witness_is_partial(tmp_path, outcome, skip_class):
+    """The failure is the more urgent signal (§ Cell semantics)."""
+    cell = _tui_cell(tmp_path, {OWN: rec("skipped", skip_class="unbuilt"),
+                                REFRESH: rec(outcome, skip_class=skip_class)})
+    assert cell.state == "partial"
+
+
+def test_unbuilt_is_read_before_the_nest_conjunct(tmp_path):
+    """A nest half with no record blanks a cell; an unbuilt app witness is the known
+    fact, so the column reads unbuilt whatever the nest half says."""
+    cell = _tui_cell(tmp_path, {OWN: rec(), REFRESH: rec("skipped", skip_class="unbuilt")},
+                     nest_witness=True)
+    assert cell.state == "unbuilt"
+
+
+def test_a_real_red_on_the_nest_half_makes_an_unbuilt_column_partial(tmp_path):
+    cell = _tui_cell(tmp_path, {OWN: rec(), REFRESH: rec("skipped", skip_class="unbuilt")},
+                     nest_tests={DELETE: rec("failed")}, nest_witness=True)
+    assert cell.state == "partial"
+
+
+def test_an_unbuilt_nest_record_is_not_an_app_witness(tmp_path):
+    """The state is held by an `[app]` witness; a nest record is no app's build gap."""
+    cell = _tui_cell(tmp_path, {OWN: rec(), REFRESH: rec()},
+                     nest_tests={DELETE: rec("skipped", skip_class="unbuilt")},
+                     nest_witness=True)
+    assert cell.state == "partial"
+
+
+@pytest.mark.parametrize("first", ["linux", "windows"])
+def test_a_real_red_on_another_platform_of_the_unbuilt_witness_is_partial(tmp_path, first):
+    """The platform fold must not let the unbuilt record hide a sibling's failure,
+    whichever platform the ledger happens to list first."""
+    records = {"linux": rec("skipped", skip_class="unbuilt", platform="linux"),
+               "windows": rec("failed", platform="windows")}
+    second = "windows" if first == "linux" else "linux"
+    cell = _tui_cell(tmp_path, {OWN: {**records[first], **records[second]}, REFRESH: rec()})
+    assert cell.state == "partial"
+
+
+def test_an_unbuilt_platform_beside_a_passing_one_is_unbuilt(tmp_path):
+    cell = _tui_cell(tmp_path, {
+        OWN: {**rec(platform="linux"), **rec("skipped", skip_class="unbuilt", platform="windows")},
+        REFRESH: rec()})
+    assert cell.state == "unbuilt"
+
+
+def test_the_unbuilt_mark_is_its_own_glyph_and_never_a_coloured_circle():
+    glyph = fc.MARKS["unbuilt"]
+    assert glyph and glyph not in {m for s, m in fc.MARKS.items() if s != "unbuilt"}
+    assert not any(0x1F534 <= ord(c) <= 0x1F535 or 0x1F7E0 <= ord(c) <= 0x1F7EB for c in glyph)
+
+
+def test_matrix_json_carries_the_unbuilt_state_word(tmp_path):
+    features = write_catalog(tmp_path, {"feed-read": PAGE}, {
+        "tui": ledger_file("tui", {"feed-read": {"cell": cell_entry(), "tests": {
+            OWN: rec(), REFRESH: rec("skipped", skip_class="unbuilt")}}})})
+    fc.write_all(features)
+    data = json.loads((features / "matrix.json").read_text(encoding="utf-8"))
+    assert data["sections"][0]["features"][0]["cells"]["tui"]["state"] == "unbuilt"
+    assert fc.MARKS["unbuilt"] in (features / "MATRIX.md").read_text(encoding="utf-8")
 
 
 # ── platform keying (§ The ledger, Platform keying) ─────────────────────────
@@ -367,6 +461,62 @@ def test_render_writes_matrix_status_and_json(tmp_path):
     assert fc.write_all(features) == []
 
 
+# § Render, the placeholder paragraph: a page whose words are still a draft reaches the
+# matrix under the placeholder. The draft record is the public-texts inventory, which a
+# tree without it (the public one) never has — so it renders every page verbatim.
+_DRAFT_INVENTORY = """\
+schema = 1
+
+[[tree]]
+id = "catalog-pages"
+glob = "docs/features/*.md"
+published = "the public repository's docs/features/"
+status = "live"
+approved = "unrecorded"
+drafts = [{drafts}]
+"""
+
+
+def _render_matrices(tmp_path, drafts: str | None):
+    features = write_catalog(tmp_path, {"feed-read": PAGE}, {
+        "tui": ledger_file("tui", {"feed-read": {"cell": cell_entry(), "tests": {
+            OWN: rec(), REFRESH: rec()}}})})
+    if drafts is not None:
+        inventory = tmp_path / "docs" / "public-texts" / "inventory.toml"
+        inventory.parent.mkdir(parents=True, exist_ok=True)
+        inventory.write_text(_DRAFT_INVENTORY.format(drafts=drafts), encoding="utf-8")
+    out = fc.render_all(features)
+    return json.loads(out["matrix.json"]), out["MATRIX.md"], out["feed-read.md"]
+
+
+def test_a_draft_page_reaches_the_matrix_as_its_slug_and_the_placeholder(tmp_path):
+    public_texts = pytest.importorskip("_public_texts")  # unshipped, beside the render
+    approved = _render_matrices(tmp_path / "approved", '')
+    data, md, page = _render_matrices(tmp_path / "draft", '"docs/features/feed-read.md"')
+    entry = data["sections"][0]["features"][0]
+    assert entry["title"] == "feed-read"
+    assert entry["what"] == public_texts.DRAFT_PLACEHOLDER_SENTENCE
+    assert "| [feed-read](feed-read.md) |" in md
+    for words in ("Read your feed", "Your feed shows the posts"):
+        assert words not in json.dumps(data) and words not in md
+    # Everything but the words renders as for an approved page — cells, stamps, the
+    # page's own status block, which keeps its draft words for the reviewer.
+    approved_entry = approved[0]["sections"][0]["features"][0]
+    assert entry["cells"] == approved_entry["cells"]
+    assert {k: v for k, v in entry.items() if k not in ("title", "what")} == {
+        k: v for k, v in approved_entry.items() if k not in ("title", "what")}
+    assert md.replace("[feed-read](", "[Read your feed](") == approved[1]
+    assert page == approved[2] and "Read your feed" in page
+
+
+def test_a_tree_with_no_inventory_renders_every_page_verbatim(tmp_path):
+    data, md, _page = _render_matrices(tmp_path, None)
+    entry = data["sections"][0]["features"][0]
+    assert entry["title"] == "Read your feed"
+    assert entry["what"] == "Your feed shows the posts of the people you follow, newest first."
+    assert "| [Read your feed](feed-read.md) |" in md
+
+
 def test_render_uses_the_ascii_marks_never_coloured_circles(tmp_path):
     features = write_catalog(tmp_path, {"feed-read": PAGE}, {
         "tui": ledger_file("tui", {"feed-read": {"cell": cell_entry(), "tests": {
@@ -392,6 +542,38 @@ def test_matrix_json_carries_the_state_as_a_word(tmp_path):
     assert feature["slug"] == "feed-read"
     assert feature["cells"]["tui"]["state"] == "partial"
     assert feature["cells"]["android"]["state"] == "absent"
+
+
+def test_the_site_lists_each_released_version_once():
+    # The release table holds one row per BUILD: a version's private verified
+    # builds and its release-candidate build all carry its number, and the site's
+    # Releases table printed them all — "0.1.5" twice, once per verified dev build,
+    # before the release itself was even recorded. A version is released by its
+    # candidate run (release-table.md § Tag gate and release table), so the site
+    # lists those, one line per version.
+    releases = [
+        {"version": "0.1.5", "date": "2026-10-20", "verified": "2026-10-20", "promoted": False},
+        {"version": "0.1.5", "date": "2026-10-21", "verified": "2026-10-21", "promoted": False},
+        {"version": "0.1.5", "date": "2026-10-22", "candidate_run": "2026-10-22", "promoted": False},
+        {"version": "0.1.6", "date": "2026-10-30", "verified": "2026-10-30", "promoted": False},
+    ]
+    assert fc.released_versions(releases) == [
+        {"version": "0.1.5", "date": "2026-10-22", "promoted": False}]
+    releases.append({"version": "0.1.5", "date": "2026-10-24", "candidate_run": "2026-10-24",
+                     "promoted": True})
+    assert fc.released_versions(releases) == [
+        {"version": "0.1.5", "date": "2026-10-24", "promoted": True}]
+
+
+def test_matrix_json_carries_the_released_versions(tmp_path):
+    features = write_catalog(tmp_path, {})
+    (features / "ledger" / "releases.json").write_text(json.dumps({"schema": 1, "releases": [
+        {"version": "0.1.5", "date": "2026-10-21", "verified": "2026-10-21", "promoted": False},
+        {"version": "0.1.5", "date": "2026-10-22", "candidate_run": "2026-10-22", "promoted": False},
+    ]}), encoding="utf-8")
+    fc.write_all(features)
+    data = json.loads((features / "matrix.json").read_text(encoding="utf-8"))
+    assert data["versions"] == [{"version": "0.1.5", "date": "2026-10-22", "promoted": False}]
 
 
 def test_render_of_an_empty_catalog_is_legal(tmp_path):
@@ -559,6 +741,293 @@ def test_the_scanner_reads_an_app_marker_wherever_pytest_would(tmp_path):
     assert facts["test_module_level"] == ("linux",)
     assert facts["test_function_level"] == ("linux", "web")
     assert facts["TestKlass::test_class_level"] == ("linux", "windows")
+
+
+def test_the_scanner_reads_requires_surface_wherever_pytest_would(tmp_path):
+    """`TestFacts.surfaces` — the static reader of the `requires_surface` marker
+    (e2e-conventions.md convention 7, *The static reader is the catalog's*), read
+    at module, class and function level the way the app marks are."""
+    import features_scan
+
+    src = tmp_path / "test_surfaces.py"
+    src.write_text(
+        "import pytest\n\n"
+        "pytestmark = pytest.mark.requires_surface('admin-audit-section')\n\n\n"
+        "@pytest.mark.requires_surface('events-day-cell')\n"
+        "def test_function_level():\n    pass\n\n\n"
+        "@pytest.mark.requires_surface('unclean-kill')\n"
+        "class TestKlass:\n"
+        "    def test_class_level(self):\n        pass\n",
+        encoding="utf-8")
+    facts = {f.node_id.split("::", 1)[1]: f.surfaces
+             for f in features_scan.scan_file(src, repo=tmp_path)}
+    assert facts["test_function_level"] == ("admin-audit-section", "events-day-cell")
+    assert facts["TestKlass::test_class_level"] == ("admin-audit-section", "unclean-kill")
+
+
+def test_the_surface_registry_loads_with_its_four_fields(tmp_path):
+    path = tmp_path / "surfaces.toml"
+    path.write_text(
+        '[events-day-cell]\nkind = "product"\nbuilt = ["tui", "web"]\n'
+        'detail = "built on tui first"\ntracked = "ui/events.md § Status"\n'
+        '\n[unclean-kill]\nkind = "harness"\nbuilt = []\n', encoding="utf-8")
+    registry = fc.load_surface_registry(path)
+    assert registry["events-day-cell"].built == frozenset({"tui", "web"})
+    assert registry["events-day-cell"].tracked == "ui/events.md § Status"
+    assert registry["unclean-kill"].kind == "harness" and registry["unclean-kill"].detail == ""
+    assert fc.load_surface_registry(tmp_path / "absent.toml") == {}
+
+
+@pytest.mark.parametrize("body, why", [
+    ('[Events]\nkind = "product"\nbuilt = []\n', "kebab-case"),
+    ('[x]\nkind = "app"\nbuilt = []\n', "kind must be"),
+    ('[x]\nkind = "product"\nbuilt = "tui"\n', "built is a list"),
+    ('[x]\nkind = "product"\nbuilt = ["tvos"]\n', "names no app"),
+    ('[x]\nkind = "product"\nbuilt = []\nowner = "me"\n', "unknown field"),
+    ('[x\n', "surfaces.toml"),
+])
+def test_a_malformed_surface_registry_is_a_hard_stop(tmp_path, body, why):
+    path = tmp_path / "surfaces.toml"
+    path.write_text(body, encoding="utf-8")
+    with pytest.raises(fc.CatalogError, match=why):
+        fc.load_surface_registry(path)
+
+
+def test_the_real_surface_registry_reads():
+    assert fc.load_surface_registry(), "tests/e2e-unified/surfaces.toml is seeded"
+
+
+# ── the declared route (§ Cell semantics, *Not built is declared*) ──────────
+NOT_ON_TUI = frozenset(a for a in fc.APPS if a != "tui")
+
+
+def _declared(kind="product", built=NOT_ON_TUI, key="feed-refresh", tests=(REFRESH,)):
+    """A registry of one surface and a map naming it for `tests`."""
+    return fc.Declared(registry={key: fc.Surface(key=key, kind=kind, built=frozenset(built))},
+                       surfaces={t: frozenset({key}) for t in tests})
+
+
+def _declared_cell(tmp_path, tests, declared, nest_tests=None):
+    ledger = {}
+    if tests is not None:
+        ledger["tui"] = ledger_file("tui", {"feed-read": {"cell": cell_entry(), "tests": tests}})
+    if nest_tests is not None:
+        ledger["nest"] = ledger_file("nest", {"feed-read": {"cell": cell_entry(),
+                                                            "tests": nest_tests}})
+    # A fresh world per call: `write_catalog` never deletes a ledger file, so a test
+    # comparing two ledgers in one `tmp_path` would read the first one's leftovers.
+    root = tmp_path / f"world{len(list(tmp_path.iterdir()))}"
+    features = write_catalog(root, {"feed-read": PAGE}, ledger)
+    return fc.compute_cell(fc.load_pages(features)[0], "tui", fc.load_ledger(features),
+                           None, declared)
+
+
+def test_a_declared_unbuilt_witness_with_no_record_is_unbuilt(tmp_path):
+    """The definition of success: a cell held only by a product surface the registry
+    declares unbuilt on its column reads unbuilt with NO record for that column."""
+    both = _declared(tests=(OWN, REFRESH))
+    assert _declared_cell(tmp_path, None, both).state == "unbuilt"
+    assert _declared_cell(tmp_path, {OWN: rec()}, _declared()).state == "unbuilt"
+
+
+def test_without_the_registry_the_same_cell_is_blank(tmp_path):
+    assert _declared_cell(tmp_path, None, None).state == "none"
+    assert _declared_cell(tmp_path, None, fc.Declared()).state == "none"
+
+
+def test_a_declaration_beside_a_real_red_is_partial(tmp_path):
+    assert _declared_cell(tmp_path, {OWN: rec("failed")}, _declared()).state == "partial"
+
+
+def test_a_declaration_beside_a_nest_red_is_partial(tmp_path):
+    text = PAGE.replace("   - (none)", f"   - `{DELETE}`")
+    features = write_catalog(tmp_path, {"feed-read": text}, {
+        "tui": ledger_file("tui", {"feed-read": {"cell": cell_entry(), "tests": {OWN: rec()}}}),
+        "nest": ledger_file("nest", {"feed-read": {"cell": cell_entry(),
+                                                   "tests": {DELETE: rec("error")}}})})
+    cell = fc.compute_cell(fc.load_pages(features)[0], "tui", fc.load_ledger(features),
+                           None, _declared())
+    assert cell.state == "partial"
+
+
+def test_a_declaration_on_a_column_that_built_the_surface_says_nothing(tmp_path):
+    built = _declared(built=fc.APPS)
+    assert _declared_cell(tmp_path, {OWN: rec()}, built).state == "partial"  # unrun, as before
+
+
+def test_a_harness_declaration_never_makes_a_cell_unbuilt(tmp_path):
+    harness = _declared(kind="harness")
+    assert _declared_cell(tmp_path, {OWN: rec()}, harness).state == "partial"
+    assert _declared_cell(tmp_path, None, harness).state == "none"
+
+
+def test_a_harness_held_unbuilt_record_reads_as_unrun_never_unbuilt(tmp_path):
+    """The gate takes one unbuilt path for both kinds, so the RECORD of a harness
+    surface is `skipped: unbuilt` too; the registry reads it as unrun."""
+    held = {OWN: rec(), REFRESH: rec("skipped", skip_class="unbuilt")}
+    held[REFRESH]["linux"]["surface"] = "feed-refresh"
+    assert _declared_cell(tmp_path, held, _declared(kind="harness")).state == "partial"
+    assert _declared_cell(tmp_path, held, _declared()).state == "unbuilt"
+
+
+def test_a_stale_unbuilt_record_reads_as_unrun(tmp_path):
+    """Its surface is built on the column now: neither unbuilt nor a pass."""
+    stale = {OWN: rec(), REFRESH: rec("skipped", skip_class="unbuilt")}
+    stale[REFRESH]["linux"]["surface"] = "feed-refresh"
+    assert _declared_cell(tmp_path, stale, _declared(built=fc.APPS)).state == "partial"
+    # A pre-registry record (no `surface`) keeps the recorded reading.
+    legacy = {OWN: rec(), REFRESH: rec("skipped", skip_class="unbuilt")}
+    assert _declared_cell(tmp_path, legacy, _declared(built=fc.APPS)).state == "unbuilt"
+
+
+@pytest.mark.parametrize("outcome", ["failed", "error"])
+def test_an_ungated_failure_reads_as_unbuilt_not_red(tmp_path, outcome):
+    cell = _declared_cell(tmp_path, {OWN: rec(), REFRESH: rec(outcome)}, _declared())
+    assert cell.state == "unbuilt"
+    # Without the declaration the same record is the red it says it is.
+    assert _declared_cell(tmp_path, {OWN: rec(), REFRESH: rec(outcome)}, None).state == "partial"
+
+
+def test_an_xfail_under_a_declaration_stays_a_real_red(tmp_path):
+    cell = _declared_cell(tmp_path, {OWN: rec(), REFRESH: rec("xfailed")}, _declared())
+    assert cell.state == "partial"
+
+
+def test_a_pass_refutes_a_declaration_rather_than_reading_through_it(tmp_path):
+    """A passing record under a declaration is lint rule 7's stale declaration; the
+    cell shows the pass it recorded."""
+    assert _declared_cell(tmp_path, {OWN: rec(), REFRESH: rec()},
+                          _declared()).state == "partial"  # nest outcome 3 is (none)
+
+
+# ── the map read for one record: a gate the test stopped calling ───────────
+GATE = "feed-refresh"
+ONLY_LINUX = fc.Surface(key=GATE, kind="product", built=frozenset({"linux"}))
+
+
+def _ledger(**by_app):
+    """`{app: {node id: {platform: record}}}` → the loaded-ledger shape."""
+    return {app: {"feed-read": {"tests": tests}} for app, tests in by_app.items()}
+
+
+def _reached(outcome="passed", date="2026-10-30", surfaces=None, platform="linux"):
+    r = rec(outcome, date=date, platform=platform)
+    if surfaces:
+        r[platform]["surfaces"] = list(surfaces)
+    return r
+
+
+def _declared_over(ledger, marks=None):
+    return fc.build_declared({GATE: ONLY_LINUX}, marks or {}, ledger)
+
+
+def test_a_removed_gate_stops_counting_for_a_record_that_did_not_reach_it():
+    """The row's case: an older record on one platform reached the gate, a newer one on
+    another did not because the test no longer calls it — the newer record is judged
+    on what its own run met, so its failure is the real red it is."""
+    older = _reached("passed", "2026-10-29", [GATE])
+    newer = _reached("failed", "2026-10-30", platform="windows")
+    d = _declared_over(_ledger(linux={REFRESH: older}, windows={REFRESH: newer}))
+    assert d.surfaces[REFRESH] == {GATE} and d.borrowed[REFRESH] == {GATE}
+    assert not d.ungated(REFRESH, newer["windows"], "windows")
+    assert d.unbuilt(REFRESH, "windows", record=newer["windows"]) == ()
+    # with no record of its own a column still meets what the other run taught it
+    assert d.unbuilt(REFRESH, "windows") == (GATE,)
+
+
+def test_a_record_that_cannot_say_what_it_reached_reads_the_whole_map():
+    """Written before the writer listed reached gates: its silence is no evidence."""
+    older = _reached("passed", "2026-10-29", [GATE])
+    legacy = _reached("failed", "2026-10-20", platform="windows")
+    d = _declared_over(_ledger(linux={REFRESH: older}, windows={REFRESH: legacy}))
+    assert d.ungated(REFRESH, legacy["windows"], "windows")
+
+
+def test_a_narrowed_gate_counts_only_where_the_run_reaches_it():
+    """The gate moved behind a branch only linux takes: a newer linux record still
+    reaches it, windows's does not — order of the runs does not matter."""
+    linux = _reached("passed", "2026-10-31", [GATE])
+    windows = _reached("failed", "2026-10-30", platform="windows")
+    d = _declared_over(_ledger(linux={REFRESH: linux}, windows={REFRESH: windows}))
+    assert not d.ungated(REFRESH, windows["windows"], "windows")
+    assert d.requires(REFRESH, linux["linux"]) == {GATE}
+
+
+def test_an_added_gate_reaches_a_record_once_its_run_meets_it():
+    """A gate added after windows's last run: that record is judged on what it met (a
+    real red until windows runs again); the run that meets it skips as unbuilt."""
+    tui = _reached("passed", "2026-10-30", [GATE], platform="linux")
+    before = _reached("failed", "2026-10-27", platform="windows")
+    d = _declared_over(_ledger(tui={REFRESH: tui}, windows={REFRESH: before}))
+    assert not d.ungated(REFRESH, before["windows"], "windows")
+    after = _reached("failed", "2026-10-31", [GATE], platform="windows")
+    assert d.ungated(REFRESH, after["windows"], "windows")
+
+
+def test_a_marked_surface_is_the_tests_own_and_never_dropped():
+    """A `requires_surface` marker is the test's current code, not a borrowed key."""
+    newer = _reached("failed", "2026-10-30", platform="windows")
+    d = _declared_over(_ledger(windows={REFRESH: newer}), marks={REFRESH: (GATE,)})
+    assert d.borrowed == {}
+    assert d.ungated(REFRESH, newer["windows"], "windows")
+
+
+def test_a_removed_gate_leaves_the_column_with_its_real_red(tmp_path):
+    """Through the cell: the failure reads as the red it is, not as unbuilt."""
+    older = _reached("passed", "2026-10-29", [GATE])
+    newer = _reached("failed", "2026-10-30", platform="linux")
+    d = fc.build_declared({GATE: fc.Surface(key=GATE, kind="product",
+                                            built=frozenset({"web"}))},
+                          {}, _ledger(web={REFRESH: older}, tui={REFRESH: newer}))
+    assert _declared_cell(tmp_path, {OWN: rec(), REFRESH: newer}, d).state == "partial"
+    stale_reach = _reached("failed", "2026-10-20", platform="linux")
+    assert _declared_cell(tmp_path, {OWN: rec(), REFRESH: stale_reach}, d).state == "unbuilt"
+
+
+def test_the_map_is_the_union_of_markers_and_every_records_surfaces(tmp_path):
+    other = "tests/e2e-unified/tests/test_other.py::test_x"
+    ledger = {
+        "web": {"feed-read": {"tests": {REFRESH: {"linux": {"outcome": "passed",
+                                                            "surfaces": ["a-key"]}}}}},
+        "tui": {"other": {"tests": {REFRESH: {"windows": {
+            "outcome": "skipped", "skip_class": "unbuilt", "surface": "b-key",
+            "surfaces": ["b-key"]}}}}},
+    }
+    scan = {REFRESH: ("m-key",), other: ("m-key",)}
+    assert fc.test_surfaces(REFRESH, scan, ledger) == {"a-key", "b-key", "m-key"}
+    assert fc.test_surfaces(other, scan, ledger) == {"m-key"}
+    assert fc.test_surfaces(OWN, scan, ledger) == frozenset()
+    assert fc.surface_map(scan, ledger) == {REFRESH: {"a-key", "b-key", "m-key"},
+                                            other: {"m-key"}}
+
+
+def test_the_render_reads_the_registry_and_markers_beside_the_catalog(tmp_path):
+    """End to end through `render_all`: the fixture tree's own `surfaces.toml` and its
+    test's `requires_surface` marker make tui's cell unbuilt with no record, the word
+    reaches `matrix.json`, and the page's `## Status` names the key beside the
+    witness."""
+    features = write_catalog(tmp_path, {"feed-read": PAGE}, {
+        "tui": ledger_file("tui", {"feed-read": {"cell": cell_entry(),
+                                                 "tests": {OWN: rec()}}})})
+    e2e = tmp_path / "tests" / "e2e-unified"
+    (e2e / "tests").mkdir(parents=True)
+    (e2e / "tests" / "test_feed.py").write_text(
+        "import pytest\n\n\n"
+        "@pytest.mark.feature('feed-read')\n"
+        "def test_own_post_appears(app):\n    pass\n\n\n"
+        "@pytest.mark.feature('feed-read')\n"
+        "@pytest.mark.requires_surface('feed-refresh')\n"
+        "def test_refresh(app):\n    pass\n", encoding="utf-8")
+    (e2e / "surfaces.toml").write_text(
+        '[feed-refresh]\nkind = "product"\nbuilt = ["web", "linux"]\n', encoding="utf-8")
+    fc.write_all(features)
+    data = json.loads((features / "matrix.json").read_text(encoding="utf-8"))
+    cells = data["sections"][0]["features"][0]["cells"]
+    assert cells["tui"]["state"] == "unbuilt"
+    assert cells["web"]["state"] == "none"
+    status = (features / "feed-read.md").read_text(encoding="utf-8")
+    assert ("`tests/e2e-unified/tests/test_feed.py::test_refresh` — requires "
+            "`feed-refresh` (not built: windows, macos, ios, android, tui)") in status
 
 
 def test_an_unmarked_test_is_scanned_as_speaking_for_every_column(tmp_path):
@@ -733,7 +1202,9 @@ def test_the_launch_routing_smokes_autostart_case_speaks_for_windows_alone():
     scanned = features_scan.scan_tree()
     module = "tests/e2e-unified/tests/test_onboarding_launch_routing_smoke.py::"
     case_j = scanned[module + "test_smoke_j_autostart_stays_hidden_only_when_it_lands_in_the_main_app"]
-    assert case_j.apps == ("windows",)
+    # `AUTOSTART_APPS` grew from windows alone; the test name keeps its first
+    # spelling so the last-green ledger key stays stable.
+    assert case_j.apps == ("linux", "macos", "windows")
     assert all(f.apps for nid, f in scanned.items()
                if nid.startswith(module) and f.features), (
         "a launch-routing case read as unmarked — every case there is client-restricted")
@@ -1192,3 +1663,234 @@ def test_behind_commits_is_unknown_without_a_green_or_a_resolvable_base(tmp_path
     assert fc.behind_commits({"last_green": None}, "tui", repo, ref="main") is None
     assert fc.behind_commits({"last_green": {"base": None}}, "tui", repo, ref="main") is None
     assert fc.behind_commits({"last_green": {"base": "f" * 40}}, "tui", repo, ref="main") is None
+
+
+def test_a_seat_list_spelled_through_a_module_constant_still_carries_its_marks(tmp_path):
+    """`pytest.param("android", marks=pytest.mark.android)` inside a module constant
+    (`_MEMBER_SEATS`) that a `parametrize` names is collected with the mark at run
+    time — pytest adds a param's marks to its item — so the item is selected on that
+    app's run. The scan walked only the decorator's own nodes, so a constant's marks
+    were invisible and a seat arm that ran on android credited the column to nobody
+    (the share-a-folder member witnesses, whose android and web/ios arms were real)."""
+    facts = _scan_apps(tmp_path, (
+        "import pytest\n\n"
+        "_SEATS = [\n"
+        "    pytest.param(\"tui\", marks=pytest.mark.tui),\n"
+        "    pytest.param(\"android\", marks=pytest.mark.android),\n"
+        "]\n\n\n"
+        "@pytest.mark.parametrize(\"media_member\", _SEATS, indirect=True)\n"
+        "def test_member(media_member):\n    pass\n\n\n"
+        "@pytest.mark.parametrize(\"media_member\", [\"tui\"], indirect=True)\n"
+        "def test_literal(media_member):\n    pass\n"))
+    assert facts["test_member"] == ("android", "tui")
+
+
+# ── two sources: the ledger and the published last-green snapshot ───────────
+# feature-catalog.md § Cell semantics, *Two sources*: each record is the newer of the
+# ledger's and the snapshot's for its key; the snapshot in git, never the box's store.
+OWN = "tests/e2e-unified/tests/test_feed.py::test_own_post_appears"
+REFRESH_ID = "tests/e2e-unified/tests/test_feed.py::test_refresh"
+LEDGER_BASE = "a" * 40
+LATER_BASE = "b" * 40
+
+
+def _ledger_rec(outcome="failed", date="2026-10-31", skip_class=None):
+    record = rec(outcome, date=date, skip_class=skip_class)
+    record["linux"]["base"] = LEDGER_BASE
+    return record
+
+
+def _dir_rec(outcome="green", time="2026-11-01T10:00:00+00:00", base=LATER_BASE,
+             dirty=False):
+    green = ({"base": base, "commit": base, "dirty": dirty, "duration": 1.0,
+              "origin": "session", "time": time} if outcome == "green" else None)
+    return {"collected": time[:10], "flaky": {"count": 0, "last": None},
+            "last": {"commit": base, "outcome": outcome, "time": time},
+            "last_green": green, "red_since": None}
+
+
+def _two_source_catalog(tmp_path, own_ledger, snapshot):
+    """A full-contract page whose two app witnesses the linux ledger holds; the
+    snapshot is `docs/features/last-green/linux.json`'s `tests` map."""
+    text = PAGE.replace("   - (none)",
+                        "   - `tests/e2e-unified/tests/api/test_delete.py::test_delete`")
+    features = write_catalog(tmp_path, {"feed-read": text}, {
+        "linux": ledger_file("linux", {"feed-read": {"cell": cell_entry(), "tests": {
+            OWN: own_ledger, REFRESH_ID: rec(),
+        }}}),
+        "nest": ledger_file("nest", {"feed-read": {"cell": cell_entry(), "tests": {
+            "tests/e2e-unified/tests/api/test_delete.py::test_delete": rec(),
+        }}}),
+    })
+    (features / "last-green").mkdir()
+    (features / "last-green" / "linux.json").write_text(json.dumps(
+        {"platform": "linux", "schema": 1, "tests": snapshot}), encoding="utf-8")
+    return features
+
+
+def _linux_cell(features, ancestor=lambda older, newer: False):
+    ledger = fc.load_ledger(features, last_green=False)
+    fc.overlay_last_green(ledger, features, ancestor=ancestor)
+    return fc.compute_cell(fc.load_pages(features)[0], "linux", ledger), ledger
+
+
+def test_a_newer_directory_green_supersedes_a_ledger_red(tmp_path):
+    features = _two_source_catalog(tmp_path, _ledger_rec("failed"),
+                                   {OWN + "[linux]": _dir_rec("green")})
+    cell, ledger = _linux_cell(features)
+    assert cell.state == "full"
+    record = ledger["linux"]["feed-read"]["tests"][OWN]["linux"]
+    assert (record["outcome"], record["date"], record["source"]) == \
+        ("passed", "2026-11-01", "last-green")
+    # The files as written are untouched: only a file can be pruned.
+    raw = fc.load_ledger(features, last_green=False)
+    assert raw["linux"]["feed-read"]["tests"][OWN]["linux"]["outcome"] == "failed"
+
+
+def test_the_default_load_reads_both_sources(tmp_path):
+    features = _two_source_catalog(tmp_path, _ledger_rec("failed"),
+                                   {OWN + "[linux]": _dir_rec("green")})
+    assert fc.load_ledger(features)["linux"]["feed-read"]["tests"][OWN]["linux"][
+        "outcome"] == "passed"
+
+
+def test_an_older_directory_record_leaves_the_ledger_standing(tmp_path):
+    features = _two_source_catalog(
+        tmp_path, _ledger_rec("failed"),
+        {OWN + "[linux]": _dir_rec("green", time="2026-10-30T10:00:00+00:00")})
+    cell, _ = _linux_cell(features)
+    assert cell.state == "partial"
+
+
+def test_a_newer_directory_unbuilt_skip_reads_unbuilt(tmp_path):
+    features = _two_source_catalog(tmp_path, _ledger_rec("failed"),
+                                   {OWN + "[linux]": _dir_rec("skip:unbuilt")})
+    cell, _ = _linux_cell(features)
+    assert cell.state == "unbuilt"
+
+
+@pytest.mark.parametrize("outcome", ["red", "error"])
+def test_a_directory_red_never_supersedes_the_ledger(tmp_path, outcome):
+    """The directory notes reds the ledger declines (a setup-time NestModeError, an
+    unnameable own artifact, a strict refusal), so a red cannot say the ledger would
+    have recorded it."""
+    features = _two_source_catalog(tmp_path, _ledger_rec("passed"),
+                                   {OWN + "[linux]": _dir_rec(outcome)})
+    cell, _ = _linux_cell(features)
+    assert cell.state == "full"
+
+
+@pytest.mark.parametrize("descends, state", [(True, "full"), (False, "partial")])
+def test_on_the_same_day_the_merge_bases_decide(tmp_path, descends, state):
+    features = _two_source_catalog(
+        tmp_path, _ledger_rec("failed"),
+        {OWN + "[linux]": _dir_rec("green", time="2026-10-31T21:00:00+00:00")})
+    asked = []
+
+    def ancestor(older, newer):
+        asked.append((older, newer))
+        return descends
+    cell, _ = _linux_cell(features, ancestor)
+    assert cell.state == state
+    assert asked == [(LEDGER_BASE, LATER_BASE)]
+
+
+def test_the_columns_own_key_answers_and_its_mode_narrows(tmp_path):
+    """`[tui]` is another column's run and `[linux-docker]` another mode's."""
+    features = _two_source_catalog(tmp_path, _ledger_rec("failed"), {
+        OWN + "[tui]": _dir_rec("green"),
+        OWN + "[linux-docker]": _dir_rec("green"),
+    })
+    cell, _ = _linux_cell(features)
+    assert cell.state == "partial"
+
+
+@pytest.mark.parametrize("second, state", [("green", "full"), ("red", "partial")])
+def test_every_variant_the_ledger_collapsed_must_agree(tmp_path, second, state):
+    features = _two_source_catalog(tmp_path, _ledger_rec("failed"), {
+        OWN + "[linux-eml]": _dir_rec("green"),
+        OWN + "[linux-mbox]": _dir_rec(second),
+    })
+    cell, _ = _linux_cell(features)
+    assert cell.state == state
+
+
+def test_a_dirty_directory_green_marks_the_cell_dirty(tmp_path):
+    features = _two_source_catalog(tmp_path, _ledger_rec("failed"),
+                                   {OWN + "[linux]": _dir_rec("green", dirty=True)})
+    cell, ledger = _linux_cell(features)
+    assert cell.state == "full"
+    assert cell.dirty
+    assert ledger["linux"]["feed-read"]["tests"][OWN]["linux"]["stamp"] == \
+        "0.1.2-dev+bbbbbbbb.dirty standalone"
+
+
+# A convention-16 seat set is keyed by seat MODES (`[2seat-native+native]`), never by
+# an app; the catalog resolves each mode to the app it launches on the snapshot's
+# platform through conftest's own table (`tests/e2e-unified/helpers/seat_modes.py`).
+def _seat_candidates(*params):
+    return [(fc._split_directory_key(OWN + f"[{p}]")[1], {"key": p}) for p in params]
+
+
+def _answering(candidates, app, platform, nest_mode=None):
+    return [r["key"] for r in fc.directory_records_for(candidates, app, nest_mode, platform)]
+
+
+def test_a_native_seat_key_answers_the_platforms_own_app(tmp_path):
+    features = _two_source_catalog(tmp_path, _ledger_rec("failed"),
+                                   {OWN + "[2seat-native+native]": _dir_rec("green")})
+    cell, ledger = _linux_cell(features)
+    assert cell.state == "full"
+    assert ledger["linux"]["feed-read"]["tests"][OWN]["linux"]["source"] == "last-green"
+
+
+def test_a_seat_key_of_another_app_never_falls_back_to_answer(tmp_path):
+    """The no-app-token fallback is for a test with no app axis; a `tui+tui` seat
+    key names tui through its modes and must not answer a linux record."""
+    features = _two_source_catalog(tmp_path, _ledger_rec("failed"),
+                                   {OWN + "[2seat-tui+tui]": _dir_rec("green")})
+    cell, _ = _linux_cell(features)
+    assert cell.state == "partial"
+
+
+@pytest.mark.parametrize("platform, app", [("linux", "linux"), ("macos", "macos"),
+                                           ("windows", "windows")])
+def test_native_resolves_per_platform_and_never_answers_tui(platform, app):
+    candidates = _seat_candidates("2seat-native+native", "2seat-tui+tui")
+    assert _answering(candidates, app, platform) == ["2seat-native+native"]
+    assert _answering(candidates, "tui", platform) == ["2seat-tui+tui"]
+
+
+def test_the_snapshot_platform_maps_to_sys_platform():
+    assert fc.seat_key_apps(("native", "native"), "windows") == {"windows"}
+    assert fc.seat_key_apps(("native", "native"), "macos") == {"macos"}
+    assert fc.seat_key_apps(("phone", "tui"), "macos") == {"ios"}
+    assert fc.seat_key_apps(("native", "native"), "plan9") == frozenset()
+    assert fc.seat_key_apps(("native", "native"), None) == frozenset()
+
+
+def test_a_device_only_seat_is_the_only_app_credited():
+    candidates = _seat_candidates("2seat-tui+phone", "2seat-web+tui")
+    assert _answering(candidates, "android", "linux") == ["2seat-tui+phone"]
+    assert _answering(candidates, "web", "linux") == ["2seat-web+tui"]
+    assert _answering(candidates, "tui", "linux") == []
+
+
+def test_an_unknown_mode_answers_no_app_and_not_the_nest():
+    candidates = _seat_candidates("2seat-engine+engine")
+    for app in ("linux", "tui"):
+        assert _answering(candidates, app, "linux") == []
+    assert _answering(candidates, fc.NEST, "linux") == []
+
+
+def test_a_docker_seat_key_answers_only_the_docker_record():
+    candidates = _seat_candidates("2seat-native+native", "docker-2seat-native+native")
+    assert _answering(candidates, "linux", "linux", "docker") == ["docker-2seat-native+native"]
+    assert _answering(candidates, "linux", "linux") == ["2seat-native+native"]
+
+
+def test_no_snapshot_reads_the_ledger_alone(tmp_path):
+    features = write_catalog(tmp_path, {"feed-read": PAGE}, {
+        "linux": ledger_file("linux", {"feed-read": {"cell": cell_entry(), "tests": {
+            OWN: _ledger_rec("failed")}}})})
+    assert fc.load_ledger(features) == fc.load_ledger(features, last_green=False)

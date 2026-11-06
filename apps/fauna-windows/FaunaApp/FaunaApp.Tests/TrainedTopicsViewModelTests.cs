@@ -40,6 +40,55 @@ public class TrainedTopicsViewModelTests
         Assert.Null(vm.ErrorMessage);
     }
 
+    // The first-listing gate's reason (i18n common.needs_nest), as the shared twins
+    // carry it on a refused read.
+    private const string NeedsNest = "Needs a connection to your nest";
+
+    [Fact]
+    public async Task LoadAsync_FirstListingRefusal_ShowsReasonAndIsRefused()
+    {
+        var rpc = new MockNestRpcClient { TrainedTopicsListGate = new() };
+        rpc.TrainedTopicsListGate.SetException(new FfiException.General(NeedsNest));
+        var vm = new TrainedTopicsViewModel(rpc);
+
+        await vm.LoadAsync();
+
+        Assert.Equal(NeedsNest, vm.ErrorMessage);
+        Assert.True(vm.LoadRefused);
+        Assert.Empty(vm.Topics);
+    }
+
+    [Fact]
+    public async Task LoadAsync_OtherFailure_IsNotARefusal()
+    {
+        var rpc = new MockNestRpcClient { TrainedTopicsListGate = new() };
+        rpc.TrainedTopicsListGate.SetException(new FfiException.General("disk exploded"));
+        var vm = new TrainedTopicsViewModel(rpc);
+
+        await vm.LoadAsync();
+
+        Assert.Equal("disk exploded", vm.ErrorMessage);
+        Assert.False(vm.LoadRefused);
+    }
+
+    [Fact]
+    public async Task StoreResync_AfterARefusedLoad_LiftsTheRefusal()
+    {
+        var rpc = new MockNestRpcClient { TrainedTopicsListGate = new() };
+        rpc.TrainedTopicsListGate.SetException(new FfiException.General(NeedsNest));
+        var vm = new TrainedTopicsViewModel(rpc);
+        await vm.LoadAsync();
+
+        rpc.TrainedTopicsListGate = null;
+        rpc.NextTrainedTopics = new[] { Row(new byte[16], "Cats", "topic:aa", 3) };
+        var changed = await vm.StoreResyncAsync();
+
+        Assert.True(changed);
+        Assert.False(vm.LoadRefused);
+        Assert.Null(vm.ErrorMessage);
+        Assert.Single(vm.Topics);
+    }
+
     [Fact]
     public async Task CreateAsync_TrimsName_AndPersists()
     {
@@ -57,6 +106,13 @@ public class TrainedTopicsViewModelTests
         Assert.Single(vm.Topics);
     }
 
+    // The shared blank-name sentence's key: no test localizer maps it, so
+    // Strings.Get answers the key itself — what the VM painted is the lookup.
+    private const string BlankNameKey = "personalization/trained_factor_blank_name";
+
+    // A blank name spends no round trip, but it says why nothing was created
+    // (topic-factors.md § Authoring surface & picker, outcome 13) — the shared
+    // sentence tui, linux, web and apple paint, never a silent no-op.
     [Fact]
     public async Task CreateAsync_BlankName_NoRpcCall()
     {
@@ -67,6 +123,36 @@ public class TrainedTopicsViewModelTests
 
         Assert.False(ok);
         Assert.DoesNotContain("TrainedTopicsCreate", rpc.Calls);
+        Assert.Equal(BlankNameKey, vm.ErrorMessage);
+    }
+
+    [Fact]
+    public async Task RenameAsync_BlankName_NoRpcCall_SaysWhy()
+    {
+        var rpc = new MockNestRpcClient();
+        var vm = new TrainedTopicsViewModel(rpc);
+
+        var ok = await vm.RenameAsync(new byte[16], " \t ");
+
+        Assert.False(ok);
+        Assert.DoesNotContain("TrainedTopicsRename", rpc.Calls);
+        Assert.Equal(BlankNameKey, vm.ErrorMessage);
+    }
+
+    [Fact]
+    public async Task CreateAsync_AfterABlankRefusal_RetiresTheMessage()
+    {
+        var rpc = new MockNestRpcClient
+        {
+            NextTrainedTopics = new[] { Row(new byte[16], "Cats", "topic:aa", 0) },
+        };
+        var vm = new TrainedTopicsViewModel(rpc);
+        await vm.CreateAsync("");
+
+        var ok = await vm.CreateAsync("Cats");
+
+        Assert.True(ok);
+        Assert.Null(vm.ErrorMessage);
     }
 
     [Fact]

@@ -26,7 +26,7 @@ import org.mockito.Mockito.`when` as whenever
 
 /**
  * [FamilyVM]'s page read feeds the ward's client-enforced inputs — the global
- * `screen-time-lock`, the content floor and Guardian Notify — off the reply's
+ * `screen-time-lock`, the content rules and Guardian Notify — off the reply's
  * gated supervision fold (`FfiFamilyStatus.supervision`), never the raw
  * `policy` (family-client-enforcement.md § Implementation status today; web's
  * Family page is the reference shape).
@@ -45,7 +45,8 @@ class FamilyVMTest {
     fun removeMainDispatcher() = Dispatchers.resetMain()
 
     private val guardian = FfiFamilyGuardianInfo(actorId = ByteArray(32) { 6 }, handle = "guardian")
-    private val floor = FfiContentPolicy(nsfw = "block", spam = "inherit", phishing = "inherit", commercial = "inherit")
+    // Opaque bytes: the VM moves the guardian's rule document, never parses it.
+    private val guardianRules = FfiContentPolicy(document = "rules".encodeToByteArray())
     private val window = FfiScreenTimePolicy(windowStart = 1260u, windowEnd = 420u, dailyMinutes = 90u)
 
     /** A successful reply whose policy sets all three inputs; whether the gated
@@ -57,7 +58,7 @@ class FamilyVMTest {
             unknownSenderMail = "allow",
             federationContact = true,
             feedSources = "allow",
-            contentPolicy = floor,
+            contentPolicy = guardianRules,
             screenTime = window,
             contentNotify = true,
             unknownPeerDm = null,
@@ -69,7 +70,7 @@ class FamilyVMTest {
         feedRequests = emptyList(),
         ageBand = null,
         supervision = supervisedBy?.let {
-            FfiSupervisionSnapshot(supervisedBy = it, contentPolicy = floor, contentNotify = true, screenTime = window)
+            FfiSupervisionSnapshot(supervisedBy = it, contentPolicy = guardianRules, contentNotify = true, screenTime = window)
         },
     )
 
@@ -86,7 +87,7 @@ class FamilyVMTest {
     }
 
     @Test
-    fun `a page read under a guardian feeds the lock and the floor from the fold`() {
+    fun `a page read under a guardian feeds the lock and the guardian rules from the fold`() {
         val reply = status(supervisedBy = guardian)
         val (screenTimeStore, contentPolicyStore) = refreshWith(reply)
 
@@ -130,7 +131,7 @@ class FamilyVMTest {
     fun `a page read whose policy names no guardian feeds nothing enforceable`() {
         val (screenTimeStore, contentPolicyStore) = refreshWith(status(supervisedBy = null))
 
-        // The raw document still names a window and a floor; only the gated
+        // The raw document still names a window and guardian rules; only the gated
         // fold keeps them off an unsupervised viewer.
         verify(screenTimeStore).setWardScreenTime(null, null, 12u)
         verify(contentPolicyStore).applySupervision(null)

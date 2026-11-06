@@ -528,9 +528,21 @@ pub fn event_scope_of(tuples: &[ScopeTuple]) -> Vec<GrantEventScope> {
     tuples
         .iter()
         .map(|t| {
+            // A `deposit` tuple's folder rides in the `kind` slot as
+            // `folder:<id>` — the frozen event scope carries no `set`
+            // (`folder-deposit.md` § The depositor signs, the owner's device
+            // verifies); `deposit_authorizations` and the succession re-mint
+            // read it back.
+            let kind = match (t.class.as_str(), t.set.as_deref()) {
+                (ScopeTuple::CLASS_DEPOSIT, Some(set)) => set
+                    .parse::<i64>()
+                    .ok()
+                    .map(fauna_core::grant_event::deposit_folder_token),
+                _ => t.kind.clone(),
+            };
             let scope = GrantEventScope {
                 class: t.class.clone(),
-                kind: t.kind.clone(),
+                kind,
                 tier: t.tier.clone(),
             };
             match t.factor.as_deref() {

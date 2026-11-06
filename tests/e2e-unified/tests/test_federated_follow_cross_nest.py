@@ -60,7 +60,6 @@ from pathlib import Path
 import pytest
 
 from conftest import provision_foreign_handled_actor
-from helpers.app_surface import skip_unbuilt
 from helpers.federated_follow import (
     CROSSING_BUDGET_S,
     FOLLOWERS_TIER,
@@ -82,14 +81,20 @@ from helpers.room_seats import (  # noqa: F401 — room_app is a pytest fixture 
 
 pytestmark = [
     pytest.mark.tier_3,
+    # windows, macos, ios and android open the real conversations rail at launch only
+    # under this marker (`launch_seat` → `enable_real_faunamls`).
+    pytest.mark.real_conversations,
     # tui LEADS (`testing.md` § Default app and nest mode); the others
     # join through the batched trickle-down, each with its own marker.
     pytest.mark.tui,
     pytest.mark.android,
+    pytest.mark.ios,
     pytest.mark.linux,
+    pytest.mark.macos,
+    pytest.mark.web,
+    pytest.mark.windows,
 ]
 
-BUILT_APPS = frozenset({"tui", "android", "linux"})
 """The apps that build the federated follow; each joins with its marker above."""
 
 TEST_IMAGE = Path(__file__).parent.parent / "fixtures" / "test-image.png"
@@ -101,13 +106,6 @@ def follow_seats(cross_nest_foreign, cross_nest_foreign_ephemeral, room_app, req
     actor on ``cross_nest_foreign`` (their home), so ``handle@authority``
     finds them from the other nest. The follower is the handled actor that
     ``cross_nest_foreign_ephemeral`` provisioned."""
-    if room_app not in BUILT_APPS:
-        skip_unbuilt(
-            room_app,
-            surface="profile-follow-button at a remote actor's home",
-            detail="tui leads the federated follow; the others follow in their trickle-down",
-            tracked="behavior/federated-follow.md § Implementation status today",
-        )
     home = cross_nest_foreign
     away = cross_nest_foreign_ephemeral
     app_path = seat_app_path(request, room_app)
@@ -151,21 +149,20 @@ def test_a_reader_follows_an_author_on_another_nest_and_their_posts_reach_the_re
     preview = f"For my followers {secrets.token_hex(3)}"
     photo_word = f"pictured{secrets.token_hex(4)}"
 
-    from common.auth import register_handled_actor
+    from helpers.admin_wire import admit_adult
 
-    stranger = register_handled_actor(
-        away["port"],
-        handle=f"carol{secrets.token_hex(4)}",
-        domain=away["authority"],
-        base_url=away["url"],
-    )
+    stranger = admit_adult(away, f"carol{secrets.token_hex(4)}", domain=away["authority"], token=True)
 
     # ── 1–3. The door, the follow at the home, and the grant crossing back ─
     follow_across_nests(follower, author, home, away)
 
     # ── 4. The author posts, public and followers-only, through the composer
     feed = author.app.feed
-    feed.navigate()
+    # A real page ENTRY, not a tap on the current tab: the author's followers tier
+    # came into being at the first follow, after the seat's own first Feed load,
+    # and a feed (with its composer's tier options) re-reads on entering the page —
+    # on both apple apps ``navigate()`` from the Feed is a no-op.
+    feed.reenter()
     feed.create_post(f"hello from home {public_word}")
     feed.create_gated_post(f"only followers read {gated_word}", preview, FOLLOWERS_TIER)
     assert not author.app.has_error(), author.app.error_text()

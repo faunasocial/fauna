@@ -1,12 +1,12 @@
 """tier_3 e2e: the login's pin on a PUBLICLY TRUSTED nest — `connect-and-sign-in`
 outcome 14.
 
-``docs/goal/architecture/security.md`` § Transport trust → *The login's pin*,
-rule (1): a binding already in hand is never waived by WebPKI. A login on a nest
-whose certificate chains to a trusted root still runs the full identity core and
+``docs/goal/architecture/transport-trust.md`` § *The login's pin*, rule (1): a
+binding already in hand is never waived by WebPKI. A login on a nest whose
+certificate chains to a trusted root still runs the full identity core and
 records the identity it verified as the pin, so a later server at the same
-address cannot pass as the nest. ``e2e-automation-surface-gating.md`` § The
-nest-leg trust seed rules how a rig reaches that branch at all.
+address cannot pass as the nest. ``e2e-gated-seeds.md`` § The nest-leg trust
+seed rules how a rig reaches that branch at all.
 
 **Why this is not an arm of ``test_nest_identity_pin.py``.** That module's arm is
 a property of the nest's TLS posture too, but every one of its nests serves the
@@ -34,10 +34,34 @@ nest with no leaf installed and no seed: the binding was required there all
 along, so it passes on both builds. A difference between the two arms across a
 pre-rule/current pair is what proves the journey walks the WebPKI branch.
 
-tui first (lead app); linux joined 2026-10-14 with no app code; macos, ios and windows join in trickle-down — the
-seed is read in shared Rust, so each join is a launch-harness leg, not app code.
-Web is a declared absence of the seam by construction (browser TLS); its reading
-of outcome 14 is the possession proof (``test_nest_identity_pin.py``).
+tui first (lead app); linux joined 2026-10-14 and macos + ios 2026-10-28, each with
+no app code; android joined 2026-10-28 with only its test-bridge env allow-list
+extended by ``FAUNA_E2E_NEST_EXTRA_CA_PEM`` (``BridgeHttpServer.kt`` and
+``MainActivity.kt``, beside the IMAP CA seed); windows joined 2026-11-02 with no
+app or harness code — its bridge session body carries the launch ``environment``
+into the app process, and the .NET residual-HTTP callback accepts the LAN nest on
+the bound SPKI the login graduates. The seed is read in shared Rust, so each join
+is a launch-harness leg, not app code. iOS's one harness difference is
+that half A awaits the pin (its optimistic entry shows the shell before the login
+graduates).
+**web joined 2026-10-30, on the same journey and its own detection point.**
+The browser terminates TLS and hands the page no certificate, so web has no
+``webpki_valid`` branch to walk and no seam to seed — and so nothing that could
+waive the check: its identity check is the login binding's possession proof
+(``nest_trust::run_pinned_silent_challenge``, ``login.md`` § Binding the nest),
+which runs whatever the browser decided about the certificate. What the outcome
+promises a person still has a web reading, and this arm walks it: the SPA dials
+nest A **raw** over its ``https://`` LAN address (``browser_origins_to_allow``
+puts the SPA origin on both nests' CORS allow-list), the browser accepts the
+certificate (the bridge's contexts set ``ignore_https_errors``, the page's view
+of a trusted one — exactly as a publicly trusted leaf would read to it), the
+login leaves the pin, and the impostor at the same address is caught. The
+launch env seed is native-only and is not passed; both postures run, and on web
+they must agree. Half B arrives through the post-auth re-check rather than the
+relaunch's launch challenge: a reload with a cached session enters from cache
+(``test_nest_identity_pin.py``), and the first RPC to nest B — which knows no
+bearer of A's — re-mints, whose pinned verify paints the same warning
+(``test_web_bearer_remint_identity_pin.py``, channel 1).
 """
 
 import contextlib
@@ -47,11 +71,12 @@ import pytest
 from common.auth import register_same_actor_on
 from common.cred_store import requires_secret_service
 from common.keyring import secret_service_available
-from common.launch_harness import make_launch_harness, reached_authenticated_app
+from common.launch_harness import make_launch_harness
 from common.nest import lan_ipv4, nest_id_from_data_dir, start_nest, stop_nest
-from conftest import _trust_seeder, get_available_apps
+from conftest import _trust_seeder, browser_origins_to_allow, get_available_apps
 from helpers.app_launch import app_launch_config
 from helpers.app_surface import skip_environment
+from helpers.waiting import await_session_actor
 from tests.test_nest_identity_pin import (
     IDENTITY_TRUST_BUTTON,
     IDENTITY_WARNING,
@@ -59,14 +84,18 @@ from tests.test_nest_identity_pin import (
     _read_pin,
 )
 
-pytestmark = [pytest.mark.tier_3, pytest.mark.linux, pytest.mark.tui]
+pytestmark = [
+    pytest.mark.tier_3, pytest.mark.linux, pytest.mark.tui,
+    pytest.mark.macos, pytest.mark.ios, pytest.mark.android, pytest.mark.web,
+    pytest.mark.windows,
+]
 
 #: The env var the app's nest-leg verifier reads (`tls_verify.rs`
 #: `E2E_NEST_EXTRA_CA_ENV`). `test_nest_leg_tls_seam_gating.py` pins this
 #: spelling to the Rust one.
 NEST_EXTRA_CA_ENV = "FAUNA_E2E_NEST_EXTRA_CA_PEM"
 
-_SUPPORTED_APPS = ("linux", "tui")
+_SUPPORTED_APPS = ("linux", "tui", "macos", "ios", "android", "web", "windows")
 
 
 def _pin_clients():
@@ -102,20 +131,34 @@ def test_a_login_on_a_publicly_trusted_nest_pins_it_and_an_impostor_warns(
     environment = (
         {NEST_EXTRA_CA_ENV: nest_a["ca_pem"]} if nest_a["ca_pem"] is not None else {}
     )
-    harness = make_launch_harness(
-        pin_client,
-        tmp_path=tmp_path,
-        **app_launch_config(pin_client, request),
-        seed_trust=_trust_seeder(request),
-        extra_launch_config={"environment": environment} if environment else None,
-    )
+    if pin_client == "web":
+        # The SPA is served by the session proxy; the identity names nest A's
+        # own https URL, which the page dials raw (see the module docstring).
+        harness = make_launch_harness("web", spa_url=request.getfixturevalue("spa_url"))
+    else:
+        harness = make_launch_harness(
+            pin_client,
+            tmp_path=tmp_path,
+            **app_launch_config(pin_client, request),
+            seed_trust=_trust_seeder(request),
+            extra_launch_config={"environment": environment} if environment else None,
+        )
     nest_b = None
     try:
         # ── Half A: the login leaves the pin. ──
-        driver = harness.launch(
+        # `launch_and_route`: native launches straight into the login; web's
+        # `launch()` only seeds, and its routed reload is the first login.
+        driver = harness.launch_and_route(
             secret_hex=bytes(user["signing_key"]).hex(), node_url=url, trust=nest_a
         )
-        reached_authenticated_app(driver, timeout=90)
+        # The live session, not merely a mounted shell: iOS mounts its shell
+        # optimistically off the stored session, before the launch machine's
+        # login graduation — whose last act records the pin — has run.
+        # `await_session_actor` returns only once the launch reached `Online` on
+        # every app, so the pin is read once.
+        await_session_actor(
+            driver, user["actor_id_hex"], budget_s=90, what="the login on nest A"
+        )
         identity_a = nest_id_from_data_dir(nest_a["tmp_dir"])
         pinned = _read_pin(driver, url)
         assert pinned == identity_a, (
@@ -141,6 +184,7 @@ def test_a_login_on_a_publicly_trusted_nest_pins_it_and_an_impostor_warns(
             port=nest_a["port"],
             serve_tls=True,
             dial_host=lan_ipv4(),
+            cors_origins=browser_origins_to_allow(request),
         )
         assert nest_b["url"] == url, (nest_b["url"], url)
         identity_b = nest_id_from_data_dir(nest_b["tmp_dir"])
@@ -169,7 +213,12 @@ def test_a_login_on_a_publicly_trusted_nest_pins_it_and_an_impostor_warns(
         )
 
         driver.click(IDENTITY_TRUST_BUTTON)
-        reached_authenticated_app(driver, timeout=60)
+        # The live session again, on every app: web's verified-this-load flag
+        # included, which the launch route's `Online` re-runs the verified
+        # refresh for after a re-trust.
+        await_session_actor(
+            driver, user["actor_id_hex"], budget_s=60, what="the re-trust of nest B"
+        )
         repinned = _read_pin(driver, url)
         assert repinned == identity_b, (
             f"after re-trusting, the pin must name the nest now at {url} "

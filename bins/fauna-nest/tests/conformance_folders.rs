@@ -90,6 +90,17 @@ async fn create_set(router: &RpcRouter, state: &Arc<AppState>, actor: [u8; 32], 
     reply.id
 }
 
+/// Register `device_hex` as one of `actor`'s own devices: the conflict-report
+/// door binds a report's `device_id` to the caller's devices, so a reporting test registers the device it reports as.
+async fn register_reporter_device(state: &Arc<AppState>, actor: [u8; 32], device_hex: &str) {
+    let device: [u8; 32] = hex::decode(device_hex).unwrap().try_into().unwrap();
+    state
+        .db
+        .register_sync_device(&actor, &device, "laptop", None, "write")
+        .await
+        .unwrap();
+}
+
 /// Sign a conflict report as the reporting engine does
 /// (`ChangeSigner::sign_report`): a RESOLVED report mints a winner head row, so
 /// it carries the reporter's writer signature over that row under the set's
@@ -2114,6 +2125,7 @@ async fn conflicts_report_list_resolve() {
     let (router, state) = router_and_state().await;
     let actor = [23u8; 32];
     create_set(&router, &state, actor, "cf").await;
+    register_reporter_device(&state, actor, &"dd".repeat(32)).await;
 
     let report: ConflictReportReply = decode(
         &dispatch(
@@ -2212,6 +2224,7 @@ async fn a_resolved_conflict_report_nudges_the_other_devices() {
     let kp = common::signing_actor(24);
     let actor = kp.actor_id().0;
     create_set(&router, &state, actor, "cfn").await;
+    register_reporter_device(&state, actor, &"dd".repeat(32)).await;
 
     let (_conn, mut rx) = state.ws.subscribe(actor);
 
@@ -2276,6 +2289,7 @@ async fn an_unresolved_conflict_report_does_not_nudge() {
     let (router, state) = router_and_state().await;
     let actor = [25u8; 32];
     create_set(&router, &state, actor, "cfu").await;
+    register_reporter_device(&state, actor, &"dd".repeat(32)).await;
 
     let (_conn, mut rx) = state.ws.subscribe(actor);
 
@@ -2319,6 +2333,7 @@ async fn conflict_list_ships_the_set_name_seal_and_salt_pair() {
     let (router, state) = router_and_state().await;
     let actor = [26u8; 32];
     create_set(&router, &state, actor, "cf-sealed").await;
+    register_reporter_device(&state, actor, &"dd".repeat(32)).await;
 
     let _report: ConflictReportReply = decode(
         &dispatch(
@@ -2397,6 +2412,7 @@ async fn conflict_list_ships_neither_half_for_an_unstamped_set() {
     let (router, state) = router_and_state().await;
     let actor = [27u8; 32];
     create_set(&router, &state, actor, "cf-unstamped").await;
+    register_reporter_device(&state, actor, &"dd".repeat(32)).await;
     let _report: ConflictReportReply = decode(
         &dispatch(
             &router,
@@ -2457,6 +2473,7 @@ async fn conflict_report_pre_resolved_feeds_review_list_not_chooser() {
     let kp = common::signing_actor(25);
     let actor = kp.actor_id().0;
     create_set(&router, &state, actor, "ar").await;
+    register_reporter_device(&state, actor, &"dd".repeat(32)).await;
 
     let report: ConflictReportReply = decode(
         &dispatch(
@@ -2574,6 +2591,7 @@ async fn conflict_report_resolved_shape_is_validated() {
     let (router, state) = router_and_state().await;
     let actor = [26u8; 32];
     create_set(&router, &state, actor, "arv").await;
+    register_reporter_device(&state, actor, &"dd".repeat(32)).await;
 
     let base = ConflictReportRequest {
         path_sealed: Some(fauna_protocol::ByteBuf::from(
@@ -2807,6 +2825,7 @@ async fn conflicts_choose_winner_propagates() {
     let kp = common::signing_actor(31);
     let actor = kp.actor_id().0;
     create_set(&router, &state, actor, "cf").await;
+    register_reporter_device(&state, actor, &"aa".repeat(32)).await;
 
     let local_dev = "aa".repeat(32);
     let incoming_dev = "bb".repeat(32);
@@ -3011,6 +3030,7 @@ async fn pre_resolved_report_retains_loser_and_propagates_winner() {
     let kp = common::signing_actor(32);
     let actor = kp.actor_id().0;
     create_set(&router, &state, actor, "ap").await;
+    register_reporter_device(&state, actor, &"aa".repeat(32)).await;
 
     let reporter_dev = "aa".repeat(32);
     let other_dev = "bb".repeat(32);
@@ -3290,6 +3310,7 @@ async fn a_resolved_reports_winner_claim_is_minted_as_sent_beside_an_adjacent_lo
     let kp = common::signing_actor(33);
     let actor = kp.actor_id().0;
     create_set(&router, &state, actor, "ap").await;
+    register_reporter_device(&state, actor, &"aa".repeat(32)).await;
     let reporter_dev = "aa".repeat(32);
     let other_dev = "bb".repeat(32);
     let path = "/ap/adjacent.txt";
@@ -3416,6 +3437,7 @@ async fn conflicts_resolve_rejects_unknown_winner() {
     let kp = common::signing_actor(32);
     let actor = kp.actor_id().0;
     create_set(&router, &state, actor, "cf2").await;
+    register_reporter_device(&state, actor, &"cc".repeat(32)).await;
 
     let report: ConflictReportReply = decode(
         &dispatch(

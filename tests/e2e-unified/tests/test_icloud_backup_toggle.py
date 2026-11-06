@@ -6,11 +6,12 @@ landed 2026-07-19). Default OFF = device-bound: the identity secret is stored
 Keychain or an encrypted-device restore. Opting in rewrites the keychain items
 `synchronizable` + `AfterFirstUnlock`.
 
-The real SecItem accessibility class is deliberately NOT observable here: apple e2e runs the
-store in-memory (`apple-e2e-automation.md`), and an unsigned process can't even create a
-`synchronizable` item — that attribute is verified manually on device, and the class choice
-is pinned by the FaunaKit unit tests (`KeychainAccessibilityTests`). What this suite guards
-is the e2e-only property the unit tests can't reach: that the toggle is actually
+The real SecItem accessibility class is deliberately NOT observable here: this suite runs the
+store in-memory (`apple-e2e-automation.md`). The class choice is pinned by the FaunaKit unit
+tests (`KeychainAccessibilityTests`), and what the real keychain holds per copy is
+`test_icloud_backup_copy.py`'s, on the seat simulator's keychain, which keeps a
+`synchronizable` item as a device does. What this suite guards is the e2e-only property the
+unit tests can't reach: that the toggle is actually
 **registered and hittable** in the real UI (the recurring apple regression — a bare
 `.accessibilityIdentifier` is invisible to the in-process driver) and that its state
 round-trips through the view model.

@@ -57,7 +57,7 @@ On-device content scanning blocks content transparently. Parents can set rules f
 *Illustration: hedgehog*
 
 Fauna is in closed alpha and the seven apps do not all do everything yet. Rather than
-tell you they do, we publish [what works where](/features/) — every feature on every
+tell you they do, we publish [what works where](/features) — every feature on every
 app, marked from the tests that actually ran, blanks and all.
 
 ## What it costs

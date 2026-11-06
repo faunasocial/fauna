@@ -40,9 +40,10 @@ public sealed partial class SoldPostTeaser : UserControl
     {
         _item = item;
         PriceText.Text = item.UnlockOfferPriceText;
-        PriceText.Visibility = FeedPage.BoolToVisibility(item.HasUnlockOffer);
-        PaymentLinkButton.Visibility = FeedPage.BoolToVisibility(item.HasUnlockPaymentLink);
-        BuyButton.Visibility = FeedPage.BoolToVisibility(item.HasUnlockOffer);
+        PriceText.Visibility = Feed.PostCardBind.BoolToVisibility(item.HasUnlockOffer);
+        PaymentLinkButton.Visibility = Feed.PostCardBind.BoolToVisibility(item.HasUnlockPaymentLink);
+        BuyButton.Visibility = Feed.PostCardBind.BoolToVisibility(item.HasUnlockOffer);
+        PurchasePendingText.Visibility = Feed.PostCardBind.BoolToVisibility(item.ShowPurchasePending);
     }
 
     private void PaymentLinkButton_Click(object sender, RoutedEventArgs e)

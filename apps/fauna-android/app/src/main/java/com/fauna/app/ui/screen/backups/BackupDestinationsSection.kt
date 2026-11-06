@@ -84,6 +84,7 @@ fun BackupDestinationsSection(
     val reseedRunning by vm.reseedRunning.collectAsState()
     val reseedResult by vm.reseedResult.collectAsState()
     val reseedPulledFrom by vm.reseedPulledFrom.collectAsState()
+    val pullBackPreflight by vm.pullBackPreflight.collectAsState()
     val appMessages = LocalAppMessages.current
     val context = LocalContext.current
 
@@ -278,6 +279,13 @@ fun BackupDestinationsSection(
         reseedResultText = reseedResultText,
         onReseed = vm::reseed,
         reseedRunsPullBack = { id -> vm.reseedRunsPullBack(destinations, id) },
+        // The shared preflight's lines, resolved here where i18n lives.
+        pullBackPreflightFor = pullBackPreflight?.first,
+        pullBackPreflightLines = pullBackPreflight?.second?.lines
+            ?.map { resolveLocalizedNested(context, it) ?: "" }
+            ?: emptyList(),
+        onPreflightPullBack = vm::preflightPullBack,
+        onCancelPullBackPreflight = vm::cancelPullBackPreflight,
     )
 }
 
@@ -585,6 +593,14 @@ fun BackupDestinationsContent(
      * (the shared `backupReseedRunsPullBack`) — its confirm then names the nest.
      */
     reseedRunsPullBack: (String) -> Boolean = { false },
+    /** The nest row the held pull-back preflight was run for, or `null` (none held). */
+    pullBackPreflightFor: String? = null,
+    /** That preflight's lines, already resolved: the confirm's body after its sentence. */
+    pullBackPreflightLines: List<String> = emptyList(),
+    /** The press on a nest row: run the shared preflight; the confirm opens on its answer. */
+    onPreflightPullBack: (String) -> Unit = {},
+    /** The confirm was cancelled: drop the held preflight. */
+    onCancelPullBackPreflight: () -> Unit = {},
 ) {
     var form by remember { mutableStateOf<FormMode>(FormMode.Closed) }
     var removing by remember { mutableStateOf<FfiBackupDestinationView?>(null) }
@@ -599,7 +615,13 @@ fun BackupDestinationsContent(
             confirmingReclaim = false
             reseedSource = source
             confirmingReseed = true
+            // A nest row's confirm opens only on the preflight's answer.
+            if (source != null && reseedRunsPullBack(source)) onPreflightPullBack(source)
         }
+    }
+    // A preflight that failed lands as a result (a stop): no confirm opens.
+    LaunchedEffect(reseedResultText) {
+        if (reseedResultText != null) confirmingReseed = false
     }
 
     Column(
@@ -720,15 +742,22 @@ fun BackupDestinationsContent(
             )
         }
 
-        if (confirmingReseed) {
+        val reseedSourceNow = reseedSource
+        val awaitingPreflight = reseedSourceNow != null && reseedRunsPullBack(reseedSourceNow) &&
+            pullBackPreflightFor != reseedSourceNow
+        if (confirmingReseed && !awaitingPreflight) {
             val source = reseedSource
             ReseedConfirm(
                 pulledFrom = source
                     ?.takeIf(reseedRunsPullBack)
                     ?.let { id -> destinations.firstOrNull { it.destinationId == id } }
                     ?.let(destinationLabel),
+                preflightLines = if (source != null && source == pullBackPreflightFor) pullBackPreflightLines else emptyList(),
                 onConfirm = { confirmingReseed = false; onReseed(source) },
-                onCancel = { confirmingReseed = false },
+                onCancel = {
+                    confirmingReseed = false
+                    onCancelPullBackPreflight()
+                },
             )
         }
 
@@ -907,6 +936,7 @@ private fun ReseedButton(enabled: Boolean, onClick: () -> Unit) {
 @Composable
 private fun ReseedConfirm(
     pulledFrom: String?,
+    preflightLines: List<String> = emptyList(),
     onConfirm: () -> Unit,
     onCancel: () -> Unit,
 ) {
@@ -928,6 +958,10 @@ private fun ReseedConfirm(
                 body,
                 style = MaterialTheme.typography.bodySmall,
             )
+            // The pull-back's preflight lines — the modal body's, no id of their own.
+            preflightLines.forEach { line ->
+                Text(line, style = MaterialTheme.typography.bodySmall)
+            }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Button(
                     onClick = onConfirm,

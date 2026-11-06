@@ -27,7 +27,7 @@ from actions.conversations import SEAM_SELF_ADDRESS
 from helpers.budgets import UI_SETTLE_S
 from helpers.waiting import wait_until
 
-pytestmark = [pytest.mark.tier_3, pytest.mark.linux, pytest.mark.web, pytest.mark.windows, pytest.mark.macos, pytest.mark.ios, pytest.mark.tui]
+pytestmark = [pytest.mark.tier_3, pytest.mark.linux, pytest.mark.web, pytest.mark.windows, pytest.mark.macos, pytest.mark.ios, pytest.mark.android, pytest.mark.tui]
 
 
 def _open_mail_thread(app, sender="alice@host.test", body="hi", recipients=None):

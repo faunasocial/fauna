@@ -11,6 +11,7 @@ use fauna_conversations::ConversationsManager;
 use fauna_conversations::address::{Rail, TypedAddress, UNKNOWN_ADDRESS_DISPLAY};
 use fauna_conversations::capabilities::derive_capabilities;
 use fauna_conversations::compose::{ComposeState, RecipientPickerState, ResolveState, SendState};
+use fauna_conversations::keying::ThreadKey;
 use fauna_conversations::message::{MessageBadges, MessageId, MessageSnapshot};
 use fauna_conversations::reactions::StampedReactionEvent;
 use fauna_conversations::store::attachments::{AttachmentOpeningKey, SealedBlobCoordinates};
@@ -426,6 +427,23 @@ fn an_unknown_reaction_op_ranks_as_a_retraction() {
 
 // ---- the drafts blob a newer device wrote ----
 
+/// The one conversation these tests draft into, as both devices key it at
+/// rest; its local id is `t-1` on each.
+fn the_channel() -> ThreadKey {
+    ThreadKey::Channel {
+        rail: Rail::FaunaMls,
+        channel_id_hex: "ab12".into(),
+    }
+}
+
+fn key_of(id: &ThreadId) -> Option<ThreadKey> {
+    (id.0 == "t-1").then(the_channel)
+}
+
+fn id_of(key: &ThreadKey) -> Option<ThreadId> {
+    (*key == the_channel()).then(|| ThreadId("t-1".into()))
+}
+
 fn known_drafts_bytes() -> Vec<u8> {
     let store = DraftStore::new();
     store.set(
@@ -445,7 +463,7 @@ fn known_drafts_bytes() -> Vec<u8> {
         }),
         ..Default::default()
     }));
-    store.snapshot_bytes()
+    store.snapshot_bytes(key_of)
 }
 
 #[test]
@@ -467,7 +485,7 @@ fn a_newer_drafts_blob_restores_and_re_snapshots_with_its_unknown_values() {
 
     let store = DraftStore::new();
     store
-        .restore_from_bytes(&newer)
+        .restore_from_bytes(&newer, id_of)
         .expect("an older build restores the blob");
     let restored = store.get(&ThreadId("t-1".into()));
     assert!(matches!(
@@ -493,7 +511,10 @@ fn a_newer_drafts_blob_restores_and_re_snapshots_with_its_unknown_values() {
         .get_mut("recipient_picker")
         .unwrap());
     picker.insert("resolve_state".into(), Value::String("Idle".into()));
-    assert_eq!(store.snapshot_bytes(), canonical_encode(&expected).unwrap());
+    assert_eq!(
+        store.snapshot_bytes(key_of),
+        canonical_encode(&expected).unwrap()
+    );
 }
 
 #[derive(Serialize, Deserialize)]

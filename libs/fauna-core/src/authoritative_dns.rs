@@ -273,7 +273,7 @@ pub async fn send_txt_update(
     use hickory_resolver::proto::rr::{DNSClass, Record};
 
     let name_of = |n: &str| Name::from_utf8(n).map_err(|e| format!("{n:?} is not a name: {e}"));
-    let txt = |value: &str| RData::TXT(TXT::new(vec![value.to_string()]));
+    let txt = |value: &str| RData::TXT(TXT::new(txt_character_strings(value)));
     let id = query_id(&(zone, added, deleted));
     let mut msg = Message::new(id, MessageType::Query, OpCode::Update);
     // RFC 2136 § 2.3: the zone section is one question naming the zone, type SOA.
@@ -301,6 +301,70 @@ pub async fn send_txt_update(
         ));
     }
     Ok(())
+}
+
+/// A TXT value as RFC 1035 character-strings of at most 255 bytes each, split
+/// on char boundaries — the form a long value (a 2048-bit DKIM key) takes on
+/// the wire; a reader joins them back (the probe compares the concatenation).
+#[cfg(any(test, debug_assertions, feature = "test-helpers"))]
+fn txt_character_strings(value: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut rest = value;
+    while rest.len() > 255 {
+        let mut cut = 255;
+        while !rest.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        out.push(rest[..cut].to_string());
+        rest = &rest[cut..];
+    }
+    out.push(rest.to_string());
+    out
+}
+
+/// Mirror a fake DNS provider's TXT writes into the name server at `server`:
+/// one [`send_txt_update`] per zone — the zone is each challenge name's parent
+/// — carrying a delete-this-RR per `withdrawn` pair and an add per `published`
+/// pair. The one shape both mirrors send: native's in-process one
+/// (`fauna_client_dns::e2e_acme_seam::mirror_fake_txt`) and the `test-hooks`
+/// nest's `fauna.dns.e2e_mirror_txt`, web's one RPC hop away
+/// (`e2e-gated-seeds.md` § The ACME directory seed → *The web order*).
+#[cfg(any(test, debug_assertions, feature = "test-helpers"))]
+pub async fn send_txt_updates_by_zone(
+    server: SocketAddr,
+    published: &[(String, String)],
+    withdrawn: &[(String, String)],
+) -> Result<(), String> {
+    type Pairs = Vec<(String, String)>;
+    let mut zones: std::collections::BTreeMap<String, (Pairs, Pairs)> = Default::default();
+    for (name, value) in published {
+        zones
+            .entry(parent_zone(name))
+            .or_default()
+            .0
+            .push((name.clone(), value.clone()));
+    }
+    for (name, value) in withdrawn {
+        zones
+            .entry(parent_zone(name))
+            .or_default()
+            .1
+            .push((name.clone(), value.clone()));
+    }
+    for (zone, (added, deleted)) in zones {
+        send_txt_update(server, &zone, &added, &deleted).await?;
+    }
+    Ok(())
+}
+
+/// `_acme-challenge.renew.test.` → `renew.test`: the zone an UPDATE for a
+/// challenge name names.
+#[cfg(any(test, debug_assertions, feature = "test-helpers"))]
+fn parent_zone(name: &str) -> String {
+    let name = name.trim_end_matches('.');
+    name.split_once('.')
+        .map_or(name, |(_, parent)| parent)
+        .to_ascii_lowercase()
 }
 
 /// The reply [`spawn_responder`] gives: TXT for `name` → `value`, NXDOMAIN for
@@ -369,6 +433,20 @@ pub async fn spawn_responder(served_name: &str, served_value: &str) -> SocketAdd
 mod tests {
     use super::*;
     use hickory_resolver::proto::rr::DNSClass;
+
+    /// A value over 255 bytes (a DKIM key) splits into character-strings the
+    /// wire can carry, and joins back to itself; a short one stays whole.
+    #[test]
+    fn a_long_txt_value_splits_into_character_strings() {
+        let long = "k".repeat(410);
+        let parts = txt_character_strings(&long);
+        assert_eq!(
+            parts.iter().map(String::len).collect::<Vec<_>>(),
+            [255, 155]
+        );
+        assert_eq!(parts.concat(), long);
+        assert_eq!(txt_character_strings("tok"), ["tok"]);
+    }
 
     #[tokio::test]
     async fn visible_when_every_ns_serves_the_exact_value() {

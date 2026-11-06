@@ -43,8 +43,8 @@ public struct NestRecoveryView: View {
                         .foregroundStyle(.secondary)
 
                     VStack(spacing: 8) {
-                        ForEach(Array(boxes.enumerated()), id: \.offset) { index, nestActorId in
-                            boxRow(nestActorId: nestActorId, index: index, selected: selected == nestActorId)
+                        ForEach(Array(boxes.enumerated()), id: \.offset) { _, nestActorId in
+                            boxRow(nestActorId: nestActorId, selected: selected == nestActorId)
                         }
                     }
                     .accessibilityIdentifier(Ids.recoverBoxList)
@@ -87,7 +87,7 @@ public struct NestRecoveryView: View {
     }
 
     @ViewBuilder
-    private func boxRow(nestActorId: String, index: Int, selected: Bool) -> some View {
+    private func boxRow(nestActorId: String, selected: Bool) -> some View {
         Button {
             vm.selectRecoveryBox(nestActorId)
         } label: {
@@ -109,7 +109,7 @@ public struct NestRecoveryView: View {
         .buttonStyle(.plain)
         .background(selected ? Color.accentColor.opacity(0.12) : Color.clear)
         .clipShape(RoundedRectangle(cornerRadius: 6))
-        .accessibilityIdentifier("recover-box-item-\(index)")
-        .automationActivate("recover-box-item-\(index)") { vm.selectRecoveryBox(nestActorId) }
+        .accessibilityIdentifier(Ids.recoverBoxItem)
+        .automationActivate(Ids.recoverBoxItem) { vm.selectRecoveryBox(nestActorId) }
     }
 }

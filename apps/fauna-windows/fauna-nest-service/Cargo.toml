@@ -66,6 +66,9 @@ test-hooks = ["fauna-nest/test-hooks"]
 # it ships. Whether the Windows service *should* keep payments is a separate
 # product question; it must not change as a side effect of a refactor.
 fauna-nest = { path = "../../../bins/fauna-nest", default-features = false, features = ["store-safe", "payments"] }
+# The build-commit `commit!()` macro, expanded in `main` and handed to the
+# embedded nest (`fauna_nest::build_identity::stamp`), or health reports `dev`.
+fauna-build-commit = { path = "../../../libs/fauna-build-commit" }
 # Defaults stay ON (fauna-core `default = ["network"]`); `format_text` is additive
 # on top — the spec the retired apps workspace carried.
 fauna-core = { path = "../../../libs/fauna-core", features = ["format_text"] }

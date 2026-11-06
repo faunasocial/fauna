@@ -13,7 +13,12 @@ import {
   NestOutdatedError,
   TransientAuthError,
 } from './auth-errors.ts';
-import { SILENT_SIGN_IN_RETRY_MS, silentSignInRetryDelay } from './silent-sign-in-retry.ts';
+import {
+  LOST_NEST_OFFER_ATTEMPT,
+  SILENT_SIGN_IN_RETRY_MS,
+  lostNestOfferDue,
+  silentSignInRetryDelay,
+} from './silent-sign-in-retry.ts';
 
 Deno.test('a transient failure is retried on the schedule, first interval first', () => {
   const err = new TransientAuthError('transient: anonymous connect: refused');
@@ -31,6 +36,19 @@ Deno.test('the schedule is capped: every later attempt waits the last interval',
   for (const attempt of [SILENT_SIGN_IN_RETRY_MS.length, 50, 10_000]) {
     const got = silentSignInRetryDelay(err, attempt);
     if (got !== cap) throw new Error(`attempt ${attempt}: expected the cap ${cap}, got ${got}`);
+  }
+});
+
+Deno.test('the lost-nest question is asked exactly once, after a blip has had its chance', () => {
+  const asked = Array.from({ length: 50 }, (_, i) => i).filter(lostNestOfferDue);
+  if (asked.length !== 1 || asked[0] !== LOST_NEST_OFFER_ATTEMPT) {
+    throw new Error(`expected one ask at ${LOST_NEST_OFFER_ATTEMPT}, got ${asked}`);
+  }
+  if (LOST_NEST_OFFER_ATTEMPT < 1) {
+    throw new Error('the first failure is a blip until proven otherwise');
+  }
+  if (LOST_NEST_OFFER_ATTEMPT >= SILENT_SIGN_IN_RETRY_MS.length) {
+    throw new Error('the ask must land before the schedule reaches its long cap');
   }
 });
 

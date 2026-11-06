@@ -24,6 +24,11 @@ public struct Contact: Codable, Identifiable {
     /// names (`ContactsVM.rosterGroups`; contacts.md § Contact roster filter).
     public let handle: String?
     public let domain: String?
+    /// The peer's home nest URL — set for a federated peer whose home the nest
+    /// knows, `nil` otherwise; the contact row's tap carries it as the Profile's
+    /// home (`contacts.md` § State & data shape). Not on the wire shape (this model
+    /// is built from `FfiContactItem`), hence outside `CodingKeys`.
+    public var homeNestUrl: String? = nil
 
     public var id: String { peerId }
 

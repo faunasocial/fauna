@@ -57,7 +57,7 @@ import uuid
 
 import pytest
 
-from helpers.app_surface import app_name, skip_unbuilt
+from helpers.app_surface import require_surface
 from helpers.succession_ceremony import (
     STOLEN_GATE_REVEAL_S,
     SUCCESSION_AND_RELAUNCH_S,
@@ -92,6 +92,10 @@ _MEMBER_REPOINT_S = 120.0
 # own fix — the point of asserting it separately from the re-point below.
 _HARVEST_ANCHOR_S = 120.0
 
+# The Status sub-page rendering the signed-in actor id after a navigate — one
+# push and a session read; a ceiling a green run never spends.
+_STATUS_RENDER_S = 30.0
+
 @pytest.mark.feature("take-your-account-back")
 def test_a_kit_holder_takes_the_account_back_and_comes_back_up_as_the_successor(
     ungranted_app, nest_instance
@@ -113,6 +117,10 @@ def test_a_kit_holder_takes_the_account_back_and_comes_back_up_as_the_successor(
     # settings nav lands a plain navigate on the root page *list*, not the
     # Status sub-page (test_settings.py::test_actor_id_visible).
     app.settings._navigate_subpage("status")
+    # Wait for the id to register before reading it: the sub-page push is
+    # asynchronous on iOS, and `actor_id()` reads "" for an id not yet on
+    # screen (measured 2026-10-31: `got ''` with an empty error surface).
+    app.wait_for("account-actor-id", timeout=_STATUS_RENDER_S)
     old_actor = app.settings.actor_id()
     assert len(old_actor) == _SECRET_HEX_LEN, (
         "the Status page must render the signed-in actor id before the "
@@ -120,7 +128,7 @@ def test_a_kit_holder_takes_the_account_back_and_comes_back_up_as_the_successor(
         f"surface: {app.error_text()!r}"
     )
 
-    app.settings.open_recovery_kit_or_skip()
+    app.settings.open_recovery_kit()
 
     # The kit is the whole authorization: the thief holds the seed, so what
     # makes this remedy work is the credential they do NOT have.
@@ -303,7 +311,7 @@ def _ceremony_over_a_real_group(app, nest_instance) -> dict:
     # test's comment (iOS lands a plain navigate on the root page list).
     app.settings._navigate_subpage("status")
     old_actor = app.settings.actor_id()
-    app.settings.open_recovery_kit_or_skip()
+    app.settings.open_recovery_kit()
     require_stolen_gate(app)
     assert len(old_actor) == _SECRET_HEX_LEN, (
         f"the pre-ceremony actor id must render; got {old_actor!r}, error "
@@ -464,21 +472,6 @@ def test_the_ceremony_tells_you_what_it_swept_and_whom_it_cannot_vouch_for(
     either — the same refusal ``SweepReport`` makes structurally.
     """
     driver = ungranted_app.driver
-    if not (
-        driver.is_tui() or driver.is_macos() or driver.is_ios()
-        or driver.is_web() or driver.is_linux()
-    ):
-        # Every other app that runs the ceremony PAINTS these lines already
-        # (settings.md § Implementation status today); what they lack is the
-        # two approved ids — parity debt, not a platform absence. tui leads,
-        # macos/ios/web/linux follow (windows is still untagged).
-        skip_unbuilt(
-            driver,
-            surface="recovery-kit-sweep-status / recovery-kit-sweep-unvouched-status",
-            detail="the sweep's two lines are painted but the ids approved 2026-09-25 "
-                   "are not tagged yet; tui, macos, ios, web and linux tag them",
-            tracked="",
-        )
     app = ungranted_app
     sweep = _ceremony_over_a_real_group(app, nest_instance)
 
@@ -535,7 +528,7 @@ def test_the_confirm_gate_refuses_rather_than_dropping_the_command(
     """
     app = ungranted_app
     app.settings.navigate()
-    app.settings.open_recovery_kit_or_skip()
+    app.settings.open_recovery_kit()
 
     app.settings.create_recovery_kit()
     app.wait_for("recovery-kit-secret-display", timeout=30.0)
@@ -690,7 +683,7 @@ def test_a_real_member_re_points_the_succeeded_participant_on_their_own_client(
         "assertion below names it; error surface: "
         f"{alice.error_text()!r}"
     )
-    alice.settings.open_recovery_kit_or_skip()
+    alice.settings.open_recovery_kit()
     require_stolen_gate(alice)
 
     # (1) The kit FIRST — registering it is what mirrors alice's chain head
@@ -943,7 +936,7 @@ def test_after_the_recovery_a_contact_can_still_add_you_to_a_conversation(
 
     app.settings._navigate_subpage("status")
     old_actor = app.settings.actor_id()
-    app.settings.open_recovery_kit_or_skip()
+    app.settings.open_recovery_kit()
     require_stolen_gate(app)
 
     # The real conversations backend: it is what publishes key packages at
@@ -985,21 +978,14 @@ def test_after_the_recovery_a_contact_can_still_add_you_to_a_conversation(
     channel, welcome, envelope = conv_api.mint_group_welcome_with_message(
         bytes(alice["signing_key"]), kp, body
     )
-    conv_api.welcome_deliver(port, alice, new_actor, channel, welcome)
+    inbox_id = conv_api.welcome_deliver(port, alice, new_actor, channel, welcome)
 
     # ── …and the invitation reaches the successor's app ──────────────────
-    wait_until(
-        lambda: any(
-            t.channel_id_hex == channel
-            for t in app.conversations.list_threads()
-        ),
-        MLS_HANDSHAKE_S,
-        diagnose=lambda: (
-            "the successor never joined the conversation it was invited to — "
-            "the invitation went nowhere; error surface: "
-            f"{app.error_text()!r}"
-        ),
-    )
+    # The message is posted at once: a Welcome-only 1:1 is listed on no rail
+    # until its first message (`archive-import.md` § Linking and merging,
+    # ruling 1), and the successor's key exists only in the app, so its inbox
+    # cannot be peeked for the acked Welcome. Both ride the nest durably, so
+    # one wait covers the join and the decrypt.
     conv_api.channel_send(port, alice, channel, envelope)
     wait_until(
         lambda: any(
@@ -1008,18 +994,14 @@ def test_after_the_recovery_a_contact_can_still_add_you_to_a_conversation(
         ),
         MLS_HANDSHAKE_S,
         diagnose=lambda: (
-            "the successor joined but cannot read what it was sent — the key "
-            "package it published is not one it holds the private half of"
+            "the successor never showed the conversation it was invited to "
+            f"(Welcome inbox row {inbox_id}) — either it never joined (the "
+            "invitation went nowhere) or it joined but cannot read what it "
+            "was sent (the key package it published is not one it holds the "
+            f"private half of); error surface: {app.error_text()!r}"
         ),
     )
 
-
-# The apps whose e2e agent hands the shared registry bridge
-# (`fauna_client_accounts::call_registry_method_for_test`) its own
-# `AccountRegistry` — the one delegation `refuse_secret_writes_for_test` needs.
-# The name table and the fault itself are shared Rust; each other app joins by
-# adding that single arm to its agent.
-_REFUSAL_DOOR_APPS = ("tui", "macos", "ios", "windows", "linux", "web")
 
 _HEX64 = re.compile(r"[0-9a-fA-F]{64}")
 
@@ -1061,19 +1043,10 @@ def test_a_key_this_device_cannot_store_stays_on_screen_until_you_leave(
     """
     app, user = succeedable_app
     stolen_seed = bytes(user["signing_key"]).hex()
-    if app_name(app.driver) not in _REFUSAL_DOOR_APPS:
-        skip_unbuilt(
-            app.driver,
-            surface="the registry E2E bridge delegation (`refuse_secret_writes_for_test`)",
-            detail="one arm in this app's agent handing "
-            "`fauna_client_accounts::call_registry_method_for_test` its own "
-            "`AccountRegistry` — the fault and its name are already shared Rust",
-            tracked="behavior/onboarding.md § E2E bridge contract — the registry "
-            "dispatcher's per-app delegation",
-        )
+    require_surface(app.driver, "registry-refuse-secret-writes")
 
     app.settings.navigate()
-    app.settings.open_recovery_kit_or_skip()
+    app.settings.open_recovery_kit()
     app.settings.create_recovery_kit()
     app.wait_for("recovery-kit-secret-display", timeout=30.0)
     held = app.settings.recovery_kit_secret()
@@ -1242,12 +1215,13 @@ def _kit_in_hand(app) -> tuple[str, str]:
     an armed-ready stolen gate. Returns ``(old_actor, held_kit)`` — the same
     opening the first journey in this module walks, for the same reasons."""
     app.settings._navigate_subpage("status")
+    app.wait_for("account-actor-id", timeout=_STATUS_RENDER_S)
     old_actor = app.settings.actor_id()
     assert len(old_actor) == _SECRET_HEX_LEN, (
         f"the Status page must render the signed-in actor id; got {old_actor!r}, "
         f"error surface: {app.error_text()!r}"
     )
-    app.settings.open_recovery_kit_or_skip()
+    app.settings.open_recovery_kit()
     app.settings.create_recovery_kit()
     app.wait_for("recovery-kit-secret-display", timeout=30.0)
     held = app.settings.recovery_kit_secret()
@@ -1593,16 +1567,7 @@ def test_a_lost_reply_you_cannot_check_or_store_keeps_the_only_key_on_screen(
     app, user = succeedable_app
     port = nest_instance["port"]
     stolen_seed = bytes(user["signing_key"]).hex()
-    if app_name(app.driver) not in _REFUSAL_DOOR_APPS:
-        skip_unbuilt(
-            app.driver,
-            surface="the registry E2E bridge delegation (`refuse_secret_writes_for_test`)",
-            detail="one arm in this app's agent handing "
-            "`fauna_client_accounts::call_registry_method_for_test` its own "
-            "`AccountRegistry` — the fault and its name are already shared Rust",
-            tracked="behavior/onboarding.md § E2E bridge contract — the registry "
-            "dispatcher's per-app delegation",
-        )
+    require_surface(app.driver, "registry-refuse-secret-writes")
 
     _old_actor, held = _kit_in_hand(app)
 

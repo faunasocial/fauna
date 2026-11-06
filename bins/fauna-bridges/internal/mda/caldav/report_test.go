@@ -12,7 +12,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/faunasocial/fauna/bins/fauna-bridges/internal/mailfauna"
 	"github.com/faunasocial/fauna/bins/fauna-bridges/internal/mda/davauth"
 	"github.com/faunasocial/fauna/bins/fauna-bridges/internal/wsrpc"
 	"github.com/fxamacker/cbor/v2"
@@ -194,7 +193,7 @@ func newReportFixture(t *testing.T) reportFixture {
 // produces, so the AUTH'd MDA can re-open them via `OpenMailRecord`.
 func (f *reportFixture) sealEvent(t *testing.T, body []byte) []byte {
 	t.Helper()
-	out, err := mailfauna.EncryptToRecipient(body, f.leaf.Pubkey)
+	out, err := sealCalendarRecord(body, fixtureCalendarPubkey())
 	if err != nil {
 		t.Fatalf("EncryptToRecipient: %v", err)
 	}
@@ -484,7 +483,7 @@ func TestReportCalendarQuerySkipsWrongKeySealedEvent(t *testing.T) {
 	caller := decryptCaller(t, fx)
 	// Seal to a fresh keypair the session's snapshot does NOT carry.
 	stranger := faunaFfi.GenerateX25519Keypair()
-	wrongKeySealed, err := mailfauna.EncryptToRecipient([]byte(testReportEventOutsideWindow), stranger.Pubkey)
+	wrongKeySealed, err := sealCalendarRecord([]byte(testReportEventOutsideWindow), stranger.Pubkey)
 	if err != nil {
 		t.Fatalf("EncryptToRecipient: %v", err)
 	}
@@ -704,7 +703,7 @@ func TestListCalendarObjectsPropfindDepth1(t *testing.T) {
 	sealed, err := SealCollectionMetadata(EncryptedCollectionMetadata{
 		Displayname: "Personal",
 		Color:       "#3273dc",
-	}, fx.leaf.Pubkey, nil)
+	}, fixtureCalendarPubkey(), nil)
 	if err != nil {
 		t.Fatalf("SealCollectionMetadata: %v", err)
 	}

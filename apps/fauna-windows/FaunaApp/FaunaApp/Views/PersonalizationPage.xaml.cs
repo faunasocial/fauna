@@ -387,7 +387,8 @@ public sealed partial class PersonalizationPage : Page
         foreach (var row in _trainedTopicsVm.Topics)
             TrainedTopicsContainer.Children.Add(BuildTrainedTopicRow(row));
         TrainedTopicsEmptyText.Visibility =
-            _trainedTopicsVm.Topics.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+            _trainedTopicsVm.Topics.Count == 0 && !_trainedTopicsVm.LoadRefused
+                ? Visibility.Visible : Visibility.Collapsed;
     }
 
     /// <summary>One <c>personalization-trained-factor-item</c> row: name +
@@ -493,12 +494,13 @@ public sealed partial class PersonalizationPage : Page
 
     /// <summary>Commit the name-input: a rename when a row retargeted it
     /// (<see cref="_renamingTopicId"/>), else a create. Any successful commit
-    /// resets the input to create mode.</summary>
+    /// resets the input to create mode. A blank input goes to the VM too, which
+    /// refuses it with the shared sentence the render below paints on
+    /// <c>error-message</c> (topic-factors.md § Authoring surface &amp; picker).</summary>
     private async Task SubmitTrainedTopicAsync()
     {
         if (_trainedTopicsVm is null) return;
         var name = TrainedTopicNameInput.Text;
-        if (string.IsNullOrWhiteSpace(name)) return;
 
         var ok = _renamingTopicId is { } id
             ? await _trainedTopicsVm.RenameAsync(id, name)

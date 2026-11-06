@@ -28,7 +28,37 @@
 //! names its chunks' store keys and its plaintext `total_size` in the clear
 //! (only the plaintext chunk hashes are sealed), so the walk needs no key to
 //! address what it moves. Every fetched byte is verified against the hash
-//! that addressed it before it is pushed.
+//! that addressed it before it is pushed — a transport check, since the holder
+//! chose the hash. What anchors a row to the OWNER is ruled in
+//! `client-device-custodian.md` § *What the pull-back trusts the holder for*
+//! and built here (§ *What the holder is trusted for*, below).
+//!
+//! # What the holder is trusted for
+//!
+//! The holder cannot author a row (the reserved rails rest under the
+//! `NestBackupKey`, the mirror plane under the folders' own keys); it can only
+//! replay a genuine older state and omit. So on the reserved rails the leg
+//! anchors every row to the owner twice:
+//!
+//! * **the set's sealed ledger** — opened first, under the owner's key
+//!   ([`fauna_client_backup::audit::open_ledger`], the audit's own reader), and
+//!   walked BY: the population is the ledger's `live` segments (both halves)
+//!   plus the ledger itself; a named segment the holder cannot produce refuses
+//!   the set `custody_incomplete` with nothing of it recorded; a listed row the
+//!   ledger does not name is reported ([`ReseedReport::unanchored_rows`]) and
+//!   neither landed nor recorded;
+//! * **this device's generation pin** — [`preflight`] judges each ledger
+//!   against it ([`LedgerVerdict`]) before anything is written — a pinned
+//!   ledger the holder does not list, a family or the whole set, included, as
+//!   [`LedgerVerdict::Withheld`] — the confirm
+//!   shows the verdicts ([`fauna_client_backup::reseed::preflight_lines`]), and
+//!   the run takes the owner's acceptance ([`NestPullBack::with_acceptance`]):
+//!   a reserved set the acceptance does not name is refused
+//!   [`SetRefusal::NotAccepted`], one whose ledger moved since is refused
+//!   [`SetRefusal::PreflightStale`].
+//!
+//! The mirror plane (covered folders) is the ruling's declared residual: it
+//! lands as the holder lists it, and the confirm says so in one line.
 //!
 //! # Order and crash-safety
 //!
@@ -74,20 +104,21 @@ use fauna_client_backup::recover_leg::{
     BlobPushSink, DestGeneration, parse_manifest_hex, segment_set_order,
 };
 use fauna_client_backup::reseed::{
-    DeliveredCorpus, DeliveredSet, FolderLabel, FolderRehome, SetAxis,
+    DeliveredCorpus, DeliveredSet, DevicePins, FolderLabel, FolderRehome, LedgerPreflight,
+    LedgerVerdict, PullBackPreflight, SetAxis, SetOutcome, SetPreflight, SetRefusal, SetResult,
 };
 use fauna_client_backup::trust::BackupNestSeam;
-use fauna_core::blob_seal::SealedBlob;
+
 use fauna_core::data::{BackupDestination, ContentHash, parse_folder_backup_set_name};
 use fauna_core::file_download::{BlobFetcher, FileDownloadKeys};
 use fauna_protocol::RpcRequester;
 use fauna_protocol::backup::CustodyItem;
 use fauna_protocol::segments::{
-    BACKED_UP_KINDS, SegmentFamily, SegmentHalf, landing_set_name, reserved_backup_set_name,
+    BACKED_UP_KINDS, LiveManifestMirror, SegmentFamily, landing_set_name, reserved_backup_set_name,
 };
 
 use crate::reseed_leg::{
-    RehomeRow, ReseedReport, is_path_hash_hex, push_sealed, rehome_nonce, sign_rehome_rows,
+    RehomeRow, ReseedReport, is_path_hash_hex, rehome_nonce, sign_rehome_rows,
 };
 
 /// The refusal a custody row the list cannot address earns — no plaintext
@@ -196,16 +227,28 @@ pub struct NestPullBack<'a, P: BlobPushSink, R: RpcRequester> {
     /// signs, read back off the delivery rather than off the destination a
     /// second time, so the signed rows are exactly the delivered ones.
     delivered_rows: Mutex<BTreeMap<String, Vec<RehomeRow>>>,
+    /// The owner's key the reserved sets' ledgers open under — the
+    /// `NestBackupKey` the host derives.
+    ledger_keys: FileDownloadKeys,
+    /// This device's generation pins at the destination ([`preflight`]).
+    pins: DevicePins,
+    /// The preflight the owner confirmed. `None` — a host whose confirm shows
+    /// no lines yet — takes a fresh preflight whole, so the ledger walk still
+    /// applies but nothing was shown (§ *What the holder is trusted for*).
+    acceptance: Option<PullBackPreflight>,
 }
 
 impl<'a, P: BlobPushSink, R: RpcRequester> NestPullBack<'a, P, R>
 where
     R::Error: fauna_protocol::RpcErrorClass,
 {
+    /// `ledger_keys` opens the reserved sets' ledgers: the owner's
+    /// `NestBackupKey` (`FileDownloadKeys::owner(NestBackupKey::derive(..))`).
     pub fn new(
         destination: PullBackDestination<'a>,
         target: PullBackTarget<'a, P, R>,
         scope_id: [u8; 32],
+        ledger_keys: FileDownloadKeys,
     ) -> Self {
         Self {
             destination,
@@ -214,7 +257,36 @@ where
             names: BTreeMap::new(),
             signing: None,
             delivered_rows: Mutex::new(BTreeMap::new()),
+            ledger_keys,
+            pins: DevicePins::default(),
+            acceptance: None,
         }
+    }
+
+    /// This device's pins at the destination, read off its audit store
+    /// ([`DevicePins::from_store`]). None given: every ledger is unvouched.
+    #[must_use]
+    pub fn with_pins(mut self, pins: DevicePins) -> Self {
+        self.pins = pins;
+        self
+    }
+
+    /// The preflight whose lines the owner confirmed — the run's acceptance.
+    #[must_use]
+    pub fn with_acceptance(mut self, accepted: PullBackPreflight) -> Self {
+        self.acceptance = Some(accepted);
+        self
+    }
+
+    /// The preflight over this leg's destination, key and pins ([`preflight`]).
+    pub async fn preflight(&self) -> std::result::Result<PullBackPreflight, String> {
+        preflight(
+            &self.destination,
+            &self.ledger_keys,
+            self.scope_id,
+            &self.pins,
+        )
+        .await
     }
 
     /// The covered folders' names, by set ([`folder_names_from_coverage`]). A
@@ -238,7 +310,9 @@ where
     /// backed-up kind's reserved segment set, then every covered-folder mirror
     /// set. Failures are not swallowed — a one-shot recovery ceremony a human
     /// is watching must never report a part-delivered corpus as delivered.
-    pub async fn run_all(&self) -> Result<ReseedReport> {
+    ///
+    /// `accepted` is the owner's acceptance ([`Self::with_acceptance`]).
+    pub async fn run_all(&self, accepted: &PullBackPreflight) -> Result<ReseedReport> {
         let live = fauna_client_backup::audit::read_full_custody(self.destination.seam)
             .await
             .map_err(|e| anyhow::anyhow!("pull-back: the destination's custody list: {e}"))?;
@@ -246,7 +320,7 @@ where
         let mut report = ReseedReport::default();
         for kind in BACKED_UP_KINDS {
             report.absorb(
-                self.run_kind(kind, &live)
+                self.run_kind(kind, &live, accepted)
                     .await
                     .with_context(|| format!("pull-back for kind {kind}"))?,
             );
@@ -259,8 +333,16 @@ where
         Ok(report)
     }
 
-    /// One kind's reserved segment set, both families, in the shared walk.
-    async fn run_kind(&self, kind: &str, live: &[CustodyItem]) -> Result<ReseedReport> {
+    /// One kind's reserved segment set, walked BY its sealed ledgers
+    /// (§ *What the holder is trusted for*): opened first, checked against the
+    /// owner's acceptance, the population read off them, and only then landed
+    /// in the shared walk. A refusal lands and records nothing of the set.
+    async fn run_kind(
+        &self,
+        kind: &str,
+        live: &[CustodyItem],
+        accepted: &PullBackPreflight,
+    ) -> Result<ReseedReport> {
         let set = reserved_backup_set_name(kind, &self.scope_id)
             .ok_or_else(|| anyhow::anyhow!("kind has no backup surface: {kind}"))?;
         // The destination's copy is read under its own set's name; the rebuilt
@@ -269,58 +351,134 @@ where
         let landing = landing_set_name(kind, &self.scope_id)
             .ok_or_else(|| anyhow::anyhow!("kind has no landing set: {kind}"))?;
         let scope_hex = hex::encode(self.scope_id);
-        let mut generations = Vec::new();
+        let mut listed: BTreeMap<&str, &CustodyItem> = BTreeMap::new();
         for item in live.iter().filter(|i| i.folder_name == set) {
-            let path = addressable(item)?;
+            listed.entry(addressable(item)?).or_insert(item);
+        }
+        let mut report = ReseedReport::default();
+
+        let ledgers = open_set_ledgers(
+            self.destination.bytes,
+            &self.ledger_keys,
+            kind,
+            &scope_hex,
+            &set,
+            &listed,
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("pull-back: {e}"))?;
+
+        // The population is what the ledgers name: both halves of every live
+        // segment, and each ledger itself (which lands last, by the walk).
+        let mut named: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        for opened in &ledgers {
+            named.insert(opened.path.clone());
+            for seg in &opened.mirror.live {
+                named.insert(opened.family.dat_path(&scope_hex, seg.segment_id));
+                named.insert(opened.family.meta_path(&scope_hex, seg.segment_id));
+            }
+        }
+        report.unanchored_rows.extend(
+            listed
+                .keys()
+                .filter(|path| !named.contains(**path))
+                .map(|path| format!("{set}/{path}")),
+        );
+
+        let refuse = |report: &mut ReseedReport, refusal: SetRefusal, detail: String| {
+            tracing::warn!(kind, set = %set, code = refusal.code(), %detail, "pull-back: set refused");
+            report.refused_sets.push(SetResult {
+                set: DeliveredSet {
+                    set_name: landing.clone(),
+                    axis: SetAxis::Segment,
+                    folder_display_name: None,
+                    folder_label: None,
+                },
+                outcome: SetOutcome::Refused { refusal, detail },
+            });
+        };
+        // This device's pinned ledgers the holder does not list — a family
+        // or the whole set withheld: judged like a rollback, so the set moves
+        // only on the owner's word (anchor (ii)).
+        let withheld = withheld_ledgers(&set, &ledgers, &self.pins);
+        if ledgers.is_empty() && withheld.is_empty() {
+            // No ledger and no pin: nothing anchors any row to the owner, so
+            // nothing of the set moves (every row was reported unanchored above).
+            return Ok(report);
+        }
+        let Some(acc) = accepted.set(&set) else {
+            refuse(
+                &mut report,
+                SetRefusal::NotAccepted,
+                format!("{set} was not among the sets you confirmed"),
+            );
+            return Ok(report);
+        };
+        // The acceptance names each ledger by its hash, and a withheld one by
+        // its absence (an empty hash), so a ledger that appears or moves after
+        // the confirm reads stale.
+        let now: std::collections::BTreeSet<(&str, &str)> = ledgers
+            .iter()
+            .map(|l| (l.path.as_str(), l.manifest_hash_hex.as_str()))
+            .chain(withheld.iter().map(|l| (l.path.as_str(), "")))
+            .collect();
+        let then: std::collections::BTreeSet<(&str, &str)> = acc
+            .ledgers
+            .iter()
+            .map(|l| (l.path.as_str(), l.manifest_hash_hex.as_str()))
+            .collect();
+        if now != then {
+            refuse(
+                &mut report,
+                SetRefusal::PreflightStale,
+                format!("{set}'s ledger changed after you confirmed the restore"),
+            );
+            return Ok(report);
+        }
+        if ledgers.is_empty() {
+            // The owner accepted a set the holder withholds whole: nothing
+            // anchors a row, so nothing of it moves.
+            return Ok(report);
+        }
+        let missing: Vec<&String> = named
+            .iter()
+            .filter(|path| !listed.contains_key(path.as_str()))
+            .collect();
+        if let Some(first) = missing.first() {
+            refuse(
+                &mut report,
+                SetRefusal::CustodyIncomplete,
+                format!(
+                    "the copy of {set} lacks {} row(s) its own ledger names, first {first}",
+                    missing.len(),
+                ),
+            );
+            return Ok(report);
+        }
+
+        let mut generations = Vec::new();
+        for path in &named {
+            let item = listed[path.as_str()];
             let manifest_hash = parse_manifest_hex(&item.manifest_hash).ok_or_else(|| {
                 anyhow::anyhow!("pull-back: {set}/{path} names a malformed manifest hash")
             })?;
             generations.push(DestGeneration {
-                path: path.to_string(),
+                path: path.clone(),
                 manifest_hash,
                 order: (true, item.updated_at),
             });
         }
-
         let ordered = segment_set_order(kind, &scope_hex, &generations);
-        let mut report = ReseedReport::default();
         for g in &ordered {
-            let sealed = fetch_as_is(self.destination.bytes, g.manifest_hash, &g.path).await?;
-            report.absorb(
-                push_sealed(self.target.bytes, &sealed)
-                    .await
-                    .with_context(|| format!("pull-back: landing {}'s bytes", g.path))?,
-            );
-            self.record(&landing, &g.path, &sealed, None)
+            let pulled = self
+                .land_bytes(&mut report, g.manifest_hash, &g.path)
+                .await
+                .with_context(|| format!("pull-back: landing {}'s bytes", g.path))?;
+            self.record(&landing, &g.path, &pulled, None)
                 .await
                 .with_context(|| format!("pull-back: recording {} on the target", g.path))?;
             report.delivered_paths.push(g.path.clone());
-            report.plaintext_bytes = report
-                .plaintext_bytes
-                .saturating_add(sealed.manifest.total_size);
-        }
-
-        // A segment the destination holds without its sidecar landed (it is
-        // real custody) but cannot be reopened — reported, as the custodian
-        // leg reports its own, so the driver never calls the corpus whole.
-        for family in SegmentFamily::PASS_ORDER {
-            if family.serve_kind(kind).is_none() {
-                continue;
-            }
-            let halves = |want: SegmentHalf| -> std::collections::BTreeSet<u32> {
-                ordered
-                    .iter()
-                    .filter_map(|g| family.parse(&scope_hex, &g.path))
-                    .filter(|(_, half)| *half == want)
-                    .map(|(id, _)| id)
-                    .collect()
-            };
-            let metas = halves(SegmentHalf::Meta);
-            report.sidecarless_segments.extend(
-                halves(SegmentHalf::Dat)
-                    .into_iter()
-                    .filter(|id| !metas.contains(id)),
-            );
+            report.plaintext_bytes = report.plaintext_bytes.saturating_add(pulled.total_size);
         }
 
         if !report.delivered_paths.is_empty() {
@@ -335,7 +493,7 @@ where
             kind,
             set = %set,
             delivered = report.delivered_paths.len(),
-            sidecarless = report.sidecarless_segments.len(),
+            unanchored = report.unanchored_rows.len(),
             "pull-back: kind complete",
         );
         Ok(report)
@@ -371,14 +529,12 @@ where
             let manifest_hash = parse_manifest_hex(&item.manifest_hash).ok_or_else(|| {
                 anyhow::anyhow!("pull-back: {set}/{leaf} names a malformed manifest hash")
             })?;
-            let sealed = fetch_as_is(self.destination.bytes, manifest_hash, leaf).await?;
-            report.absorb(
-                push_sealed(self.target.bytes, &sealed)
-                    .await
-                    .with_context(|| format!("pull-back: landing {set}/{leaf}'s bytes"))?,
-            );
+            let pulled = self
+                .land_bytes(&mut report, manifest_hash, leaf)
+                .await
+                .with_context(|| format!("pull-back: landing {set}/{leaf}'s bytes"))?;
             let path_sealed = item.path_sealed.as_ref().map(|b| b.as_slice());
-            self.record(set, leaf, &sealed, path_sealed)
+            self.record(set, leaf, &pulled, path_sealed)
                 .await
                 .with_context(|| format!("pull-back: recording folder custody for {set}/{leaf}"))?;
 
@@ -392,7 +548,7 @@ where
                             anyhow::anyhow!("pull-back: {held} has a malformed leaf")
                         })?,
                         manifest_hash: manifest_hash.digest(),
-                        total_size: sealed.manifest.total_size,
+                        total_size: pulled.total_size,
                         path_sealed: path_sealed.to_vec(),
                     }),
                 None => {
@@ -407,9 +563,7 @@ where
                 }
             }
             report.delivered_paths.push(held);
-            report.plaintext_bytes = report
-                .plaintext_bytes
-                .saturating_add(sealed.manifest.total_size);
+            report.plaintext_bytes = report.plaintext_bytes.saturating_add(pulled.total_size);
             if report.delivered_sets.last().map(|s| s.set_name.as_str()) != Some(set) {
                 let naming = self.names.get(set).cloned().unwrap_or_default();
                 report.delivered_sets.push(DeliveredSet {
@@ -422,6 +576,30 @@ where
         }
         *self.delivered_rows.lock().expect("delivered rows") = signable;
         Ok(report)
+    }
+
+    /// Bytes first: one path streamed chunk by chunk from the destination
+    /// onto the target ([`pull_as_is`]), counted into `report`.
+    async fn land_bytes(
+        &self,
+        report: &mut ReseedReport,
+        manifest_hash: ContentHash,
+        path: &str,
+    ) -> Result<PulledPath> {
+        let pulled = pull_as_is(
+            self.destination.bytes,
+            self.target.bytes,
+            manifest_hash,
+            path,
+        )
+        .await?;
+        report.absorb(ReseedReport {
+            chunks_uploaded: pulled.chunks_uploaded,
+            chunks_deduped: pulled.chunks_deduped,
+            manifests_uploaded: 1,
+            ..ReseedReport::default()
+        });
+        Ok(pulled)
     }
 
     /// Custody for one delivered path on the target, through the self-healing
@@ -438,7 +616,7 @@ where
         &self,
         set: &str,
         path: &str,
-        sealed: &SealedBlob,
+        pulled: &PulledPath,
         path_sealed: Option<&[u8]>,
     ) -> Result<()> {
         crate::SyncClient::new(self.target.nest)
@@ -446,15 +624,16 @@ where
                 set,
                 self.target.device_id.as_str(),
                 path,
-                Some(hex::encode(sealed.manifest_hash.digest())),
+                Some(hex::encode(pulled.manifest_hash.digest())),
                 // The nest derives the custody charge from the bytes it holds;
                 // declared as the plaintext size so a delivered row reads as one
                 // the source nest's own coordinator wrote.
-                sealed.manifest.total_size as i64,
+                pulled.total_size as i64,
                 "create",
                 None,
                 None,
                 path_sealed.map(<[u8]>::to_vec),
+                None,
                 None,
                 None,
                 None,
@@ -470,12 +649,22 @@ where
     /// Generic over any transport; each host's `ReseedDeliveryLeg` newtype
     /// delegates here (§ *Where it lives, and the two `Send` impls*).
     pub async fn deliver_corpus(&self) -> std::result::Result<DeliveredCorpus, String> {
-        let report = self.run_all().await.map_err(|e| format!("{e:#}"))?;
+        let fresh;
+        let accepted = match &self.acceptance {
+            Some(accepted) => accepted,
+            None => {
+                fresh = self.preflight().await?;
+                &fresh
+            }
+        };
+        let report = self.run_all(accepted).await.map_err(|e| format!("{e:#}"))?;
         Ok(DeliveredCorpus {
             sets: report.delivered_sets,
             sidecarless_segments: report.sidecarless_segments,
             folder_paths_without_seal: report.folder_paths_without_seal,
             plaintext_bytes: report.plaintext_bytes,
+            refused: report.refused_sets,
+            unanchored_rows: report.unanchored_rows,
         })
     }
 
@@ -500,6 +689,127 @@ where
     }
 }
 
+/// One reserved-set ledger the leg opened off the holder.
+struct OpenedLedger {
+    family: SegmentFamily,
+    /// The mirror path inside the set (`<scope>/manifest.<kind>`, …).
+    path: String,
+    /// The custody row's manifest hash it was read under.
+    manifest_hash_hex: String,
+    mirror: LiveManifestMirror,
+}
+
+/// Every family ledger of `kind` the holder lists in `set`, opened under the
+/// owner's key, in family order. A listed ledger that does not open is an
+/// error — never a set walked without its anchor.
+async fn open_set_ledgers(
+    fetcher: &dyn BlobFetcher,
+    keys: &FileDownloadKeys,
+    kind: &str,
+    scope_hex: &str,
+    set: &str,
+    listed: &BTreeMap<&str, &CustodyItem>,
+) -> std::result::Result<Vec<OpenedLedger>, String> {
+    let mut out = Vec::new();
+    for family in SegmentFamily::PASS_ORDER {
+        if family.serve_kind(kind).is_none() {
+            continue;
+        }
+        let path = family.mirror_path(scope_hex, kind);
+        let Some(item) = listed.get(path.as_str()) else {
+            continue;
+        };
+        let mirror = fauna_client_backup::audit::open_ledger(fetcher, keys, item)
+            .await
+            .map_err(|e| format!("{set}'s ledger does not open: {e}"))?;
+        out.push(OpenedLedger {
+            family,
+            path,
+            manifest_hash_hex: item.manifest_hash.to_ascii_lowercase(),
+            mirror,
+        });
+    }
+    Ok(out)
+}
+
+/// This device's pins on `set` for which the holder lists no ledger, judged
+/// [`LedgerVerdict::Withheld`], in pin-key order. A pin is read back to its set
+/// structurally ([`fauna_client_backup::audit::ledger_key_set`]).
+fn withheld_ledgers(set: &str, opened: &[OpenedLedger], pins: &DevicePins) -> Vec<LedgerPreflight> {
+    pins.pins
+        .iter()
+        .filter(|(key, _)| fauna_client_backup::audit::ledger_key_set(key) == Some(set))
+        .filter_map(|(key, pin)| {
+            let path = key.get(set.len() + 1..)?;
+            (!opened.iter().any(|l| l.path == path)).then(|| LedgerPreflight {
+                path: path.to_string(),
+                manifest_hash_hex: String::new(),
+                verdict: LedgerVerdict::withheld(pin, pins.last_passed_at),
+            })
+        })
+        .collect()
+}
+
+/// **The pull-back's preflight** — the read the confirm is built from
+/// (`client-device-custodian.md` § *What the pull-back trusts the holder
+/// for*, the confirm): the holder's custody list, every reserved set's ledgers
+/// opened under `keys` and judged against this device's `pins`
+/// ([`LedgerVerdict::judge`]), and the covered-folder sets by name. Writes
+/// nothing, anywhere. `Err` — the holder unreachable, a ledger that does not
+/// open — is a failed gesture, never a verdict.
+pub async fn preflight(
+    destination: &PullBackDestination<'_>,
+    keys: &FileDownloadKeys,
+    scope_id: [u8; 32],
+    pins: &DevicePins,
+) -> std::result::Result<PullBackPreflight, String> {
+    let live = fauna_client_backup::audit::read_full_custody(destination.seam)
+        .await
+        .map_err(|e| format!("the destination's custody list: {e}"))?;
+    let scope_hex = hex::encode(scope_id);
+    let mut out = PullBackPreflight::default();
+    for kind in BACKED_UP_KINDS {
+        let Some(set) = reserved_backup_set_name(kind, &scope_id) else {
+            continue;
+        };
+        let listed: BTreeMap<&str, &CustodyItem> = live
+            .iter()
+            .filter(|i| i.folder_name == set)
+            .filter_map(|i| i.path.as_deref().map(|p| (p, i)))
+            .collect();
+        let ledgers =
+            open_set_ledgers(destination.bytes, keys, kind, &scope_hex, &set, &listed).await?;
+        let withheld = withheld_ledgers(&set, &ledgers, pins);
+        if ledgers.is_empty() && withheld.is_empty() {
+            continue;
+        }
+        out.sets.push(SetPreflight {
+            ledgers: ledgers
+                .into_iter()
+                .map(|l| LedgerPreflight {
+                    verdict: LedgerVerdict::judge(
+                        l.mirror.next_segment_id_seen,
+                        pins.pins
+                            .get(&fauna_client_backup::audit::ledger_key(&set, &l.path)),
+                        pins.last_passed_at,
+                    ),
+                    path: l.path,
+                    manifest_hash_hex: l.manifest_hash_hex,
+                })
+                .chain(withheld)
+                .collect(),
+            set_name: set,
+        });
+    }
+    let folders: std::collections::BTreeSet<&str> = live
+        .iter()
+        .filter(|i| parse_folder_backup_set_name(&i.folder_name).is_some())
+        .map(|i| i.folder_name.as_str())
+        .collect();
+    out.folder_sets = folders.into_iter().map(str::to_string).collect();
+    Ok(out)
+}
+
 /// The plaintext `path` a custody row is addressed by, or the
 /// [`CUSTODY_UNADDRESSABLE`] refusal naming the row.
 fn addressable(item: &CustodyItem) -> Result<&str> {
@@ -512,14 +822,38 @@ fn addressable(item: &CustodyItem) -> Result<&str> {
     })
 }
 
-/// Fetch one custody path off the destination's open routes **as it rests
-/// there** — the manifest by its hash, then its chunks by their store keys —
-/// verifying every byte against the hash that addressed it.
-pub async fn fetch_as_is(
+/// One custody path as [`pull_as_is`] landed it on the target.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PulledPath {
+    /// The manifest's hash — the destination's, unchanged.
+    pub manifest_hash: ContentHash,
+    /// The manifest's plaintext `total_size`, which custody declares.
+    pub total_size: u64,
+    /// Chunk bodies actually uploaded (post-dedup).
+    pub chunks_uploaded: usize,
+    /// Chunk bodies the target already held.
+    pub chunks_deduped: usize,
+}
+
+/// Move one custody path off the destination's open routes onto the target
+/// **as it rests there**, a chunk at a time: the manifest by its hash, then
+/// each chunk the target lacks fetched by its store key, verified against it
+/// and pushed before the next is fetched, then the manifest last — so the
+/// target never holds a manifest naming bytes it does not have, and the app
+/// never holds more than one chunk body of the path at once
+/// (`message-segment-store.md`'s streaming rule; a multi-GB covered-folder
+/// file passes through a constant buffer). A store key the manifest repeats
+/// is pushed once.
+///
+/// A byte that fails the hash that addressed it is refused before it lands;
+/// chunks of the path already pushed stay, ordinary content-addressed bytes no
+/// manifest names yet, and a re-run resumes by content address.
+pub async fn pull_as_is<P: BlobPushSink + ?Sized>(
     fetcher: &dyn BlobFetcher,
+    sink: &P,
     manifest_hash: ContentHash,
     path: &str,
-) -> Result<SealedBlob> {
+) -> Result<PulledPath> {
     let manifest_hex = hex::encode(manifest_hash.digest());
     let manifest_bytes = fetcher
         .fetch_manifest(&manifest_hash)
@@ -534,39 +868,54 @@ pub async fn fetch_as_is(
             anyhow::anyhow!("pull-back: manifest {manifest_hex} does not decode: {e}")
         })?;
     let keys = manifest.store_keys();
-    let bodies = fetcher
-        .fetch_chunks(&keys, path)
+    let mut missing: std::collections::HashSet<ContentHash> = sink
+        .missing_chunks(&keys)
         .await
-        .with_context(|| format!("pull-back: fetching {path}'s chunks"))?;
-    anyhow::ensure!(
-        bodies.len() == keys.len(),
-        "pull-back: the destination returned {} of {path}'s {} chunks",
-        bodies.len(),
-        keys.len()
-    );
-    let mut chunks = Vec::with_capacity(keys.len());
-    for (key, body) in keys.into_iter().zip(bodies) {
-        anyhow::ensure!(
-            ContentHash::of_raw(&body) == key,
-            "pull-back: chunk {} of {path} failed hash verification",
-            hex::encode(key.digest())
-        );
-        chunks.push((key, body));
-    }
-    Ok(SealedBlob {
-        manifest,
-        manifest_bytes,
+        .with_context(|| format!("pull-back: {path}'s chunk dedup check"))?
+        .into_iter()
+        .collect();
+    let mut pulled = PulledPath {
         manifest_hash,
-        chunks,
-        content_key_version: None,
-    })
+        total_size: manifest.total_size,
+        chunks_uploaded: 0,
+        chunks_deduped: keys.len().saturating_sub(missing.len()),
+    };
+    for key in &keys {
+        // Taking the key out of the set pushes a repeated store key once.
+        if !missing.remove(key) {
+            continue;
+        }
+        let key_hex = hex::encode(key.digest());
+        let mut bodies = fetcher
+            .fetch_chunks(std::slice::from_ref(key), path)
+            .await
+            .with_context(|| format!("pull-back: fetching {path}'s chunk {key_hex}"))?;
+        anyhow::ensure!(
+            bodies.len() == 1,
+            "pull-back: the destination returned {} bodies for {path}'s chunk {key_hex}",
+            bodies.len()
+        );
+        let body = bodies.pop().expect("one body");
+        anyhow::ensure!(
+            ContentHash::of_raw(&body) == *key,
+            "pull-back: chunk {key_hex} of {path} failed hash verification"
+        );
+        sink.put_chunk(key, &body)
+            .await
+            .with_context(|| format!("pull-back: uploading {path}'s chunk {key_hex}"))?;
+        pulled.chunks_uploaded += 1;
+    }
+    sink.put_manifest(&manifest_bytes)
+        .await
+        .with_context(|| format!("pull-back: uploading {path}'s manifest"))?;
+    Ok(pulled)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use fauna_client_testkit::ClassifiedError;
-    use fauna_core::blob_seal::seal_blob;
+    use fauna_core::blob_seal::{SealedBlob, seal_blob};
     use fauna_core::crypto::NestBackupKey;
     use fauna_protocol::backup::{CustodyListReply, CustodyListRequest};
     use fauna_protocol::sync::{SyncChangeRecordReply, SyncChangeRecordRequest};
@@ -620,7 +969,10 @@ mod tests {
             for (key, chunk) in &sealed.chunks {
                 blobs.insert(*key, chunk.clone());
             }
-            self.items.lock().unwrap().push(CustodyItem {
+            let mut items = self.items.lock().unwrap();
+            items
+                .retain(|i| !(i.folder_name == set && i.path.as_deref() == path && path.is_some()));
+            items.push(CustodyItem {
                 folder_name: set.to_string(),
                 path: path.map(str::to_string),
                 path_hash: "00".repeat(32),
@@ -830,7 +1182,40 @@ mod tests {
                     device_id: device(),
                 },
                 SCOPE,
+                FileDownloadKeys::owner(NestBackupKey::from_bytes([9; 32])),
             )
+        }
+
+        /// The source's sealed ledger for `family`, naming `ids` live at
+        /// generation `counter`, held at its mirror path.
+        fn hold_ledger(&self, family: SegmentFamily, ids: &[u32], counter: u32) -> SealedBlob {
+            let mirror = LiveManifestMirror {
+                next_segment_id_seen: counter,
+                live: ids
+                    .iter()
+                    .map(|&segment_id| fauna_protocol::segments::SegmentRef {
+                        segment_id,
+                        ..Default::default()
+                    })
+                    .collect(),
+                extra: Default::default(),
+            };
+            let path = family.mirror_path(&scope_hex(), "mail");
+            self.hold_segment(&path, &mirror.to_bytes().unwrap())
+        }
+
+        /// Both halves of content segment `id`.
+        fn hold_pair(&self, id: u32) {
+            let (dat, meta) = content(id);
+            self.hold_segment(&dat, &body(id as u8, 100));
+            self.hold_segment(&meta, &body(id as u8 ^ 0x80, 30));
+        }
+
+        /// Preflight with no pins, then run accepting all of it — the shape
+        /// every test of the walk itself takes.
+        async fn run(&self, leg: &NestPullBack<'_, Target, Target>) -> ReseedReport {
+            let accepted = leg.preflight().await.unwrap();
+            leg.run_all(&accepted).await.unwrap()
         }
 
         /// The source coordinator's seal of a segment-plane path: the granted
@@ -886,8 +1271,8 @@ mod tests {
         let jmeta = SegmentFamily::Placement.meta_path(&scope_hex(), 1);
         let jmirror = SegmentFamily::Placement.mirror_path(&scope_hex(), "mail");
         // Held in an order the walk must not follow.
-        let s_mirror = rig.hold_segment(&mirror, &body(0x10, 300));
-        let s_jmirror = rig.hold_segment(&jmirror, &body(0x11, 200));
+        let s_mirror = rig.hold_ledger(SegmentFamily::Content, &[1, 2], 3);
+        let s_jmirror = rig.hold_ledger(SegmentFamily::Placement, &[1], 2);
         let s_meta2 = rig.hold_segment(&meta2, &body(0x12, 100));
         let s_jdat = rig.hold_segment(&jdat, &body(0x13, 900));
         let s_dat2 = rig.hold_segment(&dat2, &body(0x14, 9_000));
@@ -906,7 +1291,8 @@ mod tests {
             },
         )]
         .into();
-        let report = rig.leg().with_folder_names(names).run_all().await.unwrap();
+        let leg = rig.leg().with_folder_names(names);
+        let report = rig.run(&leg).await;
 
         let step = |sealed: &SealedBlob, set: &str, path: &str| {
             vec![short(sealed), format!("record {set} {path}")]
@@ -968,20 +1354,22 @@ mod tests {
     #[tokio::test]
     async fn the_pull_back_reads_the_copy_and_ignores_a_landing_set() {
         let rig = Rig::new();
-        let (dat1, _) = content(1);
-        rig.hold_segment(&dat1, &body(1, 100));
+        let (dat1, meta1) = content(1);
+        rig.hold_pair(1);
+        rig.hold_ledger(SegmentFamily::Content, &[1], 2);
+        let mirror = SegmentFamily::Content.mirror_path(&scope_hex(), "mail");
         let root = NestBackupKey::from_bytes([9; 32]).convergent_chunk_root();
         let stray = seal_blob(&body(2, 100), Some((root, None))).unwrap();
         let (dat2, _) = content(2);
         rig.dest
             .hold("__landing/mail", Some(dat2.as_str()), &stray, None);
 
-        let report = rig.leg().run_all().await.unwrap();
+        let report = rig.run(&rig.leg()).await;
 
-        assert_eq!(report.delivered_paths, vec![dat1.clone()]);
+        assert_eq!(report.delivered_paths, vec![dat1.clone(), meta1, mirror]);
         let records = rig.target.records.lock().unwrap().clone();
-        assert_eq!(records.len(), 1);
-        assert_eq!(records[0].folder, "__landing/mail");
+        assert_eq!(records.len(), 3);
+        assert!(records.iter().all(|r| r.folder == "__landing/mail"));
         assert_eq!(records[0].path, dat1);
     }
 
@@ -996,7 +1384,11 @@ mod tests {
         let orphan = seal_blob(&body(2, 100), Some((root, None))).unwrap();
         rig.dest.hold("__mail", None, &orphan, None);
 
-        let err = rig.leg().run_all().await.unwrap_err();
+        let err = rig
+            .leg()
+            .run_all(&PullBackPreflight::default())
+            .await
+            .unwrap_err();
         assert!(
             format!("{err:#}").contains(CUSTODY_UNADDRESSABLE),
             "{err:#}"
@@ -1014,14 +1406,13 @@ mod tests {
     #[tokio::test]
     async fn an_unregistered_device_is_registered_once_and_its_records_land() {
         let rig = Rig::new();
-        let (dat1, meta1) = content(1);
-        rig.hold_segment(&dat1, &body(1, 100));
-        rig.hold_segment(&meta1, &body(2, 40));
+        rig.hold_pair(1);
+        rig.hold_ledger(SegmentFamily::Content, &[1], 2);
         rig.target
             .unregistered
             .store(true, std::sync::atomic::Ordering::SeqCst);
 
-        rig.leg().run_all().await.unwrap();
+        rig.run(&rig.leg()).await;
 
         let log = rig.log();
         assert_eq!(
@@ -1029,7 +1420,7 @@ mod tests {
             1,
             "{log:?}"
         );
-        assert_eq!(rig.target.records.lock().unwrap().len(), 2, "{log:?}");
+        assert_eq!(rig.target.records.lock().unwrap().len(), 3, "{log:?}");
         assert!(
             rig.target
                 .records
@@ -1041,20 +1432,355 @@ mod tests {
         );
     }
 
-    /// A segment the destination holds without its sidecar lands and is
-    /// reported, so the driver never calls the corpus whole.
+    fn mail_ledger_key() -> String {
+        fauna_client_backup::audit::ledger_key(
+            "__mail",
+            &SegmentFamily::Content.mirror_path(&scope_hex(), "mail"),
+        )
+    }
+
+    fn pinned_at(generation: u32) -> DevicePins {
+        DevicePins {
+            pins: [(
+                mail_ledger_key(),
+                fauna_client_backup::audit::LedgerPin {
+                    generation,
+                    seen_live_at: Some(1_700_000_000),
+                },
+            )]
+            .into(),
+            last_passed_at: Some(1_600_000_000),
+        }
+    }
+
+    fn refusals(corpus: &DeliveredCorpus) -> Vec<(String, SetRefusal)> {
+        corpus
+            .refused
+            .iter()
+            .map(|r| match &r.outcome {
+                SetOutcome::Refused { refusal, .. } => (r.set.set_name.clone(), refusal.clone()),
+                other => panic!("a refused set carries a refusal, not {other:?}"),
+            })
+            .collect()
+    }
+
+    /// **A ledger-named row the holder lacks refuses the set** — the ledger
+    /// names what the copy lacks — and nothing of the set is landed or
+    /// recorded, the ledger included.
     #[tokio::test]
-    async fn a_segment_held_without_its_sidecar_is_delivered_and_reported() {
+    async fn a_ledger_named_row_the_holder_lacks_refuses_the_set() {
         let rig = Rig::new();
-        let (dat1, meta1) = content(1);
-        let (dat2, _) = content(2);
-        rig.hold_segment(&dat1, &body(1, 100));
-        rig.hold_segment(&meta1, &body(2, 10));
+        rig.hold_pair(1);
+        let (dat2, meta2) = content(2);
         rig.hold_segment(&dat2, &body(3, 100));
+        rig.hold_ledger(SegmentFamily::Content, &[1, 2], 3);
 
         let corpus = rig.leg().deliver_corpus().await.unwrap();
-        assert_eq!(corpus.sidecarless_segments, vec![2]);
+
+        assert_eq!(
+            refusals(&corpus),
+            vec![("__landing/mail".to_string(), SetRefusal::CustodyIncomplete)]
+        );
+        match &corpus.refused[0].outcome {
+            SetOutcome::Refused { detail, .. } => assert!(detail.contains(&meta2), "{detail}"),
+            _ => unreachable!(),
+        }
+        assert!(
+            corpus.sets.is_empty(),
+            "a refused set is never materialized"
+        );
+        assert!(rig.target.records.lock().unwrap().is_empty());
+        assert!(rig.target.chunks.lock().unwrap().is_empty());
+    }
+
+    /// **A listed row the ledger does not name is neither landed nor
+    /// recorded**, and is reported by name; the ledger's own rows land.
+    #[tokio::test]
+    async fn a_listed_row_the_ledger_does_not_name_is_neither_landed_nor_recorded() {
+        let rig = Rig::new();
+        rig.hold_pair(1);
+        let (dat5, _) = content(5);
+        let stray = rig.hold_segment(&dat5, &body(5, 700));
+        rig.hold_ledger(SegmentFamily::Content, &[1], 2);
+
+        let corpus = rig.leg().deliver_corpus().await.unwrap();
+
+        assert_eq!(corpus.unanchored_rows, vec![format!("__mail/{dat5}")]);
+        let records = rig.target.records.lock().unwrap().clone();
+        assert_eq!(records.len(), 3);
+        assert!(records.iter().all(|r| r.path != dat5));
+        for (key, _) in &stray.chunks {
+            assert!(
+                !rig.target.chunks.lock().unwrap().contains_key(key),
+                "an unanchored row's bytes never land"
+            );
+        }
+        assert_eq!(corpus.sets.len(), 1);
+    }
+
+    /// **A holder serving a ledger below this device's pin is a rollback**:
+    /// refused when the owner's acceptance does not name it — nothing landed,
+    /// recorded or signed — and pulled when it does.
+    #[tokio::test]
+    async fn a_ledger_below_the_pin_is_refused_unless_the_acceptance_names_it() {
+        let rig = Rig::new();
+        rig.hold_pair(1);
+        rig.hold_ledger(SegmentFamily::Content, &[1], 2);
+
+        let leg = rig.leg().with_pins(pinned_at(9));
+        let preflight = leg.preflight().await.unwrap();
+        assert_eq!(
+            preflight.sets[0].verdict(),
+            Some(LedgerVerdict::RolledBack {
+                generation: 2,
+                pinned: 9,
+                verified_at: Some(1_700_000_000),
+            })
+        );
+
+        // Declined: the owner's acceptance does not carry the set.
+        let declined = PullBackPreflight {
+            sets: Vec::new(),
+            ..preflight.clone()
+        };
+        let corpus = rig
+            .leg()
+            .with_pins(pinned_at(9))
+            .with_acceptance(declined)
+            .deliver_corpus()
+            .await
+            .unwrap();
+        assert_eq!(
+            refusals(&corpus),
+            vec![("__landing/mail".to_string(), SetRefusal::NotAccepted)]
+        );
+        assert!(corpus.sets.is_empty());
+        assert!(rig.target.records.lock().unwrap().is_empty());
+        assert!(rig.target.chunks.lock().unwrap().is_empty());
+
+        // Accepted: the owner's word pulls the older copy.
+        let corpus = rig
+            .leg()
+            .with_pins(pinned_at(9))
+            .with_acceptance(preflight)
+            .deliver_corpus()
+            .await
+            .unwrap();
+        assert!(corpus.refused.is_empty());
+        assert_eq!(corpus.sets.len(), 1);
         assert_eq!(rig.target.records.lock().unwrap().len(), 3);
+    }
+
+    /// A set this device holds no pin for is **unvouched**; one at or above
+    /// its pin is vouched, dated by the pin's sighting.
+    #[tokio::test]
+    async fn a_set_with_no_pin_is_unvouched_and_one_at_its_pin_is_vouched() {
+        let rig = Rig::new();
+        rig.hold_pair(1);
+        rig.hold_ledger(SegmentFamily::Content, &[1], 4);
+        let folder = folder_set(7);
+        rig.hold_folder(&folder, &hex::encode([0x22; 32]), &body(8, 10), Some(b"n"));
+
+        let unpinned = rig.leg().preflight().await.unwrap();
+        assert_eq!(
+            unpinned.sets[0].verdict(),
+            Some(LedgerVerdict::Unvouched { generation: 4 })
+        );
+        assert_eq!(unpinned.folder_sets, vec![folder]);
+
+        let pinned = rig.leg().with_pins(pinned_at(4)).preflight().await.unwrap();
+        assert_eq!(
+            pinned.sets[0].verdict(),
+            Some(LedgerVerdict::Vouched {
+                generation: 4,
+                pinned: 4,
+                verified_at: Some(1_700_000_000),
+            })
+        );
+        assert!(
+            rig.target.records.lock().unwrap().is_empty(),
+            "the preflight writes nothing"
+        );
+    }
+
+    /// A ledger that moved between the confirm and the run is refused
+    /// `preflight_stale`, and nothing of the set lands.
+    #[tokio::test]
+    async fn a_ledger_that_moved_after_the_confirm_is_refused_stale() {
+        let rig = Rig::new();
+        rig.hold_pair(1);
+        rig.hold_ledger(SegmentFamily::Content, &[1], 2);
+        let accepted = rig.leg().preflight().await.unwrap();
+
+        rig.hold_pair(2);
+        rig.hold_ledger(SegmentFamily::Content, &[1, 2], 3);
+        let corpus = rig
+            .leg()
+            .with_acceptance(accepted)
+            .deliver_corpus()
+            .await
+            .unwrap();
+
+        assert_eq!(
+            refusals(&corpus),
+            vec![("__landing/mail".to_string(), SetRefusal::PreflightStale)]
+        );
+        assert!(rig.target.records.lock().unwrap().is_empty());
+    }
+
+    /// Pins on `__mail`'s Content ledger at `content` and its Placement
+    /// ledger at `placement`.
+    fn pinned_both(content: u32, placement: u32) -> DevicePins {
+        let mut pins = pinned_at(content);
+        pins.pins.insert(
+            fauna_client_backup::audit::ledger_key(
+                "__mail",
+                &SegmentFamily::Placement.mirror_path(&scope_hex(), "mail"),
+            ),
+            fauna_client_backup::audit::LedgerPin {
+                generation: placement,
+                seen_live_at: Some(1_700_000_000),
+            },
+        );
+        pins
+    }
+
+    /// **A pinned family the holder withholds reads older than verified**:
+    /// the holder serves Content at its pin and lists no Placement ledger
+    /// though this device verified one at 5. The confirm shows it withheld,
+    /// the run refuses the set unless the acceptance names it, pulls the set
+    /// without the family when it does, and an acceptance taken while the
+    /// family was withheld reads stale once it appears.
+    #[tokio::test]
+    async fn a_withheld_pinned_family_is_refused_unless_the_acceptance_names_it() {
+        let rig = Rig::new();
+        rig.hold_pair(1);
+        rig.hold_ledger(SegmentFamily::Content, &[1], 2);
+
+        let preflight = rig
+            .leg()
+            .with_pins(pinned_both(2, 5))
+            .preflight()
+            .await
+            .unwrap();
+        assert_eq!(
+            preflight.sets[0].verdict(),
+            Some(LedgerVerdict::Withheld {
+                pinned: 5,
+                verified_at: Some(1_700_000_000),
+            })
+        );
+
+        let declined = PullBackPreflight {
+            sets: Vec::new(),
+            ..preflight.clone()
+        };
+        let corpus = rig
+            .leg()
+            .with_pins(pinned_both(2, 5))
+            .with_acceptance(declined)
+            .deliver_corpus()
+            .await
+            .unwrap();
+        assert_eq!(
+            refusals(&corpus),
+            vec![("__landing/mail".to_string(), SetRefusal::NotAccepted)]
+        );
+        assert!(rig.target.records.lock().unwrap().is_empty());
+        assert!(rig.target.chunks.lock().unwrap().is_empty());
+
+        // With no acceptance at all (a host showing no lines), the vouched-
+        // only acceptance leaves a withheld family out too.
+        assert!(preflight.clone().vouched_only().sets.is_empty());
+
+        let corpus = rig
+            .leg()
+            .with_pins(pinned_both(2, 5))
+            .with_acceptance(preflight.clone())
+            .deliver_corpus()
+            .await
+            .unwrap();
+        assert!(corpus.refused.is_empty());
+        assert_eq!(corpus.sets.len(), 1);
+        assert_eq!(rig.target.records.lock().unwrap().len(), 3);
+
+        // The withheld family appears after the confirm: stale.
+        let rig = Rig::new();
+        rig.hold_pair(1);
+        rig.hold_ledger(SegmentFamily::Content, &[1], 2);
+        rig.hold_ledger(SegmentFamily::Placement, &[], 5);
+        let corpus = rig
+            .leg()
+            .with_pins(pinned_both(2, 5))
+            .with_acceptance(preflight)
+            .deliver_corpus()
+            .await
+            .unwrap();
+        assert_eq!(
+            refusals(&corpus),
+            vec![("__landing/mail".to_string(), SetRefusal::PreflightStale)]
+        );
+        assert!(rig.target.records.lock().unwrap().is_empty());
+    }
+
+    /// **A pinned set the holder withholds whole reads older than verified**:
+    /// the confirm carries a line for it, and the run refuses it unless the
+    /// acceptance names it; accepted, nothing of it moves and nothing is
+    /// refused.
+    #[tokio::test]
+    async fn a_withheld_pinned_set_is_refused_unless_the_acceptance_names_it() {
+        let rig = Rig::new();
+        let folder = folder_set(7);
+        rig.hold_folder(&folder, &hex::encode([0x22; 32]), &body(8, 10), Some(b"n"));
+
+        let preflight = rig.leg().with_pins(pinned_at(4)).preflight().await.unwrap();
+        assert_eq!(preflight.sets.len(), 1);
+        assert_eq!(preflight.sets[0].set_name, "__mail");
+        assert_eq!(
+            preflight.sets[0].verdict(),
+            Some(LedgerVerdict::Withheld {
+                pinned: 4,
+                verified_at: Some(1_700_000_000),
+            })
+        );
+        assert_eq!(
+            fauna_client_backup::reseed::preflight_lines(&preflight)[0].key,
+            "backups.reseed_preflight_withheld"
+        );
+
+        let declined = PullBackPreflight {
+            sets: Vec::new(),
+            ..preflight.clone()
+        };
+        let corpus = rig
+            .leg()
+            .with_pins(pinned_at(4))
+            .with_acceptance(declined)
+            .deliver_corpus()
+            .await
+            .unwrap();
+        assert_eq!(
+            refusals(&corpus),
+            vec![("__landing/mail".to_string(), SetRefusal::NotAccepted)]
+        );
+
+        let corpus = rig
+            .leg()
+            .with_pins(pinned_at(4))
+            .with_acceptance(preflight)
+            .deliver_corpus()
+            .await
+            .unwrap();
+        assert!(corpus.refused.is_empty());
+        assert_eq!(
+            corpus
+                .sets
+                .iter()
+                .map(|s| s.set_name.as_str())
+                .collect::<Vec<_>>(),
+            vec![folder.as_str()],
+            "only the folder moves; the withheld set lands nothing"
+        );
     }
 
     /// A byte that fails the hash it was addressed by is refused before it
@@ -1062,11 +1788,15 @@ mod tests {
     #[tokio::test]
     async fn a_chunk_that_fails_its_hash_is_refused_before_it_lands() {
         let rig = Rig::new();
-        let (dat1, _) = content(1);
+        let (dat1, meta1) = content(1);
         let sealed = rig.hold_segment(&dat1, &body(1, 5_000));
+        rig.hold_segment(&meta1, &body(2, 30));
+        rig.hold_ledger(SegmentFamily::Content, &[1], 2);
         *rig.dest.tamper.lock().unwrap() = Some(sealed.chunks[0].0);
 
-        let err = rig.leg().run_all().await.unwrap_err();
+        let leg = rig.leg();
+        let accepted = leg.preflight().await.unwrap();
+        let err = leg.run_all(&accepted).await.unwrap_err();
         assert!(
             format!("{err:#}").contains("failed hash verification"),
             "{err:#}"
@@ -1122,7 +1852,7 @@ mod tests {
         let leg = rig
             .leg()
             .with_rehome_signing(signing([("Photos".to_string(), nonce)].into()));
-        leg.run_all().await.unwrap();
+        leg.run_all(&PullBackPreflight::default()).await.unwrap();
         let FolderRehome::Signed {
             signer_key,
             signatures,
@@ -1149,7 +1879,10 @@ mod tests {
         .expect("the signature covers the delivered row");
 
         let no_nonce = rig.leg().with_rehome_signing(signing(HashMap::new()));
-        no_nonce.run_all().await.unwrap();
+        no_nonce
+            .run_all(&PullBackPreflight::default())
+            .await
+            .unwrap();
         assert!(matches!(
             no_nonce.sign_folder_rehome(&target).await,
             FolderRehome::Unsigned { reason } if reason.contains("Photos")
@@ -1201,5 +1934,121 @@ mod tests {
                 }),
             }
         );
+    }
+
+    /// The byte plane both ends of `streams_one_chunk_at_a_time` log to.
+    struct Streamed {
+        dest: Arc<Destination>,
+        log: Log,
+        held: Mutex<HashMap<ContentHash, Vec<u8>>>,
+    }
+
+    impl Streamed {
+        fn tag(&self, key: &ContentHash) -> String {
+            hex::encode(&key.digest()[..2])
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl BlobFetcher for Streamed {
+        async fn fetch_manifest(&self, hash: &ContentHash) -> Result<Vec<u8>> {
+            DestBytes(self.dest.clone()).fetch_manifest(hash).await
+        }
+
+        async fn fetch_chunks(&self, keys: &[ContentHash], path: &str) -> Result<Vec<Vec<u8>>> {
+            let tags: Vec<String> = keys.iter().map(|k| self.tag(k)).collect();
+            self.log
+                .lock()
+                .unwrap()
+                .push(format!("fetch {}", tags.join(",")));
+            DestBytes(self.dest.clone()).fetch_chunks(keys, path).await
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl BlobPushSink for Streamed {
+        async fn missing_chunks(&self, keys: &[ContentHash]) -> Result<Vec<ContentHash>> {
+            let held = self.held.lock().unwrap();
+            Ok(keys
+                .iter()
+                .copied()
+                .filter(|k| !held.contains_key(k))
+                .collect())
+        }
+
+        async fn put_chunk(&self, key: &ContentHash, body: &[u8]) -> Result<()> {
+            self.log
+                .lock()
+                .unwrap()
+                .push(format!("put {}", self.tag(key)));
+            self.held.lock().unwrap().insert(*key, body.to_vec());
+            Ok(())
+        }
+
+        async fn put_manifest(&self, _bytes: &[u8]) -> Result<()> {
+            self.log.lock().unwrap().push("manifest".into());
+            Ok(())
+        }
+    }
+
+    /// **The pull streams chunk by chunk** (`message-segment-store.md`: a
+    /// transfer's memory is a constant chunk, never the body). Each chunk the
+    /// target lacks is fetched alone and pushed before the next is fetched, a
+    /// store key the manifest repeats moves once, one the target already holds
+    /// is never fetched, and the manifest lands last — so the app holds at
+    /// most one chunk body of a path at once, however large the path.
+    #[tokio::test]
+    async fn streams_one_chunk_at_a_time() {
+        let bodies: Vec<Vec<u8>> = (0..4u8).map(|t| body(t, 64 + usize::from(t))).collect();
+        let keys: Vec<ContentHash> = bodies.iter().map(|b| ContentHash::of_raw(b)).collect();
+        // Chunk 1 repeats at the end; chunk 3 the target already holds.
+        let order = [0usize, 1, 2, 3, 1];
+        let manifest = fauna_core::chunk::ChunkManifest {
+            file_hash: ContentHash::of_raw(
+                &order
+                    .iter()
+                    .flat_map(|&i| bodies[i].clone())
+                    .collect::<Vec<_>>(),
+            ),
+            total_size: order.iter().map(|&i| bodies[i].len() as u64).sum(),
+            chunk_hashes: order.iter().map(|&i| keys[i]).collect(),
+            chunk_sizes: order.iter().map(|&i| bodies[i].len() as u64).collect(),
+            stored_hashes: None,
+            sealed_hashes: None,
+            min_reader: None,
+        };
+        let manifest_bytes = fauna_core::encoding::canonical_encode(&manifest).unwrap();
+        let manifest_hash = ContentHash::of_raw(&manifest_bytes);
+        let dest = Arc::new(Destination::default());
+        {
+            let mut blobs = dest.blobs.lock().unwrap();
+            blobs.insert(manifest_hash, manifest_bytes);
+            for (key, body) in keys.iter().zip(&bodies) {
+                blobs.insert(*key, body.clone());
+            }
+        }
+        let plane = Streamed {
+            dest,
+            log: Arc::new(Mutex::new(Vec::new())),
+            held: Mutex::new(HashMap::from([(keys[3], bodies[3].clone())])),
+        };
+
+        let pulled = pull_as_is(&plane, &plane, manifest_hash, "big.bin")
+            .await
+            .unwrap();
+
+        let tag = |i: usize| plane.tag(&keys[i]);
+        let expected: Vec<String> = [0, 1, 2]
+            .into_iter()
+            .flat_map(|i| [format!("fetch {}", tag(i)), format!("put {}", tag(i))])
+            .chain(["manifest".to_string()])
+            .collect();
+        assert_eq!(*plane.log.lock().unwrap(), expected);
+        assert_eq!(pulled.chunks_uploaded, 3);
+        assert_eq!(pulled.manifest_hash, manifest_hash);
+        assert_eq!(pulled.total_size, manifest.total_size);
+        for (key, body) in keys.iter().zip(&bodies) {
+            assert_eq!(plane.held.lock().unwrap().get(key), Some(body));
+        }
     }
 }

@@ -109,6 +109,30 @@ pub enum PlaybackSource {
     Unplayable { reason: String },
 }
 
+/// Which bytes a native player plays from memory or an owner-only file, rather
+/// than through the ranged reader (`render-model.md` § D6c → *Inline playback*,
+/// the held-bytes `source` ruling).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+pub enum HeldVideo {
+    /// A [`PlaybackSource::Sealed`] item's opened plaintext, wherever it rests.
+    Sealed,
+    /// A plain `Video` of a post homed on another nest, fetched whole from its
+    /// home through the post-blob plane.
+    Home,
+}
+
+/// The `source` a `video-thumbnail` publishes for a video played from bytes the
+/// app holds: `sealed:<hash>` or `home:<hash>` — the one spelling, so no app
+/// formats it (a `Url` arm publishes its nest-relative path instead).
+#[cfg_attr(feature = "uniffi", uniffi::export)]
+pub fn held_video_source(held: HeldVideo, hash: String) -> String {
+    match held {
+        HeldVideo::Sealed => format!("sealed:{hash}"),
+        HeldVideo::Home => format!("home:{hash}"),
+    }
+}
+
 /// A feed in the selector list — the `FeedManager` projection of the wire
 /// `fauna_protocol::feed::FeedSummary` that drops the forward-compat `extra`
 /// map (UniFFI records can't carry serde-`flatten`), matching how
@@ -278,6 +302,19 @@ pub struct PostSummary {
     pub reply_count: i64,
     pub repost_count: i64,
     pub quote_count: i64,
+    /// The post's per-emoji reaction tally (`feed.md` § Layout & flow →
+    /// *Reaction posts count and paint*, rulings 2 and 4) — carried 1:1 from
+    /// the wire [`FeedPostItem`] by [`crate::manager::map_post`], one
+    /// [`PostReactionGroup`] per emoji in the nest's first-added order, beside
+    /// the four counts and never folded into them. Drives `post-reaction-pill`,
+    /// one pill per group. Folded on post-act exactly as the counts are, and
+    /// the group's [`viewer_react_id`](PostReactionGroup::viewer_react_id) is
+    /// maintained locally by the [`crate::FeedManager::react`] toggle between
+    /// reloads. Empty on a `bluesky` row, and talking to a nest that does not
+    /// project it (additive + wire-default).
+    #[serde(default)]
+    #[cfg_attr(feature = "uniffi", uniffi(default = []))]
+    pub reactions: Vec<PostReactionGroup>,
     /// Tier name of a gated-to-tier post (`FeedPostItem.gated_tier` ←
     /// `content_meta.gated_tier`; `ui/feed.md` § Encryption at rest). Drives
     /// the `gated-post-badge` on the card. `None` = public post. The list `body` of a gated post is its
@@ -467,6 +504,8 @@ pub struct PostSummary {
     /// and did not re-offer. Never set while [`gated_unlocked`](Self::gated_unlocked)
     /// is. In-memory like the guard it mirrors: a restart re-offers, by design.
     /// Additive.
+    // `payments`-gated doc line — see the note on `PostSummary::tips`.
+    #[cfg_attr(feature = "payments", doc = " Drives `gated-post-purchase-pending`.")]
     #[serde(default)]
     #[cfg_attr(feature = "uniffi", uniffi(default = false))]
     pub unlock_purchase_pending: bool,
@@ -492,7 +531,74 @@ pub struct PostSummary {
     #[serde(default)]
     #[cfg_attr(feature = "uniffi", uniffi(default = None))]
     pub home_nest_actor_id: Option<String>,
+    /// Other people's (and the owner's own) comments from the owner's
+    /// imported archive, folded under the imported post they were left on —
+    /// owner-only context, never published (`archive-import.md` § What each
+    /// category becomes → *Placement under the owner's own post*). Filled at
+    /// every snapshot read from the manager's archive-comment projection
+    /// ([`crate::FeedManager::refresh_archive_comments`]), oldest first;
+    /// empty for every other post and on every device without the source.
+    /// Painted as `post-archive-comments` / `post-archive-comment-item`.
+    #[serde(default)]
+    #[cfg_attr(feature = "uniffi", uniffi(default = []))]
+    pub archive_comments: Vec<ArchiveCommentView>,
 }
+
+/// One folded archive comment under the owner's imported post
+/// ([`PostSummary::archive_comments`]).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct ArchiveCommentView {
+    /// `<platform>:<id>` — the comment's external id.
+    pub external_id: String,
+    /// The author's display name as the archive recorded it.
+    pub author_name: String,
+    /// Epoch millis.
+    pub created_at_ms: i64,
+    pub text: String,
+    /// Media items the comment carried (kept in the archive folder, not shown).
+    pub media_count: u64,
+}
+
+/// One folded comment as the [`ArchiveCommentSource`] hands it over: the
+/// view plus the post (hex id) it sits under.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ArchiveCommentRecord {
+    pub post_id: String,
+    pub external_id: String,
+    pub author_name: String,
+    pub created_at_ms: i64,
+    pub text: String,
+    pub media_count: u64,
+}
+
+/// Read seam for the **folded archive comments**
+/// (`docs/goal/behavior/archive-import.md` § What each category becomes): the
+/// comments of every imported archive placed under the owner's own imported
+/// posts, read from the sealed archive folders' model files. The archive
+/// import machine implements it (the `fauna-conversations`
+/// `ArchiveThreadSource` discipline), so this crate stays free of the archive
+/// model and the folder reads. Registered with
+/// [`crate::FeedManager::set_archive_comment_source`].
+///
+/// The method answers a boxed future by hand (`Send` off wasm), so this
+/// crate needs no `async-trait` dependency for one seam.
+pub trait ArchiveCommentSource: fauna_core::MaybeSendSync {
+    /// Every placed comment, each external id once. `Err` is a read that
+    /// failed (the projection keeps what it last read).
+    fn archive_comments(&self) -> ArchiveCommentsFuture<'_>;
+}
+
+/// What [`ArchiveCommentSource::archive_comments`] answers.
+#[cfg(not(target_arch = "wasm32"))]
+pub type ArchiveCommentsFuture<'a> = std::pin::Pin<
+    Box<dyn std::future::Future<Output = Result<Vec<ArchiveCommentRecord>, String>> + Send + 'a>,
+>;
+/// What [`ArchiveCommentSource::archive_comments`] answers.
+#[cfg(target_arch = "wasm32")]
+pub type ArchiveCommentsFuture<'a> = std::pin::Pin<
+    Box<dyn std::future::Future<Output = Result<Vec<ArchiveCommentRecord>, String>> + 'a>,
+>;
 
 /// The nest a post's own bytes rest on when it is not this one — its URL and
 /// the identity the reader's own nest stamped for it, named together by
@@ -507,6 +613,37 @@ pub struct BlobHome<'a> {
 }
 
 impl PostSummary {
+    /// Whether this row is a **repost row** (`reposted_post_id` is `Some`):
+    /// attribution + the embedded original, no interaction bar of its own.
+    /// The one predicate the Rust-side apps read, so none re-spells the field
+    /// check.
+    pub fn is_repost_row(&self) -> bool {
+        self.reposted_post_id.is_some()
+    }
+
+    /// The post id card activation opens the detail of: the ORIGINAL's on a
+    /// repost row (the repost post is empty by construction, so its own
+    /// detail would be blank), this post's own otherwise.
+    pub fn detail_target_id(&self) -> &str {
+        self.reposted_post_id.as_deref().unwrap_or(&self.post_id)
+    }
+
+    /// The reaction groups this post paints as `post-reaction-pill`s, in the
+    /// tally's order (`feed.md` § Layout & flow → *Reaction posts count and
+    /// paint*, rulings 4–5): every group with a live count, and none at all
+    /// for a `bluesky` row (its counters live at the origin). The one filter
+    /// every app's pill row reads, so none re-decides it; a repost row's
+    /// "no bar, no pills" stays the caller's, as it owns the bar.
+    pub fn paintable_reactions(&self) -> Vec<&PostReactionGroup> {
+        if matches!(
+            crate::SourceKind::classify(&self.source),
+            crate::SourceKind::Bluesky
+        ) {
+            return Vec::new();
+        }
+        self.reactions.iter().filter(|g| g.count > 0).collect()
+    }
+
     /// The nest this post's own bytes rest on — the sealed body behind
     /// `gated_blob_hash`, its image, video and thumbnails: its
     /// [`home_nest_url`](Self::home_nest_url) when another nest is its home,
@@ -669,6 +806,36 @@ pub struct TipView {
     /// so an app can say "and N others" honestly instead of inferring it from a
     /// length comparison against a cap it would have to hard-code.
     pub has_more: bool,
+}
+
+/// One emoji's share of a post's reaction tally — the app-facing mirror of the
+/// wire `fauna_protocol::feed::PostReactionGroup`, field for field, minus its
+/// serde-`flatten` `extra` map (which UniFFI records can't hold); the feed twin
+/// of the conversations rail's `ReactionGroup` (`feed.md` § Layout & flow →
+/// *Reaction posts count and paint*, ruling 2).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct PostReactionGroup {
+    pub emoji: String,
+    /// The number of **distinct actors** with a live `React` post of this
+    /// emoji on the post.
+    pub count: i64,
+    /// Hex id of the **viewer's own live `React` post** of this emoji —
+    /// presence = "reacted by me" (the pill paints highlighted), and the value
+    /// is exactly what [`crate::FeedManager::react`] deletes on the next tap
+    /// (the `viewer_repost_id` shape). `None` = the viewer has not reacted
+    /// with this emoji.
+    pub viewer_react_id: Option<String>,
+}
+
+impl From<fauna_protocol::feed::PostReactionGroup> for PostReactionGroup {
+    fn from(g: fauna_protocol::feed::PostReactionGroup) -> Self {
+        Self {
+            emoji: g.emoji,
+            count: g.count,
+            viewer_react_id: g.viewer_react_id,
+        }
+    }
 }
 
 /// One tip in the attribution window.
@@ -917,6 +1084,17 @@ pub struct FeedSnapshot {
     #[serde(default)]
     #[cfg_attr(feature = "uniffi", uniffi(default = None))]
     pub author_selected: Option<String>,
+    /// The imported-posts selection's platform — a `fauna_core::source` token
+    /// (`feed.md` § State & data shape → *The imported-posts selection*): the
+    /// own actor's posts whose origin platform it is, read through
+    /// `fauna.feed.author.posts` with `sources: [token]`. Set by
+    /// `select_imported`, cleared by `clear_imported` / `select_feed` /
+    /// `select_trending_feed` under the same mutual exclusion
+    /// `trending_selected` keeps; drives `feed-imported-notice` /
+    /// `feed-imported-clear`. Additive.
+    #[serde(default)]
+    #[cfg_attr(feature = "uniffi", uniffi(default = None))]
+    pub imported_selected: Option<String>,
     /// The visible, ordered, deduplicated post list — never re-sorted by the
     /// client (`feed.md` § Anti-patterns; the nest supplies the order).
     pub posts: Vec<PostSummary>,
@@ -1057,6 +1235,39 @@ mod tests {
 
     /// A post's bytes rest on its named home, and on this nest when it names
     /// none — a blank or whitespace home included, which names no host.
+    /// A video played from bytes the app holds names its arm and its hash —
+    /// never a `blob:` prefix (web's object-URL scheme), never a temp path.
+    #[test]
+    fn held_video_source_names_the_arm_and_the_hash() {
+        assert_eq!(
+            held_video_source(HeldVideo::Sealed, "ab12".into()),
+            "sealed:ab12"
+        );
+        assert_eq!(
+            held_video_source(HeldVideo::Home, "ab12".into()),
+            "home:ab12"
+        );
+    }
+
+    /// A repost row opens the ORIGINAL's detail and is a repost row; any
+    /// other row opens its own.
+    #[test]
+    fn repost_row_predicate_and_detail_target() {
+        let plain = PostSummary {
+            post_id: "aa".into(),
+            ..Default::default()
+        };
+        assert!(!plain.is_repost_row());
+        assert_eq!(plain.detail_target_id(), "aa");
+        let repost = PostSummary {
+            post_id: "aa".into(),
+            reposted_post_id: Some("bb".into()),
+            ..Default::default()
+        };
+        assert!(repost.is_repost_row());
+        assert_eq!(repost.detail_target_id(), "bb");
+    }
+
     #[test]
     fn blob_home_is_the_named_home_or_this_nest() {
         let homed = |home: Option<&str>| PostSummary {
@@ -1195,5 +1406,29 @@ mod tests {
         assert_eq!(json(Some(FeedEmptyState::NoPosts)), r#""NoPosts""#);
         assert_eq!(json(Some(FeedEmptyState::NoMatches)), r#""NoMatches""#);
         assert_eq!(json(None), "null");
+    }
+
+    /// `paintable_reactions` keeps the tally's order, drops zero-count groups
+    /// and yields nothing for a `bluesky` row (`feed.md` rulings 4–5).
+    #[test]
+    fn paintable_reactions_follow_the_tally_and_skip_bluesky() {
+        let group = |emoji: &str, count: i64| PostReactionGroup {
+            emoji: emoji.to_string(),
+            count,
+            viewer_react_id: None,
+        };
+        let mut post = PostSummary {
+            source: "fauna".to_string(),
+            reactions: vec![group("a", 2), group("b", 0), group("c", 1)],
+            ..Default::default()
+        };
+        let emojis: Vec<&str> = post
+            .paintable_reactions()
+            .into_iter()
+            .map(|g| g.emoji.as_str())
+            .collect();
+        assert_eq!(emojis, ["a", "c"]);
+        post.source = "bluesky".to_string();
+        assert!(post.paintable_reactions().is_empty());
     }
 }

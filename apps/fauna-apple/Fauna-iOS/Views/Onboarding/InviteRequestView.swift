@@ -47,6 +47,7 @@ struct InviteRequestView: View {
                     ErrorBanner(message: error)
                 }
 
+                JoiningNestRules(summary: vm.joiningNestRules)
                 TermsNotice()
 
                 Button(L.common.continue) { vm.submitInviteContinue() }
@@ -132,7 +133,7 @@ struct InviteRequestView: View {
                 .automationValue(Ids.inviteCodeStatus,
                                  text: { renderLocalizedText(vm.machine.inviteRequestSnapshot().oobMessage) })
 
-            guardianSupervisedNotice(for: snap.outOfBandCodeState, font: .subheadline)
+            guardianSupervisedNotice(snap.supervisedNotice, font: .subheadline)
         }
     }
 }

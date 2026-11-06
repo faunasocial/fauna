@@ -78,7 +78,7 @@ Flow (everything a real admin does, in order):
   2. The loopback handle `<localpart>@127.0.0.1:<port>` resolves to the local nest
      (`resolve_handle_domain → is_local → skip DNS`); the handle check finds the
      fresh nest unclaimed → `UnregisteredUnclaimedNest` → Continue → `claim_code`.
-  3. The admin submits `CLAIM_CODE` → `fauna.auth.claim_admin` → `nat_mode_choice`
+  3. The admin submits the nest's claim code (`nest["claim_code"]`) → `fauna.auth.claim_admin` → `nat_mode_choice`
      (dismissed, confirm-only) → `WizardOutcome::LoggedIn`.
   4. (Test 1) Deployment mail stays OFF — the loopback handle derives no
      auto-enable. (Test 2) The admin visits Settings → Mail and enables it:
@@ -118,20 +118,36 @@ if _e2e_dir not in sys.path:
 
 from clients.ws_rpc_admin_client import WsRpcAdminClient  # noqa: E402
 from clients.ws_rpc_anon_client import WsRpcAnonClient  # noqa: E402
-from common.nest import CLAIM_CODE  # noqa: E402
+from helpers.admin_wire import admit_adult  # noqa: E402
+from nacl.signing import SigningKey  # noqa: E402
 from conftest import MAIL_PRIMARY_DOMAIN, get_available_apps  # noqa: E402
-from helpers.app_surface import skip_unbuilt  # noqa: E402
+from helpers.app_surface import require_surface  # noqa: E402
 from helpers.authenticated_shell import SHELL_MARKERS  # noqa: E402
 from helpers.waiting import wait_until  # noqa: E402
 
 _avail_clients = get_available_apps()
-if not any(c in _avail_clients for c in ("linux", "macos", "ios", "tui")):
+if not any(
+    c in _avail_clients
+    for c in ("linux", "macos", "ios", "tui", "android", "web", "windows")
+):
     pytest.skip(
-        "drives the linux/macOS/iOS/tui client admin-claim onboarding UI",
+        "drives the linux/macOS/iOS/tui/android/web/windows client admin-claim onboarding UI",
         allow_module_level=True,
     )
 
-pytestmark = [pytest.mark.tier1, pytest.mark.tier_3]
+# The module guard above, spelled where the feature ledger can read it. web runs
+# the real-domain journeys (plain HTTP behind the `"nest"` override, which web's
+# `#lib/api` dial twin mirrors into the signed-in socket); the loopback journeys
+# need a self-signed TLS nest a browser tab cannot pin, so they stay gated on
+# `admin-claim-onboarding-drive` per test.
+# The module marks every app but web; each test adds ``web`` itself except the
+# loopback claim's outcome-4 witness, whose web witness is the nest-served twin
+# `test_onboarding_localhost.py::test_claiming_with_a_local_handle_leaves_mail_off`.
+pytestmark = [
+    pytest.mark.tier1, pytest.mark.tier_3,
+    pytest.mark.linux, pytest.mark.macos, pytest.mark.ios, pytest.mark.tui,
+    pytest.mark.android, pytest.mark.windows,
+]
 
 
 # The authed app shell has mounted once any main-view landmark is visible: this
@@ -237,7 +253,7 @@ def _drive_admin_claim_to_logged_in(
 
     # claim_code page — submit the one-time code (drives `fauna.auth.claim_admin`).
     app.driver.wait_for("claim-code-input", timeout=45)
-    app.driver.clear_and_type("claim-code-input", CLAIM_CODE)
+    app.driver.clear_and_type("claim-code-input", nest["claim_code"])
     app.driver.click("claim-code-submit-button")
 
     # A successful claim lands the wizard on nat_mode_choice; dismiss it
@@ -512,37 +528,7 @@ def unclaimed_real_domain_nest(request, app, nest_mode, tmp_path_factory):
     `SuccessionWitness` fixture is the precedent) so an app that cannot use the
     seam never pays for a nest start and an override install it would only skip
     past — and never risks carrying that override into the next test."""
-    if not (
-        app.driver.is_tui() or app.driver.is_linux()
-        or app.driver.is_macos() or app.driver.is_ios()
-    ):
-        # web ALSO already resolves the dial (its own TS twin `nodeUrl()`,
-        # `apps/fauna-web/src/lib/api.ts`, wired end-to-end: the driver's
-        # `set_provider_base_urls` query-param reload reaches
-        # `onboarding/machine.svelte.ts`'s init, which calls
-        # `setNestDialOverride` alongside the onboarding-provider override —
-        # landed 2026-08-17, row 21, independently of this row) — but this
-        # fixture is unreachable for web regardless: the module-level guard
-        # above already skips the whole file for any --app outside
-        # {linux,macos,ios,tui}, since the OTHER gap this file's tests need
-        # (driving the admin-claim onboarding UI itself) is not built for
-        # web/windows/android. Not this track's job — tracked at the sibling
-        # `skip_unbuilt("the believable admin-claim onboarding UI drive")`
-        # a few tests down.
-        skip_unbuilt(
-            app.driver,
-            surface="the post-LoggedIn dial seam",
-            detail="tui and linux both resolve the dial through the shared "
-            "`fauna_launch_machine::resolved_dial_url` (tui at its "
-            "`session::adopt`/`establish` call sites, linux at "
-            "`launch_main_app_after_signin` + its stored-account relaunch; "
-            "macos+ios now at `FaunaMacApp`/`FaunaApp`'s "
-            "`completeAuthenticatedLaunch`/`enterOptimistically` + "
-            "`applySessionPatch` call sites). windows/android still dial "
-            "the literal typed URL; each owes the same one-call swap at its "
-            "own store read ",
-            tracked="onboarding.md",
-        )
+    require_surface(app.driver, "post-logged-in-dial-seam")
 
     yield from _real_domain_nest(
         request, app, nest_mode, tmp_path_factory, "admin-claim-real-domain-nest"
@@ -586,11 +572,15 @@ def _real_domain_nest(
     import os
 
     from common.nest import start_nest_in_place, stop_nest
-    from conftest import _start_dedicated_nest
+    from conftest import _start_dedicated_nest, browser_origins_to_allow
 
+    # The `"nest"` override makes a browser tab dial this nest round the SPA
+    # proxy, so the nest must allow the run's SPA origin the way a shipped nest
+    # allows its hosted one (`browser_origins_to_allow`; empty on a native run).
     nest, cleanup = _start_dedicated_nest(
         request, nest_mode, tmp_path_factory, name,
         handle_domain_seed=MAIL_PRIMARY_DOMAIN, unclaimed=True,
+        cors_origins=browser_origins_to_allow(request),
     )
     assert nest["admin"] is None, "fixture must hand the UI a genuinely unclaimed nest"
     if content_scanners is not None:
@@ -627,6 +617,21 @@ def _real_domain_nest(
         cleanup()
 
 
+def _reinstall_nest_override(app, nest) -> None:
+    """Install the real-domain fixture's `"nest"` override again after a
+    mid-test `driver.reset()`, so a second wizard leg reaches the same nest.
+
+    Whether an override outlives a reset is the app's business, not a property
+    a test may lean on: the native apps keep it in the long-lived
+    `OnboardingMachine`, while web's reset deliberately drops its dial override
+    and reloads without the query param that seeded it (`web-bridge/agent.js`,
+    the `reset` action — so a stale one cannot point the next test at a
+    torn-down nest). Installing it again is a no-op where it survived and the
+    one thing that keeps the leg honest where it did not; the fixture's teardown
+    still clears it."""
+    app.driver.set_provider_base_urls({"nest": nest["url"]})
+
+
 # ── The tests ─────────────────────────────────────────────────────────────────
 
 
@@ -648,20 +653,7 @@ def test_admin_claim_with_loopback_handle_derives_mail_disabled(app, unclaimed_m
     """Claiming with a loopback handle must NOT auto-enable deployment mail —
     the handle-locality derived default is OFF for a non-real-domain target,
     with no onboarding-time override any more (onboarding.md § 3b)."""
-    if not (
-        app.driver.is_linux()
-        or app.driver.is_macos()
-        or app.driver.is_ios()
-        or app.driver.is_tui()
-    ):
-        skip_unbuilt(
-            app.driver,
-            surface="the believable admin-claim onboarding UI drive",
-            detail="linux + macOS + iOS + tui have it (iOS confirmed "
-            "in-process 2026-06-17); web/windows/android are the remaining "
-            "cross-app follow-on",
-            tracked="onboarding.md",
-        )
+    require_surface(app.driver, "admin-claim-onboarding-drive")
 
     nest = unclaimed_mail_nest
     secret_hex = _claim_fresh_admin(app, nest)
@@ -674,6 +666,7 @@ def test_admin_claim_with_loopback_handle_derives_mail_disabled(app, unclaimed_m
     )
 
 
+@pytest.mark.web
 @pytest.mark.feature("claim-a-fresh-nest")
 def test_admin_claim_with_real_domain_handle_auto_enables_mail(app, unclaimed_real_domain_nest):
     """The derived-**ON** twin of the test above, and the first local proof of it
@@ -732,6 +725,7 @@ def test_admin_claim_with_real_domain_handle_auto_enables_mail(app, unclaimed_re
     )
 
 
+@pytest.mark.web
 @pytest.mark.feature("claim-a-fresh-nest")
 def test_marking_the_box_private_at_claim_leaves_all_four_serving_off(
     app, unclaimed_real_domain_nest
@@ -785,9 +779,8 @@ def test_marking_the_box_private_at_claim_leaves_all_four_serving_off(
     )
 
 
-# The `feature("claim-a-fresh-nest")` marker lands with the catalog edit that
-# cites this test under outcome 4 (the catalog lint refuses an uncited
-# witness).
+@pytest.mark.web
+@pytest.mark.feature("claim-a-fresh-nest")
 def test_claiming_a_social_only_box_leaves_mail_off_and_serves_the_rest(
     app, unclaimed_social_only_real_domain_nest
 ):
@@ -842,6 +835,129 @@ def test_claiming_a_social_only_box_leaves_mail_off_and_serves_the_rest(
     )
 
 
+def _attach_caldav_mda(request, tmp_path_factory, nest, admin_secret_hex: str):
+    """Spawn an MDA-role bridge against an already-claimed `nest` (the claim was
+    the app's, so the fixture's handle carries no admin) and return it; the
+    caller owns `.cleanup()`. Domainless (`domain=None`): the MDA serves the
+    nest's self-signed floor cert, so no domain cert need exist on a box whose
+    claim registered none. Started AFTER the claim's run turned CalDAV on, so
+    it binds its CalDAV listener at once."""
+    from nacl.signing import SigningKey
+
+    from conftest import _spawn_mda_bridge
+
+    claimed = dict(nest, admin={"signing_key": SigningKey(bytes.fromhex(admin_secret_hex))})
+    return _spawn_mda_bridge(
+        mail_bridge_binary=request.getfixturevalue("mail_bridge_binary"),
+        nest_instance=claimed,
+        tmp=tmp_path_factory.mktemp("social-only-mda"),
+        bridge_id="mda-social-only-1",
+        domain=None,
+    )
+
+
+@pytest.mark.web
+@pytest.mark.feature("calendar-in-standard-apps")
+def test_a_new_user_on_a_social_only_box_gets_the_calendar_credential_at_first_setup(
+    app, unclaimed_social_only_real_domain_nest, request, tmp_path_factory
+):
+    """A box that cannot run mail still hands every new user the one bridge
+    credential a calendar app signs in with — automatically, at their first
+    setup, with no gesture (`mail-credentials.md` § Auto-enable for new users →
+    *The DAV-only deployment*; § Trigger taxonomy, *The calendar-only
+    credential*, path (2)).
+
+    The admin claims the social-only box through the wizard (the sibling test
+    above pins what that claim decides: mail OFF, CalDAV ON). Then a NON-admin
+    user, self-registered over open registration, completes first setup on the
+    same app: the wizard's `LoggedIn` handoff runs the serving-enablement plan,
+    whose mail-provision step reads `fauna.setup.status` — mail off, CalDAV on,
+    the policy on, no MSEK — and mints the read recipe. Proven three ways, in
+    the order a user meets them:
+
+      1. the run for THIS user completed (convention 14's anchor) — so every
+         read after it is final;
+      2. the mail-settings page shows one app password and the CalDAV
+         connection row, while the enable toggle reads `unavailable` (the box
+         cannot run mail — no gesture turns it on);
+      3. a stock CalDAV client signs in with the revealed password against a
+         real MDA and round-trips an event — the minted credential is a real
+         one, not a row on a page.
+    """
+    from helpers.caldav_client import sign_in_round_trip
+    from helpers.waiting import await_serving_enablement_for
+    from common.auth import set_registration_mode
+
+    nest = unclaimed_social_only_real_domain_nest
+
+    # ── the admin claims the box (the sibling test's journey, unasserted) ──────
+    admin_secret_hex = secrets.token_hex(32)
+    _drive_admin_claim_to_logged_in(
+        app, nest, admin_secret_hex, f"admin{secrets.token_hex(3)}@{MAIL_PRIMARY_DOMAIN}"
+    )
+    _glue_verdict(app, admin_secret_hex, nest["url"])
+    enables = _read_deployment_enables(admin_secret_hex, nest["url"])
+    assert enables["caldav_enabled"] and not enables["mail_enabled"], (
+        f"fixture setup failed: the social-only claim must leave CalDAV on and mail "
+        f"off, but the box reads {enables}"
+    )
+
+    # Fixture setup, not behaviour under test: open registration is the admin's
+    # choice, made over the admin's own wire kind (as `open_registration` does
+    # for a fixture-claimed nest, whose handle this one lacks).
+    set_registration_mode(
+        nest["port"],
+        admin_signing_key=SigningKey(bytes.fromhex(admin_secret_hex)),
+        base_url=nest["url"],
+    )
+    localpart = "newuser" + secrets.token_hex(3)
+    # The fixture nest was unclaimed (`nest["admin"]` is None); the claim above
+    # made the admin's key the one this journey holds.
+    claimed = {**nest, "admin": {"signing_key": SigningKey(bytes.fromhex(admin_secret_hex))}}
+    user = admit_adult(claimed, localpart, domain=MAIL_PRIMARY_DOMAIN, token=True)
+    user_secret_hex = user["signing_key"].encode().hex()
+
+    # ── the new user's first setup on the same app ─────────────────────────────
+    # A reset wipes the client store; the `"nest"` override is installed again
+    # after it so the domain-shaped handle reaches this nest
+    # (`_reinstall_nest_override`).
+    app.driver.reset()
+    _reinstall_nest_override(app, nest)
+    _drive_sign_in_to_logged_in(app, user_secret_hex, f"{localpart}@{MAIL_PRIMARY_DOMAIN}")
+
+    # 1. The anchor: this user's run is done, so the mint has answered.
+    await_serving_enablement_for(app.driver, user["actor_id_hex"], what="the new user's first setup")
+
+    # 2. The page.
+    app.mail_settings.navigate()
+    assert app.mail_settings.wait_for_credential_count(1, timeout=30.0), (
+        "the new user's first setup on a social-only box must mint exactly one "
+        "app password (the read recipe, mail-credentials.md § Auto-enable for new "
+        f"users → The DAV-only deployment); got {app.mail_settings.credential_count()}. "
+        f"mail-page error: {app.mail_settings.page_error_text(timeout=3.0)!r}; "
+        f"app error: {app.error_text()!r}"
+    )
+    app.driver.wait_for("mail-settings-mua-caldav-host", timeout=20.0)
+    assert app.mail_settings.wait_for_enabled_toggle_state("unavailable", timeout=15.0), (
+        "the box cannot run mail, so the enable toggle must read `unavailable` "
+        f"beside the calendar credential; it reads {app.mail_settings.enabled_toggle_state()!r}"
+    )
+    password = app.mail_settings.reveal_credential_secret(0)
+    assert password, "the auto-minted credential's generated password did not reveal"
+
+    # 3. A calendar app signs in with it.
+    mda = _attach_caldav_mda(request, tmp_path_factory, nest, admin_secret_hex)
+    try:
+        sign_in_round_trip(
+            f"https://127.0.0.1:{mda.caldav_port}",
+            f"{localpart}@{MAIL_PRIMARY_DOMAIN}",
+            password,
+        )
+    finally:
+        mda.cleanup()
+
+
+@pytest.mark.web
 @pytest.mark.feature("claim-a-fresh-nest")
 def test_a_returning_admin_sign_in_issues_no_deployment_enable(
     app, unclaimed_real_domain_nest
@@ -915,11 +1031,11 @@ def test_a_returning_admin_sign_in_issues_no_deployment_enable(
         f"fixture setup failed: the deployment toggles did not go back off: {before}"
     )
 
-    # Wipe the client store so the wizard runs again. The nest keeps its claim,
-    # and the fixture's `provider_base_urls["nest"]` override survives a reset
-    # (it lives in the long-lived OnboardingMachine — see the fixture docstring),
-    # so leg 2 reaches the same nest.
+    # Wipe the client store so the wizard runs again. The nest keeps its claim;
+    # the `"nest"` override is installed again after the reset so leg 2 reaches
+    # the same nest (`_reinstall_nest_override`).
     app.driver.reset()
+    _reinstall_nest_override(app, nest)
 
     # The claim leg already left a COMPLETED run for this identity in the app's
     # records (unless the reset relaunched); the sign-in's own run is the one past
@@ -952,26 +1068,13 @@ def test_a_returning_admin_sign_in_issues_no_deployment_enable(
     )
 
 
+@pytest.mark.web
 def test_admin_enables_mail_via_mail_settings_after_loopback_claim(app, unclaimed_mail_nest):
     """After a loopback-handle claim (mail derived OFF), the admin can still
     enable mail through the REAL mail-settings UI — the surviving client
     surface for the mint-then-flag sequence the retired onboarding checkbox
     used to fire automatically (see module docstring)."""
-    if not (
-        app.driver.is_linux()
-        or app.driver.is_macos()
-        or app.driver.is_ios()
-        or app.driver.is_tui()
-    ):
-        skip_unbuilt(
-            app.driver,
-            surface="the mail-settings enable path "
-            "(mail-settings-enabled-toggle + add-credential form)",
-            detail="linux + macOS + iOS + tui wire it (shared FaunaKit mail "
-            "settings on macOS/iOS; iOS confirmed in-process 2026-06-17). "
-            "web/windows/android are the remaining cross-app follow-on",
-            tracked="mail-settings.md",
-        )
+    require_surface(app.driver, "admin-claim-onboarding-drive")
 
     nest = unclaimed_mail_nest
     _claim_fresh_admin(app, nest)

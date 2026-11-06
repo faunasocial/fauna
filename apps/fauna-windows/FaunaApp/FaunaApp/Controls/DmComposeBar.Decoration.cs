@@ -59,6 +59,10 @@ public sealed partial class DmComposeBar
     // What the last decoration pass styled — see ApplyDecoration's idempotency note.
     private (string, int, int, bool, bool, int)? _lastDecorationKey;
 
+    // The MarkdownRichEditBox.ContentVersion the document's formatting was last written under,
+    // or null when it carries none — see ApplyDecoration's reset note.
+    private int? _formattedContentVersion;
+
     private Color _defaultColor;
     private Color _secondaryColor;   // blockquote
     private Color _tertiaryColor;    // dimmed markers off the caret line
@@ -98,6 +102,10 @@ public sealed partial class DmComposeBar
         MessageBox.TextChanged += (_, _) => ScheduleDecoration();
         MessageBox.KeyUp += (_, _) => ScheduleDecoration();
         MessageBox.PointerReleased += (_, _) => ScheduleDecoration();
+
+        // A user's paste may bring formatting of its own (rich clipboard content), which the
+        // next pass's reset has always cleared — so a paste counts as formatting.
+        MessageBox.Paste += (_, _) => _formattedContentVersion = MessageBox.ContentVersion;
     }
 
     /// <summary>Gate styling on the rail's markdown capability (mirrors the toolbar
@@ -180,8 +188,15 @@ public sealed partial class DmComposeBar
             _lastDecorationKey = key;
 
             // Clear stale formatting from the previous edit first, so a removed marker
-            // doesn't leave a dimmed/concealed glyph behind.
-            ResetFormatting(text.Length);
+            // doesn't leave a dimmed/concealed glyph behind — but only when the document
+            // carries some. SetPlainText wipes the formatting with the text (ContentVersion
+            // bumps), so a document set since the last styled pass is already plain, and the
+            // whole-range reset is far from free on a large one: superlinear in its
+            // paragraphs (measured 2026-10-28 on windows ARM64: 2.5 s at 100,000 characters
+            // of prose, 18 s at 300,000), paid at every typing pause.
+            if (_formattedContentVersion == MessageBox.ContentVersion)
+                ResetFormatting(text.Length);
+            _formattedContentVersion = null;
             if (!_decorationEnabled || text.Length == 0)
             {
                 // No styling/concealment applied → the visible text is the raw source.
@@ -211,7 +226,10 @@ public sealed partial class DmComposeBar
                     text, FaunaFfiMethods.DecorationMap(text), plan);
             }
             foreach (var run in runs)
-                ApplyRun(text.Length, run);
+            {
+                if (ApplyRun(text.Length, run))
+                    _formattedContentVersion = MessageBox.ContentVersion;
+            }
 
             // Publish the rendered text (source minus the concealed runs) for the e2e
             // compose_visible_text read — see PublishVisibleText.
@@ -275,12 +293,13 @@ public sealed partial class DmComposeBar
     /// <summary>Apply one styled run via CharacterFormat. Mirrors the render path
     /// (<c>DmMessageBubble</c>) and the old overlay's <c>BuildInline</c> so the compose
     /// preview reads like the sent message (priority #3); markers off the caret's line
-    /// are dimmed (DimMarker), on it shown un-dimmed (Plain → default).</summary>
-    private void ApplyRun(int textLen, ComposeRun run)
+    /// are dimmed (DimMarker), on it shown un-dimmed (Plain → default). Returns whether it
+    /// wrote any formatting.</summary>
+    private bool ApplyRun(int textLen, ComposeRun run)
     {
-        if (run.Style == ComposeRunStyle.Plain) return; // defaults already applied
+        if (run.Style == ComposeRunStyle.Plain) return false; // defaults already applied
         int end = Math.Min(run.Start + run.Length, textLen);
-        if (end <= run.Start) return;
+        if (end <= run.Start) return false;
         var range = MessageBox.Document.GetRange(run.Start, end);
         var cf = range.CharacterFormat;
         switch (run.Style)
@@ -328,6 +347,7 @@ public sealed partial class DmComposeBar
         // Set the format back onto the range — modifying the value returned by the
         // CharacterFormat getter does not necessarily apply to the underlying text.
         range.CharacterFormat = cf;
+        return true;
     }
 
     /// <summary>Heading point size — mirrors <c>DmMessageBubble.HeadingFontSize</c> so a

@@ -39,6 +39,9 @@ pytestmark = [
     pytest.mark.macos,
     pytest.mark.ios,
     pytest.mark.windows,
+    # android: the wizard's device step carries the three `wizard-device-*` flag
+    # boxes (WizardDevicePlaces). Witness NOT RUN — device venue absent.
+    pytest.mark.android,
 ]
 
 # Two seats with deliberately DIFFERENT flag sets, neither of them the `sync`

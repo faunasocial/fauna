@@ -322,7 +322,28 @@ impl AadBinding {
     /// surfaced a wrong-shape decrypt site).
     pub fn for_mail_record() -> Self {
         Self {
-            inner: build_aad("mail-record", &[]),
+            inner: build_aad(MailRecordEnvelope::KIND_MAIL, &[]),
+        }
+    }
+
+    /// AAD (used as HPKE info) for a sealed **calendar** record — a CalDAV
+    /// event body, its Fauna sidecar, calendar collection metadata
+    /// (`owner-key-material.md` § Path B-sibling-5 → *AEAD and envelope*).
+    /// The [`Self::for_mail_record`] shape under its own kind tag (rule #3: a
+    /// fresh domain-separated AAD per kind), so a calendar ciphertext can never
+    /// open as a mail record or a card, whichever key a bug handed the opener.
+    pub fn for_calendar_record() -> Self {
+        Self {
+            inner: build_aad(MailRecordEnvelope::KIND_CALENDAR, &[]),
+        }
+    }
+
+    /// AAD (used as HPKE info) for a sealed **card** record — a CardDAV card
+    /// body, its sidecar, address-book metadata (`owner-key-material.md`
+    /// § Path B-sibling-6) — [`Self::for_calendar_record`]'s twin.
+    pub fn for_card_record() -> Self {
+        Self {
+            inner: build_aad(MailRecordEnvelope::KIND_CARD, &[]),
         }
     }
 
@@ -1154,8 +1175,12 @@ impl ScopeTuple {
     /// the nest seals what the holder posts to the owner's recipient key, so
     /// the tuple wraps nothing and is the audit + revocation record the
     /// deposit door re-resolves at every deposit. Its `set` is the folder's
-    /// row id in decimal; no `kind`, `tier` or `factor`. Constructed by
-    /// [`Self::folder_deposit`].
+    /// row id in decimal and its `factor` the holder's attested writer key
+    /// (`writer:<hex>`, `fauna_core::grant_event::writer_factor` — the
+    /// `content.write` tuple's own shape; a factor is not a key, the class
+    /// stays keyless), the key every deposit is signed with
+    /// (`folder-deposit.md` § The depositor signs, the owner's device
+    /// verifies); no `kind` or `tier`. Constructed by [`Self::folder_deposit`].
     pub const CLASS_DEPOSIT: &'static str = fauna_core::grant_event::CLASS_DEPOSIT;
 
     /// `kind` value for the custody `Account` form (the owner's whole
@@ -1255,24 +1280,35 @@ impl ScopeTuple {
     }
 
     /// The keyless `deposit` tuple over the folder whose row id is
-    /// `folder_id` (see [`Self::CLASS_DEPOSIT`]).
+    /// `folder_id`, confined to `writer` (see [`Self::CLASS_DEPOSIT`]).
     #[must_use]
-    pub fn folder_deposit(folder_id: i64) -> Self {
+    pub fn folder_deposit(folder_id: i64, writer: &[u8; 32]) -> Self {
         Self {
             class: Self::CLASS_DEPOSIT.to_string(),
             kind: None,
             tier: None,
             set: Some(folder_id.to_string()),
-            factor: None,
+            factor: Some(fauna_core::grant_event::writer_factor(writer)),
         }
     }
 
-    /// Is this exactly the `deposit` tuple over `folder_id`? Whole-tuple
-    /// equality with [`Self::folder_deposit`], so a tuple carrying any other
-    /// qualifier, or a non-canonical spelling of the id, admits nothing.
+    /// Is this a `deposit` tuple over `folder_id`, whatever writer it names?
+    /// The class, no `kind` or `tier`, and the canonical decimal spelling of
+    /// the id — a non-canonical spelling admits nothing. The writer is
+    /// [`Self::names_deposit_writer`]'s question.
     #[must_use]
     pub fn is_folder_deposit_for(&self, folder_id: i64) -> bool {
-        *self == Self::folder_deposit(folder_id)
+        self.class == Self::CLASS_DEPOSIT
+            && self.kind.is_none()
+            && self.tier.is_none()
+            && self.set.as_deref() == Some(folder_id.to_string().as_str())
+    }
+
+    /// Is this the `deposit` tuple over `folder_id` confined to `writer` —
+    /// exactly [`Self::folder_deposit`]`(folder_id, writer)`?
+    #[must_use]
+    pub fn names_deposit_writer(&self, folder_id: i64, writer: &[u8; 32]) -> bool {
+        *self == Self::folder_deposit(folder_id, writer)
     }
 
     /// The `content.read{folder, set}` tuple over the set whose
@@ -1333,13 +1369,18 @@ impl ScopeTuple {
         self.factor.as_deref() == factor
     }
 
-    /// Is this tuple one only a device app or nest-hosted code may hold — a
-    /// key-bearing class (`content.read` / `content.write`) over any kind but
-    /// an `ext.*` kind (TP4, `encryption-at-rest.md` § Capability tiering →
-    /// *Third-party holders*: a remote principal is grantable only over the
-    /// kinds it created)? The predicate the nest's form gate reads at
-    /// `fauna.capabilities.mint` and the principal fetch. A keyless class and
-    /// a kind-less tuple are never reserved.
+    /// Is this tuple one only a device app or nest-hosted code may hold (TP4,
+    /// `encryption-at-rest.md` § Capability tiering → *Third-party holders*:
+    /// a remote principal is grantable only over the kinds it created)? The
+    /// predicate the nest's form gate reads at `fauna.capabilities.mint`,
+    /// `fauna.capabilities.renew` and the principal fetch.
+    ///
+    /// An ALLOWLIST, so a class this build does not name is reserved: the
+    /// keyless classes (`content.label-write`, `custody`, `identity.op`,
+    /// `deposit`) are never reserved, `content.read` / `content.write` are
+    /// grantable only over an `ext.*` kind, and every other tuple — `index.*`,
+    /// a kind-less read, any class a later build adds — is reserved until it
+    /// is placed here.
     ///
     /// The base kind is `kind` up to any folded factor's separator — the fold
     /// `fauna_core::grant_event::GrantEventScope::base_kind` documents — but a
@@ -1347,14 +1388,21 @@ impl ScopeTuple {
     /// tuple, so no spelling un-reserves a key-bearing tuple.
     #[must_use]
     pub fn reserved_for_device_or_hosted(&self) -> bool {
-        if self.class != Self::CLASS_CONTENT_READ && self.class != Self::CLASS_CONTENT_WRITE {
-            return false;
+        match self.class.as_str() {
+            Self::CLASS_CONTENT_LABEL_WRITE
+            | Self::CLASS_CUSTODY
+            | Self::CLASS_IDENTITY_OP
+            | Self::CLASS_DEPOSIT => false,
+            Self::CLASS_CONTENT_READ | Self::CLASS_CONTENT_WRITE => {
+                let base = self
+                    .kind
+                    .as_deref()
+                    .and_then(|kind| kind.split(' ').next())
+                    .unwrap_or_default();
+                base.is_empty() || !fauna_core::ext_kind::is_ext_kind(base)
+            }
+            _ => true,
         }
-        let Some(kind) = self.kind.as_deref() else {
-            return false;
-        };
-        let base = kind.split(' ').next().unwrap_or_default();
-        !base.is_empty() && !fauna_core::ext_kind::is_ext_kind(base)
     }
 }
 
@@ -1570,8 +1618,9 @@ impl GrantBlob {
     /// # Errors
     ///
     /// Returns `UnwrapError::InvalidFormat` for bad CBOR, an unknown version,
-    /// a wrong `kind` discriminator, or a wrong HPKE `enc` length on any
-    /// wrapped key.
+    /// a wrong `kind` discriminator, a wrong HPKE `enc` length on any
+    /// wrapped key, or a wrapped key whose scope is not one of the declared
+    /// scopes ([`Self::undeclared_wrapped_key`]).
     pub fn from_canonical_bytes(bytes: &[u8]) -> Result<Self, UnwrapError> {
         check_stamp_before_decode(bytes)?;
         let blob: Self = fauna_cbor::decode_strict(bytes)
@@ -1594,7 +1643,26 @@ impl GrantBlob {
                 )));
             }
         }
+        if let Some(wk) = blob.undeclared_wrapped_key() {
+            return Err(UnwrapError::InvalidFormat(format!(
+                "wrapped key scope {:?} is not among the grant's declared scopes",
+                wk.scope
+            )));
+        }
         Ok(blob)
+    }
+
+    /// The first wrapped key whose scope is not one of the declared scopes,
+    /// if any. A grant's label and its keys must agree: every gate that reads
+    /// the declared `scope` (the nest's form gate, the settings page) speaks
+    /// for every key the holder can open only when no key falls outside it,
+    /// and the holder opens each key under its own `scope`. [`Self::from_canonical_bytes`] refuses such a blob, and
+    /// the renew merge asks the same question of the keys it appends.
+    #[must_use]
+    pub fn undeclared_wrapped_key(&self) -> Option<&WrappedScopeKey> {
+        self.wrapped_keys
+            .iter()
+            .find(|wk| !self.scope.contains(&wk.scope))
     }
 }
 
@@ -2187,9 +2255,16 @@ impl TlsCertBundle {
 /// in the HPKE encapsulation (the encapsulated key is targeted at the
 /// recipient's pubkey), and the same envelope shape serves both body
 /// and index-hint kinds because the two encrypts go to different keys.
-/// `kind` is always `"mail-record"`; we keep it as a discriminator so a
-/// future at-rest replay reader can sanity-check the wire shape before
-/// trying to open.
+///
+/// The type name is historical: the same envelope carries every sealed
+/// owner record, and `kind` discriminates which key and AAD sealed it —
+/// [`Self::KIND_MAIL`] (inbound mail, § Path B-sibling-2),
+/// [`Self::KIND_CALENDAR`] (CalDAV bodies, § Path B-sibling-5) or
+/// [`Self::KIND_CARD`] (CardDAV bodies, § Path B-sibling-6) —
+/// [`RecordKind`] is its typed form. The kind is plaintext, so a holder of no
+/// key (the nest) can enforce it, and every opener refuses a mismatched kind
+/// before any trial (`owner-key-material.md` § Path B-sibling-5 → *AEAD and
+/// envelope*).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MailRecordEnvelope {
     #[serde(rename = "v")]
@@ -2200,7 +2275,91 @@ pub struct MailRecordEnvelope {
     pub hpke: HpkeWire,
 }
 
+/// The kind of owner record a [`MailRecordEnvelope`] seals — the typed form of
+/// its plaintext `kind` field, and the one value that selects both the
+/// envelope tag and the AAD binding, so the two always travel together
+/// (`owner-key-material.md` § Path B-sibling-5 → *AEAD and envelope*).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum RecordKind {
+    /// Inbound mail and its index hints — the recipient-mail keypair.
+    Mail,
+    /// CalDAV event bodies, sidecars, calendar metadata, placed invitations —
+    /// the recipient-calendar keypair.
+    Calendar,
+    /// CardDAV card bodies, sidecars, address-book metadata — the
+    /// recipient-card keypair.
+    Card,
+}
+
+impl RecordKind {
+    /// Every kind, in a fixed order.
+    pub const ALL: [Self; 3] = [Self::Mail, Self::Calendar, Self::Card];
+
+    /// The envelope's `kind` string for this record kind.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Mail => MailRecordEnvelope::KIND_MAIL,
+            Self::Calendar => MailRecordEnvelope::KIND_CALENDAR,
+            Self::Card => MailRecordEnvelope::KIND_CARD,
+        }
+    }
+
+    /// Parse an envelope `kind` string; `None` for anything else.
+    #[must_use]
+    pub fn from_kind_str(kind: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|k| k.as_str() == kind)
+    }
+
+    /// The HPKE info / AAD binding records of this kind are sealed under.
+    #[must_use]
+    pub fn aad(self) -> AadBinding {
+        match self {
+            Self::Mail => AadBinding::for_mail_record(),
+            Self::Calendar => AadBinding::for_calendar_record(),
+            Self::Card => AadBinding::for_card_record(),
+        }
+    }
+}
+
 impl MailRecordEnvelope {
+    /// `kind` of a sealed inbound-mail record (and its index hint).
+    pub const KIND_MAIL: &'static str = "mail-record";
+    /// `kind` of a sealed calendar record.
+    pub const KIND_CALENDAR: &'static str = "calendar-record";
+    /// `kind` of a sealed card record.
+    pub const KIND_CARD: &'static str = "card-record";
+
+    /// The typed kind — always `Some` on a decoded envelope
+    /// ([`Self::from_canonical_bytes`] refuses any other `kind`); a hand-built
+    /// envelope with a foreign kind reads as `None`.
+    #[must_use]
+    pub fn record_kind(&self) -> Option<RecordKind> {
+        RecordKind::from_kind_str(&self.kind)
+    }
+
+    /// [`Self::from_canonical_bytes`], additionally refusing an envelope of any
+    /// kind but `expected` — the decode a per-kind reader or put path uses.
+    ///
+    /// # Errors
+    ///
+    /// `UnwrapError::InvalidFormat` as [`Self::from_canonical_bytes`], or when
+    /// the kind is not `expected`.
+    pub fn from_canonical_bytes_of_kind(
+        bytes: &[u8],
+        expected: RecordKind,
+    ) -> Result<Self, UnwrapError> {
+        let blob = Self::from_canonical_bytes(bytes)?;
+        if blob.kind != expected.as_str() {
+            return Err(UnwrapError::InvalidFormat(format!(
+                "expected kind={}, got {}",
+                expected.as_str(),
+                blob.kind
+            )));
+        }
+        Ok(blob)
+    }
+
     /// Encode to canonical DAG-CBOR.
     ///
     /// # Errors
@@ -2215,15 +2374,19 @@ impl MailRecordEnvelope {
     /// # Errors
     ///
     /// Returns `UnwrapError::InvalidFormat` for bad CBOR, unknown
-    /// version, wrong `kind`, or wrong HPKE enc length.
+    /// version, a `kind` that is no [`RecordKind`], or wrong HPKE enc
+    /// length.
     pub fn from_canonical_bytes(bytes: &[u8]) -> Result<Self, UnwrapError> {
         check_stamp_before_decode(bytes)?;
         let blob: Self = fauna_cbor::decode_strict(bytes)
             .map_err(|e| UnwrapError::InvalidFormat(format!("cbor decode: {e}")))?;
         FormatVersion(blob.version).check_supported()?;
-        if blob.kind != "mail-record" {
+        if blob.record_kind().is_none() {
             return Err(UnwrapError::InvalidFormat(format!(
-                "expected kind=mail-record, got {}",
+                "expected a sealed-record kind ({}, {} or {}), got {}",
+                Self::KIND_MAIL,
+                Self::KIND_CALENDAR,
+                Self::KIND_CARD,
                 blob.kind
             )));
         }
@@ -2285,7 +2448,9 @@ impl SealedRecordBytes {
 
 impl SealedRecordBytes {
     /// Prove `bytes` decode as a sealed [`MailRecordEnvelope`] (canonical
-    /// DAG-CBOR, `kind == "mail-record"`, supported version, suite-consistent
+    /// DAG-CBOR, `kind` one of the three [`RecordKind`]s — the per-kind check is
+    /// the put path's ([`MailRecordEnvelope::from_canonical_bytes_of_kind`]) —
+    /// supported version, suite-consistent
     /// `enc` length) and wrap them. The same strict decode as
     /// `is_sealed_mail_record` — reliable because text formats (RFC 5322,
     /// iCalendar, vCard) and the `<u32 BE len><bytes>` token-set
@@ -2297,6 +2462,20 @@ impl SealedRecordBytes {
     /// including the empty slice.
     pub fn verify(bytes: Vec<u8>) -> Result<Self, UnwrapError> {
         MailRecordEnvelope::from_canonical_bytes(&bytes)?;
+        Ok(Self(bytes))
+    }
+
+    /// [`verify`](Self::verify), additionally refusing an envelope of any kind
+    /// but `expected` — the proof a per-kind put path mints (a calendar store
+    /// takes only `calendar-record`s, a card store only `card-record`s, mail
+    /// ingest only `mail-record`s; `owner-key-material.md` § Path B-sibling-5
+    /// → *AEAD and envelope*). The kind is plaintext, so no key is needed.
+    ///
+    /// # Errors
+    ///
+    /// As [`MailRecordEnvelope::from_canonical_bytes_of_kind`].
+    pub fn verify_of_kind(bytes: Vec<u8>, expected: RecordKind) -> Result<Self, UnwrapError> {
+        MailRecordEnvelope::from_canonical_bytes_of_kind(&bytes, expected)?;
         Ok(Self(bytes))
     }
 
@@ -2375,21 +2554,76 @@ mod tests {
         ] {
             assert!(reserved.reserved_for_device_or_hosted(), "{reserved:?}");
         }
+        // An allowlist: `index.*` over a non-`ext.*` kind, a kind-less
+        // key-bearing read and a class this build does not name are all
+        // reserved.
+        let with_class = |class: &str, kind: Option<&str>| ScopeTuple {
+            class: class.to_string(),
+            kind: kind.map(str::to_string),
+            ..ScopeTuple::mail()
+        };
+        for reserved in [
+            with_class(ScopeTuple::CLASS_INDEX_READ, Some(ScopeTuple::KIND_MAIL)),
+            with_class(ScopeTuple::CLASS_INDEX_WRITE, Some(ScopeTuple::KIND_MAIL)),
+            with_class(ScopeTuple::CLASS_INDEX_READ, Some(EXT)),
+            with_class("a.class.added.later", Some(ScopeTuple::KIND_MAIL)),
+            with_class("a.class.added.later", None),
+            with_class(ScopeTuple::CLASS_CONTENT_READ, None),
+        ] {
+            assert!(reserved.reserved_for_device_or_hosted(), "{reserved:?}");
+        }
         let identity_op = ScopeTuple {
             class: ScopeTuple::CLASS_IDENTITY_OP.to_string(),
             ..ScopeTuple::delegable_kind_read("nostr.sign")
         };
+        let custody = with_class(
+            ScopeTuple::CLASS_CUSTODY,
+            Some(ScopeTuple::KIND_CUSTODY_ACCOUNT),
+        );
         for keyless in [
-            ScopeTuple::folder_deposit(3),
+            ScopeTuple::folder_deposit(3, &[5; 32]),
             ScopeTuple::label_write(None),
+            ScopeTuple::label_write(Some("labeler:00")),
             identity_op,
-            ScopeTuple {
-                kind: None,
-                ..ScopeTuple::mail()
-            },
+            custody,
         ] {
             assert!(!keyless.reserved_for_device_or_hosted(), "{keyless:?}");
         }
+    }
+
+    /// The deposit tuple names its writer (`folder-deposit.md` § The
+    /// depositor signs, the owner's device verifies): the factor is the
+    /// writer's, `is_folder_deposit_for` matches the folder whatever the
+    /// writer, and `names_deposit_writer` matches the folder and the writer.
+    #[test]
+    fn a_deposit_tuple_names_its_writer() {
+        let w = [5u8; 32];
+        let t = ScopeTuple::folder_deposit(17, &w);
+        assert_eq!(
+            t.factor.as_deref(),
+            Some(fauna_core::grant_event::writer_factor(&w).as_str())
+        );
+        assert!(t.is_folder_deposit_for(17));
+        assert!(!t.is_folder_deposit_for(18));
+        assert!(t.names_deposit_writer(17, &w));
+        assert!(!t.names_deposit_writer(17, &[6; 32]));
+        assert!(!t.names_deposit_writer(18, &w));
+        let factorless = ScopeTuple {
+            factor: None,
+            ..t.clone()
+        };
+        assert!(factorless.is_folder_deposit_for(17));
+        assert!(!factorless.names_deposit_writer(17, &w));
+        let spelled = ScopeTuple {
+            set: Some("017".into()),
+            ..t.clone()
+        };
+        assert!(!spelled.is_folder_deposit_for(17));
+        let other_class = ScopeTuple {
+            class: ScopeTuple::CLASS_CONTENT_WRITE.into(),
+            ..t
+        };
+        assert!(!other_class.is_folder_deposit_for(17));
     }
 
     /// **The `ladder` ground at the blob** (`transport.md` § Schema and

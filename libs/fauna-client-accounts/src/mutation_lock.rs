@@ -78,6 +78,15 @@ impl MutationLock for NoopMutationLock {
     }
 }
 
+/// The line [`FileMutationLock`] logs (info) when a mutator finds another
+/// instance holding the registry lock and is about to wait for it — logged
+/// before the wait, so a mutator queued behind a sibling is observable on every
+/// OS (the e2e witness of `account-scoping.md` § Concurrent instances reads it
+/// from the app's own log; linux's `/proc/locks` is the only kernel view, and
+/// macOS and windows have none). Names no path (log redaction rule).
+pub const CONTENDED_LOG_LINE: &str =
+    "account registry: another instance holds the mutation lock; waiting for it";
+
 #[cfg(not(target_arch = "wasm32"))]
 pub use file_lock::FileMutationLock;
 
@@ -86,7 +95,7 @@ mod file_lock {
     use std::fs::File;
     use std::path::{Path, PathBuf};
 
-    use super::{MutationLock, MutationLockGuard};
+    use super::{CONTENDED_LOG_LINE, MutationLock, MutationLockGuard};
 
     /// Name of the lock file inside the install-scoped state directory.
     const LOCK_FILE_NAME: &str = "account-registry.lock";
@@ -112,16 +121,28 @@ mod file_lock {
             }
         }
 
-        fn open_and_lock(&self) -> std::io::Result<File> {
+        /// Take the lock, trying first without blocking: when another holder
+        /// has it, `on_contended` runs BEFORE the blocking wait — the one
+        /// moment "this mutator is queued behind a sibling instance" is known.
+        pub(crate) fn open_and_lock(&self, on_contended: impl FnOnce()) -> std::io::Result<File> {
             let file = crate::lock_file::open_lock_file(&self.lock_path)?;
-            file.lock()?;
+            match file.try_lock() {
+                Ok(()) => {}
+                Err(std::fs::TryLockError::WouldBlock) => {
+                    on_contended();
+                    file.lock()?;
+                }
+                Err(std::fs::TryLockError::Error(e)) => return Err(e),
+            }
             Ok(file)
         }
     }
 
     impl MutationLock for FileMutationLock {
         fn acquire(&self) -> MutationLockGuard {
-            match self.open_and_lock() {
+            let contended =
+                || tracing::info!(target: "fauna_client_accounts", "{CONTENDED_LOG_LINE}");
+            match self.open_and_lock(contended) {
                 // Dropping the `File` releases the lock (and the OS releases
                 // it if the holder dies — no orphaned lock is possible).
                 Ok(file) => MutationLockGuard::holding(Box::new(file)),
@@ -172,6 +193,43 @@ mod tests {
         acquired_rx
             .recv_timeout(Duration::from_secs(10))
             .expect("second holder must acquire once the first releases");
+        b.join().unwrap();
+    }
+
+    /// An uncontended acquire never reports a wait; one that meets a sibling
+    /// holding the lock calls `on_contended` BEFORE it blocks — the hook
+    /// [`FileMutationLock::acquire`] logs [`CONTENDED_LOG_LINE`] through, the
+    /// positive observable of a mutator queued behind another instance on
+    /// every OS. Deterministic: the release waits for the hook's signal.
+    #[test]
+    fn an_acquire_that_meets_a_holder_reports_it_before_blocking() {
+        let dir = tempfile::tempdir().unwrap();
+        let lock_a = FileMutationLock::new(dir.path());
+        let lock_b = FileMutationLock::new(dir.path());
+
+        let file_a = lock_a
+            .open_and_lock(|| panic!("the first holder found nobody to wait for"))
+            .unwrap();
+
+        let (contended_tx, contended_rx) = mpsc::channel();
+        let (acquired_tx, acquired_rx) = mpsc::channel();
+        let b = thread::spawn(move || {
+            let _file_b = lock_b
+                .open_and_lock(|| contended_tx.send(()).unwrap())
+                .unwrap();
+            acquired_tx.send(()).unwrap();
+        });
+        contended_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("an acquire that meets a holder must report it before blocking");
+        assert!(
+            acquired_rx.try_recv().is_err(),
+            "the reporting acquire returned while the first guard was still live"
+        );
+        drop(file_a);
+        acquired_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the reporting acquire must take the lock once the holder releases");
         b.join().unwrap();
     }
 

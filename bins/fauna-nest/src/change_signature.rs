@@ -42,6 +42,11 @@ use crate::db::CacheDb;
 pub(crate) struct CarriedSignature<'a> {
     pub signature: Option<&'a [u8]>,
     pub signer_key: Option<&'a [u8]>,
+    /// The depositor's writer key, a statement field the record carries beside
+    /// its row content (`folder-deposit.md` ruling 3; already parsed from the
+    /// request's hex). It travels with the signature that covers it, so it
+    /// reaches the row only through [`VerifiedSignature`].
+    pub deposited_by: Option<[u8; 32]>,
 }
 
 impl<'a> CarriedSignature<'a> {
@@ -52,6 +57,15 @@ impl<'a> CarriedSignature<'a> {
         Self {
             signature: signature.map(|b| &b[..]),
             signer_key: signer_key.map(|b| &b[..]),
+            deposited_by: None,
+        }
+    }
+
+    /// The same carriage naming the depositor of an adopted deposit.
+    pub(crate) fn with_deposited_by(self, deposited_by: Option<[u8; 32]>) -> Self {
+        Self {
+            deposited_by,
+            ..self
         }
     }
 
@@ -87,6 +101,9 @@ pub(crate) struct VerifiedSignature {
     /// cert naming another refused `author_mismatch` — so it is also the
     /// stored row's `cert_actor_id`.
     pub cert: Option<([u8; 32], [u8; 32], Vec<u8>)>,
+    /// The verified statement's depositor — stored on the row only because
+    /// the signature covered it.
+    pub deposited_by: Option<[u8; 32]>,
 }
 
 impl VerifiedSignature {
@@ -94,6 +111,7 @@ impl VerifiedSignature {
         crate::db::RowSignature {
             signature: &self.signature,
             signer_key: &self.signer_key,
+            deposited_by: self.deposited_by.as_ref().map(|d| &d[..]),
         }
     }
 
@@ -199,6 +217,7 @@ pub(crate) fn stored_row_signed_under(
                 Some(v) => Some(u64::try_from(v).ok()?),
                 None => None,
             },
+            content_generation: None,
             path_sealed: row.path_sealed.clone(),
             thumbnail_hash: match row.thumbnail_hash.as_deref() {
                 Some(t) => Some(fauna_core::hex32::decode(t).ok()?),
@@ -207,6 +226,10 @@ pub(crate) fn stored_row_signed_under(
             derived_through: row.derived_through,
             is_resolution: row.is_resolution.unwrap_or(false),
             is_retention: row.is_retention.unwrap_or(false),
+            deposited_by: match row.deposited_by.as_deref() {
+                Some(d) => Some(b32(d)?),
+                None => None,
+            },
         })
     })();
     let (Some(statement), Some(key)) = (statement, b32(signer_key)) else {
@@ -243,6 +266,7 @@ pub(crate) async fn verify_carried(
         signature: signature.to_vec(),
         signer_key: signer_key.to_vec(),
         cert: cert.map(|wire| (actor, key, wire)),
+        deposited_by: statement.deposited_by,
     };
 
     // Direct: the identity key signed; no cert, no grant.
@@ -330,11 +354,13 @@ mod tests {
             change_type: "create".into(),
             size_bytes: 42,
             content_key_version: Some(1),
+            content_generation: None,
             path_sealed: Some(vec![9, 9]),
             thumbnail_hash: None,
             derived_through: Some(5),
             is_resolution: false,
             is_retention: false,
+            deposited_by: None,
         }
     }
 
@@ -362,6 +388,7 @@ mod tests {
         let carried = CarriedSignature {
             signature: Some(&sig),
             signer_key: Some(&key),
+            deposited_by: None,
         };
 
         // The writer's own cert, inline: verified, and remembered.
@@ -404,6 +431,7 @@ mod tests {
         let half = CarriedSignature {
             signature: Some(&sig),
             signer_key: None,
+            deposited_by: None,
         };
         assert!(matches!(
             verify_carried(&db, &s, half, CertCarriage::ByReference).await,

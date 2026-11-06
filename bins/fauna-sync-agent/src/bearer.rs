@@ -47,6 +47,13 @@ pub struct CapabilitySlot {
     rejection: StdMutex<Option<Rejection>>,
     reported: Notify,
     answered: watch::Sender<u64>,
+    /// The bearer the renewal loop last replaced after a reader's rejection
+    /// of it. Refused for good — the nest never issues a token twice, and a
+    /// restart forgets every one it held — so an app pushing it again never
+    /// displaces its replacement (`sync-agent-credentials.md` § Credential
+    /// model → *A rejected credential asks at once*, *A refused bearer stays
+    /// replaced*).
+    refused_replaced: StdMutex<Option<Zeroizing<String>>>,
 }
 
 /// What a reader reported to the renewal loop ([`CapabilitySlot`]).
@@ -74,7 +81,29 @@ impl CapabilitySlot {
             rejection: StdMutex::new(None),
             reported: Notify::new(),
             answered: watch::channel(0).0,
+            refused_replaced: StdMutex::new(None),
         })
+    }
+
+    /// The renewal loop replaced `refused`, a bearer a reader's rejection
+    /// named, with one it minted. Written under the slot's write lock, with
+    /// the replacement, so a concurrent push reads both or neither.
+    pub(crate) fn note_refused_replaced(&self, refused: &str) {
+        *self
+            .refused_replaced
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+            Some(Zeroizing::new(refused.to_owned()));
+    }
+
+    /// Whether `token` is the bearer the nest refused and the renewal loop
+    /// has already replaced ([`Self::note_refused_replaced`]).
+    pub(crate) fn is_refused_and_replaced(&self, token: &str) -> bool {
+        self.refused_replaced
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_deref()
+            .is_some_and(|refused| refused.as_str() == token)
     }
 
     /// A reader presented `token` and the nest refused it with a `401`.

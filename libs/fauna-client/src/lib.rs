@@ -13,6 +13,7 @@ pub mod push;
 pub mod ranged_nest_reader;
 mod reconnect;
 pub mod remote_image;
+pub mod self_identity;
 /// Test doubles for driving a real [`NestClient`] with a mocked socket. Behind
 /// the `test-util` feature, so nothing here can reach a release artifact.
 #[cfg(feature = "test-util")]
@@ -57,6 +58,7 @@ pub use media_upload::{
 pub use post_blob::{ForeignHome, PostBlobHosts};
 pub use push::PushBroker;
 pub use ranged_nest_reader::{RangedNestReader, RangedReadError};
+pub use self_identity::SelfIdentityFollower;
 pub use types::ConnectionState;
 
 // Re-exports from fauna-protocol so consumers don't need a direct dep.

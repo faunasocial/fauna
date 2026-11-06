@@ -13,7 +13,10 @@
 //!   § Persistence), and takes the epoch read BEFORE the load so a reply the
 //!   outgoing account's fetch delivers after an identity change fills nothing
 //!   (`docs/goal/architecture/apps/account-scoping.md` § The scoping taxonomy);
-//!   the feed manager's is still a plain call.
+//!   the feed manager's is still a plain call. The tokio-native legs (tui,
+//!   linux conversations) run that body through [`restore_when_loaded`], which
+//!   owns the epoch-before-poll ordering and returns a [`LaunchRestore`] for
+//!   the leg to log.
 //! * after a compose change (debounced): `drafts.save_if_changed(&manager.drafts_snapshot_bytes()).await?`
 //!
 //! [`DraftsSync`] wraps the lower-level [`DraftsClient`] (the raw, stateless
@@ -27,11 +30,13 @@
 //! `fauna_protocol::RpcRequester` seam. Drafts are owner-only (no signing).
 //! There is **no HTTP** here.
 
+pub mod restore;
 mod seal;
 pub mod store;
 pub mod succession_aftermath;
 pub mod sync;
 
+pub use restore::{LaunchRestore, restore_when_loaded};
 pub use seal::{
     DraftSealError, backup_key_from_seed, rekey_drafts_blob, seal_drafts, unseal_drafts,
 };
@@ -39,7 +44,7 @@ pub use store::{DraftsClient, DraftsClientError, DraftsRekeyOutcome};
 pub use succession_aftermath::{
     DraftsResealOutcome, DraftsResealProgress, rekey_drafts_after_succession,
 };
-pub use sync::{AUTOSAVE_DEBOUNCE, DraftsSync, autosave_debounce};
+pub use sync::{AUTOSAVE_DEBOUNCE, DraftsSync, LEAVE_FLUSH_BUDGET, autosave_debounce};
 
 // Re-export the at-rest key type so consumers depend on this crate's surface
 // rather than reaching into `fauna_core::crypto` directly.

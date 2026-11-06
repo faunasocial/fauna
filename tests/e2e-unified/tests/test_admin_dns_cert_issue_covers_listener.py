@@ -182,7 +182,6 @@ def test_issuing_from_a_second_domains_row_covers_every_listener_name(
         try:
             if _mode_of(admin_app, second) == _LABEL_MANAGED:
                 admin_app.admin.toggle_domain_mode(index=_index(admin_app, second))
-            while admin_app.admin.dns_credential_count() > 0:
-                admin_app.admin.clear_dns_credential(0)
+            admin_app.admin.clear_all_dns_credentials()
         except Exception:
             pass

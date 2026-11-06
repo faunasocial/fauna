@@ -24,6 +24,32 @@ ONLY_ME_TEXT = "Only me note"
 FRIENDS_TS = 1_600_000_000
 PUBLIC_TS = 1_610_000_000
 ONLY_ME_TS = 1_620_000_000
+# The link the `Friend Two` comment's `external_context` names — the commented
+# post's shared link (archive-import.md § Linking and merging, ruling 5's rung
+# (iii)). A post sharing it (`LINK_POST`, opt-in) dated before the comment is
+# where that comment folds; without one the comment stays unplaced.
+COMMENTED_LINK = "https://example.invalid/post/1"
+FRIEND_TWO_COMMENT = "Nice one"
+FRIEND_TWO_COMMENT_TS = 1_602_000_000
+LINK_TEXT = "Worth a read"
+LINK_TS = 1_601_500_000
+# Phase two (archive-import.md § Linking and merging, ruling 12): the friend's
+# OWN archive holds their comment and their like on the owner's link post, both
+# naming `COMMENTED_LINK`, so ruling 5's rung (iii) places them. The comment is
+# the same record the owner's archive keeps as its private copy (same instant,
+# same words — one external id), which is what a claim hides.
+FRIEND_LIKE_TS = 1_603_000_000
+# The friend's `LOVE` on the owner's link post (`love`, opt-in), which the
+# merge maps to `React { emoji: "❤️" }` (archive-import.md ruling 7) — after
+# the like, so the two reactions never tie.
+FRIEND_LOVE_TS = 1_603_500_000
+# The second-import variant's one new comment on the owner's post.
+SECOND_COMMENT = "Still a good read"
+SECOND_COMMENT_TS = 1_604_000_000
+# The third-import variant's one more comment — what an import after an unlink
+# must NOT bring back (outcome 19).
+THIRD_COMMENT = "Read it again today"
+THIRD_COMMENT_TS = 1_605_000_000
 PHOTO_PATH = "your_facebook_activity/posts/media/Timeline_photos/photo_1.jpg"
 PHOTO_TAKEN_TS = PUBLIC_TS - 1_000
 PROFILE_MEMBER = "personal_information/profile_information/profile_information.json"
@@ -87,12 +113,53 @@ class ArchivePostSpec:
     # How many times the record names its photo — past the parser's
     # `MAX_RECORD_MEDIA_REFS` (512) the tail is dropped and reported.
     photo_refs: int = 1
+    # A link the post shared (`attachments[].data[].external_context.url`).
+    link: str | None = None
+
+
+DEFAULT_POSTS = (
+    ArchivePostSpec(FRIENDS_TEXT, FRIENDS_TS, "Friends"),
+    ArchivePostSpec(PUBLIC_TEXT, PUBLIC_TS, "Public", photo=b"fixture-photo-1"),
+    ArchivePostSpec(ONLY_ME_TEXT, ONLY_ME_TS, "Only me"),
+)
+
+# The owner's public link post sharing `COMMENTED_LINK`, dated before the
+# `Friend Two` comment — opt-in (`posts=[*DEFAULT_POSTS, LINK_POST]`), so the
+# journeys that count posts are unchanged.
+LINK_POST = ArchivePostSpec(LINK_TEXT, LINK_TS, "Public", link=COMMENTED_LINK)
 
 
 @dataclass
 class FakeFacebookArchive:
     owner: str = "Test Owner"
     tag: str = ""
+    # The profile's `username` — a Facebook export carries its owner's. Derived
+    # from `owner` when left empty, so two archives naming each other carry two.
+    username: str = ""
+    # The friend whose comment on the owner's post the owner's archive keeps
+    # (its private copy), and the friends list's second name.
+    friend_two: str = "Friend Two"
+    # Phase two, opt-in: the friend whose link post the owner commented on and
+    # liked, in the owner's OWN archive (`_own_comments_on`, `_reactions`).
+    # `None` writes neither — every other journey's counts are unchanged.
+    activity_on: str | None = None
+    # The second-import variant: one more comment by the owner on
+    # `activity_on`'s post, after the first.
+    second_comment: bool = False
+    # The third-import variant: one more again, after the second.
+    third_comment: bool = False
+    # The owner's `LOVE` on `activity_on`'s link post, beside the like.
+    love: bool = False
+    # The link every comment and reaction on a link post names — ruling 5's
+    # rung (iii) shared link. A journey whose account may import more than once
+    # in a session passes its own, so two of its link posts never share one
+    # (the rung then refuses as `ambiguous`).
+    link: str = COMMENTED_LINK
+    # Whether the archive keeps `friend_two`'s comment on the owner's post (the
+    # owner's private copy). A friend's OWN archive (`activity_on` set) passes
+    # False: that record and the friend's own comment share instant and words,
+    # so the one archive would carry one external id twice.
+    friend_comment: bool = True
     posts: list[ArchivePostSpec] = field(default_factory=list)
     # One post record the parser cannot read (no timestamp) — skipped and
     # listed, never failing the import (§ Parser contract rule 1).
@@ -108,13 +175,14 @@ class FakeFacebookArchive:
 
     def __post_init__(self) -> None:
         if not self.posts:
-            self.posts = [
-                ArchivePostSpec(FRIENDS_TEXT, FRIENDS_TS, "Friends"),
-                ArchivePostSpec(PUBLIC_TEXT, PUBLIC_TS, "Public", photo=b"fixture-photo-1"),
-                ArchivePostSpec(ONLY_ME_TEXT, ONLY_ME_TS, "Only me"),
-            ]
+            self.posts = list(DEFAULT_POSTS)
 
     # ── members ─────────────────────────────────────────
+
+    def _username(self) -> str:
+        if self.username:
+            return self.username
+        return ".".join(self.owner.lower().split()) + ".fixture"
 
     def _profile(self) -> dict:
         return {
@@ -122,8 +190,8 @@ class FakeFacebookArchive:
                 "name": {"full_name": mojibake(self.owner), "first_name": "Test", "last_name": "Owner"},
                 "emails": {"emails": []},
                 "registration_timestamp": 1_262_304_000,
-                "profile_uri": "https://www.facebook.com/test.owner.fixture",
-                "username": "test.owner.fixture",
+                "profile_uri": f"https://www.facebook.com/{self._username()}",
+                "username": self._username(),
                 "intro_bio": {"text": mojibake("Fixture bio ❤")},
                 "websites": [{"address": "https://example.invalid/owner"}],
             }
@@ -148,6 +216,9 @@ class FakeFacebookArchive:
                         "description": "Photo caption",
                     }}]},
                 ] * spec.photo_refs
+            if spec.link is not None:
+                record.setdefault("attachments", []).append(
+                    {"data": [{"external_context": {"url": spec.link}}]})
             out.append(record)
         if self.bad_record:
             out.append({"data": [{"post": "A record with no timestamp"}],
@@ -166,25 +237,67 @@ class FakeFacebookArchive:
         }
 
     def _comments(self) -> dict:
+        friend = [
+            {"timestamp": FRIEND_TWO_COMMENT_TS,
+             "data": [{"comment": {"timestamp": FRIEND_TWO_COMMENT_TS, "comment": FRIEND_TWO_COMMENT,
+                                   "author": mojibake(self.friend_two)}}],
+             "title": mojibake(f"{self.friend_two} commented on {self.owner}'s post."),
+             "attachments": [{"data": [{"external_context": {"url": self.link}}]}]},
+        ] if self.friend_comment else []
         return {"comments_v2": [
             {"timestamp": 1_601_000_000,
              "data": [{"comment": {"timestamp": 1_601_000_000, "comment": mojibake("Děkuji!"), "author": mojibake(self.owner)}}],
              "title": mojibake(f"{self.owner} commented on Friend One's photo.")},
-            {"timestamp": 1_602_000_000,
-             "data": [{"comment": {"timestamp": 1_602_000_000, "comment": "Nice one", "author": "Friend Two"}}],
-             "title": mojibake(f"Friend Two commented on {self.owner}'s post."),
-             "attachments": [{"data": [{"external_context": {"url": "https://example.invalid/post/1"}}]}]},
+            *friend,
+            *self._own_comments_on(),
         ]}
 
+    def _own_comment(self, text: str, ts: int) -> dict:
+        return {"timestamp": ts,
+                "data": [{"comment": {"timestamp": ts, "comment": text, "author": mojibake(self.owner)}}],
+                "title": mojibake(f"{self.owner} commented on {self.activity_on}'s post."),
+                "attachments": [{"data": [{"external_context": {"url": self.link}}]}]}
+
+    def _own_comments_on(self) -> list[dict]:
+        """The owner's own comments on `activity_on`'s link post — what a
+        linked owner claims back as their own replies."""
+        if self.activity_on is None:
+            return []
+        out = [self._own_comment(FRIEND_TWO_COMMENT, FRIEND_TWO_COMMENT_TS)]
+        if self.second_comment:
+            out.append(self._own_comment(SECOND_COMMENT, SECOND_COMMENT_TS))
+        if self.third_comment:
+            out.append(self._own_comment(THIRD_COMMENT, THIRD_COMMENT_TS))
+        return out
+
     def _reactions(self) -> list[dict]:
-        return [
+        out = [
             {"timestamp": 1_603_000_000, "data": [{"reaction": {"reaction": "LIKE", "actor": mojibake(self.owner)}}],
              "title": mojibake(f"{self.owner} likes Friend One's post.")},
         ]
+        if self.activity_on is not None:
+            # The owner's like on `activity_on`'s link post, naming the link it
+            # shared (`parse_reaction` reads the attachment's url), dated after
+            # the post so rung (iii) may fire.
+            out.append(
+                {"timestamp": FRIEND_LIKE_TS,
+                 "data": [{"reaction": {"reaction": "LIKE", "actor": mojibake(self.owner)}}],
+                 "title": mojibake(f"{self.owner} likes {self.activity_on}'s post."),
+                 "attachments": [{"data": [{"external_context": {"url": self.link}}]}]})
+            if self.love:
+                out.append(
+                    {"timestamp": FRIEND_LOVE_TS,
+                     "data": [{"reaction": {"reaction": "LOVE", "actor": mojibake(self.owner)}}],
+                     "title": mojibake(f"{self.owner} reacted to {self.activity_on}'s post."),
+                     "attachments": [{"data": [{"external_context": {"url": self.link}}]}]})
+        return out
 
     def _friends(self) -> dict:
-        return {"friends_v2": [{"name": "Friend One", "timestamp": 1_500_000_000},
-                               {"name": "Friend Two", "timestamp": 1_510_000_000}]}
+        names = ["Friend One", self.friend_two]
+        if self.activity_on is not None and self.activity_on not in names:
+            names.append(self.activity_on)
+        return {"friends_v2": [{"name": mojibake(n), "timestamp": 1_500_000_000 + 10_000_000 * i}
+                               for i, n in enumerate(names)]}
 
     def _events(self) -> dict:
         extra = self.reply_events

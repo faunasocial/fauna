@@ -55,7 +55,9 @@ namespace FaunaApp.Conversations;
 internal static class ConversationsManagerHost
 {
     private static readonly object Gate = new();
+#if DEBUG || FAUNA_E2E_AGENT
     private static volatile bool _realRailsRegistered;
+#endif
 
     private static Lazy<ConversationsManager> _mockOrEmpty = NewManager();
 
@@ -158,7 +160,9 @@ internal static class ConversationsManagerHost
             // untouched Lazy would CONSTRUCT a manager just to close it.
             var outgoing = _mockOrEmpty.IsValueCreated ? _mockOrEmpty.Value : null;
             _mockOrEmpty = NewManager();
+#if DEBUG || FAUNA_E2E_AGENT
             _realRailsRegistered = false;
+#endif
             // The page-scoped VM+observer pair is bound to the OUTGOING manager
             // (`PageObserverState`'s own doc): null it here so the next
             // `ConversationsPage.Page_Loaded` builds a fresh pair against the fresh
@@ -198,6 +202,11 @@ internal static class ConversationsManagerHost
         }
     }
 
+#if DEBUG || FAUNA_E2E_AGENT
+    // The readiness flag (declared above), its writer and its reader below serve
+    // only the e2e real-conversations session door and its state field, so all
+    // three compile out of a Release build with them (convention 15).
+
     /// <summary>
     /// Record that the real FaunaMls/SMTP rails have been registered onto
     /// <see cref="Instance"/> (by building the session over it — see the class doc).
@@ -231,6 +240,7 @@ internal static class ConversationsManagerHost
     /// <c>conv_backend::is_e2e_real_active</c> (which reads <c>ACTIVE_SESSION.ready</c>).
     /// </summary>
     public static bool IsRealManagerRegistered => _realRailsRegistered;
+#endif
 
     public static ConversationsManager Instance
     {
@@ -243,6 +253,40 @@ internal static class ConversationsManagerHost
             Lazy<ConversationsManager> lazy;
             lock (Gate) { lazy = _mockOrEmpty; }
             return lazy.Value;
+        }
+    }
+
+    /// <summary>
+    /// The manager a page works on: the handed-over conversations session's wired
+    /// manager when the hand-off carried one, else <see cref="Instance"/> — the one
+    /// resolution every conversations-touching page makes. <c>null</c> when that session
+    /// is RETIRED, and the caller then skips what it was about to do.
+    ///
+    /// <para>When that happens (<c>apps/windows.md</c> § Client lifetime, the teardown
+    /// corollary): an actor change closes the outgoing session (<c>App.RetireConvSession</c>
+    /// disposes its wrapper) on the command's thread, and the root frame takes the page
+    /// away on a later UI turn — so a page load, a click or a store-change tick landing
+    /// in between holds a session whose <c>Manager()</c> throws
+    /// <see cref="ObjectDisposedException"/>, on the UI thread, where it is an unhandled
+    /// crash. The page is on its way out, so skipping is right; falling back to
+    /// <see cref="Instance"/> instead would be wrong — after the actor change that is the
+    /// INCOMING identity's manager, and a page of the outgoing session must not act on it.
+    /// The exception is the check, as in <c>ConversationsPage.UnlessManagerRetired</c>: a
+    /// "retired?" flag read here would race the dispose on the other thread.</para>
+    /// </summary>
+    /// <param name="what">What the caller was about to do, for the log line.</param>
+    internal static ConversationsManager? ManagerFor(ConversationsSession? session, string what)
+    {
+        if (session is null) return Instance;
+        try
+        {
+            return session.Manager();
+        }
+        catch (ObjectDisposedException ex)
+        {
+            FaunaApp.Core.Logs.ShellLog.Info("ConversationsManagerHost",
+                $"[actor-change] {what} skipped: the page's conversations session was retired ({ex.ObjectName})");
+            return null;
         }
     }
 }

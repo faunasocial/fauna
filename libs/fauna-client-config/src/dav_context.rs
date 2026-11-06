@@ -23,7 +23,8 @@ use crate::store_seam::MailStore;
 /// The inputs every encrypted CalDAV/CardDAV op needs: the actor, the current
 /// MSEK generation (what a write seals to) and the custody's prior generations,
 /// newest first (with `msek`, what a read opens through —
-/// `DavRecipientKeys::from_mseks(&msek, &prior_mseks)`; `mail-credentials.md`
+/// `DavRecipientKeys::from_mseks(kind, &msek, &prior_mseks)`, one ring per DAV
+/// kind; `mail-credentials.md`
 /// § Rotation and recovery → *DAV bodies across a rotation*, ruling 1: reads
 /// walk the ring, writes seal to the current generation alone).
 #[derive(PartialEq, Eq)]

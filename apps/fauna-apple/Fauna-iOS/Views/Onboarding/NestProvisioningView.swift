@@ -16,7 +16,7 @@ struct NestProvisioningView: View {
     @State private var nowMs: UInt64 = Date.nowEpochMillis
 
     var body: some View {
-        let snap = vm.machine.provisioningSnapshot()
+        let snap = vm.provisioningSnapshot
 
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
@@ -58,6 +58,12 @@ struct NestProvisioningView: View {
                     automationText(Ids.provisioningElapsed, renderLocalizedText(elapsed))
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                }
+
+                // The SSH door after a door run (onboarding-provisioning.md § 5):
+                // the command and the one-time key hand-over.
+                if snap.overall == .succeeded, let door = vm.machine.sshDoorReadout() {
+                    ProvisioningSshDoorSection(machine: vm.machine, door: door)
                 }
 
                 if let msg = snap.finalError ?? vm.errorMessage {
@@ -115,7 +121,7 @@ struct NestProvisioningView: View {
                     .accessibilityIdentifier(Ids.provisioningContinueButton)
                     .automationActivate(
                         Ids.provisioningContinueButton,
-                        isEnabled: { snap.overall == .succeeded }
+                        isEnabled: { vm.machine.canContinueProvisioning() }
                     ) {
                         _ = vm.machine.continueFromProvisioning()
                     }

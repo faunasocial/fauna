@@ -26,7 +26,9 @@ from pathlib import Path
 import pytest
 
 from actions.media import MediaActions
+from common.auth import user_folders_list
 from helpers import budgets
+from helpers.set_names import find_set
 from helpers.waiting import (
     describe_photo_backup_funnel,
     photo_backup_funnel,
@@ -164,15 +166,15 @@ def enable_photo_backup(app) -> None:
             f"{driver.diagnose('photo-backup-enable-toggle')}"
         ),
     )
-    # ⚠ IDEMPOTENT, and it has to be: the toggle's state PERSISTS across tests and
-    # across launches (its `@State` seeds from the `fauna.photoBackupEnabled`
-    # UserDefaults key), so a journey that is not the first in the run can find
+    # ⚠ IDEMPOTENT, and it has to be: the toggle's `@State` seeds from the
+    # `fauna.photoBackupEnabled` defaults key, which persists for as long as the
+    # launch's home does (a relaunch pin, a reused home), so a journey can find
     # backup already on — and a blind click then turns it OFF, hiding the entire
     # enabled half of the surface. Measured 2026-09-20: four witnesses failed
-    # exactly that way, alternating down the run order (file 1 passed, the first
-    # test of file 2 failed, its second passed, …) which reads like flakiness and
-    # is not. A user who sees the switch already on does not tap it, so neither
-    # does this.
+    # exactly that way, alternating down the run order — then because the macOS
+    # bare binary's defaults leaked into the real profile across EVERY launch,
+    # fixed 2026-11-04 by `AppDefaults.store`'s per-launch suite. A user who sees
+    # the switch already on does not tap it, so neither does this.
     if driver.get_attr("photo-backup-enable-toggle", "value") != "on":
         driver.click("photo-backup-enable-toggle")
 
@@ -202,6 +204,11 @@ def granted(app) -> bool:
     failure can name itself here instead of masquerading as a product bug.
     """
     driver = app.driver
+    if driver.is_android():
+        # Android's funnel is a subset with no `authorization` leg
+        # (`TestAgent.kt`, convention 11: an absent field is not zero); the grant
+        # is `pm grant` at launch, which fails loudly there, not a live status.
+        return True
     ok = wait_until(
         lambda: ((photo_backup_funnel(driver) or {}).get("authorization")
                  in ("authorized", "limited")),
@@ -319,6 +326,25 @@ def await_photo_in_media(app, tag: str, *, what: str,
     )
     assert names, f"expected a Media row carrying {tag!r}"
     return names
+
+
+#: The set the shared resolver creates or adopts for a device's photo ingress
+#: (`fauna_folders_machine::photo_library::PHOTO_LIBRARY_SET_NAME`;
+#: `folders.md` § Photo backup → *Target set model*).
+PHOTO_LIBRARY_SET = "Photo Library"
+
+
+def photo_library_set(port: int, secret_key: str) -> str:
+    """The photo-library set's name once the nest holds it, else ``""``.
+
+    Found by its ``name_hash``, never by the row's ``name``: the resolver seals
+    the set from birth, so its row rests no plaintext name (schema 114 —
+    `path-sealing.md` § the set-name plane) and a by-name match finds nothing
+    although the set exists. The name returned is what ``sync_changes_list``
+    takes; it addresses the set by the same hash.
+    """
+    rows = user_folders_list(port, secret_key=secret_key).get("folders", [])
+    return PHOTO_LIBRARY_SET if find_set(rows, PHOTO_LIBRARY_SET) else ""
 
 
 def a_tag() -> str:

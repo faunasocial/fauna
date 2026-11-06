@@ -67,6 +67,11 @@ pytestmark = [
     # beside it already needed. Assertion 2 is what tells the two apart, which is
     # the whole reason this test is where a leg reports.
     pytest.mark.windows,
+    # android, 2026-10-31: the seventh app. `folder-audience-select` is a
+    # `TokenSelect` (wire value on the anchor), the website toggle a Switch.
+    # Witness NOT run — no android venue yet; the marker is
+    # the parity ledger, not a green cell.
+    pytest.mark.android,
 ]
 
 # Generous ceilings, not expectations (convention 14): every wait below is a

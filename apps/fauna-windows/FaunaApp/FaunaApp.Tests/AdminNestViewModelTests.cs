@@ -201,15 +201,39 @@ public class AdminNestViewModelTests
     // ── Host-OS maintenance (installers/vps.md § Host OS Maintenance § 4) ──
 
     [Fact]
-    public async Task Load_PopulatesOsMaintenance_UpToDate()
+    public async Task Load_PopulatesOsMaintenance_NoHostData()
     {
         // A nest with no host maintenance channel (the default) reports the serde
-        // defaults (0 / false) off fauna.setup.status → "OS up to date", neither the
-        // count badge nor the restart button (vps.md § 4 — no false alarm on skew).
+        // defaults (0 / false) off fauna.setup.status, which are not a report: the
+        // shared label says "no host data" rather than vouching "up to date" for a
+        // host it cannot see (vps.md § 4), with neither the count badge nor the
+        // restart button.
         var rpc = new MockNestRpcClient
         {
             NextServiceFlags = new uniffi.fauna_ffi.FfiAdminServiceFlags(false, false),
             NextSetupStatus = MockNestRpcClient.MakeSetupStatus(),
+        };
+        var vm = new AdminNestViewModel(rpc);
+
+        await vm.LoadCommand.ExecuteAsync(null);
+
+        Assert.Equal((uint)0, vm.OsSecurityUpdatesPending);
+        Assert.False(vm.OsRebootPending);
+        // No localizer in the test host → Resolve falls back to the dotted key.
+        Assert.Equal("admin.nest_page.os_no_host_data", vm.OsMaintenanceStatus);
+        Assert.Null(vm.Error);
+        Assert.Contains("SetupStatus", rpc.Calls);
+    }
+
+    [Fact]
+    public async Task Load_PopulatesOsMaintenance_UpToDate()
+    {
+        // A host that reported a status file with nothing pending → "OS up to date",
+        // neither the count badge nor the restart button.
+        var rpc = new MockNestRpcClient
+        {
+            NextServiceFlags = new uniffi.fauna_ffi.FfiAdminServiceFlags(false, false),
+            NextSetupStatus = MockNestRpcClient.MakeSetupStatus(osHostStatusPresent: true),
         };
         var vm = new AdminNestViewModel(rpc);
 
@@ -519,6 +543,98 @@ public class AdminNestViewModelTests
 
         Assert.False(vm.WebAppOriginLoaded);
         Assert.False(vm.WebAppOriginCanSet);
+        Assert.Null(vm.Error);
+    }
+
+    // ── Update channel (nest/update-channel.md § The UI) ──
+
+    private static readonly uniffi.fauna_provisioning.UpdateChannel Stable =
+        uniffi.fauna_provisioning.UpdateChannel.Stable;
+    private static readonly uniffi.fauna_provisioning.UpdateChannel Dev =
+        uniffi.fauna_provisioning.UpdateChannel.Dev;
+
+    [Fact]
+    public async Task UpdateChannel_UnmarkedAndDisabledUntilReadLands()
+    {
+        var vm = NewVm(new MockNestRpcClient());
+
+        Assert.False(vm.UpdateChannelLoaded);
+        Assert.False(vm.UpdateChannelCanSet);
+        Assert.False(vm.IsUpdateChannelSelected(Stable));
+        Assert.False(vm.UpdateChannelCanSave);
+
+        await vm.LoadCommand.ExecuteAsync(null);
+
+        Assert.True(vm.UpdateChannelLoaded);
+        Assert.True(vm.UpdateChannelCanSet);
+        Assert.True(vm.IsUpdateChannelSelected(Stable));
+        Assert.False(vm.IsUpdateChannelSelected(Dev));
+    }
+
+    [Fact]
+    public async Task UpdateChannel_CanSetFalseDisablesRadiosAndIgnoresPicks()
+    {
+        var rpc = new MockNestRpcClient();
+        rpc.NextUpdateChannelView = rpc.NextUpdateChannelView with { canSet = false };
+        var vm = NewVm(rpc);
+        await vm.LoadCommand.ExecuteAsync(null);
+
+        vm.SelectUpdateChannel(Dev);
+
+        Assert.False(vm.UpdateChannelCanSet);
+        Assert.False(vm.UpdateChannelCanSave);
+        Assert.True(vm.IsUpdateChannelSelected(Stable));
+        await vm.SaveUpdateChannelAsync();
+        Assert.Empty(rpc.UpdateChannelSetCalls);
+    }
+
+    [Fact]
+    public async Task UpdateChannel_PickIsLocalSaveCommitsAndRepaintsFromReply()
+    {
+        var rpc = new MockNestRpcClient();
+        var vm = NewVm(rpc);
+        await vm.LoadCommand.ExecuteAsync(null);
+
+        vm.SelectUpdateChannel(Dev);
+
+        Assert.Empty(rpc.UpdateChannelSetCalls); // a pick dispatches nothing
+        Assert.True(vm.IsUpdateChannelSelected(Dev));
+        Assert.True(vm.UpdateChannelCanSave);
+
+        await vm.SaveUpdateChannelAsync();
+
+        Assert.Equal(new[] { Dev }, rpc.UpdateChannelSetCalls);
+        Assert.True(vm.IsUpdateChannelSelected(Dev));
+        Assert.False(vm.UpdateChannelWorking);
+        Assert.Null(vm.Error);
+    }
+
+    [Fact]
+    public async Task UpdateChannel_SaveFailureRoutesToPageErrorKeepsDraft()
+    {
+        var rpc = new MockNestRpcClient();
+        var vm = NewVm(rpc);
+        await vm.LoadCommand.ExecuteAsync(null);
+        vm.SelectUpdateChannel(Dev);
+
+        rpc.NextError = "boom";
+        await vm.SaveUpdateChannelAsync();
+
+        Assert.False(string.IsNullOrEmpty(vm.Error));
+        Assert.True(vm.IsUpdateChannelSelected(Dev));
+        Assert.False(vm.UpdateChannelWorking);
+    }
+
+    [Fact]
+    public async Task UpdateChannel_FailedReadLeavesSectionUnloadedNotPageFailed()
+    {
+        var rpc = new MockNestRpcClient { NextUpdateChannelReadError = true };
+        var vm = NewVm(rpc);
+
+        await vm.LoadCommand.ExecuteAsync(null);
+
+        Assert.False(vm.UpdateChannelLoaded);
+        Assert.False(vm.UpdateChannelCanSet);
         Assert.Null(vm.Error);
     }
 

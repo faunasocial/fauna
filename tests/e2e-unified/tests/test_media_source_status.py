@@ -42,7 +42,7 @@ from common import (
 from common.auth import UNBINDING_MAX_DEVICES, _user_call, set_tier_caps
 from conftest import _login_app_as, _make_user, _seed_cross_set_media
 from helpers import sync_seats
-from helpers.set_names import set_name_hash
+from helpers.set_names import item_in_set
 from i18n.strings import S
 
 pytestmark = [pytest.mark.tier2, pytest.mark.tier_3]
@@ -56,19 +56,6 @@ ITEM_BUDGET_S = 60.0
 RECORD_BUDGET_S = 180.0
 
 
-def _in_folder(item: dict, folder: str) -> bool:
-    """Whether a ``fauna.media.list`` item belongs to the set called ``folder``.
-
-    By hash first: once a seat's engine stamps the sealed set name the set rests
-    no plaintext name (schema 114), so the item's ``folder`` is blank beside its
-    ``folder_hash`` — a plaintext-only match finds nothing although the record
-    landed. A set no engine has stamped still carries its plaintext."""
-    raw = item.get("folder_hash")
-    if raw is not None and bytes(raw) == set_name_hash(folder):
-        return True
-    return item.get("folder") == folder
-
-
 def _wire_verdicts(nest_instance, secret_key: str, folder: str) -> tuple:
     """``(media.list, sync.status)`` ``source_online`` for ``folder`` — the two
     replies carrying the one per-folder verdict, read straight off the nest."""
@@ -76,7 +63,7 @@ def _wire_verdicts(nest_instance, secret_key: str, folder: str) -> tuple:
     items = _user_call(port, secret_key, "fauna.media.list", {"limit": 1000, "cursor_version": 2}, url).get(
         "items", []
     )
-    listed = {item.get("source_online") for item in items if _in_folder(item, folder)}
+    listed = {item.get("source_online") for item in items if item_in_set(item, folder)}
     status = sync_status(port, secret_key=secret_key, folder=folder, base_url=url)
     return listed, status.get("source_online")
 
@@ -90,7 +77,7 @@ def _await_listed(nest_instance, secret_key: str, folder: str, budget: float) ->
         items = _user_call(
             port, secret_key, "fauna.media.list", {"limit": 1000, "cursor_version": 2}, url
         ).get("items", [])
-        mine = [item for item in items if _in_folder(item, folder)]
+        mine = [item for item in items if item_in_set(item, folder)]
         if mine or time.monotonic() >= deadline:
             return mine
         time.sleep(0.5)
@@ -111,7 +98,7 @@ def _await_wire_verdicts(nest_instance, secret_key: str, folder: str, want: tupl
 # asked anything, on the same red as tui's own arm: the holder DID record the
 # file, but the seat's start stamps the sealed set name, after which the item's
 # plaintext `folder` is blank and only `folder_hash` names the set — the
-# plaintext-only match `_in_folder` replaced read the record as missing. They
+# plaintext-only match `item_in_set` replaced read the record as missing. They
 # join with their own run; android joins with its venue.
 @pytest.mark.tui
 @pytest.mark.macos
@@ -270,6 +257,7 @@ def test_media_item_says_whether_its_folder_can_be_reached_apart_from_its_sync_s
 @pytest.mark.ios
 @pytest.mark.windows
 @pytest.mark.tui
+@pytest.mark.android
 @pytest.mark.feature("media")
 def test_media_item_in_a_full_folder_is_reachable_with_no_seat_connected(
     request, app, nest_instance

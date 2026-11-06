@@ -56,7 +56,6 @@ import time
 
 from nacl.signing import SigningKey
 
-from common import CLAIM_CODE
 from common.auth import mint_token_via_handshake, port_base_url
 
 from clients.ws_rpc_admin_client import WsRpcAdminClient
@@ -153,7 +152,7 @@ def ws_client(sk: SigningKey, port: int) -> WsRpcAdminClient:
     )
 
 
-def _claim_and_open_registration(port: int) -> SigningKey:
+def _claim_and_open_registration(port: int, claim_code: str) -> SigningKey:
     """Claim the nest, then set its registration posture to ``open``.
 
     ⚠ 2026-08-20: this step did not
@@ -197,7 +196,7 @@ def _claim_and_open_registration(port: int) -> SigningKey:
         anon.call(
             "fauna.auth.claim_admin",
             {
-                "claim_code": CLAIM_CODE,
+                "claim_code": claim_code,
                 "actor_id": bytes(admin_sk.verify_key).hex(),
                 "signature": sig.hex(),
                 "timestamp": timestamp,
@@ -226,7 +225,9 @@ def test_alice_self_service_onboarding(onboarding_nest):
     # A fresh nest seeds `closed`, so self-service has an admin step in
     # front of it now. Everything from step 2 on is Alice alone, with no
     # further admin help — which is what "self-service" means today.
-    _claim_and_open_registration(port)
+    # The handle's own code: the image mints one per container, so the
+    # standalone constant is refused in docker mode.
+    _claim_and_open_registration(port, onboarding_nest["claim_code"])
 
     # --- Step 1: Query node info ---
     info = ws_api.nest_info(port)

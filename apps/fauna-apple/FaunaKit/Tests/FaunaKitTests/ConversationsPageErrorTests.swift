@@ -138,3 +138,51 @@ import Foundation
         vm.pageError == L.conversations.errors.receiveStopped,
         "the dead-rail notice must outrank both the send failure and the floor")
 }
+
+@MainActor
+@Test func pageErrorRanksStateNeedsNewerAppAboveReceiveStoppedAndBelowServedElsewhere() {
+    // The sixth truth (`conversations.md` § Errors & edge cases): a newer
+    // build's conversation state is a standing refusal beside the role lock,
+    // outranking the dead rail and the snapshot error; no gesture clears it.
+    let vm = ConversationsVM()
+    vm.manager.injectPageErrorForTest(error: LocalizedText(
+        key: "conversations.unified.error_add_participant",
+        args: ["message": "no key package published"]))
+    vm.manager.markReceiveStoppedForTest()
+    #expect(vm.pageError == L.conversations.errors.receiveStopped, "sanity: the dead rail shows first")
+
+    vm.manager.setEngineStateNeedsNewerApp(needs: true)
+    #expect(vm.pageError == L.conversations.errors.stateNeedsNewerApp, "the newer-build notice must shadow the dead rail")
+
+    vm.manager.clearPageError()
+    #expect(vm.pageError == L.conversations.errors.stateNeedsNewerApp, "no gesture clears the notice")
+
+    vm.manager.setEngineServedElsewhere(served: true)
+    #expect(vm.pageError == L.conversations.errors.servedElsewhere, "the role-lock refusal still outranks it")
+}
+
+@MainActor
+@Test func receiveStoppedTestDoorsMarkThenRetireTheNotice() {
+    // The macOS/iOS `conversations_mark_receive_stopped` /
+    // `conversations_begin_receive_loop` arms (conversations outcome 18): the
+    // mark answers "pending" until the real loop has begun, then "marked" and
+    // the page shows the notice; a newer loop retires it.
+    let vm = ConversationsVM()
+    vm.manager.beginReceiveLoopForTest()
+    #expect(ConversationsTestInject.markReceiveStopped(in: vm.manager) == "marked")
+    #expect(vm.pageError == L.conversations.errors.receiveStopped)
+
+    ConversationsTestInject.beginReceiveLoop(in: vm.manager)
+    #expect(vm.pageError != L.conversations.errors.receiveStopped, "a newer loop must retire the notice")
+}
+
+@MainActor
+@Test func receiveStoppedMarkAnswersPendingBeforeTheRealLoopHasBegun() {
+    // Before the session's real receive loop has claimed its generation the
+    // mark door answers "pending" and marks nothing: that later claim would
+    // retire a death marked now, so the action layer asks again instead.
+    let vm = ConversationsVM()
+    #expect(!vm.manager.receiveLoopBegunForTest(), "sanity: a fresh manager has no loop yet")
+    #expect(ConversationsTestInject.markReceiveStopped(in: vm.manager) == "pending")
+    #expect(vm.pageError != L.conversations.errors.receiveStopped, "a pending answer must mark nothing")
+}

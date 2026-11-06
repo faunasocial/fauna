@@ -1,0 +1,99 @@
+---
+import Base from '../layouts/Base.astro';
+import Critter from '../components/Critter.astro';
+// The prose is single-sourced from docs/sites/fauna-social/apps.md, like
+// every other page here (served at /apps since 2026-10-24; /official-apps
+// redirects here). Two things on the page are generated, never typed:
+//
+// - `{releases}`, the releases page every official download comes from, read
+//   from installer/official-apps.json — the one tracked list of the identities
+//   the official apps and releases carry, which a merge gate
+//   holds equal to the tree's own pins (release-integrity.md § Release signing →
+//   The official-apps list);
+// - `{downloads}`, the downloads table, built from installer/downloads.json:
+//   each cell links its file at the release of the newest version the release
+//   table records (docs/features/matrix.json's `versions`). The release
+//   workflow refuses to publish files the table disagrees with,
+//   so a cell never links a file its release lacks.
+import manifest from '../../../../installer/official-apps.json';
+import downloads from '../../../../installer/downloads.json';
+import matrix from '../../../../docs/features/matrix.json';
+import { compiledContent, frontmatter as fm } from '../../../../docs/sites/fauna-social/apps.md';
+import { fill } from '../data/fill.ts';
+import { takeOpening } from '../data/copy.ts';
+
+const repo = manifest.platforms
+  .flatMap((platform) => platform.identities)
+  .find((identity) => identity.kind === 'github-release-repo')?.value;
+if (typeof repo !== 'string') {
+  throw new Error('installer/official-apps.json lists no github-release-repo');
+}
+const releasesUrl = `${repo}/releases`;
+const releases = `<a href="${releasesUrl}">${releasesUrl.replace(/^https:\/\//, '')}</a>`;
+
+// The newest released version, by its numbers (0.1.10 after 0.1.9).
+const semver = (v: string) => v.split('.').map(Number);
+const newer = (a: string, b: string) => {
+  const [x, y] = [semver(a), semver(b)];
+  for (let i = 0; i < Math.max(x.length, y.length); i++) {
+    if ((x[i] ?? 0) !== (y[i] ?? 0)) return (x[i] ?? 0) > (y[i] ?? 0);
+  }
+  return false;
+};
+const version = matrix.versions
+  .map((release: { version: string }) => release.version)
+  .reduce((best: string | null, v: string) => (best === null || newer(v, best) ? v : best), null);
+if (version === null) {
+  throw new Error('docs/features/matrix.json records no released version');
+}
+
+interface Cell { label: string; file?: string; href?: string }
+interface Row { label: string; cells: Record<string, Cell[]> }
+const rows = downloads.rows as Row[];
+// Only operating systems the release carries something for get a column.
+const columns = downloads.columns.filter((column) =>
+  rows.some((row) => (row.cells[column.id] ?? []).length > 0));
+const escape = (s: string) =>
+  s.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;');
+const link = (cell: Cell) => {
+  const href = cell.file
+    ? `${releasesUrl}/download/v${version}/${cell.file.replaceAll('{version}', version)}`
+    : cell.href!;
+  return `<a href="${escape(href)}">${escape(cell.label)}</a>`;
+};
+const table = [
+  '<table class="downloads">',
+  '<thead><tr><th scope="col"></th>',
+  ...columns.map((column) => `<th scope="col">${escape(column.label)}</th>`),
+  '</tr></thead><tbody>',
+  ...rows.map((row) => [
+    `<tr><th scope="row">${escape(row.label)}</th>`,
+    ...columns.map((column) =>
+      `<td>${(row.cells[column.id] ?? []).map(link).join(' · ')}</td>`),
+    '</tr>',
+  ].join('')),
+  '</tbody></table>',
+].join('');
+
+const { heading, lead, illustration, rest } = takeOpening(
+  fill(await compiledContent())
+    .replaceAll('{releases}', releases)
+    .replaceAll('{version}', escape(version))
+    .replace(/<p>\s*\{downloads\}\s*<\/p>/, table),
+);
+---
+<Base title={fm.title} description={fm.description}>
+  <div class="wrap page">
+    <article class="prose copy">
+      <div class="page-head">
+        {illustration && <Critter name={illustration} size={90} />}
+        <div>
+          <h1 set:html={heading} />
+          <p class="lead" set:html={lead} />
+        </div>
+      </div>
+
+      <Fragment set:html={rest} />
+    </article>
+  </div>
+</Base>

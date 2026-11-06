@@ -14,6 +14,48 @@ pub use fauna_devices_machine::{
 use crate::folders_client::ffi_folder_members;
 use crate::{FfiError, FfiFolderMember, FfiFoldersClient, FfiNestClient, stringify};
 
+/// The `error-message` texts a folder row's background reads put up, one slot
+/// per (read, set), so a later good answer retires exactly its own text and
+/// never a gesture's (`ui/folders.md` § Errors & edge cases). The rule is
+/// [`fauna_devices_machine::RowReadErrors`]; this object carries it to the
+/// binding apps, whose reads answer on several threads.
+#[derive(Default, uniffi::Object)]
+pub struct FfiRowReadErrors(std::sync::Mutex<fauna_devices_machine::RowReadErrors>);
+
+impl FfiRowReadErrors {
+    fn lock(&self) -> std::sync::MutexGuard<'_, fauna_devices_machine::RowReadErrors> {
+        self.0.lock().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
+#[uniffi::export]
+impl FfiRowReadErrors {
+    #[uniffi::constructor]
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self::default())
+    }
+
+    /// Remember that `read` for `set` put `message` on the banner.
+    pub fn put(&self, read: String, set: String, message: String) {
+        self.lock().put(&read, &set, message);
+    }
+
+    /// `read` answered for `set`: whether the banner, showing `shown`, clears.
+    pub fn retire(&self, read: String, set: String, shown: String) -> bool {
+        self.lock().retire(&read, &set, &shown)
+    }
+
+    /// `set`'s row closed: whether the banner, showing `shown`, clears.
+    pub fn retire_set(&self, set: String, shown: String) -> bool {
+        self.lock().retire_set(&set, &shown)
+    }
+
+    /// Whether `shown` is a row read's own text.
+    pub fn owns(&self, shown: String) -> bool {
+        self.lock().owns(&shown)
+    }
+}
+
 /// The device-place editor's read. It lives here rather than beside
 /// `members_list` in `src/folders_client.rs` because it takes the Devices
 /// page's roster — a `folders`-feature type the Go mail-bridge build does not
@@ -31,9 +73,13 @@ impl FfiFoldersClient {
         name: String,
         devices: Vec<DeviceSummary>,
     ) -> Result<Vec<FfiFolderMember>, FfiError> {
-        let reply = self.client().members_list(name).await.map_err(stringify)?;
-        let rows = fauna_devices_machine::place_rows(&reply.members, &devices);
-        Ok(ffi_folder_members(reply.members, rows))
+        let members = self
+            .client()
+            .row_device_members(name)
+            .await
+            .map_err(stringify)?;
+        let rows = fauna_devices_machine::place_rows(&members, &devices);
+        Ok(ffi_folder_members(members, rows))
     }
 }
 
@@ -263,11 +309,7 @@ fn keyless_posture_over(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    struct NullObserver;
-    impl DevicesObserver for NullObserver {
-        fn on_changed(&self) {}
-    }
+    use fauna_devices_machine::observer::NullObserver;
 
     /// `build_devices_machine` used to hand every FFI app (apple/android/
     /// windows) a keyless `DevicesMachine`, so a conflict on a sealed-only
@@ -282,7 +324,7 @@ mod tests {
     /// of three separate per-app calls.
     ///
     /// Mutation: drop the wiring below → `has_resolver()`/`has_owner_key()`
-    /// both false → this pin reds (`cargo test -p fauna-ffi --lib`).
+    /// both false → this pin reds (`cargo test -p fauna-ffi-core --lib`).
     #[cfg(all(feature = "folders-author", not(target_arch = "wasm32")))]
     #[test]
     fn the_builder_hands_the_machine_a_resolver_wired_custody() {
@@ -306,7 +348,7 @@ mod tests {
     /// above: the attestor needs only the identity key the connection holds.
     ///
     /// Mutation: drop the `set_audience_attestor` wiring → this reds
-    /// (`cargo test -p fauna-ffi --lib`).
+    /// (`cargo test -p fauna-ffi-core --lib`).
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn the_builder_hands_the_machine_the_audience_attestor() {
@@ -330,7 +372,7 @@ mod tests {
     ///
     /// Mutation: drop the `machine.set_fleet_removal(...)` wiring in
     /// [`build_devices_machine`] → `fleet_removal()` answers `None` → this pin
-    /// reds (`cargo test -p fauna-ffi --lib`).
+    /// reds (`cargo test -p fauna-ffi-core --lib`).
     #[cfg(feature = "account-runtime")]
     #[tokio::test]
     async fn the_builder_hands_the_machine_the_fleet_removal_door() {

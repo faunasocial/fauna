@@ -181,7 +181,7 @@ pub const fn allowlisted_kinds() -> [&'static str; 7] {
 /// ([`crate::store_serve`]). A Rust constant — never a knob.
 const MAX_BLOCK_BYTES_PER_PULL: usize = 700 * 1024;
 
-pub use crate::store_serve::ServeStoreHandle;
+pub use crate::store_serve::{ServeStoreClosed, ServeStoreHandle};
 
 // ── The server ───────────────────────────────────────────────────────────────
 
@@ -290,6 +290,21 @@ impl PeerSyncServer {
             own_endpoints: RwLock::new(None),
             observed_endpoints: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// The close of this server's OWN account store, to wait on once the
+    /// server and every handle the node's handlers held to it are gone
+    /// ([`ServeStoreClosed`]). The own store is the server's alone; a
+    /// custodied store's handle is shared with whoever registered it
+    /// ([`Self::set_custodied`]), which owns waiting for that one.
+    pub fn own_store_closed(&self) -> ServeStoreClosed {
+        self.served
+            .read()
+            .unwrap()
+            .get(&self.account)
+            .expect("the own entry is constructed in and never removed")
+            .store
+            .closed()
     }
 
     /// Publish this device's current dial identity + candidates, answered in
@@ -476,21 +491,6 @@ impl PeerSyncServer {
         Ok((verdict, entry.store))
     }
 
-    /// [`Self::admitted_connection`] plus the scope check — the preflight of
-    /// the kinds whose request names the one scope they serve.
-    fn admitted_for(
-        &self,
-        peer: &EndpointKey,
-        slot: &Mutex<Option<AdmittedConnection>>,
-        scope: &str,
-    ) -> Result<ServeStoreHandle, RpcError> {
-        let (verdict, store) = self.admitted_connection(peer, slot)?;
-        if !verdict.admits_scope(&verdict.account, scope) {
-            return Err(not_admitted("the verdict does not admit this scope"));
-        }
-        Ok(store)
-    }
-
     async fn handle_admit(
         &self,
         peer: &EndpointKey,
@@ -628,10 +628,16 @@ impl PeerSyncServer {
         slot: &Mutex<Option<AdmittedConnection>>,
         payload: Value,
     ) -> Result<Value, RpcError> {
+        // Admission before parsing (wormability rule 1): the verdict is read
+        // first, and the scope the request names is checked against it once
+        // the request is parsed.
+        let (verdict, store) = self.admitted_connection(peer, slot)?;
         let req: SyncChangesListRequest = from_value(&payload)?;
         let (item_class, scope) =
             crate::store_serve::changes_list_scope(&req).map_err(serve_refusal)?;
-        let store = self.admitted_for(peer, slot, &scope)?;
+        if !verdict.admits_scope(&verdict.account, &scope) {
+            return Err(not_admitted("the verdict does not admit this scope"));
+        }
         let reply = crate::store_serve::serve_changes_list(&store, item_class, scope, &req)
             .await
             .map_err(serve_refusal)?;
@@ -644,7 +650,6 @@ impl PeerSyncServer {
         slot: &Mutex<Option<AdmittedConnection>>,
         payload: Value,
     ) -> Result<Value, RpcError> {
-        let req: PeerSyncBlocksPullRequest = from_value(&payload)?;
         // The want-list is scope-less on the wire (blocks are
         // content-addressed), so the scope check runs per block against its
         // index row below; the preflight asks only metering + verdict-exists
@@ -653,6 +658,8 @@ impl PeerSyncServer {
         // shape) admits no account-state scope, yet the per-block check is
         // exactly what its bound is for.
         let (verdict, store) = self.admitted_connection(peer, slot)?;
+        // Admission before parsing (wormability rule 1).
+        let req: PeerSyncBlocksPullRequest = from_value(&payload)?;
 
         let mut cids = Vec::with_capacity(req.cids.len());
         for cid in &req.cids {
@@ -715,8 +722,10 @@ impl PeerSyncServer {
         slot: &Mutex<Option<AdmittedConnection>>,
         payload: Value,
     ) -> Result<Value, RpcError> {
-        let req: PeerSyncChunksPullRequest = from_value(&payload)?;
+        // Admission before parsing (wormability rule 1): the request's shape
+        // is read only once the connection is admitted.
         self.admitted_own_device(peer, slot)?;
+        let req: PeerSyncChunksPullRequest = from_value(&payload)?;
         let mut wants = Vec::with_capacity(req.wants.len());
         for want in &req.wants {
             let key = <[u8; 32]>::try_from(want.store_key.as_ref())
@@ -796,8 +805,8 @@ impl PeerSyncServer {
         slot: &Mutex<Option<AdmittedConnection>>,
         payload: Value,
     ) -> Result<Value, RpcError> {
-        let req: PeerSyncChangesListRequest = from_value(&payload)?;
         self.admitted_own_device(peer, slot)?;
+        let req: PeerSyncChangesListRequest = from_value(&payload)?;
         let page = crate::ranged::MAX_ROWS_PER_PAGE;
         let rows = match &self.config.folder_changes {
             Some(source) => source(req.folder.clone(), req.since, page + 1)
@@ -815,6 +824,7 @@ impl PeerSyncServer {
                 change: row.change,
                 sequenced: row.sequenced,
                 signer_cert: row.signer_cert,
+                group_base: None,
                 extra: Default::default(),
             })
             .collect();
@@ -838,8 +848,8 @@ impl PeerSyncServer {
         slot: &Mutex<Option<AdmittedConnection>>,
         payload: Value,
     ) -> Result<Value, RpcError> {
-        let req: PeerSyncManifestsGetRequest = from_value(&payload)?;
         self.admitted_own_device(peer, slot)?;
+        let req: PeerSyncManifestsGetRequest = from_value(&payload)?;
         // One page of hashes per request: each is a source read (a DB open in
         // the sync agent) and a frame holds ~29k of them. The sibling client
         // asks for one at a time.
@@ -1769,6 +1779,55 @@ mod tests {
         let reply: PeerSyncChunksPullReply = from_value(&reply).unwrap();
         assert!(reply.chunks.is_empty());
         assert_eq!(reply.missing.len(), 1);
+    }
+
+    /// Wormability rule 1 (`p2p.md` § Wormability posture): admission before
+    /// parsing. Every door past the admission exchange answers an unadmitted
+    /// connection's request with the admission refusal **before** it reads the
+    /// request's shape — so a malformed payload from a stranger meets the
+    /// same `not_admitted` a well-formed one does, never a decode error that
+    /// says the parser ran.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn every_data_door_refuses_an_unadmitted_peer_before_parsing_its_request() {
+        let (_dir, server, _owner) = admit_server(None).await;
+        let slot = Mutex::new(None);
+        let peer = EndpointKey::from_bytes([0x0B; 32]);
+        let malformed = || to_value(&("not", "a", "request")).unwrap();
+
+        let refusals = [
+            (
+                "chunks.pull",
+                server.handle_chunks_pull(&peer, &slot, malformed()).await,
+            ),
+            (
+                "folder changes.list",
+                server
+                    .handle_folder_changes_list(&peer, &slot, malformed())
+                    .await,
+            ),
+            (
+                "manifests.get",
+                server
+                    .handle_folder_manifests_get(&peer, &slot, malformed())
+                    .await,
+            ),
+            (
+                "blocks.pull",
+                server.handle_blocks_pull(&peer, &slot, malformed()).await,
+            ),
+            (
+                "sync changes.list",
+                server.handle_changes_list(&peer, &slot, malformed()).await,
+            ),
+        ];
+        for (door, outcome) in refusals {
+            let err = outcome.expect_err("an unadmitted peer is never served");
+            assert_eq!(
+                err.code, ERR_NOT_ADMITTED,
+                "{door}: an unadmitted peer's malformed request must meet the admission \
+                 refusal, not the parser: {err:?}"
+            );
+        }
     }
 
     fn custody_admit_payload(owner: &ActorKeypair, custodian: [u8; 32]) -> (Value, Vec<u8>) {

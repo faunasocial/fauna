@@ -530,6 +530,54 @@ impl PlaneMachine {
             .expect("the generation publishes");
     }
 
+    /// Record in the owner's signed grant log a `Mint` whose deposit tuple over
+    /// `folder_id` is confined to `writer`, through the production ledger door,
+    /// and publish it — the authorization the owner's consent records, and the
+    /// set the adopter admits a parked item's signer against
+    /// (`folder-deposit.md` § The depositor signs, the owner's device verifies).
+    async fn authorize_deposit_writer(&self, folder_id: i64, writer: [u8; 32]) {
+        use fauna_core::grant_event::{
+            CLASS_DEPOSIT, GrantEvent, GrantEventKind, GrantEventScope, deposit_folder_token,
+            writer_factor,
+        };
+        let owner = ActorKeypair::from_secret(self.account);
+        let mint = GrantEvent {
+            grant_id: vec![0xD5; 16],
+            holder: DEPOSIT_HOLDER.to_vec(),
+            kind: GrantEventKind::Mint,
+            scope: vec![
+                GrantEventScope {
+                    class: CLASS_DEPOSIT.into(),
+                    kind: Some(deposit_folder_token(folder_id)),
+                    tier: None,
+                }
+                .with_factor(&writer_factor(&writer)),
+            ],
+            window_start: 1_000,
+            window_end: u64::MAX / 2,
+            at: 1_000,
+            sig: Vec::new(),
+        }
+        .sign(owner.signing_key())
+        .expect("the mint signs");
+        let mut ledger = fauna_core::succession_ledger::SuccessionLedger::empty(owner.actor_id());
+        ledger.grant_events.push(mint);
+        let plane = self.plane();
+        fauna_sync_engine::succession_ledger_rows::merge_succession_ledger(
+            &self.store,
+            &plane,
+            owner.actor_id(),
+            &ledger,
+            &[],
+        )
+        .await
+        .expect("the grant log writes through the succession-ledger door");
+        plane
+            .publish_pending()
+            .await
+            .expect("the grant log publishes");
+    }
+
     /// The pump legs a sibling machine's join needs from this one: walk the
     /// feed (the sibling's enrollment), then top the current generation up to
     /// every enrolled member — so a principal enrolled after the first mint
@@ -1351,6 +1399,65 @@ async fn app_dead_host_refresh_picks_up_a_post_construction_remote_change() {
     );
 }
 
+/// A remote delete of a file this host HYDRATED reaches the enumeration: the
+/// owner's other device deletes it after the OS fetched it here, and the next
+/// refresh drops the row and reports `changed`, so the appex signals and
+/// fileproviderd evicts its copy (`delete-propagation.md` § *How a delete
+/// travels*, the on-demand bullet; `on-demand-files-apple.md` § Apple File
+/// Provider binding, *A remote delete of a hydrated item*).
+#[tokio::test]
+async fn app_dead_host_refresh_applies_a_remote_delete_of_a_hydrated_file() {
+    let owner = ActorKeypair::from_secret(OWNER_SECRET).actor_id().0;
+    let (url, bearer) = start_test_nest(owner).await;
+
+    let owner_watch = tempfile::tempdir().unwrap();
+    std::fs::write(owner_watch.path().join("opened.txt"), b"opened here\n").unwrap();
+    let (owner_engine, owner_nest) =
+        owner_write_engine(&url, &bearer, owner_watch.path().to_path_buf());
+    owner_nest
+        .connect()
+        .await
+        .expect("owner nest_client must reach Connected");
+    assert!(
+        owner_engine
+            .upload_file("opened.txt")
+            .await
+            .expect("upload")
+            .recorded
+    );
+
+    let (host, _root) = app_dead_host(&url, &bearer, backup_key_bytes()).await;
+    let fetched = tokio::time::timeout(Duration::from_secs(30), host.fetch("opened.txt".into()))
+        .await
+        .expect("fetch must not hang")
+        .expect("fetch hydrates the file");
+    assert_eq!(fetched.bytes, b"opened here\n");
+
+    // The owner's other device deletes the file the OS just hydrated here.
+    std::fs::remove_file(owner_watch.path().join("opened.txt")).unwrap();
+    assert!(
+        owner_engine
+            .handle_delete("opened.txt")
+            .await
+            .expect("record the delete")
+            .recorded
+    );
+
+    assert!(
+        host.refresh().await.expect("refresh"),
+        "the applied delete is a change the enumerator must hear of"
+    );
+    let after = host
+        .enumerate(String::new())
+        .await
+        .expect("enumerate post-refresh");
+    assert!(
+        !after.iter().any(|i| i.rel == "opened.txt"),
+        "the remotely deleted hydrated file leaves the enumeration; got {:?}",
+        after.iter().map(|i| &i.rel).collect::<Vec<_>>()
+    );
+}
+
 /// The refresh tick must stay quiet for a set containing a 0-byte file. The fold
 /// stamps the empty-content `local_hash` once at populate (so a later OS
 /// materialization isn't misread as a local edit), but an unchanged head must
@@ -1874,8 +1981,10 @@ async fn an_on_demand_owner_shares_a_set_and_its_prebind_files_reach_members() {
         );
         let entry = od.db().get_entry(rel).unwrap().expect("row kept");
         assert_eq!(
-            entry.content_key_version,
-            Some(content_keys.current_version()),
+            entry.content_stamp,
+            Some(fauna_core::blob_seal::SealStamp::Version(
+                content_keys.current_version()
+            )),
             "{rel}'s row is stamped at the set's generation"
         );
     }
@@ -3757,15 +3866,22 @@ const DEPOSIT_NAME: &str = "deposited.txt";
 const DEPOSIT_BODY: &[u8] = b"a third party's deposited bytes\n";
 /// `start_test_nest` mints [`FOLDER`] as row 1.
 const FOLDER_ROW: i64 = 1;
+/// The depositor's writer signing key's seed (`deposit_through_the_door`).
+const DEPOSIT_WRITER_SEED: [u8; 32] = [0x5D; 32];
+
+/// The depositor's writer key, as the owner's grant log names it.
+fn deposit_writer() -> [u8; 32] {
+    ed25519_dalek::SigningKey::from_bytes(&DEPOSIT_WRITER_SEED)
+        .verifying_key()
+        .to_bytes()
+}
 
 /// Give the owner the recipient seal key the provision door writes from
 /// `msek` — what the deposit door seals to on the owner's behalf.
 async fn seed_recipient_seal_key(db: &CacheDb, owner: &[u8; 32], msek: &[u8; 32]) {
-    let (_secret, pubkey) = fauna_mls::wrapped_blob::derive_recipient_hpke_keypair(msek);
-    let xwing = fauna_mls::wrapped_blob::derive_recipient_xwing_keypair(msek);
-    db.put_actor_recipient_seal_key(owner, &pubkey, xwing.public.mlkem_encaps_key())
+    db.put_actor_recipient_seal_keys(owner, &common::recipient_seal_keys_for(msek))
         .await
-        .expect("seed the owner's recipient seal key");
+        .expect("seed the owner's recipient seal keys");
 }
 
 /// A third party deposits `name` into [`FOLDER_ROW`] through the real door:
@@ -3782,6 +3898,11 @@ async fn deposit_through_the_door(
         AttestedKeys, ExecutionForm, PrincipalAttestation,
     };
     let scope = format!("fauna:folder:deposit:{FOLDER_ROW}");
+    // The depositor's writer key: attested at the consent, confined into the
+    // grant, and the key it signs the deposit with (`folder-deposit.md` § The
+    // depositor signs, the owner's device verifies).
+    let writer_key = ed25519_dalek::SigningKey::from_bytes(&DEPOSIT_WRITER_SEED);
+    let writer = writer_key.verifying_key().to_bytes();
     state
         .db
         .record_atproto_oauth_grant(
@@ -3798,7 +3919,7 @@ async fn deposit_through_the_door(
             &PrincipalAttestation {
                 keys: AttestedKeys {
                     holder_x25519: Some(DEPOSIT_HOLDER),
-                    writer_ed25519: None,
+                    writer_ed25519: Some(writer),
                 },
                 execution_form: ExecutionForm::Remote,
                 manifest: None,
@@ -3818,6 +3939,7 @@ async fn deposit_through_the_door(
         owner,
         &grant_id,
         &DEPOSIT_HOLDER,
+        &writer,
         fauna_mls::wrapped_blob::GrantWindow(now - 60, i64::MAX as u64),
         &[FOLDER_ROW],
     )
@@ -3843,7 +3965,17 @@ async fn deposit_through_the_door(
             name: name.into(),
             content_type: "text/plain".into(),
             body: serde_bytes::ByteBuf::from(body.to_vec()),
-            extra: Default::default(),
+            sig: serde_bytes::ByteBuf::from(
+                fauna_protocol::folders::DepositStatement::for_body(
+                    FOLDER_ROW,
+                    name,
+                    "text/plain",
+                    body,
+                )
+                .sign(&writer_key)
+                .to_vec(),
+            ),
+            ..Default::default()
         })
         .unwrap(),
     )
@@ -3926,6 +4058,9 @@ async fn a_refresh_adopts_a_parked_deposit_as_a_placeholder() {
         .expect("enumerate root");
     assert!(!before.iter().any(|i| i.rel == DEPOSIT_NAME));
 
+    plane
+        .authorize_deposit_writer(FOLDER_ROW, deposit_writer())
+        .await;
     deposit_through_the_door(&state, &owner, DEPOSIT_NAME, DEPOSIT_BODY).await;
     assert!(
         within("refresh", host.refresh()).await.expect("refresh"),
@@ -3986,13 +4121,16 @@ async fn a_refresh_adopts_a_parked_deposit_as_a_placeholder() {
 #[tokio::test]
 async fn without_mail_custody_a_refresh_leaves_the_deposit_parked() {
     let owner = ActorKeypair::from_secret(OWNER_SECRET).actor_id().0;
-    let (url, bearer, state, _plane) = start_test_nest_with_state(owner).await;
+    let (url, bearer, state, plane) = start_test_nest_with_state(owner).await;
     seed_recipient_seal_key(&state.db, &owner, &DEPOSIT_MSEK).await;
 
     let (host, _root) = app_dead_host(&url, &bearer, backup_key_bytes()).await;
     within("enumerate", host.enumerate(String::new()))
         .await
         .expect("enumerate root");
+    plane
+        .authorize_deposit_writer(FOLDER_ROW, deposit_writer())
+        .await;
     deposit_through_the_door(&state, &owner, DEPOSIT_NAME, DEPOSIT_BODY).await;
 
     assert!(
@@ -4033,6 +4171,9 @@ async fn an_owned_tree_refresh_adopts_a_deposit_into_the_cache_root() {
     within("enumerate", host.enumerate(String::new()))
         .await
         .expect("enumerate root");
+    plane
+        .authorize_deposit_writer(FOLDER_ROW, deposit_writer())
+        .await;
     deposit_through_the_door(&state, &owner, DEPOSIT_NAME, DEPOSIT_BODY).await;
 
     assert!(

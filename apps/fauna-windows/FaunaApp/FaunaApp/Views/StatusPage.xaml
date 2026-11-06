@@ -69,15 +69,10 @@
             <!-- Separator -->
             <Border Height="1" Background="{ThemeResource DividerStrokeColorDefaultBrush}" />
 
-            <!-- Service info / Account identity — carries the cross-platform
-                 `account-settings-link` page landmark (linux status.rs +
-                 web +page.svelte both fold it onto their default Status
-                 sub-page the same way; settings.md § Navigation model).
-                 AutomationProperties.Name required: a bare layout StackPanel
-                 with only an AutomationId is pruned from the UIA tree (same
-                 trap as quota-section below). -->
-            <StackPanel Spacing="8" AutomationProperties.AutomationId="{x:Bind ids:Ids.AccountSettingsLink}"
-                        AutomationProperties.Name="Account">
+            <!-- Service info / Account identity. `account-settings-link` is the
+                 Settings rail's Account row (SettingsShellPage.TagRailRows), not
+                 a landmark here. -->
+            <StackPanel Spacing="8">
                 <TextBlock Style="{StaticResource SubtitleTextBlockStyle}"
                            Text="{loc:Localize Key=status/connection/service}" />
 
@@ -333,6 +328,28 @@
                         AutomationProperties.Name="Region">
                 <TextBlock Style="{StaticResource SubtitleTextBlockStyle}" Text="{loc:Localize Key=region/section_title}" />
                 <StackPanel x:Name="RegionRowsPanel" Spacing="8" />
+            </StackPanel>
+
+            <!-- The nest's rules (nest-rules.md § Acceptance at joining, and a change of
+                 rules → the rules surface), the region section's twin beside it — the
+                 same home web, linux, android and the apple apps give it: the rules in
+                 force for the nest this session reads through (per rule its verdict,
+                 level and the admin's reason verbatim), their version and issue time, and
+                 any rule (or the whole document) not applied on this device. Painted in
+                 code-behind from the shared book's summary (StatusPage.PaintNestRules),
+                 every label already chosen in shared Rust; absent (Collapsed, no UIA
+                 peer) while the shared is_shown rule says so. Named (in code-behind, the
+                 nest's title) so UIA does not prune the container. -->
+            <StackPanel x:Name="NestRulesSection" Spacing="8"
+                        AutomationProperties.AutomationId="{x:Bind ids:Ids.SettingsNestRulesSection}"
+                        AutomationProperties.Name="Nest rules"
+                        Visibility="Collapsed">
+                <TextBlock x:Name="NestRulesTitleText" Style="{StaticResource SubtitleTextBlockStyle}" />
+                <!-- Read by get_text: AutomationId only, no static Name. -->
+                <TextBlock x:Name="NestRulesVersionText"
+                           AutomationProperties.AutomationId="{x:Bind ids:Ids.SettingsNestRulesVersion}"
+                           Opacity="0.7" FontSize="12" TextWrapping="Wrap" />
+                <StackPanel x:Name="NestRulesRowsPanel" Spacing="8" />
             </StackPanel>
         </StackPanel>
     </ScrollViewer>

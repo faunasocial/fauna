@@ -6,6 +6,9 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+# The release repository and URL shape (`fauna_core::version`); the
+# `network` default would drag redb/hickory into a crate that needs none.
+fauna-core = { path = "../fauna-core", default-features = false }
 ed25519-dalek.workspace = true
 reqwest = { workspace = true, features = ["json"] }
 tokio.workspace = true

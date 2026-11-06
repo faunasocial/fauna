@@ -33,8 +33,9 @@ journey's own post id, never on emptiness — ``admin_app``'s nest is
 session-scoped.
 
 App arm: **tui** (the lead app — ``testing.md`` § Default app and nest mode), then
-linux, web and android (the batched trickle-down; android's emulator run is host-owed);
-windows, macos and ios join their trickle-down by extending ``_BUILT_APPS``.
+linux, web and android (the batched trickle-down; android's emulator run is host-owed),
+macos and ios, and windows — built on all seven apps, so the test runs on each with
+no surface gate.
 """
 
 import time
@@ -43,8 +44,7 @@ import uuid
 import pytest
 
 from common.auth import create_actor_and_register
-from helpers.app_surface import app_name, skip_unbuilt
-from helpers.e2e_session import E2E_LOGIN_DEVICE_ID, login_as
+from helpers.e2e_session import e2e_login_device_id, login_as
 from helpers.mail_dedicated_nest import login_as_nest_admin
 
 pytestmark = [
@@ -57,8 +57,6 @@ pytestmark = [
     pytest.mark.macos,
     pytest.mark.ios,
 ]
-
-_BUILT_APPS = ("tui", "linux", "web", "android")
 
 # The shared words every app renders (i18n, en.yaml): the notice
 # (`moderation.admin_block.notice` over `moderation.report.reason.harassment`),
@@ -102,7 +100,7 @@ def _login(app, nest_instance, actor):
         nest_instance,
         actor,
         handle=actor["handle"],
-        device_id=E2E_LOGIN_DEVICE_ID,
+        device_id=e2e_login_device_id(app),
         wait_for_id="feed-tab",
     )
 
@@ -127,15 +125,6 @@ def _quote_embed_text(app, target_post_id):
 def test_the_admin_blocks_a_reported_post_and_unblocks_it_through_the_app(app, nest_instance):
     """report → Block (named confirm) → blocked list → the viewer's notice →
     the author's own view → appeal → Unblock → the same post serves again."""
-    if app_name(app.driver) not in _BUILT_APPS:
-        skip_unbuilt(
-            app.driver,
-            surface="admin-nest-report-block-button",
-            detail="the admin block of a reported item (moderation.md § Admin "
-            "block of a reported item) is built on tui first",
-            tracked="",
-        )
-
     token = uuid.uuid4().hex[:10]
     target_text = f"block target {token}"
     author, viewer, reporter = (_actor(nest_instance) for _ in range(3))

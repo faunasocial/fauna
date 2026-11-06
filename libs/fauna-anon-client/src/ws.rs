@@ -27,14 +27,6 @@ use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 use crate::error::AnonClientError;
 use crate::tls_verify::CaptureHandle;
 
-/// Builds the wss/ws URL for the anonymous (pre-identity) endpoint:
-/// `/api/v1/ws` — no `{actor_id}` segment. An anonymous connection has no
-/// proven actor to key on (transport.md § Pre-identity).
-pub(crate) fn build_anon_ws_url(nest_url: &str) -> String {
-    let base = fauna_core::web::http_to_ws(nest_url);
-    format!("{base}/api/v1/ws")
-}
-
 use crate::tls_dial::ensure_tls_provider;
 
 /// Bounds the connect phase (TCP + TLS + WS-upgrade, whichever of the three
@@ -72,20 +64,31 @@ const CONNECT_DEADLINE: std::time::Duration = crate::dispatch::DEFAULT_DEADLINE;
 /// before its DNS record has propagated; MITM-safe because the capturing
 /// verifier's channel binding authenticates the box by identity, not by the
 /// address dialed (security.md § Transport trust Axis 1).
+///
+/// With `resolve` `None`, the dial follows the reach hint's rule
+/// (`fauna_ws_substrate::reach_hint`): the domain first; if that fails to
+/// reach anything and the process holds a reach hint for the host, the same
+/// request once more over a socket to the hint. The third value says which
+/// socket carried the connection — `true` for an explicit `resolve` and for
+/// the hint fallback — so a caller can tell a domain success from a hint one.
 pub(crate) async fn connect_anonymous(
     nest_url: &str,
     resolve: Option<std::net::SocketAddr>,
-) -> Result<(AnonWsAdapter, CaptureHandle), AnonClientError> {
-    let url = build_anon_ws_url(nest_url);
+) -> Result<(AnonWsAdapter, CaptureHandle, bool), AnonClientError> {
+    let url = fauna_core::transport::anon_ws_url(nest_url);
 
-    let mut request: Request = url
-        .clone()
-        .into_client_request()
-        .map_err(|e| AnonClientError::WebSocket(format!("invalid ws url: {e}")))?;
-    request.headers_mut().insert(
-        "Sec-WebSocket-Protocol",
-        HeaderValue::from_static("fauna.v1"),
-    );
+    let anon_request = || -> Result<Request, AnonClientError> {
+        let mut request: Request = url
+            .clone()
+            .into_client_request()
+            .map_err(|e| AnonClientError::WebSocket(format!("invalid ws url: {e}")))?;
+        request.headers_mut().insert(
+            "Sec-WebSocket-Protocol",
+            HeaderValue::from_static("fauna.v1"),
+        );
+        Ok(request)
+    };
+    let request = anon_request()?;
 
     // rustls 0.23 needs a process-default CryptoProvider before the first
     // `wss://` handshake; install ring once (no-op on a plain `ws://` dev nest).
@@ -100,11 +103,21 @@ pub(crate) async fn connect_anonymous(
     // The process-wide dial budget, taken before the deadline below starts so a
     // paced dial never eats its own connect bound
     // (`fauna_ws_substrate::dial_budget` — every native dial to a nest passes it).
+    // One token for the domain dial and its hint fallback: one logical dial.
     let budget_key = fauna_ws_substrate::dial_budget::nest_key(request.uri());
     let started = std::time::Instant::now();
     fauna_ws_substrate::dial_budget::acquire(&budget_key).await;
     let budget_wait = started.elapsed();
     let nest_for_log = budget_key.clone();
+    // The reach hint, consulted only for a plain domain dial: an explicit
+    // `resolve` is already a hint dial (the launch machine's own fallback), and
+    // the launch phase clears the table before its domain dial anyway.
+    let host = fauna_ws_substrate::reach_hint::host_key_of_uri(request.uri());
+    let hint = match resolve {
+        None => fauna_ws_substrate::reach_hint::hint_for(&host),
+        Some(_) => None,
+    };
+
     // `Box::pin` the deep TLS + WS-upgrade handshake future onto the heap so the
     // enclosing `connect_anonymous` future (and everything that holds it inline up
     // the chain — `AnonymousNestClient::connect`, `mint_bearer_over_handshake`, the
@@ -119,58 +132,110 @@ pub(crate) async fn connect_anonymous(
     // Boxing keeps the big state machine off the stack — the shared root fix for
     // every anon-WS caller (#2). See docs/goal/architecture/apps/native-async-execution.md.
     //
-    // The whole branch (TCP connect + TLS/WS-upgrade, whichever runs) is
-    // wrapped in one `CONNECT_DEADLINE` bound from the outside — deliberately
-    // external to `tokio_tungstenite`'s own connect futures, none of which take
-    // a deadline, so bounding must happen at this call site regardless of what
-    // any one branch does internally.
-    let (ws_stream, _resp) = tokio::time::timeout(CONNECT_DEADLINE, async move {
-        if let Some(addr) = resolve {
-            // Temporary DNS override: dial `addr` directly (`request`'s URI —
-            // hence SNI/`Host`/cert-identity — is untouched, built from
-            // `nest_url` above). `client_async_tls_with_config` mode-dispatches
-            // on the URL scheme (`tungstenite::client::uri_mode`), so passing a
-            // Rustls connector even for a plain `ws://` override is harmless —
-            // it wraps the socket as `MaybeTlsStream::Plain` for a non-TLS
-            // scheme.
-            let tcp = TcpStream::connect(addr)
-                .await
-                .map_err(|e| AnonClientError::WebSocket(format!("tcp connect {addr}: {e}")))?;
-            let connector = tokio_tungstenite::Connector::Rustls(config);
-            Box::pin(tokio_tungstenite::client_async_tls_with_config(
-                request,
-                tcp,
-                Some(ws_config),
-                Some(connector),
-            ))
+    // Each attempt (TCP connect + TLS/WS-upgrade, whichever runs) is wrapped in
+    // one `CONNECT_DEADLINE` bound from the outside — deliberately external to
+    // `tokio_tungstenite`'s own connect futures, none of which take a deadline,
+    // so bounding must happen at this call site regardless of what any one
+    // branch does internally. The hint attempt gets a bound of its own: a
+    // blackholed domain spending the whole deadline is exactly a failure the
+    // hint exists to answer, so it must not have eaten the hint's share.
+    // `tungstenite::Error` is 136 bytes and is the closure's `Err` type by the
+    // dialer's own signature; the success side is already boxed, and the error
+    // is consumed at once by `fail` below, so boxing it too buys nothing.
+    #[allow(clippy::result_large_err)]
+    let dial_once = |request: Request, via: Option<std::net::SocketAddr>| {
+        let config = std::sync::Arc::clone(&config);
+        let url_is_wss = url.starts_with("wss://");
+        async move {
+            // The whole bounded attempt is boxed (not just the handshake inside it):
+            // the domain dial and the hint dial are separate `dial_once` futures held
+            // across the `match` below, and the un-boxed `timeout` + TCP-connect state
+            // of each would otherwise sit inline in `connect_anonymous`'s future.
+            Box::pin(tokio::time::timeout(CONNECT_DEADLINE, async move {
+                if let Some(addr) = via {
+                    // Temporary DNS override: dial `addr` directly (`request`'s
+                    // URI — hence SNI/`Host`/cert-identity — is untouched,
+                    // built from `nest_url` above). `client_async_tls_with_config`
+                    // mode-dispatches on the URL scheme
+                    // (`tungstenite::client::uri_mode`), so passing a Rustls
+                    // connector even for a plain `ws://` override is harmless —
+                    // it wraps the socket as `MaybeTlsStream::Plain` for a
+                    // non-TLS scheme.
+                    let tcp = TcpStream::connect(addr).await?;
+                    let connector = tokio_tungstenite::Connector::Rustls(config);
+                    Box::pin(tokio_tungstenite::client_async_tls_with_config(
+                        request,
+                        tcp,
+                        Some(ws_config),
+                        Some(connector),
+                    ))
+                    .await
+                } else if url_is_wss {
+                    let connector = tokio_tungstenite::Connector::Rustls(config);
+                    Box::pin(tokio_tungstenite::connect_async_tls_with_config(
+                        request,
+                        Some(ws_config),
+                        false,
+                        Some(connector),
+                    ))
+                    .await
+                } else {
+                    // Plain `ws://` — no TLS, nothing to capture.
+                    Box::pin(tokio_tungstenite::connect_async_with_config(
+                        request,
+                        Some(ws_config),
+                        false,
+                    ))
+                    .await
+                }
+            }))
             .await
-        } else if url.starts_with("wss://") {
-            let connector = tokio_tungstenite::Connector::Rustls(config);
-            Box::pin(tokio_tungstenite::connect_async_tls_with_config(
-                request,
-                Some(ws_config),
-                false,
-                Some(connector),
-            ))
-            .await
-        } else {
-            // Plain `ws://` — no TLS, nothing to capture.
-            Box::pin(tokio_tungstenite::connect_async_with_config(
-                request,
-                Some(ws_config),
-                false,
-            ))
-            .await
+            // The connected stream + response ride the heap too: the domain
+            // attempt's result is held across the hint attempt's await.
+            .map(|attempt| attempt.map(Box::new))
         }
-        .map_err(|e| {
-            fauna_ws_substrate::dial_budget::note_dial_error(&budget_key, &e);
-            map_ws_connect_err(e)
-        })
-    })
-    .await
-    .map_err(|_elapsed| {
-        AnonClientError::WebSocket(format!("connect timed out after {CONNECT_DEADLINE:?}"))
-    })??;
+    };
+    let fail = |e: tokio_tungstenite::tungstenite::Error| {
+        fauna_ws_substrate::dial_budget::note_dial_error(&budget_key, &e);
+        map_ws_connect_err(e)
+    };
+    let timed_out =
+        || AnonClientError::WebSocket(format!("connect timed out after {CONNECT_DEADLINE:?}"));
+
+    let (ws_stream, carried_by_hint) = match (Box::pin(dial_once(request, resolve)).await, hint) {
+        (Ok(Ok(connected)), _) => (connected.0, resolve.is_some()),
+        // The domain reached nothing (or nothing within the bound) and the
+        // process holds a hint for it: the same request over the hint's socket.
+        (Ok(Err(domain_err)), Some(addr))
+            if fauna_ws_substrate::reach_hint::is_reachability_failure(&domain_err) =>
+        {
+            tracing::info!(
+                host,
+                %addr,
+                error = %domain_err,
+                "the domain did not reach the nest; dialling its reach hint"
+            );
+            let connected = Box::pin(dial_once(anon_request()?, Some(addr)))
+                .await
+                .map_err(|_elapsed| timed_out())?
+                .map_err(fail)?;
+            (connected.0, true)
+        }
+        (Err(_elapsed), Some(addr)) => {
+            tracing::info!(
+                host,
+                %addr,
+                "the domain dial timed out; dialling its reach hint"
+            );
+            let connected = Box::pin(dial_once(anon_request()?, Some(addr)))
+                .await
+                .map_err(|_elapsed| timed_out())?
+                .map_err(fail)?;
+            (connected.0, true)
+        }
+        (Ok(Err(e)), _) => return Err(fail(e)),
+        (Err(_elapsed), _) => return Err(timed_out()),
+    };
 
     // The one timing line a slow mint needs: budget wait vs the connect itself
     // (TCP + TLS + WS upgrade), so "the nest is slow" and "this process is
@@ -179,9 +244,10 @@ pub(crate) async fn connect_anonymous(
         nest = %nest_for_log,
         budget_wait_ms = budget_wait.as_millis() as u64,
         connect_ms = (started.elapsed() - budget_wait).as_millis() as u64,
+        carried_by_hint,
         "anonymous connect up"
     );
-    Ok((AnonWsAdapter::new(ws_stream), capture))
+    Ok((AnonWsAdapter::new(ws_stream), capture, carried_by_hint))
 }
 
 /// Connect to the nest's **authenticated** endpoint with the subprotocol-bearer
@@ -434,18 +500,6 @@ impl Sink<Bytes> for AnonWsAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn build_anon_ws_url_swaps_scheme_and_omits_actor_id() {
-        assert_eq!(
-            build_anon_ws_url("https://nest.example.com"),
-            "wss://nest.example.com/api/v1/ws"
-        );
-        assert_eq!(
-            build_anon_ws_url("http://localhost:8080"),
-            "ws://localhost:8080/api/v1/ws"
-        );
-    }
 
     /// Regression guard for the cooperative-pool stack overflow (FaunaMacOS
     /// SIGBUS "Could not determine thread index for stack guard region",

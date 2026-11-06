@@ -38,6 +38,8 @@ struct AdminShellView: View {
                 AdminWebView(reloadToken: appState.navGeneration)
             case .mail:
                 AdminMailView(reloadToken: appState.navGeneration)
+            case .mailReports:
+                AdminMailReportsView(reloadToken: appState.navGeneration)
             case .calendar:
                 AdminCalendarView(reloadToken: appState.navGeneration)
             case .contacts:
@@ -52,15 +54,20 @@ struct AdminShellView: View {
                 // pre-filled) touches the App-owned onboarding state, so the
                 // shared FaunaKit view delegates it via this callback, wired by
                 // FaunaMacApp through `appState.onFactoryReset`.
-                AdminNestView(reloadToken: appState.navGeneration) { claimCode in
-                    appState.onFactoryReset?(claimCode)
-                }
+                AdminNestView(
+                    reloadToken: appState.navGeneration,
+                    onFactoryReset: { claimCode in appState.onFactoryReset?(claimCode) },
+                    onRetire: { appState.onRetire?() }
+                )
             case .adminLogs:
                 // The nest's `fauna_log` ring over `fauna.admin.logs` — same
                 // shared `LogsView` as the client Logs page, no Clear
                 // (observability.md § Surfaces).
                 LogsView(
-                    source: .admin(load: { try await client?.api.adminClient().logs() ?? [] }),
+                    source: .admin(
+                        load: { try await client?.api.adminClient().logs() ?? [] },
+                        audit: { try await client?.api.adminClient().auditLog() }
+                    ),
                     headingId: Ids.adminLogsHeading
                 )
             }

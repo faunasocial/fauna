@@ -102,6 +102,8 @@
   import { t } from '#lib/i18n/strings';
   import { resolveLocalized, resolveLocalizedNested, resolveKey, type LocalizedText } from '#lib/i18n/localized';
   import { IDS } from '#lib/generated/uiIds';
+  import NestRulesJoining from '#lib/components/NestRulesJoining.svelte';
+  import { NEST_RULES_LANG } from '#lib/nestRulesPaint';
 
   // Step values produced by the OnboardingMachine. Snake-case translated
   // by `machine.svelte.ts:camelToSnake`. The forbidden stages
@@ -421,6 +423,13 @@
   const inviteRequestSnapshotValue = $derived.by(() => {
     void machineTick.value;
     return m?.inviteRequestSnapshot();
+  });
+  // The nest's rules both joining pages paint above the terms notice
+  // (`nest-rules.md` § Acceptance at joining) — the shared machine decides
+  // whether this page shows them.
+  const joiningNestRulesValue = $derived.by(() => {
+    void machineTick.value;
+    return m?.joiningNestRules(NEST_RULES_LANG);
   });
   // The "this account will be supervised by …" notice a verified out-of-band
   // invite code carries, derived in the shared machine (guardian plus the
@@ -972,7 +981,7 @@
       return;
     }
     if (!secret) {
-      error = t.onboarding.launch.launch_failed;
+      error = t.onboarding.launch.locked_secret_missing;
       return;
     }
     error = '';
@@ -1103,6 +1112,12 @@
         active?.domain ?? '',
         active?.tier ?? 'free',
       );
+      // The machine verified this secret against its nest, but `registered` —
+      // the verified-this-load flag — is the background refresh's alone. After a
+      // post-auth re-trust that refresh already settled on the identity-changed
+      // verdict for this secret, so it is re-run here; on a plain launch it is
+      // still in flight or done, and this is a no-op.
+      if (secret) void identity.reverifyAfterLaunch(secret);
       goto('/app/feed', { replaceState: true });
       return;
     }
@@ -3305,6 +3320,9 @@
       {/if}
 
       {#if handleCheckSnapshotValue?.terms_notice_visible}
+        {#if joiningNestRulesValue}
+          <NestRulesJoining summary={joiningNestRulesValue} />
+        {/if}
         {@render termsNotice()}
       {/if}
 
@@ -3848,6 +3866,11 @@
         <div data-testid={IDS.ERROR_MESSAGE} class="error">{errorMessageValue}</div>
       {/if}
 
+      <!-- Joining is acceptance: the nest's rules directly above the terms
+           notice, once the machine's verified read has landed. -->
+      {#if joiningNestRulesValue}
+        <NestRulesJoining summary={joiningNestRulesValue} />
+      {/if}
       {@render termsNotice()}
 
       <div class="button-group">

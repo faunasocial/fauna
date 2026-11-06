@@ -46,6 +46,10 @@ public sealed partial class BridgeCard : UserControl
     public BridgeCard()
     {
         this.InitializeComponent();
+        FollowsHeading.Text = S.Get("bridges/follows");
+        FollowIdInput.PlaceholderText = S.Get("bridges/id_to_follow");
+        FollowPetnameInput.PlaceholderText = S.Get("bridges/petname_optional");
+        AddFollowButton.Content = S.Get("bridges/add_follow");
         // The ward's asks move off-card (a status read lands, a link/follow is
         // refused on the page's view model): repaint just the ask rows. The static
         // event is app-lifetime, so it is held only while the card is in the tree.
@@ -91,6 +95,24 @@ public sealed partial class BridgeCard : UserControl
     /// over <c>INestRpcClient.BridgesSetSettingsAsync</c> and re-reads.</summary>
     public event EventHandler<BridgeSettingChangedEventArgs>? SettingChanged;
 
+    /// <summary><c>bridge-follow-request-approve</c> / <c>-refuse</c> was pressed on one
+    /// row (bridges.md § Follow requests). The card decides nothing: the host page
+    /// answers it over <c>BridgesViewModel.AnswerFollowRequestAsync</c>, which re-reads.</summary>
+    public event EventHandler<FollowRequestAnswerEventArgs>? FollowRequestAnswer;
+
+    /// <summary><c>bridge-add-follow-button</c> was pressed with a non-blank id (bridges.md
+    /// § User actions). The host adds over <c>BridgesViewModel.AddFollowAsync</c>, which
+    /// re-reads.</summary>
+    public event EventHandler<FollowAddEventArgs>? FollowAdd;
+
+    /// <summary><c>bridge-follow-remove</c> was pressed on one follow row. The host
+    /// removes over <c>BridgesViewModel.RemoveFollowAsync</c>, which re-reads.</summary>
+    public event EventHandler<FollowRemoveEventArgs>? FollowRemove;
+
+    /// <summary>The bridge the add row's buffers were typed for: a recycled card handed a
+    /// different bridge starts with an empty add row.</summary>
+    private string? _renderedBridgeId;
+
     private static void OnBridgeChanged(DependencyObject d, DependencyPropertyChangedEventArgs e)
         => ((BridgeCard)d).Render(e.NewValue as BridgeInfo);
 
@@ -108,9 +130,13 @@ public sealed partial class BridgeCard : UserControl
         Root.Visibility = Visibility.Visible;
         AutomationProperties.SetName(Root, bridge.DisplayName);
         NameText.Text = bridge.DisplayName;
-        IdentityRun.Text = bridge.Identity ?? string.Empty;
-        ModeRun.Text = bridge.Mode ?? string.Empty;
+        var identity = bridge.Linked ? bridge.IdentityLine : null;
+        IdentityText.Text = identity ?? string.Empty;
+        IdentityText.Visibility = identity is null ? Visibility.Collapsed : Visibility.Visible;
+        ModeText.Text = bridge.Mode ?? string.Empty;
         RenderSettings(bridge);
+        RenderFollows(bridge);
+        RenderFollowRequests(bridge);
         RenderSourceAsks(bridge);
         ActionText.Text = bridge.Linked
             ? S.Get("bridges/unlink_action")
@@ -151,6 +177,149 @@ public sealed partial class BridgeCard : UserControl
     private void ActionButton_Click(object sender, RoutedEventArgs e)
     {
         if (Bridge is { } bridge) ActionClick?.Invoke(this, bridge);
+    }
+
+    // ── Follows (bridges.md § Follows; apple's BridgeCardContent `followsContent`,
+    //    tui's bridges.rs). Rendered for a LINKED card whose provider supports
+    //    follows. A row paints the shared follow_display (the nickname, else the id).
+
+    private void RenderFollows(BridgeInfo bridge)
+    {
+        if (_renderedBridgeId != bridge.Id)
+        {
+            FollowIdInput.Text = string.Empty;
+            FollowPetnameInput.Text = string.Empty;
+            _renderedBridgeId = bridge.Id;
+        }
+        FollowRows.Children.Clear();
+        if (!bridge.Linked || !bridge.SupportsFollows)
+        {
+            FollowsPanel.Visibility = Visibility.Collapsed;
+            return;
+        }
+        foreach (var follow in bridge.Follows ?? Array.Empty<BridgeFollow>())
+        {
+            FollowRows.Children.Add(BuildFollowRow(bridge.Id, follow));
+        }
+        FollowsPanel.Visibility = Visibility.Visible;
+    }
+
+    private Grid BuildFollowRow(string bridgeId, BridgeFollow follow)
+    {
+        var display = uniffi.fauna_ffi.FaunaFfiMethods.FollowDisplay(follow.Id, follow.Petname);
+        var row = new Grid { ColumnSpacing = 8 };
+        row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        AutomationProperties.SetAutomationId(row, FaunaApp.UiIds.Ids.BridgeFollowItem);
+        // A bare Grid carrying only an AutomationId is UIA-pruned; the Name keeps it.
+        AutomationProperties.SetName(row, display);
+
+        var text = new TextBlock
+        {
+            Text = display,
+            VerticalAlignment = VerticalAlignment.Center,
+            TextWrapping = TextWrapping.Wrap,
+        };
+        Grid.SetColumn(text, 0);
+
+        // A glyph, so the row's get_text reads the follow alone (FlaUI's GetText skips
+        // single-character icon glyphs); the label is the button's accessible name.
+        var remove = new Button
+        {
+            Content = "\uE711",
+            FontFamily = new Microsoft.UI.Xaml.Media.FontFamily("Segoe MDL2 Assets"),
+            FontSize = 10,
+            Padding = new Thickness(4, 2, 4, 2),
+        };
+        AutomationProperties.SetAutomationId(remove, FaunaApp.UiIds.Ids.BridgeFollowRemove);
+        AutomationProperties.SetName(remove, S.Get("bridges/remove_follow"));
+        Grid.SetColumn(remove, 1);
+        var followId = follow.Id;
+        remove.Click += (_, _) => FollowRemove?.Invoke(this, new FollowRemoveEventArgs(bridgeId, followId));
+
+        row.Children.Add(text);
+        row.Children.Add(remove);
+        return row;
+    }
+
+    private void FollowIdInput_TextChanged(object sender, TextChangedEventArgs e)
+        => AddFollowButton.IsEnabled = !string.IsNullOrWhiteSpace(FollowIdInput.Text);
+
+    private void AddFollowButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (Bridge is not { } bridge) return;
+        var id = FollowIdInput.Text.Trim();
+        if (id.Length == 0) return;
+        var petname = FollowPetnameInput.Text.Trim();
+        // Dispatch clears the buffers; a refused follow's ask keys on its own triple,
+        // never on these (family-safety.md § Feed-source approvals, rule (d)).
+        FollowIdInput.Text = string.Empty;
+        FollowPetnameInput.Text = string.Empty;
+        FollowAdd?.Invoke(this, new FollowAddEventArgs(bridge.Id, id, petname.Length == 0 ? null : petname));
+    }
+
+    // ── Follow requests (bridges.md § Follow requests; apple's BridgeCardContent
+    //    `followRequestsContent`, tui's bridges.rs). Rendered for a LINKED bridge whose
+    //    provider declares the capability: the heading with the count (kept at zero),
+    //    one row per request painting the shared row model's `display`, Approve /
+    //    Refuse forwarding the row's id — no confirm, and the host re-reads.
+
+    private void RenderFollowRequests(BridgeInfo bridge)
+    {
+        FollowRequestRows.Children.Clear();
+        if (!bridge.Linked || !bridge.SupportsFollowRequests)
+        {
+            FollowRequestsPanel.Visibility = Visibility.Collapsed;
+            return;
+        }
+
+        var requests = bridge.FollowRequests ?? Array.Empty<BridgeFollowRequest>();
+        FollowRequestsHeading.Text = S.Format("bridges/follow_requests", requests.Count.ToString());
+        foreach (var request in requests)
+        {
+            FollowRequestRows.Children.Add(BuildFollowRequestRow(bridge.Id, request));
+        }
+        FollowRequestsPanel.Visibility = Visibility.Visible;
+    }
+
+    private Grid BuildFollowRequestRow(string bridgeId, BridgeFollowRequest request)
+    {
+        var row = new Grid { ColumnSpacing = 8 };
+        row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        AutomationProperties.SetAutomationId(row, FaunaApp.UiIds.Ids.BridgeFollowRequestItem);
+        // A bare Grid carrying only an AutomationId is UIA-pruned; the Name is what
+        // materializes the row (memory reference_winui_flaui_datatemplate_name).
+        AutomationProperties.SetName(row, request.Display);
+
+        var text = new TextBlock
+        {
+            Text = request.Display,
+            VerticalAlignment = VerticalAlignment.Center,
+            TextWrapping = TextWrapping.Wrap,
+        };
+        Grid.SetColumn(text, 0);
+
+        var approveButton = new Button { Content = S.Get("bridges/approve_follow_request") };
+        AutomationProperties.SetAutomationId(approveButton, FaunaApp.UiIds.Ids.BridgeFollowRequestApprove);
+        Grid.SetColumn(approveButton, 1);
+
+        var refuseButton = new Button { Content = S.Get("bridges/refuse_follow_request") };
+        AutomationProperties.SetAutomationId(refuseButton, FaunaApp.UiIds.Ids.BridgeFollowRequestRefuse);
+        Grid.SetColumn(refuseButton, 2);
+
+        // Each button captures ITS OWN row's id, never a position the re-read can move.
+        var id = request.Id;
+        approveButton.Click += (_, _) => FollowRequestAnswer?.Invoke(
+            this, new FollowRequestAnswerEventArgs(bridgeId, id, approve: true));
+        refuseButton.Click += (_, _) => FollowRequestAnswer?.Invoke(
+            this, new FollowRequestAnswerEventArgs(bridgeId, id, approve: false));
+
+        row.Children.Add(text);
+        row.Children.Add(approveButton);
+        row.Children.Add(refuseButton);
+        return row;
     }
 
     // ── The ward's feed-source ask (family-safety.md § Feed-source approvals → App
@@ -205,112 +374,18 @@ public sealed partial class BridgeCard : UserControl
         SourceAskPanel.Visibility = rows.IsEmpty ? Visibility.Collapsed : Visibility.Visible;
     }
 
-    // ── Metadata-driven settings (bridges.md § Bridge settings) — built imperatively, one row per BridgeSetting, mirroring
-    //    linux's build_settings_group / tui's setting_elements / web's
-    //    BridgeCard.svelte / android's SettingRow arm-for-arm (priority #1).
+    // ── Metadata-driven settings (bridges.md § Bridge settings) — the one settings renderer, BridgeSettingRows, shared with a
+    //    hosted plugin's settings card on the Bridges page.
 
     private void RenderSettings(BridgeInfo bridge)
     {
         SettingsPanel.Children.Clear();
         foreach (var setting in bridge.Settings)
         {
-            SettingsPanel.Children.Add(BuildSettingRow(bridge.Id, setting));
+            var bridgeId = bridge.Id;
+            SettingsPanel.Children.Add(BridgeSettingRows.Build(setting, value =>
+                SettingChanged?.Invoke(this, new BridgeSettingChangedEventArgs(bridgeId, value))));
         }
-    }
-
-    private FrameworkElement BuildSettingRow(string bridgeId, BridgeSetting setting)
-    {
-        // Which control a setting paints is the shared classifier's call
-        // (fauna_client_bridges::setting_control) — no spelling is matched here.
-        switch (uniffi.fauna_ffi.FaunaFfiMethods.SettingControl(setting.SettingType))
-        {
-            case uniffi.fauna_ffi.FfiSettingControl.Toggle:
-                return BuildToggleRow(bridgeId, setting);
-            case uniffi.fauna_ffi.FfiSettingControl.Number:
-                return BuildTextRow(bridgeId, setting, isNumber: true);
-            case uniffi.fauna_ffi.FfiSettingControl.Text:
-                return BuildTextRow(bridgeId, setting, isNumber: false);
-            default:
-                // Unknown (a setting_type this build predates — a newer nest)
-                // and Select (windows has no picker row yet): a read-only
-                // row, never a dropped setting.
-                // Mirrors tui's Element::chrome fallback / web's/android's
-                // read-only "{label}: {value}" line.
-                var value = setting.BoolValue?.ToString()
-                    ?? setting.NumberValue?.ToString()
-                    ?? setting.TextValue
-                    ?? string.Empty;
-                return new TextBlock { Text = $"{setting.Label}: {value}", Opacity = 0.6 };
-        }
-    }
-
-    private ToggleSwitch BuildToggleRow(string bridgeId, BridgeSetting setting)
-    {
-        var toggle = new ToggleSwitch
-        {
-            Header = setting.Label,
-            OnContent = string.Empty,
-            OffContent = string.Empty,
-            IsOn = setting.BoolValue ?? false,
-        };
-        toggle.Toggled += (_, _) => SettingChanged?.Invoke(this,
-            new BridgeSettingChangedEventArgs(bridgeId, BridgeSettingValue.Bool(setting.Key, toggle.IsOn)));
-        return toggle;
-    }
-
-    /// <summary>A text/number setting row. Commits on BOTH blur and Enter (the
-    /// mail-spam-threshold-override-input / FoldersPage capInput idiom) — Enter
-    /// alone doesn't move focus off a single-line TextBox, so the e2e's
-    /// click-to-commit gesture needs the LostFocus arm too. An unparseable
-    /// number commits nothing (never a client error — nest-side clamping is the
-    /// guard, this is a UX nicety per the row's own scope note).</summary>
-    private Grid BuildTextRow(string bridgeId, BridgeSetting setting, bool isNumber)
-    {
-        var row = new Grid { ColumnSpacing = 8 };
-        row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-        row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-
-        var label = new TextBlock
-        {
-            Text = setting.Label,
-            VerticalAlignment = VerticalAlignment.Center,
-            Opacity = 0.7,
-        };
-        Grid.SetColumn(label, 0);
-
-        var textBox = new TextBox
-        {
-            Width = 120,
-            Text = isNumber ? setting.NumberValue?.ToString() ?? string.Empty : setting.TextValue ?? string.Empty,
-        };
-        Grid.SetColumn(textBox, 1);
-
-        void Commit()
-        {
-            if (isNumber)
-            {
-                if (uniffi.fauna_ffi.FaunaFfiMethods.ParseCountI64(textBox.Text) is long n)
-                {
-                    SettingChanged?.Invoke(this,
-                        new BridgeSettingChangedEventArgs(bridgeId, BridgeSettingValue.Number(setting.Key, n)));
-                }
-            }
-            else
-            {
-                SettingChanged?.Invoke(this,
-                    new BridgeSettingChangedEventArgs(bridgeId, BridgeSettingValue.Text(setting.Key, textBox.Text)));
-            }
-        }
-
-        textBox.LostFocus += (_, _) => Commit();
-        textBox.KeyDown += (_, e) =>
-        {
-            if (e.Key == VirtualKey.Enter) Commit();
-        };
-
-        row.Children.Add(label);
-        row.Children.Add(textBox);
-        return row;
     }
 }
 
@@ -334,6 +409,53 @@ public sealed class SourceAskEventArgs : EventArgs
         Operation = triple.Operation;
         Target = triple.Target;
         Label = label;
+    }
+}
+
+/// <summary>Payload for <see cref="BridgeCard.FollowAdd"/>: the bridge, the external id
+/// and the optional nickname, ready for <c>BridgesViewModel.AddFollowAsync</c>.</summary>
+public sealed class FollowAddEventArgs : EventArgs
+{
+    public string BridgeId { get; }
+    public string Id { get; }
+    public string? Petname { get; }
+
+    public FollowAddEventArgs(string bridgeId, string id, string? petname)
+    {
+        BridgeId = bridgeId;
+        Id = id;
+        Petname = petname;
+    }
+}
+
+/// <summary>Payload for <see cref="BridgeCard.FollowRemove"/>: the bridge and that row's
+/// own follow id.</summary>
+public sealed class FollowRemoveEventArgs : EventArgs
+{
+    public string BridgeId { get; }
+    public string FollowId { get; }
+
+    public FollowRemoveEventArgs(string bridgeId, string followId)
+    {
+        BridgeId = bridgeId;
+        FollowId = followId;
+    }
+}
+
+/// <summary>Payload for <see cref="BridgeCard.FollowRequestAnswer"/> — the bridge, the
+/// row's own request id and the verdict, ready for
+/// <c>BridgesViewModel.AnswerFollowRequestAsync</c>.</summary>
+public sealed class FollowRequestAnswerEventArgs : EventArgs
+{
+    public string BridgeId { get; }
+    public string Id { get; }
+    public bool Approve { get; }
+
+    public FollowRequestAnswerEventArgs(string bridgeId, string id, bool approve)
+    {
+        BridgeId = bridgeId;
+        Id = id;
+        Approve = approve;
     }
 }
 

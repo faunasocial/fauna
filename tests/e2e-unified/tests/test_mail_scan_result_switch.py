@@ -36,8 +36,10 @@ from tests.test_mail_scan_result_on_bubble import SENDER, _message
 pytestmark = [
     pytest.mark.tier_3,
     pytest.mark.tui,
+    pytest.mark.macos,
     pytest.mark.web,
     pytest.mark.linux,
+    pytest.mark.android,
     pytest.mark.real_conversations,
 ]
 

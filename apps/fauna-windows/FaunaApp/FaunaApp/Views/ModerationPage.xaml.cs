@@ -46,6 +46,10 @@ public sealed partial class ModerationPage : Page
                 clients.Rpc!,
                 clients.ConvSession is { } session ? new SessionLocalDetections(session) : null,
                 new MachineSpamModelClientWrite(clients.Rpc!));
+            // A withheld-message badge's tap: the queue read Page_Loaded starts opens
+            // that row's own appeal (takedown-and-block.md § Legal takedown → App render).
+            if (clients.DeepLinkAppealContentId is { } appealId)
+                _viewModel.RequestAppeal(appealId);
             _viewModel.PropertyChanged += ViewModel_PropertyChanged;
             ActionsList.ItemsSource = _viewModel.Actions;
             // The empty-state placeholder tracks the queue's row count, including

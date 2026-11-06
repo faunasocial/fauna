@@ -44,7 +44,7 @@ from conftest import (
     _trust_seeder,
     get_available_apps,
 )
-from helpers.app_surface import skip_environment, skip_unbuilt
+from helpers.app_surface import require_surface, skip_environment
 from helpers.trust_seed_witness import TRUST_SEED_ENV, await_a_tip_sealed_row
 from helpers.waiting import account_runtime_role_or_skip
 
@@ -77,14 +77,7 @@ def test_an_app_pointed_at_a_dedicated_nest_mints_on_that_nest(
 ):
     """The session app, pointed at a nest its launch did not name, mints there."""
     _require_a_seeded_runtime(app)
-    if app.driver.relaunch_environment() is None:
-        skip_unbuilt(
-            app.driver,
-            surface="a cold relaunch (`recover()`) that seeds a nest the launch did not name",
-            detail="this driver cannot relaunch its app, so an app pointed at a "
-            "dedicated nest keeps an empty escrow trust set there",
-            tracked="",
-        )
+    require_surface(app.driver, "relaunch-environment")
     nest = dedicated_no_mail_nest
     _login_app_as(
         app,

@@ -124,6 +124,11 @@ public struct DmComposeBar: View {
     /// read and its caret keys (`MarkdownFieldHandle`), which only the live view answers.
     @State private var bodyField = MarkdownFieldHandle()
 
+    /// `ThreadCapabilities.canSend` (shared Rust): `false` on a bridged room whose
+    /// bridge is disconnected, where the backend refuses every send. The field and
+    /// Send stay in view but disabled (`bridged-adapter.md`; tui's `reply_compose_bar`).
+    /// nil capabilities = new-thread compose, which always can.
+    private var canSend: Bool { capabilities?.canSend ?? true }
     private var supportsAttachments: Bool { capabilities?.supportsAttachments ?? true }
     private var supportsMarkdown: Bool { capabilities?.supportsMarkdown ?? true }
     private var supportsSubject: Bool { capabilities?.supportsSubject ?? true }
@@ -194,6 +199,7 @@ public struct DmComposeBar: View {
                 selection: $bodySelection,
                 placeholder: L.conversations.compose.writeMessage,
                 markersShown: markersShown,
+                isEditable: canSend,
                 handle: bodyField
             )
             // `dm-text-field`'s a11y id lives on the underlying NSTextView/UITextView
@@ -239,6 +245,7 @@ public struct DmComposeBar: View {
                         onBodyChange(newValue)
                     }
                 ),
+                isEnabled: { canSend },
                 visibleText: {
                     MarkdownDecorator.visibleText(
                         source: body_,
@@ -352,12 +359,12 @@ public struct DmComposeBar: View {
     @ViewBuilder private var sendButton: some View {
         let button = Button(sending ? L.common.sending : L.common.send) { onSend() }
             .buttonStyle(.borderedProminent)
-            .disabled(sending || body_.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            .disabled(!canSend || sending || body_.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             .accessibilityIdentifier(Ids.dmSendButton)
             // Live re-read of the same predicate the `.disabled(...)` uses.
             .automationActivate(
                 Ids.dmSendButton,
-                isEnabled: { !(sending || body_.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty) }
+                isEnabled: { canSend && !(sending || body_.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty) }
             ) { onSend() }
         if sendFoundsRoom {
             button.faunaGate("fauna.conversations.room.create")

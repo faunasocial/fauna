@@ -135,6 +135,25 @@ struct FeedListView: View {
                         value: { vm.trendingSelected ? "on" : "off" }
                     ) { Task { await vm.selectTrendingFeed() } }
 
+                    // Built-in Local entry (feed.md § Layout & flow, region 1) —
+                    // directly below Trending, above the user's own feeds.
+                    // Mirrors macOS's MacFeedListView row.
+                    Button {
+                        Task { await vm.selectLocalFeed() }
+                    } label: {
+                        HStack {
+                            Text(L.feed.list.local)
+                                .fontWeight(vm.trendingSelected || vm.selectedFeedId != nil ? .regular : .bold)
+                            Spacer()
+                        }
+                    }
+                    .tint(.primary)
+                    .accessibilityIdentifier(Ids.feedLocalItem)
+                    .automationActivate(
+                        Ids.feedLocalItem,
+                        value: { vm.trendingSelected || vm.selectedFeedId != nil ? "off" : "on" }
+                    ) { Task { await vm.selectLocalFeed() } }
+
                     ForEach(Array(vm.feeds.enumerated()), id: \.element.feedId) { index, feed in
                         HStack {
                             Button {
@@ -272,23 +291,8 @@ struct FeedListView: View {
 
                 Divider()
 
-                // Search bar — shown whenever posts are shown (same gate as the
-                // posts section below), NOT only when a custom feed is selected:
-                // search is a nest re-query that works on the LOCAL feed too
-                // (`query_local_feed_core` applies `search`; pinned by
-                // tests/api/test_feed_search_api.py), and every other app
-                // offers search on the default view (macOS auto-selects the
-                // first feed; windows/linux/web always render the box). The old
-                // `selectedFeedId != nil` gate made `feed-search-field`
-                // unreachable on a fresh iOS login — the test_feed_search 404s.
-                // `|| !searchText.isEmpty` completes that fix for the ZERO-RESULT
-                // case: on the Local feed (`selectedFeedId == nil`) a search that
-                // matches nothing empties `posts`, so a `posts`-only gate would
-                // yank the search field (and its clear button) out from under the
-                // user mid-search, stranding them unable to clear their own query
-                // (`test_feed_search_clear_restores_feed[ios]`). An active search
-                // buffer keeps the bar reachable until the user clears it.
-                if vm.selectedFeedId != nil || !vm.posts.isEmpty || !vm.searchText.isEmpty {
+                // Search bar — same gate as the posts section below.
+                if vm.showsSearchBar {
                     Group {
                         HStack {
                             Image(systemName: "magnifyingglass")
@@ -312,6 +316,10 @@ struct FeedListView: View {
                         }
                     }
                 }
+
+                // The imported-posts selection's notice + clear
+                // (`feed.md` § State & data shape → *The imported-posts selection*).
+                FeedImportedNotice(vm: vm)
 
                 Divider()
                 VStack(alignment: .leading, spacing: 8) {
@@ -489,8 +497,7 @@ struct FeedListView: View {
                         // above (test_feed_search_clear_restores_feed[ios]); and
                         // `|| emptyState != nil` so the shared empty-state answer
                         // is painted whenever it is given.
-                        if vm.selectedFeedId != nil || !vm.posts.isEmpty || !vm.searchText.isEmpty
-                            || vm.emptyState != nil {
+                        if vm.showsSearchBar || vm.emptyState != nil {
                             if vm.showsLoadingSpinner {
                                 ProgressView()
                             } else if let emptyState = vm.emptyState {
@@ -539,7 +546,10 @@ struct FeedListView: View {
                                     // `value:`) so `/element/click` and `/element/text`
                                     // resolve to the same slot (AutomationRegistry
                                     // § automationActivate) — not a split `.automationValue`.
-                                    .automationActivate(Ids.postCard, value: { post.body }) {
+                                    // `post` is the card's own post id (linux's row attr),
+                                    // which the harness reads a card's identity from.
+                                    .automationActivate(Ids.postCard, value: { post.body },
+                                                        attributes: { ["post": post.postId] }) {
                                         openPostCard(post)
                                     }
                                     .automationScope(Ids.postCard, index: offset)
@@ -687,7 +697,7 @@ struct FeedListView: View {
 
     private func configureAndLoadFeeds() async {
         guard let client, let secretHex = appState.session.secretHex else { return }
-        await vm.configure(api: client.api, secretHex: secretHex)
+        await vm.configure(api: client.api, secretHex: secretHex, deviceIdHex: client.deviceId)
         // Load feeds + the current selection (the nest's Local timeline when none),
         // retrying while the client is still authenticating. `rehydrate` runs
         // loadFeeds() + selectFeed(current | nil→Local), so posts on the default

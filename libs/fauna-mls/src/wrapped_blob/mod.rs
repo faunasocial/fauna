@@ -44,11 +44,11 @@ pub use format::{
     AtprotoIdentityPublishedKeys, AtprotoSessionSecretBlob, AtprotoSessionSecretBundle,
     AtprotoSessionSecretIndex, BLOB_FORMAT_VERSION, ExportSessionKeyBlob, ExportSessionKeyIndex,
     FAUNA_KEM_XWING, FormatVersion, GrantBlob, GrantIndex, GrantWindow, HpkeWire, KemSuite,
-    MailRecordEnvelope, MlsSnapshotBlob, MlsSnapshotIndex, ScopeTuple, SealedRecordBytes,
-    SeedEscrowBlob, SeedEscrowIndex, SerKdfParams, SpamModelCopyBlob, SpamModelCopyIndex,
-    TlsCertBlob, TlsCertBundle, TlsCertIndex, UnwrapError, WebdavKeysBlob, WebdavKeysIndex,
-    WrapError, WrappedMsekBlob, WrappedMsekIndex, WrappedScopeKey, WrappedSubmissionTokenBlob,
-    custody_scope_set_from_tuples, grant_window_is_open,
+    MailRecordEnvelope, MlsSnapshotBlob, MlsSnapshotIndex, RecordKind, ScopeTuple,
+    SealedRecordBytes, SeedEscrowBlob, SeedEscrowIndex, SerKdfParams, SpamModelCopyBlob,
+    SpamModelCopyIndex, TlsCertBlob, TlsCertBundle, TlsCertIndex, UnwrapError, WebdavKeysBlob,
+    WebdavKeysIndex, WrapError, WrappedMsekBlob, WrappedMsekIndex, WrappedScopeKey,
+    WrappedSubmissionTokenBlob, custody_scope_set_from_tuples, grant_window_is_open,
 };
 pub use kdf::{
     ARGON2_VERSION_13, Argon2idParams, CredentialInput, HkdfSha256Params, KdfParams,
@@ -58,7 +58,20 @@ pub use lan_cert::{
     LAN_TLS_CERT_ENTRY_ID, LanCertError, OpenedLanCert, open_lan_tls_cert_entry,
     seal_lan_tls_cert_entry,
 };
-pub use mail_epoch_open::{open_mail_epoch_chain, unseal_mail_record_with_derived_key};
+pub use mail_epoch_open::{
+    open_mail_epoch_chain, unseal_mail_record_with_derived_key, unseal_record_with_derived_key,
+};
+pub use mls_snapshot_plaintext::{
+    CALENDAR_ROOT_DERIVE_CONTEXT, CARD_ROOT_DERIVE_CONTEXT, DavKind, DavSealPubkeys,
+    RECIPIENT_CALENDAR_HPKE_DERIVE_CONTEXT, RECIPIENT_CALENDAR_MLKEM_DERIVE_CONTEXT,
+    RECIPIENT_CARD_HPKE_DERIVE_CONTEXT, RECIPIENT_CARD_MLKEM_DERIVE_CONTEXT, StandingDavRing,
+    derive_calendar_root, derive_card_root, derive_dav_root,
+    derive_recipient_calendar_capability_secret, derive_recipient_calendar_hpke_keypair,
+    derive_recipient_calendar_xwing_keypair, derive_recipient_card_capability_secret,
+    derive_recipient_card_hpke_keypair, derive_recipient_card_xwing_keypair,
+    derive_recipient_dav_capability_secret, derive_recipient_dav_hpke_keypair,
+    derive_recipient_dav_xwing_keypair, open_record_standing,
+};
 pub use mls_snapshot_plaintext::{
     INDEX_SEGMENT_KEY_DERIVE_CONTEXT, LeafInitKeypair, MAIL_EPOCH_PUBLISH_HORIZON,
     MAIL_EPOCH_ROOT_DERIVE_CONTEXT, MAIL_EPOCH_SEALING_WRITE_DEFAULT, MAIL_SEALING_EPOCH_SECS,
@@ -1907,7 +1920,8 @@ pub fn build_renewal_wraps(
 ///
 /// HPKE info + AAD are the constant `AadBinding::for_mail_record()`
 /// binding; per-recipient targeting is encoded by the KEM step (the
-/// encapsulated key is bound to `recipient_x25519_pubkey`).
+/// encapsulated key is bound to `recipient_x25519_pubkey`). The mail arm of
+/// [`seal_record_to_recipient`].
 ///
 /// # Errors
 ///
@@ -1917,12 +1931,30 @@ pub fn seal_to_recipient(
     plaintext: &[u8],
     recipient_x25519_pubkey: &[u8; 32],
 ) -> Result<MailRecordEnvelope, WrapError> {
-    let info = AadBinding::for_mail_record();
-    let aad = AadBinding::for_mail_record();
+    seal_record_to_recipient(RecordKind::Mail, plaintext, recipient_x25519_pubkey)
+}
+
+/// HPKE-Seal `plaintext` as a record of `kind` to the recipient's X25519
+/// pubkey of that kind — the envelope tag and the HPKE info/AAD both come from
+/// `kind` ([`RecordKind::as_str`], [`RecordKind::aad`]), so the two can never
+/// disagree (`owner-key-material.md` § Path B-sibling-5 → *AEAD and
+/// envelope*). Which pubkey to hand it is the caller's: the mail, calendar or
+/// card recipient key of the same kind.
+///
+/// # Errors
+///
+/// Returns `WrapError::HpkeFailed` on HPKE seal failure.
+pub fn seal_record_to_recipient(
+    kind: RecordKind,
+    plaintext: &[u8],
+    recipient_x25519_pubkey: &[u8; 32],
+) -> Result<MailRecordEnvelope, WrapError> {
+    let info = kind.aad();
+    let aad = kind.aad();
     let (enc, ciphertext) = hpke_seal(recipient_x25519_pubkey, &info, &aad, plaintext)?;
     Ok(MailRecordEnvelope {
         version: format::BLOB_FORMAT_VERSION,
-        kind: "mail-record".into(),
+        kind: kind.as_str().into(),
         hpke: HpkeWire {
             kem_suite: KemSuite::STANDARD,
             enc: ByteBuf::from(enc),
@@ -1942,6 +1974,7 @@ pub fn seal_to_recipient(
 /// `hpke.kem_suite.kem = FAUNA_KEM_XWING` and carries the 1120-byte X-Wing
 /// ciphertext in `hpke.enc`; the AEAD ciphertext + AAD binding are byte-identical
 /// to the classical path. A reader opens it with [`unseal_mail_record_hybrid`].
+/// The mail arm of [`seal_record_to_recipient_xwing`].
 ///
 /// # Errors
 ///
@@ -1951,12 +1984,26 @@ pub fn seal_to_recipient_xwing(
     plaintext: &[u8],
     recipient_xwing_pubkey: &XWingPublicKey,
 ) -> Result<MailRecordEnvelope, WrapError> {
-    let info = AadBinding::for_mail_record();
-    let aad = AadBinding::for_mail_record();
+    seal_record_to_recipient_xwing(RecordKind::Mail, plaintext, recipient_xwing_pubkey)
+}
+
+/// [`seal_record_to_recipient`] under the X-Wing suite — kind and AAD travel
+/// together exactly as there.
+///
+/// # Errors
+///
+/// As [`seal_to_recipient_xwing`].
+pub fn seal_record_to_recipient_xwing(
+    kind: RecordKind,
+    plaintext: &[u8],
+    recipient_xwing_pubkey: &XWingPublicKey,
+) -> Result<MailRecordEnvelope, WrapError> {
+    let info = kind.aad();
+    let aad = kind.aad();
     let (enc, ciphertext) = xwing_seal(recipient_xwing_pubkey, &info, &aad, plaintext)?;
     Ok(MailRecordEnvelope {
         version: format::BLOB_FORMAT_VERSION,
-        kind: "mail-record".into(),
+        kind: kind.as_str().into(),
         hpke: HpkeWire {
             kem_suite: KemSuite {
                 kem: FAUNA_KEM_XWING,
@@ -1968,6 +2015,25 @@ pub fn seal_to_recipient_xwing(
     })
 }
 
+/// Refuse an envelope whose plaintext kind is not `expected` — before any key
+/// is tried, so a ring of one kind never trials a record of another
+/// (`owner-key-material.md` § Path B-sibling-5 → *AEAD and envelope*: an
+/// opener handed the wrong kind fails closed before any trial).
+fn check_record_kind(
+    envelope: &MailRecordEnvelope,
+    expected: RecordKind,
+) -> Result<(), UnwrapError> {
+    if envelope.kind == expected.as_str() {
+        Ok(())
+    } else {
+        Err(UnwrapError::InvalidFormat(format!(
+            "expected kind={}, got {}",
+            expected.as_str(),
+            envelope.kind
+        )))
+    }
+}
+
 /// Unseal a `MailRecordEnvelope` produced by `seal_to_recipient`.
 /// The recipient client / MDA calls this with its X25519 secret to
 /// recover the plaintext (raw RFC 5322 bytes for `encrypted_body`;
@@ -1975,7 +2041,8 @@ pub fn seal_to_recipient_xwing(
 ///
 /// Not called from the MTA itself — it's the at-rest reader's
 /// counterpart. Kept in the same module as the seal so the round-trip
-/// stays in one file and tests cover both directions.
+/// stays in one file and tests cover both directions. The mail arm of
+/// [`unseal_record`]: a calendar or card record is refused.
 ///
 /// # Errors
 ///
@@ -1986,14 +2053,23 @@ pub fn unseal_mail_record(
     envelope: &MailRecordEnvelope,
     recipient_x25519_secret: &[u8; 32],
 ) -> Result<Vec<u8>, UnwrapError> {
-    if envelope.kind != "mail-record" {
-        return Err(UnwrapError::InvalidFormat(format!(
-            "expected kind=mail-record, got {}",
-            envelope.kind
-        )));
-    }
-    let info = AadBinding::for_mail_record();
-    let aad = AadBinding::for_mail_record();
+    unseal_record(RecordKind::Mail, envelope, recipient_x25519_secret)
+}
+
+/// Classical-only open of a record of `kind` — refuses any other kind before
+/// the HPKE open (`check_record_kind`), then opens under `kind`'s AAD.
+///
+/// # Errors
+///
+/// As [`unseal_mail_record`].
+pub fn unseal_record(
+    kind: RecordKind,
+    envelope: &MailRecordEnvelope,
+    recipient_x25519_secret: &[u8; 32],
+) -> Result<Vec<u8>, UnwrapError> {
+    check_record_kind(envelope, kind)?;
+    let info = kind.aad();
+    let aad = kind.aad();
     // Classical-only opener: an X-Wing blob returns a typed error pointing at
     // `unseal_mail_record_hybrid` rather than mis-decrypting.
     hpke_open_dispatch(&envelope.hpke, recipient_x25519_secret, None, &info, &aad)
@@ -2004,7 +2080,8 @@ pub fn unseal_mail_record(
 /// decapsulation key. This is the post-quantum-capable reader counterpart of
 /// [`unseal_mail_record`]; the MDA / client derives both halves from MSEK via
 /// [`derive_recipient_xwing_keypair`] and calls this so it can read both
-/// classical (ek-absent or degraded) and hybrid mail.
+/// classical (ek-absent or degraded) and hybrid mail. The mail arm of
+/// [`unseal_record_hybrid`].
 ///
 /// A classical blob ignores `recipient_mlkem_dk` (it opens with the X25519
 /// secret); a hybrid blob uses both halves.
@@ -2020,14 +2097,29 @@ pub fn unseal_mail_record_hybrid(
     recipient_x25519_secret: &[u8; 32],
     recipient_mlkem_dk: &[u8; MLKEM768_DECAPS_KEY_LEN],
 ) -> Result<Vec<u8>, UnwrapError> {
-    if envelope.kind != "mail-record" {
-        return Err(UnwrapError::InvalidFormat(format!(
-            "expected kind=mail-record, got {}",
-            envelope.kind
-        )));
-    }
-    let info = AadBinding::for_mail_record();
-    let aad = AadBinding::for_mail_record();
+    unseal_record_hybrid(
+        RecordKind::Mail,
+        envelope,
+        recipient_x25519_secret,
+        recipient_mlkem_dk,
+    )
+}
+
+/// Either-suite open of a record of `kind` — the kind check first, as
+/// [`unseal_record`].
+///
+/// # Errors
+///
+/// As [`unseal_mail_record_hybrid`].
+pub fn unseal_record_hybrid(
+    kind: RecordKind,
+    envelope: &MailRecordEnvelope,
+    recipient_x25519_secret: &[u8; 32],
+    recipient_mlkem_dk: &[u8; MLKEM768_DECAPS_KEY_LEN],
+) -> Result<Vec<u8>, UnwrapError> {
+    check_record_kind(envelope, kind)?;
+    let info = kind.aad();
+    let aad = kind.aad();
     hpke_open_dispatch(
         &envelope.hpke,
         recipient_x25519_secret,
@@ -2038,7 +2130,7 @@ pub fn unseal_mail_record_hybrid(
 }
 
 /// Report whether `bytes` are a sealed [`MailRecordEnvelope`] (canonical
-/// DAG-CBOR, `kind == "mail-record"`, supported version, suite-consistent
+/// DAG-CBOR, any [`RecordKind`], supported version, suite-consistent
 /// `enc` length) — as opposed to raw plaintext (an RFC 5322 mail body,
 /// an iCalendar event, canonical index-hint token bytes).
 ///
@@ -2223,6 +2315,26 @@ mod tests {
                 .expect_err("raw bytes must not mint SealedRecordBytes");
             assert!(matches!(err, UnwrapError::InvalidFormat(_)));
         }
+    }
+
+    #[test]
+    fn sealed_record_bytes_verify_of_kind_takes_its_kind_only() {
+        let (_sk, pk) = generate_x25519_keypair();
+        for sealed_as in RecordKind::ALL {
+            let bytes = seal_record_to_recipient(sealed_as, b"x", &pk)
+                .unwrap()
+                .to_canonical_bytes()
+                .unwrap();
+            for expected in RecordKind::ALL {
+                let got = SealedRecordBytes::verify_of_kind(bytes.clone(), expected);
+                assert_eq!(
+                    got.is_ok(),
+                    sealed_as == expected,
+                    "a {sealed_as:?} record checked as {expected:?}"
+                );
+            }
+        }
+        assert!(SealedRecordBytes::verify_of_kind(b"raw".to_vec(), RecordKind::Calendar).is_err());
     }
 
     #[test]
@@ -4110,6 +4222,34 @@ mod seal_tests {
         blob.kind = GrantBlob::KIND.into();
         let ok = blob.to_canonical_bytes().unwrap();
         assert!(GrantBlob::from_canonical_bytes(&ok).is_ok());
+    }
+
+    /// A grant's label cannot disagree with its keys: a blob whose declared
+    /// scope is an `ext.*` read but which carries a mail wrap does not decode,
+    /// so no gate reading the label is ever misled about what the holder
+    /// opens.
+    #[test]
+    fn grant_blob_rejects_a_wrapped_key_outside_its_declared_scope() {
+        let (_, holder_pk) = generate_x25519_keypair();
+        let owner = [0x44u8; 32];
+        let mail_wrap =
+            seal_capability(&[0xABu8; 32], &owner, &mail_read_scope(), None, &holder_pk).unwrap();
+        let mut blob = GrantBlob {
+            version: BLOB_FORMAT_VERSION,
+            kind: GrantBlob::KIND.into(),
+            index: GrantIndex(owner.to_vec(), vec![0x55u8; 16]),
+            holder: ByteBuf::from(holder_pk.to_vec()),
+            window: GrantWindow(0, 200),
+            scope: vec![ScopeTuple::ext_kind_read("ext.app.example.notes")],
+            wrapped_keys: vec![mail_wrap],
+        };
+        assert!(blob.undeclared_wrapped_key().is_some());
+        let err = GrantBlob::from_canonical_bytes(&blob.to_canonical_bytes().unwrap()).unwrap_err();
+        assert!(matches!(err, UnwrapError::InvalidFormat(_)), "{err:?}");
+        // Declaring the mail tuple makes the same keys a valid grant.
+        blob.scope.push(mail_read_scope());
+        assert!(blob.undeclared_wrapped_key().is_none());
+        assert!(GrantBlob::from_canonical_bytes(&blob.to_canonical_bytes().unwrap()).is_ok());
     }
 
     #[test]

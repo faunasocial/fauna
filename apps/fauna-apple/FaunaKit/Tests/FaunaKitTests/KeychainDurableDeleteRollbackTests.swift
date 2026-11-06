@@ -16,6 +16,7 @@ import Foundation
 /// reported it gone — a sign-out whose credential wipe was refused by the store painted a clean
 /// "Signed out" over a device that still held its identity secret.
 @MainActor
+@Suite(.sharedKeychain)
 struct KeychainDurableDeleteRollbackTests {
     /// Points `KeychainStore` at a throwaway durable directory for the body, then restores the
     /// directory to writable and wipes the store before cleaning up — so a failing `body` never

@@ -55,10 +55,11 @@ fn build_remote_query_request(
 fn remote_response_to_candidates(
     resp: crate::feed_routes::RemoteQueryResponse,
     nest_url: &str,
+    loopback: bool,
 ) -> Vec<ScoredCandidate> {
     resp.candidates
         .into_iter()
-        .filter_map(|c| parse_peer_candidate(c, nest_url))
+        .filter_map(|c| parse_peer_candidate(c, nest_url, loopback))
         .collect()
 }
 
@@ -85,7 +86,11 @@ pub async fn query_peer_channel_first(
         crate::federation_pool::originate_feed_query(&state.federation_pool, state, nest_url, &req)
             .await
             .map_err(|e| PeerQueryError::Network(format!("feed.query channel: {e}")))?;
-    Ok(remote_response_to_candidates(resp, nest_url))
+    Ok(remote_response_to_candidates(
+        resp,
+        nest_url,
+        state.peer_fetch_loopback.is_some(),
+    ))
 }
 
 /// Encode a post CID for the peer-query wire as lowercase hex of the full
@@ -108,7 +113,11 @@ pub(crate) fn cid_from_wire_hex(s: &str) -> Option<fauna_cbor::Cid> {
 
 /// Parse a single remote candidate off the peer-query wire into a
 /// `ScoredCandidate`. Drops the candidate (`None`) on any malformed field.
-fn parse_peer_candidate(pc: RemoteQueryCandidate, nest_url: &str) -> Option<ScoredCandidate> {
+fn parse_peer_candidate(
+    pc: RemoteQueryCandidate,
+    nest_url: &str,
+    loopback: bool,
+) -> Option<ScoredCandidate> {
     // Peers exchange the full 36-byte CID (codec byte included) — the
     // querying nest decodes it faithfully instead of assuming dag-cbor.
     let post_cid = cid_from_wire_hex(&pc.post_id)?;
@@ -134,7 +143,7 @@ fn parse_peer_candidate(pc: RemoteQueryCandidate, nest_url: &str) -> Option<Scor
     let references = pc
         .references
         .into_iter()
-        .filter_map(parse_peer_reference)
+        .filter_map(|r| parse_peer_reference(r, loopback))
         .collect();
 
     Some(ScoredCandidate {
@@ -166,7 +175,16 @@ fn parse_peer_candidate(pc: RemoteQueryCandidate, nest_url: &str) -> Option<Scor
 
 /// Parse a single post-to-post reference off the peer-query wire. Drops
 /// the reference (`None`) on a malformed field or an unknown ref type.
-fn parse_peer_reference(r: PostReferenceResponse) -> Option<fauna_core::feed::PostReference> {
+///
+/// The reference's `nest_url` is the peer's word about ANOTHER nest, which
+/// discovery queries unattended and keeps as a referral contributor: it is
+/// kept only when it passes [`crate::ssrf::peer_declared_origin`] — loopback
+/// admitted only on test state (`loopback`) — and otherwise dropped as if the
+/// peer had named none.
+fn parse_peer_reference(
+    r: PostReferenceResponse,
+    loopback: bool,
+) -> Option<fauna_core::feed::PostReference> {
     // References already carry the full 36-byte CID on the wire
     // (`db::posts::get_post_references` returns it); decode through the
     // same codec-validating helper as the candidate post_id.
@@ -181,7 +199,9 @@ fn parse_peer_reference(r: PostReferenceResponse) -> Option<fauna_core::feed::Po
     Some(fauna_core::feed::PostReference {
         post_id: ref_cid.as_bytes().to_vec(),
         author: author_bytes,
-        nest_url: r.nest_url,
+        nest_url: r
+            .nest_url
+            .and_then(|u| crate::ssrf::peer_declared_origin(u.trim(), loopback)),
         ref_type,
     })
 }
@@ -237,7 +257,7 @@ mod tests {
             references: vec![],
         };
 
-        let scored = parse_peer_candidate(pc, "https://peer.example")
+        let scored = parse_peer_candidate(pc, "https://peer.example", false)
             .expect("a candidate with a full-CID wire post_id must parse");
 
         match scored.post_id {
@@ -281,7 +301,7 @@ mod tests {
             metadata: empty_metadata(),
             references: vec![],
         };
-        let scored = parse_peer_candidate(pc, "https://peer.example").unwrap();
+        let scored = parse_peer_candidate(pc, "https://peer.example", false).unwrap();
         assert_eq!(scored.source_token, "facebook");
     }
 
@@ -302,7 +322,7 @@ mod tests {
             metadata: empty_metadata(),
             references: vec![],
         };
-        let scored = parse_peer_candidate(pc, "https://peer.example").unwrap();
+        let scored = parse_peer_candidate(pc, "https://peer.example", false).unwrap();
         assert_eq!(scored.source_token, "fauna");
     }
 
@@ -325,10 +345,58 @@ mod tests {
                 references: vec![],
             };
             assert!(
-                parse_peer_candidate(pc, "https://peer.example").is_none(),
+                parse_peer_candidate(pc, "https://peer.example", false).is_none(),
                 "{bad_source:?} must not parse into a candidate"
             );
         }
+    }
+
+    /// A referral's `nest_url` is the peer's word about another nest, and the
+    /// discovery engine queries it unattended: a production nest drops a
+    /// loopback, plaintext or non-origin one as if the peer named none.
+    #[test]
+    fn a_referrals_loopback_nest_url_is_dropped_on_a_production_nest() {
+        let with_reference = |nest_url: &str| RemoteQueryCandidate {
+            post_id: cid_to_wire_hex(&fauna_cbor::Cid::of_dag_cbor(b"a post")),
+            author: hex::encode([5u8; 32]),
+            source: "fauna".to_string(),
+            created_at: 1,
+            score: None,
+            scorer_version: None,
+            metadata: empty_metadata(),
+            references: vec![crate::feed_routes::PostReferenceResponse {
+                post_id: cid_to_wire_hex(&fauna_cbor::Cid::of_dag_cbor(b"referred")),
+                author: hex::encode([6u8; 32]),
+                nest_url: Some(nest_url.to_string()),
+                ref_type: "quote".to_string(),
+            }],
+        };
+        let referral = |nest_url: &str, loopback: bool| {
+            parse_peer_candidate(with_reference(nest_url), "https://peer.example", loopback)
+                .expect("the candidate parses")
+                .references
+                .into_iter()
+                .next()
+                .expect("the reference survives")
+                .nest_url
+        };
+        for refused in [
+            "http://127.0.0.1:9000",
+            "https://127.0.0.1:9000",
+            "https://localhost",
+            "http://b.example",
+            "https://b.example/x",
+        ] {
+            assert_eq!(referral(refused, false), None, "{refused}");
+        }
+        assert_eq!(
+            referral("https://b.example/", false).as_deref(),
+            Some("https://b.example")
+        );
+        assert_eq!(
+            referral("http://127.0.0.1:9000", true).as_deref(),
+            Some("http://127.0.0.1:9000")
+        );
     }
 
     #[test]

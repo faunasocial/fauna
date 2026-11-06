@@ -2,6 +2,7 @@
 // out (family-safety.md § The account age band, the kids-app bullet, item (4)).
 #if !FAUNA_KIDS
 import SwiftUI
+import FaunaFFISwift
 
 /// The subset of `AppState`/`MacAppState` a feed post-card needs to render:
 /// content-policy verdicts, the web-publish store, and the viewer's own
@@ -18,9 +19,22 @@ public protocol PostCardAppStateProviding: AnyObject {
     var region: RegionStore { get }
     var webPublish: WebPublishStore { get }
     var session: SessionState { get }
+    /// Open `actorId`'s profile carrying `home` — the author line's door
+    /// (`post-author` / `feed-post-detail-author`; the per-target navigation is the
+    /// app's, the carried home is `PostSummary.homeNestUrl`). An id naming the
+    /// viewer normalizes to the SELF profile through the shared `profileNavTarget`.
+    func openAuthorProfile(actorId: String, home: String?)
 }
 
-extension AppState: PostCardAppStateProviding {}
+extension AppState: PostCardAppStateProviding {
+    /// iOS: the More-tab profile destination (mirrors the Contacts rows' opener).
+    public func openAuthorProfile(actorId: String, home: String?) {
+        profileActorId = profileNavTarget(entryActorId: actorId, selfActorId: session.actorId)
+        profileHome = profileActorId == nil ? nil : home
+        selectedTab = "more"
+        moreSelectedView = "profile"
+    }
+}
 
 /// The `PostCardView` (iOS) / `MacPostCardView` (macOS) shared body
 /// (`feed.md` § Interaction bar) —
@@ -132,6 +146,7 @@ public struct PostCardBody: View {
         let decision = decision
         arms(decision)
             .regionBlockWitness(witnessKey, blocked: decision.isRegionBlocked)
+            .nestBlockWitness(witnessKey, blocked: decision.isNestBlocked)
     }
 
     @ViewBuilder
@@ -147,10 +162,16 @@ public struct PostCardBody: View {
             postCardId(RegionPlaceholderView(placeholder: withheld, witnessKey: witnessKey) {
                 contentRevealed = true
             }.padding(.vertical, verticalPadding))
+        } else if let withheld = decision.withheldByNest(revealed: contentRevealed) {
+            postCardId(NestPlaceholderView(placeholder: withheld, witnessKey: witnessKey) {
+                contentRevealed = true
+            }.padding(.vertical, verticalPadding))
         } else if contentVerdict == "block" {
-            postCardId(ContentPolicyBlockedNotice(reported: decision.reported).padding(.vertical, verticalPadding))
+            postCardId(ContentPolicyBlockedNotice(reported: decision.reported, reason: decision.guardianReason)
+                .padding(.vertical, verticalPadding))
         } else if contentVerdict == "collapse" && !contentRevealed {
-            postCardId(ContentPolicyCollapsedPlaceholder { contentRevealed = true }.padding(.vertical, verticalPadding))
+            postCardId(ContentPolicyCollapsedPlaceholder(reason: decision.guardianReason) { contentRevealed = true }
+                .padding(.vertical, verticalPadding))
         } else if vm.isMuted(postId: post.postId) && !mutedRevealed {
             postCardId(FeedPostMutedPlaceholder(onReveal: {
                 mutedRevealed = true
@@ -159,6 +180,20 @@ public struct PostCardBody: View {
         } else {
             cardContent
         }
+    }
+
+    /// The inline player's progress on this card's video, handed to the feed's cue
+    /// tracker — which keeps the peak until its next sample of this post's row takes
+    /// it, the media arm of `watch-complete` (`engagement-cues.md` § Cue vocabulary &
+    /// derivation). Pre-auth (no manager, so no tracker) it goes nowhere.
+    private func notePlayed(position: Double, duration: Double) {
+        vm.cueTracker()?.notePlayed(postId: post.postId, position: position, duration: duration)
+    }
+
+    /// The inline player's engagement — a play counts as attention from the tap to
+    /// the pause, end, error or teardown (`engagement-cues.md` *A play is attention*).
+    private func notePlaying(_ playing: Bool) {
+        vm.cueTracker()?.notePlaying(postId: post.postId, playing: playing)
     }
 
     @ViewBuilder
@@ -189,7 +224,9 @@ public struct PostCardBody: View {
             VStack(alignment: .leading, spacing: cardSpacing) {
                 // Author row with source badge
                 HStack {
-                    automationText(Ids.postAuthor, conversationsVM.postAuthorLabel(post))
+                    PostAuthorLine(
+                        id: Ids.postAuthor, label: conversationsVM.postAuthorLabel(post),
+                        onOpen: { appState.openAuthorProfile(actorId: post.author, home: post.homeNestUrl) })
                         .font(.caption.monospaced())
                         .foregroundStyle(.secondary)
 
@@ -205,10 +242,16 @@ public struct PostCardBody: View {
                     // the sibling badge above instead, never this one.
                     DelegatedOriginBadge(authoringOrigin: post.authoringOrigin)
 
-                    GatedPostBadge(gatedTier: post.gatedTier, roomLabel: post.roomLabel)
+                    // The badge pick is the shared `postCardGate` (the row's own gate, else a
+                    // repost's TARGET gate — `restricted-posts.md` § Encryption at rest, ruling
+                    // 3), never re-derived from the `reposted_*` fields here.
+                    let cardGate = postCardGate(post: post)
+                    GatedPostBadge(gatedTier: cardGate?.tier, roomLabel: cardGate?.roomLabel)
                     // Sold-post buyer teaser (gap (2c), monetization.md § Per-post
                     // pay-to-unlock) — same row as the badge, mirroring linux/windows.
-                    PostUnlockOfferTeaser(postId: post.postId, offer: post.unlockOffer, vm: vm)
+                    PostUnlockOfferTeaser(
+                        postId: post.postId, offer: post.unlockOffer,
+                        purchasePending: post.unlockPurchasePending && !post.gatedUnlocked, vm: vm)
 
                     // Per-row content-label verdict (moderation.md § Per-row badge data
                     // path) — the feed twin of DmMessageBubble's identical
@@ -278,10 +321,13 @@ public struct PostCardBody: View {
                 // mutually exclusive with the image branch above, same fold. A tap plays it in
                 // place off the shared `playback_source` (§ D6c → Inline playback).
                 if let hash = documentMediaVideoHash(post.document) {
-                    VideoThumbnailView(hash: hash, resolve: { await vm.videoPlaybackURL(hash, home: postBlobHome(post: post)) })
+                    VideoThumbnailView(hash: hash, resolve: { await vm.videoPlayback(hash, home: postBlobHome(post: post)) },
+                                       onPlayed: notePlayed, onPlaying: notePlaying)
                 } else if let path = documentMediaProxiedVideoPath(post.document) {
-                    // A bridged post's `ProxiedVideo` (§ D6c → Proxied video): glyph + path, inert.
-                    VideoThumbnailView(proxiedPath: path)
+                    // A bridged post's `ProxiedVideo` (§ D6c → Proxied video): glyph + path; a tap
+                    // plays it through the nest's media proxy on the shared ticket.
+                    VideoThumbnailView(proxiedPath: path, resolve: { await vm.proxiedVideoPlayback(path) },
+                                       onPlayed: notePlayed, onPlaying: notePlaying)
                 }
 
                 // Quoted post — the document's folded `QuotedPost` block (render-model.md § D6);
@@ -289,7 +335,8 @@ public struct PostCardBody: View {
                 if let quote = documentQuotedPost(post.document) {
                     QuotedPostCard(author: shortId(hex: quote.author), postBody: quote.body, verification: quote.verification,
                                    authoringOrigin: quote.authoringOrigin,
-                                   legalTakedownRef: quote.legalTakedownRef, notFound: quote.notFound)
+                                   legalTakedownRef: quote.legalTakedownRef, notFound: quote.notFound,
+                               adminBlockReason: quote.adminBlockReason)
                 }
 
                 // Link previews — the document's folded `LinkPreview` blocks (render-model.md § D4). One
@@ -317,6 +364,16 @@ public struct PostCardBody: View {
                     }
                 }
 
+                // The folded archive comments — owner-only context from the owner's own
+                // archive, never published (`archive-import.md` § What each category
+                // becomes → *Placement under the owner's own post*). The shared
+                // `PostSummary.archiveComments` is filled only on the owner's own
+                // archive-origin posts; anything else paints nothing. Mirrors tui's
+                // `archive_comment_elements`.
+                if !post.archiveComments.isEmpty {
+                    ArchiveCommentsFold(comments: post.archiveComments)
+                }
+
                 // Interaction bar — real counts from the shared snapshot (icon + count,
                 // hidden at 0; feed.md § Interaction bar). Each button is interact glue.
                 // A REPOST ROW renders no bar at all (`isRepostRow`): its own counters
@@ -336,6 +393,11 @@ public struct PostCardBody: View {
                         onQuote: { Task { await vm.quotePost(postId: post.postId) } },
                         onLike: { Task { await vm.likePost(postId: post.postId) } }
                     )
+                    // The per-emoji reaction pills under the bar (feed.md *Reaction
+                    // posts count and paint*); none on a repost row (no bar).
+                    PostReactionPills(reactions: post.reactions) { emoji in
+                        Task { await vm.reactPost(postId: post.postId, emoji: emoji) }
+                    }
                 }
 
                 // The tip surface (monetization.md § Tips) — nil until
@@ -377,15 +439,30 @@ public struct PostCardBody: View {
                 _ = await vm.resolveQuotedPost(qid)
             }
         }
+        // The remote author's byline (`ui/feed.md` § The read model → *The remote
+        // author's byline*): one guarded driver line, beside the tips resolve. The
+        // manager names the author from their own signed profile and writes
+        // `Some(AuthorDisplayView::default())` on every no-face outcome, so the guard
+        // closes; the card's label changes nowhere (`postAuthorLabel` already hands
+        // `authorDisplay` to the shared label chain).
+        .task(id: post.homeNestUrl != nil && post.authorDisplay == nil) {
+            if post.homeNestUrl != nil && post.authorDisplay == nil {
+                await vm.resolveAuthorFace(post.postId)
+            }
+        }
         // Sold-post buyer teaser fire-once resolve (gap (2c), monetization.md §
         // Per-post pay-to-unlock) → the manager folds it into `PostSummary.unlockOffer`
         // + re-emits → the card paints gated-post-price/-payment-link/-buy-button.
         // Guarded on `unlockOffer == nil` alone, same shape as resolveMedia/
         // resolveQuotedPost above — the re-offer-after-buy guard now lives
         // shared-Rust side (`FeedManager::unlock_purchase_requested`), so this
-        // fire-once resolve needs no per-app twin.
-        .task(id: post.gatedTier != nil && post.unlockOffer == nil) {
-            if post.gatedTier != nil && post.unlockOffer == nil {
+        // fire-once resolve needs no per-app twin. `unlockPurchasePending` is in
+        // the key so a feed reload — which rebuilds a bought post with neither
+        // the offer nor the marker, leaving `gatedTier != nil && unlockOffer ==
+        // nil` unchanged — still flips the key and re-runs the guarded resolve
+        // that re-sets the marker (linux/tui re-resolve on every render).
+        .task(id: post.gatedTier != nil && post.unlockOffer == nil && !post.unlockPurchasePending) {
+            if post.gatedTier != nil && post.unlockOffer == nil && !post.unlockPurchasePending {
                 await vm.resolvePostUnlockOffer(post.postId)
             }
         }
@@ -411,6 +488,31 @@ public struct PostCardBody: View {
         .fullScreenCover(item: $lightboxItem) { item in
             ImageLightbox(source: item.source, onDismiss: { lightboxItem = nil })
         }
+    }
+}
+
+/// `post-archive-comments` — the collapsed comments under an imported post, one
+/// `post-archive-comment-item` each ("author: text", oldest first as the shared
+/// projection orders them). The container needs `.contain` so its items keep their
+/// own ids, and its own read so the driver sees it present.
+struct ArchiveCommentsFold: View {
+    let comments: [ArchiveCommentView]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            ForEach(comments, id: \.externalId) { comment in
+                automationText(Ids.postArchiveCommentItem, "\(comment.authorName): \(comment.text)")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(.leading, 8)
+        .overlay(alignment: .leading) {
+            Rectangle().fill(.secondary.opacity(0.3)).frame(width: 2)
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier(Ids.postArchiveComments)
+        .automationValue(Ids.postArchiveComments, text: { "" })
     }
 }
 #endif // !FAUNA_KIDS

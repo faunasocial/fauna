@@ -13,11 +13,13 @@ import (
 	"github.com/faunasocial/fauna/bins/fauna-bridges/internal/connlimit"
 )
 
-// deadlineConn is a fake accepted socket recording every SetReadDeadline.
+// deadlineConn is a fake accepted socket recording every read and write
+// deadline.
 type deadlineConn struct {
 	net.Conn // nil: only the overridden methods are called
 	mu       sync.Mutex
 	reads    []time.Time
+	writes   []time.Time
 }
 
 func (c *deadlineConn) SetReadDeadline(t time.Time) error {
@@ -27,13 +29,30 @@ func (c *deadlineConn) SetReadDeadline(t time.Time) error {
 	return nil
 }
 
+func (c *deadlineConn) SetWriteDeadline(t time.Time) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.writes = append(c.writes, t)
+	return nil
+}
+
+func lastOf(ds []time.Time) (time.Time, bool) {
+	if len(ds) == 0 {
+		return time.Time{}, false
+	}
+	return ds[len(ds)-1], true
+}
+
 func (c *deadlineConn) last() (time.Time, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if len(c.reads) == 0 {
-		return time.Time{}, false
-	}
-	return c.reads[len(c.reads)-1], true
+	return lastOf(c.reads)
+}
+
+func (c *deadlineConn) lastWrite() (time.Time, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return lastOf(c.writes)
 }
 
 type oneConnListener struct {
@@ -52,8 +71,9 @@ type tlsLike struct {
 func (w tlsLike) NetConn() net.Conn { return w.inner }
 
 // TestSubmissionAuthSuccessLiftsPreAuthDeadline: the connection's pre-auth
-// bound is set at accept and cleared on the inner socket once AUTH PLAIN
-// succeeds, through the TLS layer 465 puts above the wrapper. No wall clock.
+// bound is set at accept on both halves and cleared on the inner socket once
+// AUTH PLAIN succeeds, through the TLS layer 465 puts above the wrapper. No
+// wall clock.
 func TestSubmissionAuthSuccessLiftsPreAuthDeadline(t *testing.T) {
 	inner := &deadlineConn{}
 	ln := connlimit.NewPreAuthListener(&oneConnListener{conn: inner}, nil)
@@ -63,6 +83,9 @@ func TestSubmissionAuthSuccessLiftsPreAuthDeadline(t *testing.T) {
 	}
 	if got, ok := inner.last(); !ok || got.IsZero() {
 		t.Fatalf("accept must set a pre-auth read deadline, got %v (set=%v)", got, ok)
+	}
+	if got, ok := inner.lastWrite(); !ok || got.IsZero() {
+		t.Fatalf("accept must set a pre-auth write deadline, got %v (set=%v)", got, ok)
 	}
 
 	caller := &submissionAuthCaller{
@@ -78,6 +101,9 @@ func TestSubmissionAuthSuccessLiftsPreAuthDeadline(t *testing.T) {
 	}
 	if got, _ := inner.last(); !got.IsZero() {
 		t.Fatalf("after AUTH success the inner read deadline = %v, want cleared", got)
+	}
+	if got, _ := inner.lastWrite(); !got.IsZero() {
+		t.Fatalf("after AUTH success the inner write deadline = %v, want cleared", got)
 	}
 }
 
@@ -103,5 +129,8 @@ func TestSubmissionAuthFailureKeepsPreAuthDeadline(t *testing.T) {
 	}
 	if got, _ := inner.last(); got.IsZero() {
 		t.Fatal("a failed AUTH must not lift the pre-auth deadline")
+	}
+	if got, _ := inner.lastWrite(); got.IsZero() {
+		t.Fatal("a failed AUTH must not lift the pre-auth write deadline")
 	}
 }

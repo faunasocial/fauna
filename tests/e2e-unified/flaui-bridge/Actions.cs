@@ -90,6 +90,18 @@ class Actions
         while (true)
         {
             var el = Find(id, index, scope);
+            // A control its view rebuilt between the find and this read (a folder
+            // row whose member roster lands just after the expand replaces its
+            // body, `folder-share-button` with it) answers no pattern, so it would
+            // fall through to the physical click below and throw
+            // NoClickablePointException on a peer that no longer exists — the log
+            // reads `click on <unknown element>`. Re-find it inside the same
+            // window: the live tree already holds the rebuilt control.
+            if (IsStale(el) && DateTime.UtcNow < deadline)
+            {
+                Thread.Sleep(50);
+                continue;
+            }
             // Convention 11's gate rides the SAME window the retry above describes,
             // rather than firing on the first disabled read. That is not leniency:
             // the retry exists because a legitimate chain (toggle → TwoWay binding →
@@ -211,6 +223,11 @@ class Actions
         System.Threading.Thread.Sleep(150);
     }
 
+    /// <summary>The longest text <see cref="Type"/> will inject as physical keystrokes
+    /// when ValuePattern cannot take it — far past any field a test types, far short of
+    /// a paste-sized body.</summary>
+    private const int PhysicalTypingCeiling = 10_000;
+
     public void Type(string id, string text, int index = 0, IReadOnlyList<ScopeStep>? scope = null)
     {
         var el = Find(id, index, scope);
@@ -225,6 +242,13 @@ class Actions
         // SendInput into a disabled TextBox writes nothing and acks 200.
         Gate("type", id, index, el);
 
+        // A range control (a WinUI Slider exposes RangeValuePattern and no
+        // ValuePattern): the text is the number to set, the same bound value a drag
+        // sets — apple's automationSelect reads a slider's numeric string the same
+        // way. Without this the call fell through to physical typing, which a
+        // Slider ignores (spam-threshold kept its 0.5 while "0.2" was typed).
+        if (TrySetRangeValue(el, text)) return;
+
         // Prefer ValuePattern.SetValue for the WHOLE text, newlines included.
         // Multi-line controls (RichEditBox / multi-line TextBox) accept '\n' as
         // content, so a multi-line body types in one shot — and this avoids
@@ -238,6 +262,17 @@ class Actions
         var inner = FindInnerEditWithRetry(el, TimeSpan.FromSeconds(2));
         if (inner is not null && WatchForeground($"ValuePattern.SetValue on {Describe(inner)}",
                 () => TrySetValueAppend(inner, text))) return;
+
+        // A body this long can only ever be a paste, never keystrokes: typing it
+        // physically holds the bridge's one request thread for hours (2,000,000
+        // characters pegged it past every client timeout, which surfaced as a reset
+        // connection or a "bridge thread pegged" timeout, never as the cause). Refuse
+        // loudly instead, so the SetValue failure logged above is the diagnosis.
+        if (text.Length > PhysicalTypingCeiling)
+            throw new InvalidOperationException(
+                $"refusing to type {text.Length} characters into {Describe(el)} physically: " +
+                $"ValuePattern.SetValue did not take the text (the bridge log names why), " +
+                $"and physical typing is capped at {PhysicalTypingCeiling} characters");
 
         // Fallback (ValuePattern unsupported on this control): physical typing.
         // Handle '\n' as Enter for the rare ContentDialog-confirmation path —
@@ -344,6 +379,36 @@ class Actions
     /// denied" because the composite peer can't write directly) so the
     /// caller can fall back to keyboard input.
     /// </summary>
+    /// <summary>
+    /// A control whose value is a number in a range and nothing else: RangeValuePattern
+    /// without ValuePattern (a WinUI Slider). Text inputs advertise ValuePattern, so
+    /// they never land here.
+    /// </summary>
+    private static bool IsRangeOnly(AutomationElement el)
+    {
+        try { return el.Patterns.RangeValue.IsSupported && !el.Patterns.Value.IsSupported; }
+        catch { return false; }
+    }
+
+    /// <summary>
+    /// Set a range control to the number <paramref name="text"/> names, through
+    /// RangeValuePattern (UIA, no foreground). False when <paramref name="el"/> is not
+    /// a range control. A text that is not a number, or one outside the control's
+    /// range, is the caller's error and throws, naming the control.
+    /// </summary>
+    private bool TrySetRangeValue(AutomationElement el, string text)
+    {
+        if (!IsRangeOnly(el)) return false;
+        if (!double.TryParse(text.Trim(), System.Globalization.NumberStyles.Float,
+                System.Globalization.CultureInfo.InvariantCulture, out var value))
+            throw new InvalidOperationException(
+                $"{Describe(el)} is a range control: `type` takes a number, got '{text}'");
+        var range = el.Patterns.RangeValue.Pattern;
+        WatchForeground($"RangeValuePattern.SetValue({value}) on {Describe(el)}",
+            () => range.SetValue(value));
+        return true;
+    }
+
     private static bool TrySetValueAppend(AutomationElement el, string text)
     {
         if (!el.Patterns.Value.IsSupported) return false;
@@ -353,8 +418,11 @@ class Actions
             el.Patterns.Value.Pattern.SetValue(current + text);
             return true;
         }
-        catch
+        catch (Exception ex)
         {
+            Console.Error.WriteLine(
+                $"[bridge] ValuePattern.SetValue on {Describe(el)} ({text.Length} chars) " +
+                $"threw {ex.GetType().Name} (0x{ex.HResult:X8}): {ex.Message}");
             return false;
         }
     }
@@ -442,8 +510,7 @@ class Actions
                     return key.Length == 0 || key == name ? name : $"{name} [{key}]";
                 }));
             el.Patterns.ExpandCollapse.Pattern.Collapse();
-            throw new InvalidOperationException(
-                $"Select target '{value}' not found in '{id}' (visible items: {visible})");
+            throw new SelectOptionNotOfferedException(id, index, value, visible);
         }
 
         if (match.Patterns.SelectionItem.IsSupported)
@@ -471,6 +538,11 @@ class Actions
         // Convention 11, after the structural check: emptying a disabled field is
         // the same illegal act as typing into one.
         Gate("clear", id, index, el);
+        // A range control (a WinUI Slider) has no empty value: `clear` keeps the
+        // current number and the `type` that follows sets the one it names
+        // (TrySetRangeValue). Physical keys never reach it — a Slider ignores
+        // Ctrl+A/Delete, and the keystrokes take the desktop's foreground.
+        if (IsRangeOnly(el)) return;
         if (WatchForeground($"ValuePattern.SetValue(\"\") on {Describe(el)}",
                 () => TrySetValue(el, "")))
             return;
@@ -677,16 +749,19 @@ class Actions
     {
         try
         {
-            var root = _session.RootElement;
-            var cf = _session.Automation.ConditionFactory;
-            var scoped = ElementFinder.WalkScope(root, cf, scope);
-            var elements = ElementFinder.FindAll(scoped, cf, id);
-            return elements.Length > 0 && !elements[0].IsOffscreen;
+            return UiaRetry.Run("visible " + id, () =>
+            {
+                var root = _session.RootElement;
+                var cf = _session.Automation.ConditionFactory;
+                var scoped = ElementFinder.WalkScope(root, cf, scope);
+                var elements = ElementFinder.FindAll(scoped, cf, id);
+                return elements.Length > 0 && !elements[0].IsOffscreen;
+            }, trace: Trace);
         }
-        // A crashed app is not an absent element (convention 11): let the
-        // dead-peer report through instead of answering "not visible".
-        catch (AppExitedException) { throw; }
-        catch
+        // A crashed app or a held UI thread is not an absent element (convention
+        // 11): let the dead-peer report or the stall verdict through instead of
+        // answering "not visible" (UiaSwallow).
+        catch (Exception ex) when (UiaSwallow.MayAnswerAbsent(ex))
         {
             return false;
         }
@@ -699,10 +774,9 @@ class Actions
             var el = Find(id, index, scope);
             return el.IsEnabled;
         }
-        // A crashed app is not an absent element (convention 11): let the
-        // dead-peer report through instead of answering "not enabled".
-        catch (AppExitedException) { throw; }
-        catch
+        // A crashed app or a held UI thread is not a disabled element (convention
+        // 11, UiaSwallow): let the report through instead of answering "not enabled".
+        catch (Exception ex) when (UiaSwallow.MayAnswerAbsent(ex))
         {
             return false;
         }
@@ -786,7 +860,7 @@ class Actions
         {
             el = Find(id, index, scope);
         }
-        catch
+        catch (Exception ex) when (UiaSwallow.MayAnswerAbsent(ex))
         {
             return null;
         }
@@ -828,7 +902,7 @@ class Actions
             // throws must not lose the other 60. null is already this
             // contract's "not set / doesn't apply".
             try { values[i] = AttrOf(elements[i], attr); }
-            catch { values[i] = null; }
+            catch (Exception ex) when (UiaSwallow.MayAnswerAbsent(ex)) { values[i] = null; }
         }
         return values;
     }
@@ -852,26 +926,28 @@ class Actions
         for (var i = 0; i < elements.Length; i++)
         {
             try { texts[i] = ElementFinder.GetText(elements[i], cf); }
-            catch { texts[i] = ""; }
+            catch (Exception ex) when (UiaSwallow.MayAnswerAbsent(ex)) { texts[i] = ""; }
         }
         return texts;
     }
 
     /// <summary>The one scope walk + one <see cref="ElementFinder.FindAll"/>
     /// both bulk reads share. Mirrors <see cref="Count"/>'s shape exactly —
-    /// including letting <see cref="AppExitedException"/> through, because a
-    /// crashed app is not an empty column (convention 11).</summary>
+    /// including letting a crashed app and a held UI thread through, because
+    /// neither is an empty column (convention 11, <see cref="UiaSwallow"/>).</summary>
     private AutomationElement[] FindAllFor(string id, IReadOnlyList<ScopeStep>? scope)
     {
         try
         {
-            var root = _session.RootElement;
-            var cf = _session.Automation.ConditionFactory;
-            var scoped = ElementFinder.WalkScope(root, cf, scope);
-            return ElementFinder.FindAll(scoped, cf, id);
+            return UiaRetry.Run("find-all " + id, () =>
+            {
+                var root = _session.RootElement;
+                var cf = _session.Automation.ConditionFactory;
+                var scoped = ElementFinder.WalkScope(root, cf, scope);
+                return ElementFinder.FindAll(scoped, cf, id);
+            }, trace: Trace);
         }
-        catch (AppExitedException) { throw; }
-        catch
+        catch (Exception ex) when (UiaSwallow.MayAnswerAbsent(ex))
         {
             return [];
         }
@@ -915,7 +991,7 @@ class Actions
                         }
                         return $"{r.X - ox},{r.Y - oy},{r.Width},{r.Height}";
                     }
-                    catch { return null; }
+                    catch (Exception ex) when (UiaSwallow.MayAnswerAbsent(ex)) { return null; }
                 }
             case "in-viewport":
                 // The cross-driver "brought into view" observable
@@ -951,7 +1027,7 @@ class Actions
                         var inBand = centre >= vp.Y && centre <= vp.Y + vp.Height;
                         return inBand && !el.IsOffscreen ? "true" : "false";
                     }
-                    catch { return null; }
+                    catch (Exception ex) when (UiaSwallow.MayAnswerAbsent(ex)) { return null; }
                 }
             case "disabled":
                 // Walk up the parent chain — UIA's IsEnabled doesn't
@@ -999,7 +1075,7 @@ class Actions
                             _ => null,
                         };
                     }
-                    catch { return null; }
+                    catch (Exception ex) when (UiaSwallow.MayAnswerAbsent(ex)) { return null; }
                 }
             case "options":
                 // The cross-driver picker contract (`drivers/base.py::option_texts`):
@@ -1017,11 +1093,10 @@ class Actions
                 // (`feed-factor-select`) reports what it paints, as `option_texts`
                 // promises.
                 try { return el.ControlType == FlaUI.Core.Definitions.ControlType.ComboBox ? OptionsJson(el) : null; }
-                catch (AppExitedException) { throw; }
-                catch { return null; }
+                catch (Exception ex) when (UiaSwallow.MayAnswerAbsent(ex)) { return null; }
             case "name":
                 try { return el.Properties.Name.ValueOrDefault; }
-                catch { return null; }
+                catch (Exception ex) when (UiaSwallow.MayAnswerAbsent(ex)) { return null; }
             default:
                 // One value, or several packed `key=value;…` (PackedAttr): a pack
                 // answers this attribute's own value, never the whole string.
@@ -1030,7 +1105,7 @@ class Actions
                     var help = el.Properties.HelpText.ValueOrDefault;
                     return PackedAttr.TryRead(help, attr.ToLowerInvariant(), out var packed) ? packed : help;
                 }
-                catch { return null; }
+                catch (Exception ex) when (UiaSwallow.MayAnswerAbsent(ex)) { return null; }
         }
     }
 
@@ -1038,15 +1113,18 @@ class Actions
     {
         try
         {
-            var root = _session.RootElement;
-            var cf = _session.Automation.ConditionFactory;
-            var scoped = ElementFinder.WalkScope(root, cf, scope);
-            return ElementFinder.FindAll(scoped, cf, id).Length;
+            return UiaRetry.Run("count " + id, () =>
+            {
+                var root = _session.RootElement;
+                var cf = _session.Automation.ConditionFactory;
+                var scoped = ElementFinder.WalkScope(root, cf, scope);
+                return ElementFinder.FindAll(scoped, cf, id).Length;
+            }, trace: Trace);
         }
-        // A crashed app is not an absent element (convention 11): let the
-        // dead-peer report through instead of answering "count 0".
-        catch (AppExitedException) { throw; }
-        catch
+        // A crashed app or a held UI thread is not an absent element (convention
+        // 11): let the dead-peer report or the stall verdict through instead of
+        // answering "count 0" (UiaSwallow).
+        catch (Exception ex) when (UiaSwallow.MayAnswerAbsent(ex))
         {
             return 0;
         }
@@ -1097,92 +1175,74 @@ class Actions
         try { rootHwnd = (IntPtr)root.Properties.NativeWindowHandle.ValueOrDefault; }
         catch { rootHwnd = IntPtr.Zero; }
 
-        // Below NavigationView's ~641 DIP "Minimal" pane-display threshold — which
-        // App.xaml.cs's 600 DIP minimum window size sits inside — the pane is an
-        // unopened flyout and its NavigationViewItems (every "-tab" id) are absent
-        // from the tree entirely, not merely offscreen: a whole-frame scan silently
-        // dropped every nav tab. `ElementFinder`'s by-id lookup already opens the
-        // pane on a miss for exactly this reason (`ToggleNavPane`, its
-        // "s3-toggle-pane-retry" strategy) — probe the one nav item every
-        // authenticated page carries (`feed-tab`) and open-scan-restore around it,
-        // so the registry doesn't quietly omit every nav item when the pane starts
-        // closed. A pre-login frame has no `TogglePaneButton` either, so the probe
-        // miss there is a harmless no-op (`ToggleNavPane` returns immediately).
-        bool openedPane = false;
-        if (root.FindFirstDescendant(cf.ByAutomationId("feed-tab")) is null)
-        {
-            ElementFinder.ToggleNavPane(root, cf);
-            openedPane = true;
-        }
-        try
-        {
-            var all = root.FindAllDescendants();
+        // The nav items are read like every other element: MainPage's
+        // NavigationView keeps a rail at every window width the app allows
+        // (CompactModeThresholdWidth="0"), so its NavigationViewItems are in the
+        // tree whenever the main pane shows. Until 2026-11-05 the 600 DIP default
+        // window sat below Auto's 641 DIP Minimal threshold, where the items were
+        // absent until the pane was toggled open, and this walk opened it around
+        // the scan.
+        var all = root.FindAllDescendants();
 
-            var indexCounters = new Dictionary<string, int>();
-            var kept = new List<(AutomationElement El, string Id, int Index, string Key)>();
-            foreach (var el in all)
+        var indexCounters = new Dictionary<string, int>();
+        var kept = new List<(AutomationElement El, string Id, int Index, string Key)>();
+        foreach (var el in all)
+        {
+            string autoId;
+            try { autoId = el.AutomationId ?? ""; } catch (Exception ex) when (UiaSwallow.MayAnswerAbsent(ex)) { continue; }
+            if (string.IsNullOrEmpty(autoId)) continue;
+            bool offscreen;
+            try { offscreen = el.IsOffscreen; } catch (Exception ex) when (UiaSwallow.MayAnswerAbsent(ex)) { continue; }
+            if (offscreen) continue;
+
+            var idx = indexCounters.TryGetValue(autoId, out var n) ? n : 0;
+            indexCounters[autoId] = idx + 1;
+            kept.Add((el, autoId, idx, RuntimeKey(el)));
+        }
+
+        var byKey = new Dictionary<string, (string Id, int Index)>();
+        foreach (var e in kept) byKey[e.Key] = (e.Id, e.Index);
+
+        var records = new List<Dictionary<string, object?>>();
+        foreach (var (el, autoId, idx, _) in kept)
+        {
+            bool enabled;
+            try { enabled = el.IsEnabled; } catch (Exception ex) when (UiaSwallow.MayAnswerAbsent(ex)) { enabled = false; }
+
+            bool actuable = false;
+            try
             {
-                string autoId;
-                try { autoId = el.AutomationId ?? ""; } catch { continue; }
-                if (string.IsNullOrEmpty(autoId)) continue;
-                bool offscreen;
-                try { offscreen = el.IsOffscreen; } catch { continue; }
-                if (offscreen) continue;
-
-                var idx = indexCounters.TryGetValue(autoId, out var n) ? n : 0;
-                indexCounters[autoId] = idx + 1;
-                kept.Add((el, autoId, idx, RuntimeKey(el)));
+                actuable = el.Patterns.Invoke.IsSupported
+                    || el.Patterns.Toggle.IsSupported
+                    || el.Patterns.SelectionItem.IsSupported
+                    || el.Patterns.ExpandCollapse.IsSupported;
             }
+            catch { }
 
-            var byKey = new Dictionary<string, (string Id, int Index)>();
-            foreach (var e in kept) byKey[e.Key] = (e.Id, e.Index);
-
-            var records = new List<Dictionary<string, object?>>();
-            foreach (var (el, autoId, idx, _) in kept)
+            bool editable = false;
+            try
             {
-                bool enabled;
-                try { enabled = el.IsEnabled; } catch { enabled = false; }
-
-                bool actuable = false;
-                try
-                {
-                    actuable = el.Patterns.Invoke.IsSupported
-                        || el.Patterns.Toggle.IsSupported
-                        || el.Patterns.SelectionItem.IsSupported
-                        || el.Patterns.ExpandCollapse.IsSupported;
-                }
-                catch { }
-
-                bool editable = false;
-                try
-                {
-                    editable = el.Patterns.Value.IsSupported
-                        && !el.Patterns.Value.Pattern.IsReadOnly.ValueOrDefault;
-                }
-                catch { }
-
-                bool declaresEnabled = false;
-                try { declaresEnabled = el.Properties.ItemStatus.ValueOrDefault == GateDeclaredMarker; }
-                catch { }
-
-                records.Add(new Dictionary<string, object?>
-                {
-                    ["id"] = autoId,
-                    ["index"] = idx,
-                    ["enabled"] = enabled,
-                    ["declares_enabled"] = declaresEnabled,
-                    ["actuable"] = actuable,
-                    ["editable"] = editable,
-                    ["scope"] = ScopeOf(el, byKey, rootHwnd),
-                });
+                editable = el.Patterns.Value.IsSupported
+                    && !el.Patterns.Value.Pattern.IsReadOnly.ValueOrDefault;
             }
-            return records;
+            catch { }
+
+            bool declaresEnabled = false;
+            try { declaresEnabled = el.Properties.ItemStatus.ValueOrDefault == GateDeclaredMarker; }
+            catch { }
+
+            records.Add(new Dictionary<string, object?>
+            {
+                ["id"] = autoId,
+                ["index"] = idx,
+                ["enabled"] = enabled,
+                ["declares_enabled"] = declaresEnabled,
+                ["actuable"] = actuable,
+                ["editable"] = editable,
+                ["scope"] = ScopeOf(el, byKey, rootHwnd),
+            });
         }
-        finally
-        {
-            if (openedPane)
-                ElementFinder.ToggleNavPane(root, cf);
-        }
+        return records;
     }
 
     /// <summary>The "id[index]/id[index]" ancestor-scope DSL for <paramref name="el"/>
@@ -1446,27 +1506,39 @@ class Actions
                 catch { setMs += call.ElapsedMilliseconds; break; }
                 setMs += call.ElapsedMilliseconds;
                 steps++;
-                Thread.Sleep(40);
+
+                // SetScrollPercent returns before the container has moved, and a busy
+                // UI thread moves it later still. Read the position until it lands, so
+                // neither answer below is the previous step's: a fixed wait here read
+                // "no movement" two steps into a five-step page and reported the
+                // bottom with the element still below the fold (ScrollPolicy.ReachedBottom).
+                var achieved = double.NaN;
+                var settle = System.Diagnostics.Stopwatch.StartNew();
+                call.Restart();
+                try
+                {
+                    do
+                    {
+                        Thread.Sleep(20);
+                        achieved = sp.VerticalScrollPercent.ValueOrDefault;
+                    }
+                    while (!ScrollPolicy.Landed(achieved, target)
+                           && settle.ElapsedMilliseconds < ScrollPolicy.SweepSettleMs);
+                }
+                catch { readMs += call.ElapsedMilliseconds; break; }
+                readMs += call.ElapsedMilliseconds;
+                lastPercent = achieved;
+
                 call.Restart();
                 var onscreen = !el.IsOffscreen;
                 offMs += call.ElapsedMilliseconds;
                 if (onscreen) { outcome = "swept"; return true; }
 
-                // The container clamps at its own maximum, so once the achieved
-                // position stops advancing the remaining requests are no-ops that
-                // still cost a full round trip each. Reading it back is one extra
-                // call per step and saves every step after the bottom.
-                double achieved;
-                call.Restart();
-                try { achieved = sp.VerticalScrollPercent.ValueOrDefault; }
-                catch { readMs += call.ElapsedMilliseconds; break; }
-                readMs += call.ElapsedMilliseconds;
-                if (!double.IsNaN(lastPercent) && Math.Abs(achieved - lastPercent) < 0.5)
+                if (ScrollPolicy.ReachedBottom(achieved))
                 {
                     outcome = "bottom-reached";
                     break;
                 }
-                lastPercent = achieved;
             }
             sweep = phase.ElapsedMilliseconds;
             // A sweep that ran to its bound without the element ever reporting
@@ -1475,18 +1547,20 @@ class Actions
             // the element still calls itself invisible. Name the geometry so the
             // next reader can tell "the scroll never reached it" from "the scroll
             // reached it and the window clips it" without another run.
-            if (outcome == "not-found") geometry = DescribeGeometry(el, container, viewSize, lastPercent);
+            if (outcome is "not-found" or "bottom-reached")
+                geometry = DescribeGeometry(el, container, viewSize, lastPercent);
             if (outcome == "not-found") outcome = "swept-without-finding";
             return !el.IsOffscreen;
         }
-        catch (Exception e)
+        catch (Exception e) when (UiaSwallow.MayAnswerAbsent(e))
         {
             // NAME the exception. `scroll_to` is best-effort by contract — a caller
             // that cannot scroll still gets its plain visibility answer — so this
-            // swallow is correct, but a swallow that says only "threw" is how a
-            // 2 s UIA provider timeout (the app's UI thread not pumping) reads as
-            // "the element is not scrollable", which is a different bug with a
-            // different owner. One line separates them.
+            // swallow is correct, but a swallow that says only "threw" hides which
+            // failure it was. A 2 s UIA provider timeout (the app's UI thread not
+            // pumping) never lands here: the filter lets it through with the stall
+            // verdict, because "not found" would be the held thread's lie
+            // (UiaSwallow).
             outcome = $"threw {e.GetType().Name}: {e.Message.Split('\n')[0]}";
             return false;
         }
@@ -1755,7 +1829,7 @@ class Actions
             }
             return fraction;
         }
-        catch
+        catch (Exception ex) when (UiaSwallow.MayAnswerAbsent(ex))
         {
             return null;
         }
@@ -2147,10 +2221,14 @@ class Actions
 
     private AutomationElement Find(string id, int index = 0, IReadOnlyList<ScopeStep>? scope = null)
     {
-        var root = _session.RootElement;
-        var cf = _session.Automation.ConditionFactory;
-        var scoped = ElementFinder.WalkScope(root, cf, scope);
-        return ElementFinder.FindOne(scoped, cf, id, index);
+        // Root acquisition and the find both wait out a transient UIA timeout (UiaRetry).
+        return UiaRetry.Run("find " + id, () =>
+        {
+            var root = _session.RootElement;
+            var cf = _session.Automation.ConditionFactory;
+            var scoped = ElementFinder.WalkScope(root, cf, scope);
+            return ElementFinder.FindOne(scoped, cf, id, index);
+        }, trace: Trace);
     }
 
     private AutomationElement FindWithRetry(string id, int index, TimeSpan timeout,
@@ -2512,6 +2590,23 @@ class Actions
     /// <summary>A short, log-safe identity for an element: its AutomationId when it
     /// has one, else control type + Name. Used only in the commit-path diagnostics —
     /// a fallback that fires must say WHICH element it gave up on (convention 6).</summary>
+    /// <summary>Whether <paramref name="el"/>'s UIA peer is gone — its view
+    /// rebuilt it since the find. A live element answers its AutomationId (empty
+    /// when unset); a dead one throws on the read, the same read
+    /// <see cref="Describe"/> falls back from to <c>&lt;unknown element&gt;</c>.</summary>
+    private static bool IsStale(AutomationElement el)
+    {
+        try
+        {
+            _ = el.Properties.AutomationId.ValueOrDefault;
+            return false;
+        }
+        catch
+        {
+            return true;
+        }
+    }
+
     private static string Describe(AutomationElement el)
     {
         try

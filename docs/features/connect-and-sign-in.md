@@ -27,6 +27,7 @@ Stamped 2026-10-01 at 308c995169.
    - `tests/e2e-unified/tests/test_onboarding_launch_routing_smoke.py::test_smoke_c_unreachable_refused_shows_retry_surface`
    - `tests/e2e-unified/tests/test_onboarding_launch_routing_smoke.py::test_smoke_d_unreachable_dns_fail_shows_retry_surface`
    - `tests/e2e-unified/tests/test_onboarding_launch_routing_smoke.py::test_smoke_f_retry_surface_fallthrough_goes_to_handle_entry`
+   - `tests/e2e-unified/tests/test_launch_retry_gating_case.py::test_no_session_entered_and_nest_unreachable_lands_launch_retry`
 3. [app] The app remembers your nest's identity and warns you, before signing in, if it has changed — `docs/goal/architecture/security.md` § Transport trust
    - `tests/e2e-unified/tests/test_nest_identity_pin.py::test_changed_nest_identity_warns_then_recovers`
    - `tests/e2e-unified/tests/test_nest_identity_pin_post_auth.py::test_post_auth_identity_change_warns_then_recovers`
@@ -35,6 +36,7 @@ Stamped 2026-10-01 at 308c995169.
    - `tests/e2e-unified/tests/test_onboarding_self_signed_probe.py::test_onboarding_handle_check_tolerates_self_signed_local_nest`
    - `tests/e2e-unified/tests/platform/docker/test_firewalled_trust_differential.py::test_native_tofu_client_reaches_connected_and_admin_on_self_signed_floor`
    - `tests/e2e-unified/tests/test_self_signed_nest_client_legs.py::test_blob_legs_round_trip_against_a_self_signed_nest`
+   - `tests/e2e-unified/tests/test_static_serving.py::test_the_nest_served_app_signs_in_on_the_self_signed_floor`
 5. [app] You stay signed in across a restart of the app — `docs/goal/behavior/onboarding.md` § Long-term store contract
    - `tests/e2e-unified/tests/test_signed_in_relaunch_stays_ready.py::test_a_signed_in_app_relaunches_reset_ready`
    - `tests/e2e-unified/tests/test_onboarding_logged_in_terminal_web.py::test_web_logged_in_terminal_survives_a_page_reload`
@@ -54,6 +56,7 @@ Stamped 2026-10-01 at 308c995169.
    - `tests/e2e-unified/tests/test_onboarding_launch_routing_smoke.py::test_smoke_m_wrong_clock_ahead_stays_signed_in`
 11. [app] If a nest already holds your account but no longer lets you in, asking it for an invite says so plainly and never tells you to try again — `docs/goal/behavior/onboarding.md` § 3. Invite request (`invite_request`)
    - `tests/e2e-unified/tests/test_onboarding_launch_routing_smoke.py::test_smoke_n_suspended_user_fallthrough_invite_submit_is_terminal`
+   - `tests/e2e-unified/tests/test_invite_request_already_registered_web.py::test_web_suspended_user_invite_submit_is_terminal`
 12. [app] If your nest's identity history shows two competing successors, the app warns you, names both, and offers no way to trust either — `docs/goal/architecture/nest/box-recovery.md` § Client acceptance — re-pin on a verified chain
     - `tests/e2e-unified/tests/test_nest_identity_fork.py::test_competing_successors_warn_naming_both_heads_with_no_trust`
 13. [app] If your nest's admin suspends your account while you are signed in, the app says the nest refused you without being restarted, and Retry lets you back in once the admin restores you — `docs/goal/behavior/onboarding.md` § App-launch routing
@@ -66,41 +69,44 @@ Stamped 2026-10-01 at 308c995169.
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ⚠ partial | |
-| linux | ⚠ partial | |
-| windows | ⚠ partial | |
-| macos | ⚠ partial | |
-| ios | ⚠ partial | |
+| web | ⚠ partial | 0.1.5-dev+acde58f9 standalone |
+| linux | ✅ full | 0.1.5-dev+acde58f9 standalone |
+| windows | ⚠ partial | 0.1.5-dev+acde58f9 standalone |
+| macos | ⚠ partial | 0.1.5-dev+acde58f9 standalone |
+| ios | ⚠ partial | 0.1.5-dev+acde58f9 standalone |
 | android |  no run recorded | |
-| tui | ⚠ partial | |
+| tui | ✅ full | 0.1.5-dev+acde58f9 standalone |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
-| 1 | app | `tests/e2e-unified/tests/test_onboarding.py::test_login_and_see_feed` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (windows): passed |
-| 1 | app | `tests/e2e-unified/tests/test_onboarding_launch_routing_smoke.py::test_smoke_b_registered_identity_relaunches_to_main_app` | web (linux): passed, linux (linux): passed, tui (linux): passed, tui (windows): passed |
-| 1 | app | `tests/e2e-unified/tests/test_onboarding_launch_routing_smoke.py::test_smoke_k_real_onboarding_completion_reaches_the_main_app` | linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 2 | app | `tests/e2e-unified/tests/test_onboarding_launch_routing_smoke.py::test_smoke_c_unreachable_refused_shows_retry_surface` | web (linux): passed, linux (linux): passed, tui (linux): passed, tui (windows): passed |
-| 2 | app | `tests/e2e-unified/tests/test_onboarding_launch_routing_smoke.py::test_smoke_d_unreachable_dns_fail_shows_retry_surface` | web (linux): passed, linux (linux): passed, tui (linux): passed, tui (windows): passed |
-| 2 | app | `tests/e2e-unified/tests/test_onboarding_launch_routing_smoke.py::test_smoke_f_retry_surface_fallthrough_goes_to_handle_entry` | web (linux): passed, linux (linux): passed, tui (linux): passed, tui (windows): passed |
-| 3 | app | `tests/e2e-unified/tests/test_nest_identity_pin.py::test_changed_nest_identity_warns_then_recovers` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 1 | app | `tests/e2e-unified/tests/test_onboarding.py::test_login_and_see_feed` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 1 | app | `tests/e2e-unified/tests/test_onboarding_launch_routing_smoke.py::test_smoke_b_registered_identity_relaunches_to_main_app` | web (linux): passed, linux (linux): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 1 | app | `tests/e2e-unified/tests/test_onboarding_launch_routing_smoke.py::test_smoke_k_real_onboarding_completion_reaches_the_main_app` | linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 2 | app | `tests/e2e-unified/tests/test_onboarding_launch_routing_smoke.py::test_smoke_c_unreachable_refused_shows_retry_surface` | web (linux): passed, linux (linux): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 2 | app | `tests/e2e-unified/tests/test_onboarding_launch_routing_smoke.py::test_smoke_d_unreachable_dns_fail_shows_retry_surface` | web (linux): passed, linux (linux): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 2 | app | `tests/e2e-unified/tests/test_onboarding_launch_routing_smoke.py::test_smoke_f_retry_surface_fallthrough_goes_to_handle_entry` | web (linux): passed, linux (linux): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 2 | app | `tests/e2e-unified/tests/test_launch_retry_gating_case.py::test_no_session_entered_and_nest_unreachable_lands_launch_retry` | linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 3 | app | `tests/e2e-unified/tests/test_nest_identity_pin.py::test_changed_nest_identity_warns_then_recovers` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 3 | app | `tests/e2e-unified/tests/test_nest_identity_pin_post_auth.py::test_post_auth_identity_change_warns_then_recovers` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
 | 3 | app | `tests/e2e-unified/tests/test_web_bearer_remint_identity_pin.py::test_post_auth_identity_change_bearer_remint_channel` | web (linux): passed |
-| 4 | app | `tests/e2e-unified/tests/test_onboarding_self_signed_probe.py::test_onboarding_handle_check_tolerates_self_signed_local_nest` | web (linux): skipped, linux (linux): passed, tui (linux): skipped |
-| 4 | app | `tests/e2e-unified/tests/platform/docker/test_firewalled_trust_differential.py::test_native_tofu_client_reaches_connected_and_admin_on_self_signed_floor` | — |
-| 4 | app | `tests/e2e-unified/tests/test_self_signed_nest_client_legs.py::test_blob_legs_round_trip_against_a_self_signed_nest` | web (linux): skipped, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (windows): passed |
-| 5 | app | `tests/e2e-unified/tests/test_signed_in_relaunch_stays_ready.py::test_a_signed_in_app_relaunches_reset_ready` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (windows): passed |
+| 4 | app | `tests/e2e-unified/tests/test_onboarding_self_signed_probe.py::test_onboarding_handle_check_tolerates_self_signed_local_nest` | web (linux): skipped, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 4 | app | `tests/e2e-unified/tests/platform/docker/test_firewalled_trust_differential.py::test_native_tofu_client_reaches_connected_and_admin_on_self_signed_floor` — requires `firewalled-trust-differential-drive` (test harness) (not built: web, windows, macos, ios, android) | linux (linux): passed, tui (linux): passed |
+| 4 | app | `tests/e2e-unified/tests/test_self_signed_nest_client_legs.py::test_blob_legs_round_trip_against_a_self_signed_nest` | web (linux): skipped, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 4 | app | `tests/e2e-unified/tests/test_static_serving.py::test_the_nest_served_app_signs_in_on_the_self_signed_floor` | web (linux): passed |
+| 5 | app | `tests/e2e-unified/tests/test_signed_in_relaunch_stays_ready.py::test_a_signed_in_app_relaunches_reset_ready` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
 | 5 | app | `tests/e2e-unified/tests/test_onboarding_logged_in_terminal_web.py::test_web_logged_in_terminal_survives_a_page_reload` | web (linux): passed |
 | 6 | app | `tests/e2e-unified/tests/test_nest_flip_resilience.py::test_nest_flip_resilience` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 6 | app | `tests/e2e-unified/tests/test_nest_flip_resilience.py::test_nest_flip_feed_rehydrate` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 6 | app | `tests/e2e-unified/tests/test_nest_flip_resilience.py::test_page_machines_open_no_socket_of_their_own` | web (linux): passed |
-| 6 | app | `tests/e2e-unified/tests/test_nest_flip_resilience.py::test_a_folders_gesture_lands_the_moment_the_app_reads_online_after_a_flip` | web (linux): passed, linux (linux): failed, tui (linux): passed |
-| 7 | nest | `tests/e2e-unified/tests/test_api_helpers.py::test_auth_token` | nest (linux): passed |
-| 7 | nest | `tests/e2e-unified/tests/api/test_onboarding.py::test_alice_self_service_onboarding` | nest (linux): passed |
-| 8 | app | `tests/e2e-unified/tests/test_reach_hint_dial_journey.py::test_the_hint_opens_a_connected_app_and_the_domains_first_answer_drops_it` | web (linux): skipped, linux (linux): skipped, windows (windows): failed, tui (linux): passed |
-| 9 | app | `tests/e2e-unified/tests/test_onboarding_launch_routing_smoke.py::test_smoke_l_wrong_clock_still_signs_in` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 10 | app | `tests/e2e-unified/tests/test_onboarding_launch_routing_smoke.py::test_smoke_m_wrong_clock_ahead_stays_signed_in` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 11 | app | `tests/e2e-unified/tests/test_onboarding_launch_routing_smoke.py::test_smoke_n_suspended_user_fallthrough_invite_submit_is_terminal` | linux (linux): passed, windows (windows): passed, tui (linux): passed |
-| 12 | app | `tests/e2e-unified/tests/test_nest_identity_fork.py::test_competing_successors_warn_naming_both_heads_with_no_trust` | linux (linux): passed, tui (linux): passed |
-| 13 | app | `tests/e2e-unified/tests/test_onboarding_launch_routing_smoke.py::test_smoke_e2_suspended_while_signed_in_lands_refused_surface_without_relaunch` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
-| 14 | app | `tests/e2e-unified/tests/test_nest_identity_pin_webpki.py::test_a_login_on_a_publicly_trusted_nest_pins_it_and_an_impostor_warns` | linux (linux): passed, tui (linux): passed |
+| 6 | app | `tests/e2e-unified/tests/test_nest_flip_resilience.py::test_a_folders_gesture_lands_the_moment_the_app_reads_online_after_a_flip` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 7 | nest | `tests/e2e-unified/tests/test_api_helpers.py::test_auth_token` | nest (linux): passed, nest (macos): passed |
+| 7 | nest | `tests/e2e-unified/tests/api/test_onboarding.py::test_alice_self_service_onboarding` | nest (linux): passed, nest (macos): passed |
+| 8 | app | `tests/e2e-unified/tests/test_reach_hint_dial_journey.py::test_the_hint_opens_a_connected_app_and_the_domains_first_answer_drops_it` — requires `registry-set-account-reach` (test harness) (not built: web, android) | web (linux): skipped, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 9 | app | `tests/e2e-unified/tests/test_onboarding_launch_routing_smoke.py::test_smoke_l_wrong_clock_still_signs_in` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 10 | app | `tests/e2e-unified/tests/test_onboarding_launch_routing_smoke.py::test_smoke_m_wrong_clock_ahead_stays_signed_in` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 11 | app | `tests/e2e-unified/tests/test_onboarding_launch_routing_smoke.py::test_smoke_n_suspended_user_fallthrough_invite_submit_is_terminal` | linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 11 | app | `tests/e2e-unified/tests/test_invite_request_already_registered_web.py::test_web_suspended_user_invite_submit_is_terminal` | web (linux): passed |
+| 12 | app | `tests/e2e-unified/tests/test_nest_identity_fork.py::test_competing_successors_warn_naming_both_heads_with_no_trust` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 13 | app | `tests/e2e-unified/tests/test_onboarding_launch_routing_smoke.py::test_smoke_e2_suspended_while_signed_in_lands_refused_surface_without_relaunch` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 14 | app | `tests/e2e-unified/tests/test_nest_identity_pin_webpki.py::test_a_login_on_a_publicly_trusted_nest_pins_it_and_an_impostor_warns` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 <!-- features-render:end -->

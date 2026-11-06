@@ -8,7 +8,9 @@
 //! (only when the checked code carries a guardian designation). Above the
 //! bottom row, always: the terms notice `onboarding-terms-notice` +
 //! `onboarding-terms-link` (`terms-and-content-guidelines.md` § The decisions,
-//! item 3).
+//! item 3), with the nest's rules `onboarding-nest-rules` +
+//! `onboarding-nest-rules-item` directly above it when it publishes any
+//! (`nest-rules.md` § Acceptance at joining).
 //!
 //! Two independent rows: the admin-flow request on top, the out-of-band code
 //! below. Both status labels render the snapshot's `LocalizedText` — the OOB
@@ -93,6 +95,12 @@ pub fn elements(w: &Wizard) -> Vec<Element> {
         ));
     }
 
+    // Joining is acceptance: the nest's rules directly above the terms notice
+    // (`nest-rules.md` § Acceptance at joining), once the machine's verified
+    // read has landed.
+    if let Some(rules) = w.machine.joining_nest_rules(crate::nest_rules::UI_LANG) {
+        out.extend(crate::nest_rules::joining_elements(&rules));
+    }
     out.extend(super::terms_notice());
     out.push(Element::button(
         ids::INVITE_REQUEST_CONTINUE_BUTTON,

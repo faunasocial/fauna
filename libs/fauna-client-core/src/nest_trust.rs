@@ -737,7 +737,7 @@ fn save_local_pins(map: &HashMap<String, String>) {
     if let Some(ls) = local_storage()
         && let Ok(s) = serde_json::to_string(map)
     {
-        // Best-effort, like native `DiskPinStore::persist`: a quota /
+        // Best-effort, like native `DiskPinStore`'s write: a quota /
         // private-mode write error must never break a live sign-in.
         let _ = ls.set_item(LOCAL_STORAGE_PIN_KEY, &s);
     }

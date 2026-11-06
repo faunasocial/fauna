@@ -98,7 +98,12 @@ pub(super) fn web_elements(state: &SettingsState) -> Vec<Element> {
         // a nest-confirmed view, never from the click — which is exactly what
         // makes reading it back a round-trip proof rather than an echo of the
         // gesture (`test_web_authoring.py` § docstring).
-        .attr("state", if enabled { "on" } else { "off" }),
+        .attr("state", if enabled { "on" } else { "off" })
+        // Disabled until the nest-confirmed view is in: `ToggleWebSubdomain`
+        // flips against that view, so before hydrate a click would be dropped
+        // silently. A disabled control is refused loudly by the automation
+        // layer (`apple:3580` found this on macOS; this is the same gate).
+        .enabled(view.is_some()),
         Element::chrome(t::SUBDOMAIN_TOGGLE_SUBTITLE),
     ];
 
@@ -489,6 +494,26 @@ mod tests {
             .find(|e| e.id == "web-settings-subdomain-toggle")
             .expect("toggle painted");
         assert_eq!(attr(toggle, "state"), Some("off"));
+        // An un-hydrated page has nothing true to flip from, so the toggle is
+        // painted disabled and an early click is refused loudly rather than
+        // dropped (`apple:3580`'s shape, lifted here).
+        assert!(!toggle.enabled, "toggle must be disabled until hydrated");
+    }
+
+    /// The toggle becomes actionable once the nest-confirmed view is in.
+    #[test]
+    fn hydrated_toggle_is_enabled() {
+        let app = state_with(SubdomainView {
+            enabled: false,
+            url: None,
+            disabled_reason: None,
+        });
+        let els = web_elements(&app.settings);
+        let toggle = els
+            .iter()
+            .find(|e| e.id == "web-settings-subdomain-toggle")
+            .expect("toggle painted");
+        assert!(toggle.enabled, "toggle must be enabled once hydrated");
     }
 
     /// **The non-optimism proof.** Clicking the toggle must NOT move the painted

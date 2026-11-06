@@ -271,7 +271,7 @@ fun ConversationDetailScreen(
     val mutedKeywords by vm.mutedKeywords.collectAsState()
     val revealedMuted = remember { mutableStateListOf<String>() }
     LaunchedEffect(Unit) { vm.loadMutedKeywords() }
-    // Content-policy render inputs (guardian floor + own spam thresholds) — the
+    // Content-policy render inputs (guardian rules + own spam thresholds) — the
     // per-bubble block/collapse verdict resolves off these (family-safety.md
     // § Content policy). Refreshed by `loadMutedKeywords()` above on detail open.
     val contentPolicyInputs by vm.contentPolicyInputs.collectAsState()
@@ -308,7 +308,7 @@ fun ConversationDetailScreen(
     }
 
     // Guardian Notify (family-safety.md § Guardian Notify): count every
-    // currently-rendered message's guardian-floor enforcement. A no-op per
+    // currently-rendered message's guardian-rule enforcement. A no-op per
     // message unless the ward's content_notify knob is on and the guardian
     // floor bites; deduped per message per local day inside the store, so a
     // re-render never re-counts. Mirrors web's conversations/+page.svelte effect.
@@ -782,7 +782,7 @@ fun ConversationDetailContent(
     revealedMuted: List<String> = emptyList(),
     onRevealMuted: (String) -> Unit = {},
     // Content-policy render inputs (family-safety.md § Content policy) — the
-    // guardian floor + the viewer's own spam/phishing thresholds. The bubble
+    // guardian rules + the viewer's own spam/phishing thresholds. The bubble
     // resolves its block/collapse verdict off these in shared Rust. The default
     // (empty) short-circuits to "show" WITHOUT the shared-Rust call
     // ([ContentPolicyInputs.verdictFor]), so the VM-free test harness stays
@@ -960,7 +960,7 @@ fun ConversationDetailContent(
                                 // which has no plane identity and paints no report verb.
                                 val senderActor = messageSenderActorHex(msg)
                                 val reportKey = msg.planeRef?.recordDigest
-                                // The composed verdict — the guardian floor, the viewer's
+                                // The composed verdict — the guardian rules, the viewer's
                                 // own thresholds and reports, and the region content
                                 // policy, in shared Rust (`RegionPlaneHost.render`); the
                                 // region's placeholder rides along when it drove the verb.
@@ -989,6 +989,9 @@ fun ConversationDetailContent(
                                     // dm-reply-all-button is mail-only (the
                                     // recipient-selection capability).
                                     showReplyAll = detail.capabilities.supportsRecipientSelection,
+                                    // ThreadCapabilities.canSend (shared Rust): false on a bridged room no bridge
+                                    // serves — Reply stays in view, disabled.
+                                    canSend = detail.capabilities.canSend,
                                     onReplyAll = { onReplyAll(msg.messageId) },
                                     loadAttachmentBytes = loadAttachmentBytes,
                                     attachmentResident = attachmentResident,
@@ -1013,6 +1016,12 @@ fun ConversationDetailContent(
                                     // arm (never revealable), a `collapse` behind a reveal.
                                     contentVerdict = decision.verdict,
                                     regionPlaceholder = decision.placeholder,
+                                    // The sealed-item sentence after the frame — an
+                                    // end-to-end thread's bubble only, never one Guardian
+                                    // Notify counted, decided in shared Rust.
+                                    regionSealedNote = remember(decision, detail.capabilities, contentPolicyInputs, msg.labels) {
+                                        decision.sealedNote(detail.capabilities.encryption, contentPolicyInputs, msg.labels)
+                                    },
                                     nestPlaceholder = decision.nestPlaceholder,
                                     // The guardian rule's reason, verbatim beside the family
                                     // frame (nest-rules.md § The shared rule editor → *The
@@ -1845,6 +1854,7 @@ private fun MessageBubble(
     isSelected: Boolean = false,
     onReply: () -> Unit,
     showReplyAll: Boolean = false,
+    canSend: Boolean = true,
     onReplyAll: () -> Unit = {},
     loadAttachmentBytes: (String) -> ByteArray? = { null },
     attachmentResident: (String) -> Boolean = { false },
@@ -1874,12 +1884,15 @@ private fun MessageBubble(
     // (region-blocking.md § The blocked render) — painted AHEAD of the family
     // arms below; a revealed `collapse` shares [contentRevealed].
     regionPlaceholder: FfiRegionPlaceholder? = null,
+    // The sealed-item sentence after the region frame (`region.sealed_note`) —
+    // the shared decision, true on an end-to-end thread's bubble only.
+    regionSealedNote: Boolean = false,
     // The nest's placeholder when a rule of the nest the message was read through
     // drove the verdict (nest-rules.md § The nest source in the engine) — the
     // region's twin, painted in the same place.
     nestPlaceholder: com.fauna.ffi.FfiNestPlaceholder? = null,
     // The guardian rule's reason, painted beside the family-policy frame
-    // (`content-policy-blocked-reason`); null for a floor or any other source.
+    // (`content-policy-blocked-reason`); null for any other source.
     guardianReason: String? = null,
     // `dm-message-report-button` (moderation.md § User-initiated reporting): `null`
     // paints nothing — own messages and mail/bridged messages have no verb.
@@ -1898,7 +1911,7 @@ private fun MessageBubble(
     onMoreReaction: () -> Unit = {},
     onMarkSpam: () -> Unit = {},
 ) {
-    // Session-local reveal for a content-policy `collapse` verdict (the floor
+    // Session-local reveal for a content-policy `collapse` verdict (the rule
     // itself persists). Declared before any early return so its remember slot is
     // always allocated in the same order across recompositions of this bubble.
     var contentRevealed by remember(msg.messageId) { mutableStateOf(false) }
@@ -1979,6 +1992,7 @@ private fun MessageBubble(
                 regionPlaceholder,
                 witnessKey = "conversation:${msg.messageId}",
                 onReveal = { contentRevealed = true },
+                sealedNote = regionSealedNote,
             )
             MessageTimestamp(msg.timestampMs, isSelected)
         }
@@ -1998,7 +2012,7 @@ private fun MessageBubble(
         return
     }
 
-    // Content-policy BLOCK (a guardian floor) — collapse the bubble to a
+    // Content-policy BLOCK (a guardian rule) — collapse the bubble to a
     // policy-naming notice in place of the body, NO reveal (family-safety.md
     // § Content policy). Checked AHEAD of the muted-keyword arm so a message that
     // is both muted (revealable) and blocked can never be revealed past the
@@ -2053,9 +2067,9 @@ private fun MessageBubble(
         return
     }
 
-    // Content-policy COLLAPSE (a guardian `collapse` floor OR the viewer's own
+    // Content-policy COLLAPSE (a guardian `collapse` rule OR the viewer's own
     // spam/phishing threshold — the every-user un-darking of moderation.md § item
-    // 1) — collapse behind a one-tap, session-local reveal; the floor persists.
+    // 1) — collapse behind a one-tap, session-local reveal; the rule persists.
     // After the muted arm (both are revealable collapses). The block arm's notice
     // in `state="collapsed"` beside `content-policy-collapsed-reveal-button` (ids
     // user-approved 2026-10-16), the feed's twin.
@@ -2381,6 +2395,7 @@ private fun MessageBubble(
             )
             IconButton(
                 onClick = onReply,
+                enabled = canSend,
                 modifier = Modifier.size(32.dp).testTag(Ids.DM_REPLY_BUTTON),
             ) {
                 Icon(
@@ -2392,6 +2407,7 @@ private fun MessageBubble(
             if (showReplyAll) {
                 IconButton(
                     onClick = onReplyAll,
+                    enabled = canSend,
                     modifier = Modifier.size(32.dp).testTag(Ids.DM_REPLY_ALL_BUTTON),
                 ) {
                     Icon(

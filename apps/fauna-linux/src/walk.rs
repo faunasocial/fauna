@@ -282,8 +282,117 @@ fn check_declared_kinds_are_registered(ctx: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// **I8 — a tooltip never merely restates the widget's own test id.**
+///
+/// A test id is an internal kebab-case token; a tooltip is user-visible prose.
+/// A widget wearing its own id as its tooltip costs twice, and both costs were
+/// measured:
+///
+/// * **The user sees it.** Hovering a post card popped up a tooltip reading
+///   `post-card` — internal vocabulary painted into the product.
+/// * **It blocks on the X server, at build time, once per widget.**
+///   `gtk_widget_set_tooltip_text` triggers a tooltip query, which asks the
+///   display for the pointer — `XIQueryPointer` → `_XReply` → `poll`. A stall
+///   stack caught the feed's per-post render sitting in exactly that. So the
+///   cost lands on a *render loop*, once per card, and is invisible at the call
+///   site because setting a tooltip reads as free.
+///
+/// [`crate::testid::set_test_id`] used to make this stamp on every tagged
+/// widget and no longer does. This invariant is what stops it coming back one
+/// hand-written call site at a time — the shape [`set_test_id`]'s own guard
+/// cannot see, because that guard only knows the widgets it tags itself.
+///
+/// It is safe as a *class* assertion because the two vocabularies never
+/// legitimately collide: real tooltips are sentences ("Like", "Export a
+/// calendar as .ics file"), ids are kebab tokens.
+///
+/// [`set_test_id`]: crate::testid::set_test_id
+fn check_no_tooltip_restates_a_test_id(
+    root: &impl IsA<gtk::Widget>,
+    ctx: &str,
+) -> Result<(), String> {
+    fn walk(w: &gtk::Widget, out: &mut BTreeMap<String, usize>) {
+        let name = w.widget_name();
+        if !name.is_empty()
+            && !looks_like_a_gtype(&name)
+            && w.tooltip_text()
+                .is_some_and(|tip| tip.as_str() == name.as_str())
+        {
+            *out.entry(name.to_string()).or_default() += 1;
+        }
+        let mut c = w.first_child();
+        while let Some(child) = c {
+            if crate::automation::find::is_showing(&child) {
+                walk(&child, out);
+            }
+            c = child.next_sibling();
+        }
+    }
+    let mut offenders: BTreeMap<String, usize> = BTreeMap::new();
+    walk(root.upcast_ref(), &mut offenders);
+    if offenders.is_empty() {
+        return Ok(());
+    }
+    let total: usize = offenders.values().sum();
+    let named: Vec<String> = offenders
+        .iter()
+        .map(|(id, n)| {
+            if *n == 1 {
+                id.clone()
+            } else {
+                format!("{id} ×{n}")
+            }
+        })
+        .collect();
+    Err(format!(
+        "{ctx}: {total} widget(s) carry their own test id as their tooltip, so the user sees \
+         internal vocabulary and the build pays an X round trip per widget: {}",
+        named.join(", ")
+    ))
+}
+
+/// I8 detects the shape it exists for — a widget wearing its own test id as
+/// its tooltip — and does not flag a real one.
+///
+/// The sweeps below apply I8 to the app's actual surfaces; this pins the
+/// *detector* against a synthetic positive and a negative control, so a later
+/// refactor that quietly stops looking (a walk that no longer descends, a
+/// comparison that never matches) reds here rather than going silently green
+/// over every page.
+#[test]
+fn the_tooltip_invariant_catches_a_widget_wearing_its_own_id() {
+    run_on_gtk_thread(|| {
+        let offender = gtk::Button::new();
+        offender.set_widget_name("post-card");
+        offender.set_tooltip_text(Some("post-card"));
+        let err = check_no_tooltip_restates_a_test_id(&offender, "synthetic")
+            .expect_err("a widget whose tooltip is its own test id must be flagged");
+        assert!(
+            err.contains("post-card"),
+            "the failure must name the offending id; got: {err}"
+        );
+
+        // Negative control: a real, user-facing tooltip on the same id is fine.
+        // Without this, an invariant that flagged every tooltip would pass the
+        // positive case above and still be wrong.
+        let ok = gtk::Button::new();
+        ok.set_widget_name("feed-like-button");
+        ok.set_tooltip_text(Some("Like"));
+        check_no_tooltip_restates_a_test_id(&ok, "synthetic")
+            .expect("a real tooltip must not be flagged");
+
+        // And a widget with no tooltip at all — the shape every tagged widget
+        // has had since `set_test_id` stopped stamping one.
+        let bare = gtk::Button::new();
+        bare.set_widget_name("feed-like-button");
+        check_no_tooltip_restates_a_test_id(&bare, "synthetic")
+            .expect("an untooltipped widget must not be flagged");
+    });
+}
+
 /// Every invariant over one surface.
 fn check_all(
+    root: &impl IsA<gtk::Widget>,
     ids: &[String],
     indexed: &std::collections::BTreeSet<String>,
     ctx: &str,
@@ -292,6 +401,7 @@ fn check_all(
     check_surface_has_a_heading(ids, ctx)?;
     check_online_only_affordances_are_disabled(ctx)?;
     check_declared_kinds_are_registered(ctx)?;
+    check_no_tooltip_restates_a_test_id(root, ctx)?;
     Ok(())
 }
 
@@ -419,7 +529,7 @@ fn every_sidebar_page_upholds_the_invariants() {
                 "the {want:?} page shows no test ids at all — an empty surface, or one whose \
                  whole subtree is hidden"
             );
-            if let Err(e) = check_all(&ids, &indexed, &format!("page {want:?}")) {
+            if let Err(e) = check_all(&page, &ids, &indexed, &format!("page {want:?}")) {
                 failures.push(e);
             }
         }
@@ -485,6 +595,9 @@ fn sweep_shell_rail(
         // stops being true the moment a lazily-built page declares: the sweep
         // that walks to it is then the only one that can see its declarations.
         if let Err(e) = check_online_only_affordances_are_disabled(&ctx) {
+            failures.push(e);
+        }
+        if let Err(e) = check_no_tooltip_restates_a_test_id(&surface, &ctx) {
             failures.push(e);
         }
         if let Err(e) = check_declared_kinds_are_registered(&ctx) {
@@ -704,6 +817,47 @@ fn returning_to_admin_lands_on_the_dashboard() {
             "admin-nav-back",
             "dashboard",
             &result,
+        );
+    });
+}
+
+/// A sidebar row stays clickable after the page moved by another door.
+///
+/// The main sidebar navigates on `row-selected`, and a press on a row that is
+/// already selected selects nothing — so whenever the content stack moved
+/// WITHOUT the sidebar (the quick switcher, a sub-page's "View imported" deep
+/// link, a notification tap-through, the agent's nav), the row of the page the
+/// user had left kept its selection, and clicking it again went nowhere. The
+/// store reviewer journey hit exactly this: Settings entered by `settings-tab`,
+/// the feed reached by another door, and the teardown's `settings-tab` press
+/// never brought the Settings rail back.
+#[test]
+fn a_sidebar_row_re_enters_its_page_after_another_door_moved_the_stack() {
+    run_on_gtk_thread(|| {
+        let (_app, result) = offline_window();
+        click_sidebar_row(&result, settings_tab_index());
+        assert_eq!(
+            result.stack.visible_child_name().as_deref(),
+            Some("settings")
+        );
+
+        crate::app::navigate_to_section(&result.window, "feed");
+        assert_eq!(result.stack.visible_child_name().as_deref(), Some("feed"));
+
+        click_sidebar_row(&result, settings_tab_index());
+        assert_eq!(
+            result.stack.visible_child_name().as_deref(),
+            Some("settings"),
+            "a settings-tab press after the stack moved to the feed by another door left the \
+             app on {:?} — the sidebar still held the Settings row's selection, so the press \
+             selected nothing and the row-selected nav never fired",
+            result.stack.visible_child_name()
+        );
+        assert!(
+            showing_ids(&result.window)
+                .iter()
+                .any(|id| id == "account-settings-link"),
+            "back in Settings, the rail's Account row (account-settings-link) is not showing"
         );
     });
 }

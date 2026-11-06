@@ -25,7 +25,7 @@ use fauna_ipc::sync::{FileVersionEntry, FileVersionListInfo};
 use fauna_protocol::RpcRequester;
 use fauna_protocol::files::FilesVersionsListReply;
 
-/// The version list for a path that resolves to no served on-demand folder.
+/// The version list for a path that resolves to no bound folder.
 ///
 /// Not an error: Explorer right-clicks any file, including ones outside every sync
 /// root. An empty history renders as a disabled/absent submenu rather than an error
@@ -123,6 +123,15 @@ pub struct RestoredVersion {
     pub recorded_seq: i64,
 }
 
+/// The head a restore is about to record — [`restore_file_version`]'s `owe` seam
+/// receives it ahead of the record, the resealed manifest in the reseal case.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RestoreHead {
+    pub manifest_hash: [u8; 32],
+    pub size_bytes: i64,
+    pub content_key_version: Option<u64>,
+}
+
 /// Why this verb refuses a version that was recorded under a previous identity
 /// of the account where it cannot open it: one whose folder no engine is
 /// running for ([`InheritedReseal`]).
@@ -196,6 +205,11 @@ pub trait InheritedReseal {
 /// engine keys through `FileDownloadKeys::label_seal_root`, S8 D2) and carried
 /// verbatim; `None` records the re-point plaintext-only, best-effort — an S8
 /// backfill row, never an error.
+///
+/// `owe` is called with the exact head about to be recorded, after the reseal
+/// decision and BEFORE the record, for the caller to write the owed-restore
+/// intent (`file-versions.md` § Restore, ordering 1): written first, a crash at
+/// any point leaves the intent or nothing. A refusal records nothing.
 #[allow(clippy::too_many_arguments)]
 pub async fn restore_file_version<R>(
     sync: &SyncClient<R>,
@@ -207,6 +221,7 @@ pub async fn restore_file_version<R>(
     path_sealed: Option<Vec<u8>>,
     seat: &ReaderSeat,
     reseal: &impl InheritedReseal,
+    owe: &(dyn Fn(&RestoreHead) -> Result<(), String> + Sync),
 ) -> Result<RestoredVersion, String>
 where
     R: RpcRequester,
@@ -252,7 +267,13 @@ where
     // head this records is re-signed, so its bytes are opened and re-sealed
     // first and the record carries the NEW manifest. A version the seam does
     // not open records nothing.
-    let (manifest_hash, size_bytes) = if decision == RestoreDecision::NeedsReseal {
+    //
+    // The version's thumbnail rests as its bytes rest (`media.md` § Encryption
+    // at rest → *A thumbnail rests as its file rests*): re-pointed verbatim
+    // with them, or re-sealed through the same seam under the same signer — a
+    // tile that does not re-seal is dropped (the download backfill re-renders
+    // it), never a reason to refuse the file.
+    let (manifest_hash, size_bytes, thumbnail_hash) = if decision == RestoreDecision::NeedsReseal {
         let resealed = reseal
             .reseal(rel, historical, info.signed_as)
             .await
@@ -265,10 +286,38 @@ where
                 );
                 format!("version {version_num}: {e}")
             })?;
-        (resealed.manifest_hash.digest(), resealed.size_bytes)
+        let thumbnail = match info
+            .thumbnail_hash
+            .as_deref()
+            .and_then(|h| hex::decode(h).ok()?.try_into().ok())
+        {
+            Some(thumb) => match reseal.reseal(rel, thumb, info.signed_as).await {
+                Ok(t) => Some(hex::encode(t.manifest_hash.digest())),
+                Err(e) => {
+                    tracing::warn!(
+                        version_num,
+                        error = %e,
+                        "restore: the version's thumbnail did not re-seal; recorded without one"
+                    );
+                    None
+                }
+            },
+            None => None,
+        };
+        (
+            resealed.manifest_hash.digest(),
+            resealed.size_bytes,
+            thumbnail,
+        )
     } else {
-        (historical, info.size_bytes)
+        (historical, info.size_bytes, info.thumbnail_hash.clone())
     };
+
+    owe(&RestoreHead {
+        manifest_hash,
+        size_bytes,
+        content_key_version: info.content_key_version,
+    })?;
 
     let reply = sync
         .restore_version(
@@ -278,6 +327,7 @@ where
             hex::encode(manifest_hash),
             size_bytes,
             info.content_key_version,
+            thumbnail_hash,
             path_sealed,
             // The binding's row, as the listing above: the seal is the
             // binding's, so the row the record names is too.
@@ -600,6 +650,7 @@ mod tests {
             Some(vec![9u8; 40]),
             &seat(),
             &NeverReseals,
+            &|_| Ok(()),
         )
         .await
         .unwrap();
@@ -665,6 +716,118 @@ mod tests {
         assert_eq!(restored.recorded_seq, 77);
     }
 
+    /// The owed-restore intent goes down BEFORE the record, naming the exact
+    /// head the record then carries: a crash at any point leaves the intent or
+    /// nothing (`file-versions.md` § Restore, ordering 1).
+    #[tokio::test]
+    async fn the_restores_head_is_owed_before_it_is_recorded() {
+        let fake = FakeRestoreNest::new(Ok(historical([7u8; 32], 4096, Some(3))));
+        let sync = SyncClient::new(Arc::clone(&fake));
+        let owed = Mutex::new(Vec::new());
+
+        restore_file_version(
+            &sync,
+            "docs",
+            ROW,
+            "dev-1",
+            "docs/report.txt",
+            42,
+            None,
+            &seat(),
+            &NeverReseals,
+            &|head| {
+                owed.lock().unwrap().push((head.clone(), fake.kinds()));
+                Ok(())
+            },
+        )
+        .await
+        .unwrap();
+
+        let owed = owed.into_inner().unwrap();
+        assert_eq!(owed.len(), 1, "owed exactly once");
+        let (head, sent_before) = &owed[0];
+        assert_eq!(
+            *head,
+            RestoreHead {
+                manifest_hash: [7u8; 32],
+                size_bytes: 4096,
+                content_key_version: Some(3),
+            }
+        );
+        assert!(
+            !sent_before.iter().any(|k| k == "fauna.sync.changes.record"),
+            "the record is not sent ahead of the intent: {sent_before:?}"
+        );
+        assert_eq!(
+            fake.kinds().last().map(String::as_str),
+            Some("fauna.sync.changes.record")
+        );
+    }
+
+    /// A restore whose intent could not be written records nothing: the record
+    /// alone is the crash window the intent closes.
+    #[tokio::test]
+    async fn a_refused_intent_records_nothing() {
+        let fake = FakeRestoreNest::new(Ok(historical([7u8; 32], 4096, Some(3))));
+        let sync = SyncClient::new(Arc::clone(&fake));
+
+        let err = restore_file_version(
+            &sync,
+            "docs",
+            ROW,
+            "dev-1",
+            "docs/report.txt",
+            42,
+            None,
+            &seat(),
+            &NeverReseals,
+            &|_| Err("the state DB refused".to_string()),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(err.contains("the state DB refused"), "got: {err}");
+        assert!(
+            !fake
+                .kinds()
+                .iter()
+                .any(|k| k == "fauna.sync.changes.record"),
+            "nothing is recorded behind a refused intent"
+        );
+    }
+
+    /// The version's thumbnail rests as its bytes rest (`media.md` § Encryption
+    /// at rest → *A thumbnail rests as its file rests*): a verbatim restore
+    /// re-points it with them, so the restored head keeps its tile.
+    #[tokio::test]
+    async fn a_verbatim_restore_re_records_the_versions_thumbnail() {
+        let thumb = hex::encode([0x7a; 32]);
+        let fake = FakeRestoreNest::new(Ok(signed_by_root(FileVersionInfo {
+            version_num: 42,
+            manifest_hash: fauna_protocol::ByteBuf::from(vec![7u8; 32]),
+            size_bytes: 4096,
+            thumbnail_hash: Some(thumb.clone()),
+            ..Default::default()
+        })));
+        let sync = SyncClient::new(Arc::clone(&fake));
+        restore_file_version(
+            &sync,
+            "docs",
+            ROW,
+            "dev-1",
+            "docs/report.txt",
+            42,
+            None,
+            &seat(),
+            &NeverReseals,
+            &|_| Ok(()),
+        )
+        .await
+        .unwrap();
+        let rec: SyncChangeRecordRequest = fake.decode(2);
+        assert_eq!(rec.thumbnail_hash, Some(thumb));
+    }
+
     /// A failed lookup must record **nothing** — a `modify` without the historical
     /// manifest would re-point the file at a guess.
     #[tokio::test]
@@ -682,6 +845,7 @@ mod tests {
             None,
             &ReaderSeat::default(),
             &NeverReseals,
+            &|_| Ok(()),
         )
         .await
         .unwrap_err();
@@ -718,6 +882,7 @@ mod tests {
             None,
             &seat(),
             &NeverReseals,
+            &|_| Ok(()),
         )
         .await
         .unwrap_err();
@@ -842,6 +1007,7 @@ mod tests {
             None,
             &seat(),
             &NeverReseals,
+            &|_| Ok(()),
         )
         .await
         .unwrap_err();
@@ -925,6 +1091,7 @@ mod tests {
             manifest_hash: fauna_core::data::ContentHash::from_digest_raw([0xee; 32]),
             size_bytes: 5000,
         }));
+        let owed = Mutex::new(Vec::new());
         let restored = restore_file_version(
             &sync,
             "docs",
@@ -935,9 +1102,22 @@ mod tests {
             None,
             &successor_seat,
             &seam,
+            &|head| {
+                owed.lock().unwrap().push(head.clone());
+                Ok(())
+            },
         )
         .await
         .expect("an inherited unstamped version restores through the byte seam");
+        assert_eq!(
+            *owed.lock().unwrap(),
+            vec![RestoreHead {
+                manifest_hash: [0xee; 32],
+                size_bytes: 5000,
+                content_key_version: None,
+            }],
+            "the intent names the resealed head the record carries, never the historical one"
+        );
         assert_eq!(
             *seam.asked.lock().unwrap(),
             vec![(
@@ -966,6 +1146,49 @@ mod tests {
         assert_eq!(restored.size_bytes, 5000);
         assert_eq!(restored.content_key_version, None);
 
+        // A version naming a thumbnail re-seals it through the same seam,
+        // under the same signer, and records the re-sealed manifest.
+        let mut with_thumb = inherited(43, None);
+        with_thumb.thumbnail_hash = Some(hex::encode([0x7a; 32]));
+        let mut row = with_thumb.as_change_row().expect("statement");
+        row.author_actor_id = Some(predecessor.actor_id().to_hex());
+        fauna_protocol::sync_writer_sig::ChangeSigner::direct(&predecessor)
+            .sign_row(&mut row, NONCE)
+            .expect("signs");
+        with_thumb.signature = row.signature;
+        with_thumb.signer_key = row.signer_key;
+        let fake = FakeRestoreNest::new(Ok(with_thumb));
+        let sync = SyncClient::new(Arc::clone(&fake));
+        let seam = FakeReseal::answering(Ok(fauna_sync_engine::engine::ResealedVersion {
+            manifest_hash: fauna_core::data::ContentHash::from_digest_raw([0xee; 32]),
+            size_bytes: 5000,
+        }));
+        restore_file_version(
+            &sync,
+            "docs",
+            ROW,
+            "dev-1",
+            "docs/report.txt",
+            43,
+            None,
+            &successor_seat,
+            &seam,
+            &|_| Ok(()),
+        )
+        .await
+        .expect("restores with its thumbnail");
+        assert_eq!(
+            seam.asked.lock().unwrap()[1],
+            (
+                "docs/report.txt".to_string(),
+                [0x7a; 32],
+                Some(predecessor.actor_id().0)
+            ),
+            "the thumbnail re-seals under the version's own signer"
+        );
+        let rec: SyncChangeRecordRequest = fake.decode(2);
+        assert_eq!(rec.thumbnail_hash, Some(hex::encode([0xee; 32])));
+
         // The attack: the seam refuses (the bytes open under no root the
         // predecessor's signature may reach) — the reason surfaces, and
         // nothing is recorded.
@@ -984,6 +1207,7 @@ mod tests {
             None,
             &successor_seat,
             &seam,
+            &|_| Ok(()),
         )
         .await
         .unwrap_err();
@@ -1012,6 +1236,7 @@ mod tests {
             None,
             &successor_seat,
             &NeverReseals,
+            &|_| Ok(()),
         )
         .await
         .expect("a stamped version never opens under an owner root");
@@ -1033,6 +1258,7 @@ mod tests {
             None,
             &successor_seat,
             &NeverReseals,
+            &|_| Ok(()),
         )
         .await
         .expect("signed as the current identity");
@@ -1069,6 +1295,7 @@ mod tests {
             None,
             &successor_seat,
             &NeverReseals,
+            &|_| Ok(()),
         )
         .await
         .expect("the current identity vouches for the manifest in this set");
@@ -1162,6 +1389,7 @@ mod tests {
             None,
             &lineage_seat,
             &seam,
+            &|_| Ok(()),
         )
         .await
         .expect("a history version restores through the opening restore");
@@ -1256,6 +1484,7 @@ mod tests {
             None,
             &seat(),
             &NeverReseals,
+            &|_| Ok(()),
         )
         .await
         .expect("a delegated writer's verified version restores");
@@ -1272,6 +1501,7 @@ mod tests {
             None,
             &seat(),
             &NeverReseals,
+            &|_| Ok(()),
         )
         .await
         .unwrap_err();

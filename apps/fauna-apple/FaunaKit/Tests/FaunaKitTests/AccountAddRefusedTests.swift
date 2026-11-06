@@ -10,6 +10,7 @@ import Foundation
 ///
 /// Hermetic: `FAUNA_E2E_BRIDGE` forces `KeychainStore` into its in-memory mode.
 @MainActor
+@Suite(.sharedKeychain)
 struct AccountAddRefusedTests {
     private static func secret(_ n: Int) -> String {
         String(format: "%064x", n + 1)

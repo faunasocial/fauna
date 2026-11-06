@@ -395,7 +395,9 @@ fi
 
 # --- Step 9: Generate checksum ---
 PKG="$REPO_ROOT/build/Fauna-${VERSION}.pkg"
-shasum -a 256 "$PKG" > "${PKG}.sha256"
+# The bare file name, as release.yml's SHA256SUMS and the .dmg's .sha256: the
+# checksum is verified beside the downloaded .pkg, never at this build path.
+(cd "$(dirname "$PKG")" && shasum -a 256 "$(basename "$PKG")") > "${PKG}.sha256"
 
 echo ""
 echo "==> Done! Package: $PKG"

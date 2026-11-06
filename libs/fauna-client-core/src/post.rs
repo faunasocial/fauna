@@ -402,6 +402,32 @@ pub fn build_sealed_referencing_post(
     audience: SealedAudience<'_>,
     seal_id: [u8; 32],
 ) -> Result<GatedPostBuild, ClientError> {
+    build_sealed_referencing_post_at(
+        kp,
+        body,
+        target,
+        kind,
+        audience,
+        seal_id,
+        &PostAuthoring::now(),
+    )
+}
+
+/// [`build_sealed_referencing_post`], but with a caller-supplied
+/// `created_at` + `origin` — the twin an archive merge signs a claimed reply
+/// to a followers-gated imported post through, sealed to the claimant's own
+/// tier and backdated to the comment's instant
+/// (`docs/goal/behavior/archive-import.md` § Linking and merging (phase two)
+/// → *Phase two — the rulings*, ruling 6; the [`build_post_at`] precedent).
+pub fn build_sealed_referencing_post_at(
+    kp: &ActorKeypair,
+    body: &str,
+    target: [u8; 36],
+    kind: ReferenceKind,
+    audience: SealedAudience<'_>,
+    seal_id: [u8; 32],
+    authoring: &PostAuthoring,
+) -> Result<GatedPostBuild, ClientError> {
     use fauna_core::data::ContentHash;
     use fauna_core::subscription::types::KeyAccess;
     use fauna_core::subscription::{ROOM_POST_TIER, ROOM_POST_TIER_RANK};
@@ -446,7 +472,7 @@ pub fn build_sealed_referencing_post(
         tier_rank,
         base_key,
         seal_id,
-        &PostAuthoring::now(),
+        authoring,
     )
 }
 
@@ -939,6 +965,32 @@ pub fn build_referencing_post(
     target_audience: ReferencedAudience,
     kind: ReferenceKind,
 ) -> Result<Vec<u8>, ClientError> {
+    build_referencing_post_at(
+        kp,
+        body,
+        tags,
+        target,
+        target_audience,
+        kind,
+        &PostAuthoring::now(),
+    )
+}
+
+/// [`build_referencing_post`], but with a caller-supplied `created_at` +
+/// `origin` — the twin an archive merge signs a claimed reply to a public
+/// imported post, or a claimed reaction, through, backdated to the record's
+/// instant (`docs/goal/behavior/archive-import.md` § Linking and merging
+/// (phase two) → *Phase two — the rulings*, rulings 6 and 7; the
+/// [`build_post_at`] precedent).
+pub fn build_referencing_post_at(
+    kp: &ActorKeypair,
+    body: &str,
+    tags: &[String],
+    target: [u8; 36],
+    target_audience: ReferencedAudience,
+    kind: ReferenceKind,
+    authoring: &PostAuthoring,
+) -> Result<Vec<u8>, ClientError> {
     let cid = fauna_cbor::Cid::from_bytes(target)
         .map_err(|e| ClientError(format!("malformed target post id: {e}")))?;
     if target_audience == ReferencedAudience::Restricted && !body.trim().is_empty() {
@@ -947,7 +999,7 @@ pub fn build_referencing_post(
 
     let post = Post {
         author: kp.actor_id(),
-        created_at: Timestamp::now(),
+        created_at: authoring.created_at,
         body: PostBody::Text {
             content: body.to_string(),
             facets: tags_to_facets(tags),
@@ -956,9 +1008,50 @@ pub fn build_referencing_post(
         expires_at: None,
         gated: None,
         content_warning: None,
-        origin: None,
+        origin: authoring.origin.clone(),
     };
 
+    encode_signed_post(kp, &post)
+}
+
+/// Build and sign a **reaction post** — a wordless post whose one reference is
+/// `Reference::Upvote` (`emoji: None`, a plain like) or `Reference::React {
+/// emoji }` — at a caller-supplied `created_at` + `origin`: the shape an
+/// archive merge signs a claimed reaction through
+/// (`docs/goal/behavior/archive-import.md` § Linking and merging (phase two) →
+/// *Phase two — the rulings*, ruling 7). It carries no words, so it builds
+/// public whatever the target's audience (ruling 3 of `ui/feed.md`'s
+/// *A reply, quote or repost of a restricted post*: a wordless reference names
+/// only what the target's plaintext envelope already shows). Strict on a
+/// malformed target, as [`build_referencing_post_at`] is.
+pub fn build_reaction_post_at(
+    kp: &ActorKeypair,
+    target: [u8; 36],
+    emoji: Option<&str>,
+    authoring: &PostAuthoring,
+) -> Result<Vec<u8>, ClientError> {
+    let post_id = fauna_cbor::Cid::from_bytes(target)
+        .map_err(|e| ClientError(format!("malformed target post id: {e}")))?;
+    let reference = match emoji {
+        None => Reference::Upvote { post_id },
+        Some(emoji) => Reference::React {
+            post_id,
+            emoji: emoji.to_string(),
+        },
+    };
+    let post = Post {
+        author: kp.actor_id(),
+        created_at: authoring.created_at,
+        body: PostBody::Text {
+            content: String::new(),
+            facets: vec![],
+        },
+        references: vec![reference],
+        expires_at: None,
+        gated: None,
+        content_warning: None,
+        origin: authoring.origin.clone(),
+    };
     encode_signed_post(kp, &post)
 }
 
@@ -1725,5 +1818,124 @@ mod tests {
         let (post, _) = decode_post(&build_post(&kp, "hi", &[], None).unwrap()).unwrap();
         assert!(post.created_at >= before);
         assert_eq!(post.origin, None);
+    }
+
+    /// The referencing twins keep a merge's backdated instant and origin
+    /// byte-for-byte (`archive-import.md` § Linking and merging (phase two),
+    /// rulings 6 and 7), and the live builders stay stamped now with no
+    /// origin.
+    #[test]
+    fn a_reaction_post_is_wordless_backdated_and_carries_its_reference() {
+        let kp = test_keypair();
+        let authoring = PostAuthoring::imported(Timestamp(1_262_304_000_000), "facebook");
+        let like = build_reaction_post_at(&kp, target_cid(), None, &authoring).expect("like");
+        let (post, origin) = decode_post(&like).expect("decode");
+        assert!(origin.is_some(), "signed");
+        assert_eq!(post.created_at, authoring.created_at);
+        assert_eq!(post.origin, authoring.origin);
+        assert_eq!(post.body_text(), "");
+        assert!(post.gated.is_none(), "a wordless reference builds public");
+        assert!(matches!(post.references[..], [Reference::Upvote { .. }]));
+
+        let love = build_reaction_post_at(&kp, target_cid(), Some("❤️"), &authoring).expect("love");
+        let (post, _) = decode_post(&love).expect("decode");
+        assert!(matches!(&post.references[..], [Reference::React { emoji, .. }] if emoji == "❤️"));
+        assert!(build_reaction_post_at(&kp, [0u8; 36], None, &authoring).is_err());
+    }
+
+    #[test]
+    fn the_referencing_at_twins_keep_created_at_and_origin() {
+        use fauna_core::subscription::types::KeyAccess;
+        let kp = test_keypair();
+        let authoring = PostAuthoring {
+            created_at: Timestamp(1_262_304_000_000),
+            origin: Some(PostOrigin {
+                platform: "facebook".into(),
+                url: Some("https://example.com/p/1".into()),
+            }),
+        };
+
+        let bytes = build_referencing_post_at(
+            &kp,
+            "nice one",
+            &[],
+            target_cid(),
+            ReferencedAudience::Public,
+            ReferenceKind::Reply,
+            &authoring,
+        )
+        .expect("public twin builds");
+        let (post, _) = decode_post(&bytes).expect("decode");
+        assert_eq!(post.created_at, authoring.created_at);
+        assert_eq!(post.origin, authoring.origin);
+        assert_eq!(post.body_text(), "nice one");
+        assert!(matches!(post.references[..], [Reference::Reply { .. }]));
+        assert_eq!(
+            bytes,
+            build_referencing_post_at(
+                &kp,
+                "nice one",
+                &[],
+                target_cid(),
+                ReferencedAudience::Public,
+                ReferenceKind::Reply,
+                &authoring,
+            )
+            .unwrap(),
+            "the twin is deterministic over its authoring"
+        );
+        assert!(
+            build_referencing_post_at(
+                &kp,
+                "words",
+                &[],
+                target_cid(),
+                ReferencedAudience::Restricted,
+                ReferenceKind::Reply,
+                &authoring,
+            )
+            .is_err(),
+            "the twin keeps the live builder's restricted-target refusal"
+        );
+
+        let base = [6u8; 32];
+        let build = build_sealed_referencing_post_at(
+            &kp,
+            "for followers",
+            target_cid(),
+            ReferenceKind::Reply,
+            SealedAudience::Tier {
+                tier: "followers",
+                tier_rank: 0,
+                key_blob_ref: [8u8; 32],
+                period_key: &base,
+            },
+            [4u8; 32],
+            &authoring,
+        )
+        .expect("sealed twin builds");
+        let (post, _) = decode_post(&build.post_bytes).expect("decode");
+        assert_eq!(post.created_at, authoring.created_at);
+        assert_eq!(post.origin, authoring.origin);
+        assert!(matches!(
+            post.gated.expect("gated").key_access,
+            KeyAccess::Broadcast { .. }
+        ));
+
+        let before = Timestamp::now();
+        let (live, _) = decode_post(
+            &build_referencing_post(
+                &kp,
+                "",
+                &[],
+                target_cid(),
+                ReferencedAudience::Public,
+                ReferenceKind::Repost,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(live.created_at >= before);
+        assert_eq!(live.origin, None);
     }
 }

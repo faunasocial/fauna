@@ -65,9 +65,8 @@ impl FfiRuleEditor {
         Self::open(document, Publisher::Nest(domain))
     }
 
-    /// The guardian's editor over a ward's content policy: its rule document
-    /// with every floor still set shown as a rule beside it. `None` for a
-    /// ward with no content policy.
+    /// The guardian's editor over a ward's content policy: its rule document.
+    /// `None` for a ward with no content policy.
     #[uniffi::constructor]
     pub fn for_guardian(policy: Option<FfiContentPolicy>) -> Arc<Self> {
         let policy: Option<ContentPolicy> = policy.map(Into::into);
@@ -309,10 +308,6 @@ mod tests {
         let bytes = editor.document_bytes().unwrap();
 
         let policy = FfiContentPolicy {
-            nsfw: "inherit".into(),
-            spam: "inherit".into(),
-            phishing: "inherit".into(),
-            commercial: "inherit".into(),
             document: Some(bytes.clone()),
         };
         let shared: ContentPolicy = policy.clone().into();
@@ -327,10 +322,6 @@ mod tests {
     #[test]
     fn unreadable_guardian_bytes_fail_closed() {
         let policy: ContentPolicy = FfiContentPolicy {
-            nsfw: "inherit".into(),
-            spam: "inherit".into(),
-            phishing: "inherit".into(),
-            commercial: "inherit".into(),
             document: Some(vec![0xff]),
         }
         .into();

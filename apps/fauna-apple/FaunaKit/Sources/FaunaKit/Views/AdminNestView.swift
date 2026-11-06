@@ -25,6 +25,7 @@ import SwiftUI
 /// stack (iOS), not this page.
 public struct AdminNestView: View {
     @Environment(FaunaClient.self) private var client: FaunaClient?
+    @Environment(RegionStore.self) private var region: RegionStore?
     @State private var vm = AdminNestVM()
     @State private var showResetConfirm = false
     /// Edit buffer for the serving-port field — a `String` so it parses on Save with
@@ -43,10 +44,20 @@ public struct AdminNestView: View {
     /// `factory_reset`. Default no-op (iOS wires its own in Track 3 / standalone
     /// previews); macOS wires `FaunaMacApp.factoryResetReonboard`.
     var onFactoryReset: (String) -> Void = { _ in }
+    /// Opens the `nest_retire` page over this session (`admin-nest-retire-button`,
+    /// `nest-retirement.md` § Layout & flow). `nil` hides the section: the Fauna
+    /// Kids build compiles the whole retire surface out, and a host that cannot
+    /// present the page has no entry to offer.
+    var onRetire: (() -> Void)?
 
-    public init(reloadToken: Int = 0, onFactoryReset: @escaping (String) -> Void = { _ in }) {
+    public init(
+        reloadToken: Int = 0,
+        onFactoryReset: @escaping (String) -> Void = { _ in },
+        onRetire: (() -> Void)? = nil
+    ) {
         self.reloadToken = reloadToken
         self.onFactoryReset = onFactoryReset
+        self.onRetire = onRetire
     }
 
     public var body: some View {
@@ -108,6 +119,10 @@ public struct AdminNestView: View {
                 //    directly after NAT mode ──
                 webAppOriginSection
 
+                // ── Update channel (admin.md § N Nest → Update channel) —
+                //    directly after the web-app origin ──
+                updateChannelSection
+
                 // ── Read-only host-OS-maintenance status + "restart now" ──
                 osMaintenanceSection
 
@@ -137,6 +152,20 @@ public struct AdminNestView: View {
                 //    *Where it lands*) — directly after the takedown console it
                 //    pre-fills, as ui.yaml's admin-nest element order declares ──
                 reportsSection
+                blockedSection
+
+                // ── Nest rules (nest-rules.md § The shared rule editor;
+                //    admin.md § N. Nest → *Nest rules*) — the shared rule
+                //    editor, directly after the reports queue ──
+                if let client, let region {
+                    AdminNestRulesSection(api: client.api, nestRules: region.nestRules)
+                }
+
+                // ── Retire this server — between the reports section and
+                //    Factory reset (nest-retirement.md § Layout & flow) ──
+                #if !FAUNA_KIDS
+                if let onRetire { retireSection(onRetire) }
+                #endif
 
                 // ── Factory Reset danger zone (moved off Settings) ──
                 factoryResetSection
@@ -375,6 +404,93 @@ public struct AdminNestView: View {
         Task { await vm.saveWebAppOrigin() }
     }
 
+    /// Update channel (`admin-nest-update-channel-*`, admin.md § N Nest →
+    /// *Update channel*; nest/update-channel.md § The UI) — which builds this
+    /// nest installs on its own. Paint only: the status sentence, the three
+    /// radios' labels and descriptions and the `canSet` verdict are the shared
+    /// `FfiAdminUpdateChannelView` fold. Radios stay unmarked and disabled until
+    /// the read lands and whenever `canSet` is false. A radio pick is local; the
+    /// save commits it.
+    private var updateChannelSection: some View {
+        let view = vm.updateChannelView
+        let loading = L.admin.nestPage.updateChannelLoading
+        return GroupBox {
+            VStack(alignment: .leading, spacing: 6) {
+                Text(L.admin.nestPage.updateChannelLabel).fontWeight(.medium)
+                Text(L.admin.nestPage.updateChannelDesc)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                if let view {
+                    ForEach(view.options, id: \.channel) { option in
+                        updateChannelRadio(option: option)
+                    }
+                } else {
+                    Text(loading).font(.caption).foregroundStyle(.secondary)
+                }
+                HStack {
+                    automationText(Ids.adminNestUpdateChannelStatus,
+                                   view.map { renderLocalizedText($0.status) } ?? loading)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Button(L.admin.nestPage.updateChannelSave) { saveUpdateChannel() }
+                        .disabled(!vm.updateChannelEditable || vm.updateChannelDraft == nil)
+                        .accessibilityIdentifier(Ids.adminNestUpdateChannelSaveButton)
+                        .automationActivate(Ids.adminNestUpdateChannelSaveButton,
+                                            isEnabled: { vm.updateChannelEditable && vm.updateChannelDraft != nil }) {
+                            saveUpdateChannel()
+                        }
+                        // Picking a radio is local; the commit is
+                        // `fauna.admin.update_channel.set`.
+                        .faunaGate("fauna.admin.update_channel.set")
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier(Ids.adminNestUpdateChannelSection)
+        .automationValue(Ids.adminNestUpdateChannelSection, text: { L.admin.nestPage.updateChannelLabel })
+    }
+
+    /// One update-channel radio (`admin-nest-update-channel-{stable,test,dev}-radio`);
+    /// label and description come from the fold's `options`.
+    private func updateChannelRadio(option: FfiUpdateChannelOption) -> some View {
+        let id: String
+        switch option.channel {
+        case .stable: id = Ids.adminNestUpdateChannelStableRadio
+        case .test: id = Ids.adminNestUpdateChannelTestRadio
+        case .dev: id = Ids.adminNestUpdateChannelDevRadio
+        }
+        let selected = vm.updateChannelDraft == option.channel
+        return Button(action: { vm.selectUpdateChannel(option.channel) }) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Image(systemName: selected ? "largecircle.fill.circle" : "circle")
+                    .foregroundStyle(selected ? Color.accentColor : Color.secondary)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(renderLocalizedText(option.label)).foregroundStyle(.primary)
+                    Text(renderLocalizedText(option.description))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(!vm.updateChannelEditable)
+        .accessibilityIdentifier(id)
+        .automationActivate(id,
+                            isEnabled: { vm.updateChannelEditable },
+                            value: { vm.updateChannelDraft == option.channel ? "on" : "off" }) {
+            vm.selectUpdateChannel(option.channel)
+        }
+    }
+
+    /// Save action, shared by the Button and its `automationActivate` sibling.
+    private func saveUpdateChannel() {
+        Task { await vm.saveUpdateChannel() }
+    }
+
     /// Read-only host-OS-maintenance status (installers/vps.md § Host OS Maintenance
     /// § 4) — the patch/reboot state of an onboarded VPS's host Ubuntu box, read off
     /// the `os_*` fields on `fauna.setup.status`. The status line is always present;
@@ -589,14 +705,17 @@ public struct AdminNestView: View {
     /// fold — see `blockedReason`).
     @ViewBuilder
     private var seedRotateConfirmView: some View {
+        // Both unresolved states carry the withhold reason's id, like tui's
+        // `seed_rotate` fold: the reason a disabled confirm owes is the
+        // loading line or the failure itself.
         switch vm.seedRotateConfirm {
         case .loading:
-            Text(L.admin.nestPage.rotateSeedRosterLoading)
+            automationText(Ids.adminNestSeedRotateRosterReason, L.admin.nestPage.rotateSeedRosterLoading)
                 .font(.caption)
                 .foregroundStyle(.secondary)
             seedRotateConfirmButtons(enabled: false)
         case .failed(let message):
-            Text(message)
+            automationText(Ids.adminNestSeedRotateRosterReason, message)
                 .font(.caption)
                 .foregroundStyle(.red)
             seedRotateConfirmButtons(enabled: false)
@@ -604,14 +723,11 @@ public struct AdminNestView: View {
             Text(L.admin.nestPage.rotateSeedConfirmBody)
                 .font(.caption)
                 .foregroundStyle(.secondary)
-            ForEach(Array(view.inheritors.enumerated()), id: \.offset) { index, inheritor in
-                // Index baked directly into the registered id (not
-                // `.automationScope`, which needs a caller-supplied `scope=`
-                // query the cross-app test never sends) — matches windows'
-                // `AutomationProperties.SetAutomationId(row,
-                // $"…roster-item-{i}")` and linux's `set_test_id`, and the
-                // literal `-{n}` shape `ui.yaml` documents for this id.
-                automationText("\(Ids.adminNestSeedRotateRosterItem)-\(index)", inheritor.label)
+            ForEach(Array(view.inheritors.enumerated()), id: \.offset) { _, inheritor in
+                // One repeated id per row, addressed by `index=n` — convention 1
+                // (`e2e-conventions.md`); the registry's flat occurrence index
+                // resolves it with no `scope=` query.
+                automationText(Ids.adminNestSeedRotateRosterItem, inheritor.label)
                     .font(.caption)
             }
             if let reason = view.blockedReason {
@@ -740,11 +856,10 @@ public struct AdminNestView: View {
             TimelineView(.periodic(from: .now, by: 15)) { context in
                 let nowSecs = Int64(context.date.timeIntervalSince1970)
                 VStack(alignment: .leading, spacing: 4) {
-                    ForEach(Array(view.keys.enumerated()), id: \.offset) { index, row in
-                        // The literal `-{n}` id, not `.automationScope` (which
-                        // needs a `scope=` query the cross-app test never
-                        // sends) — the seed-rotate roster's shape above.
-                        automationText("\(Ids.adminNestOauthKeyItem)-\(index)",
+                    ForEach(Array(view.keys.enumerated()), id: \.offset) { _, row in
+                        // One repeated id per row (convention 1) — the
+                        // seed-rotate roster's shape above.
+                        automationText(Ids.adminNestOauthKeyItem,
                                        renderLocalizedText(FaunaFFISwift.issuerKeyRowLabel(
                                            row: row, nowSecs: nowSecs)))
                             .font(.callout)
@@ -933,7 +1048,13 @@ public struct AdminNestView: View {
                 ForEach(vm.reports, id: \.reportId) { row in
                     reportRow(row)
                 }
+                if let armed = vm.blockArmed {
+                    blockConfirm(armed)
+                }
                 if let status = vm.reportsStatus {
+                    Text(status).font(.caption).foregroundStyle(.secondary)
+                }
+                if let status = vm.blockStatus {
                     Text(status).font(.caption).foregroundStyle(.secondary)
                 }
             }
@@ -942,6 +1063,51 @@ public struct AdminNestView: View {
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier(Ids.adminNestReportsSection)
         .automationValue(Ids.adminNestReportsSection, text: { L.admin.nestPage.reportsLabel })
+    }
+
+    /// The blocked items (`admin-nest-blocked-section`): one `admin-nest-blocked-item`
+    /// per row with its Unblock, which arms the same confirm Block does.
+    private var blockedSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            ForEach(Array(vm.blocked.enumerated()), id: \.offset) { _, row in
+                let line = AdminNestVM.blockedLine(row)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(line)
+                        .font(.caption)
+                        .accessibilityIdentifier(Ids.adminNestBlockedItem)
+                        .automationValue(Ids.adminNestBlockedItem, text: { line })
+                    Button(renderLocalizedText(row.unblock.armLabel)) { vm.armUnblock(row) }
+                        .controlSize(.small)
+                        .accessibilityIdentifier(Ids.adminNestBlockedUnblockButton)
+                        .automationActivate(Ids.adminNestBlockedUnblockButton) { vm.armUnblock(row) }
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier(Ids.adminNestBlockedSection)
+        .automationValue(Ids.adminNestBlockedSection, text: { "" })
+    }
+
+    /// The armed Block / Unblock confirm — the summary CAPTURED at arm time names
+    /// the verb, the item and the reason before anything dispatches.
+    private func blockConfirm(_ armed: BlockArmed) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            automationText(Ids.adminNestReportBlockConfirmSummary, armed.summary)
+                .font(.caption)
+                .fixedSize(horizontal: false, vertical: true)
+            HStack {
+                Button(armed.confirmLabel, role: .destructive) { Task { await vm.confirmBlock() } }
+                    .accessibilityIdentifier(Ids.adminNestReportBlockConfirmButton)
+                    .automationActivate(Ids.adminNestReportBlockConfirmButton) {
+                        Task { await vm.confirmBlock() }
+                    }
+                    .faunaGate("fauna.moderation.admin_block")
+                Button(L.admin.nestPage.takedownCancelButton, role: .cancel) { vm.cancelBlock() }
+                    .accessibilityIdentifier(Ids.adminNestReportBlockCancelButton)
+                    .automationActivate(Ids.adminNestReportBlockCancelButton) { vm.cancelBlock() }
+            }
+        }
     }
 
     private func reportRow(_ row: FfiReportQueueRow) -> some View {
@@ -959,6 +1125,15 @@ public struct AdminNestView: View {
                         .automationActivate(Ids.adminNestReportOpenTakedownButton) {
                             vm.openTakedown(for: row)
                         }
+                }
+                // Block — an item subject only (the shared `can_block`); arms the confirm.
+                if row.canBlock {
+                    Button(renderLocalizedText(reportBlockFormView(subject: row.subject, restore: false).armLabel)) {
+                        vm.armBlock(row)
+                    }
+                    .controlSize(.small)
+                    .accessibilityIdentifier(Ids.adminNestReportBlockButton)
+                    .automationActivate(Ids.adminNestReportBlockButton) { vm.armBlock(row) }
                 }
                 Button(L.admin.nestPage.reportsActed) {
                     Task { await vm.resolveReport(row, acted: true) }
@@ -1036,6 +1211,28 @@ public struct AdminNestView: View {
         // No container id: ui.yaml declares no confirm container, and the
         // section's `.contain` already keeps these children queryable.
     }
+
+    #if !FAUNA_KIDS
+    /// Factory reset wipes a box the admin keeps; this destroys the box — the two
+    /// sit adjacent and their labels differentiate sharply.
+    private func retireSection(_ onRetire: @escaping () -> Void) -> some View {
+        GroupBox(L.admin.nestPage.retireTitle) {
+            VStack(alignment: .leading, spacing: 8) {
+                Text(L.admin.nestPage.retireDesc)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Button(L.admin.nestPage.retireButton, role: .destructive) { onRetire() }
+                    .accessibilityIdentifier(Ids.adminNestRetireButton)
+                    .automationActivate(Ids.adminNestRetireButton) { onRetire() }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier(Ids.adminNestRetireSection)
+        .automationValue(Ids.adminNestRetireSection, text: { L.admin.nestPage.retireTitle })
+    }
+    #endif
 
     private var factoryResetSection: some View {
         GroupBox(L.admin.settingsPage.factoryResetSection) {

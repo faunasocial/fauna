@@ -139,6 +139,11 @@ def _wait_for_device_card_by_name(app, name: str, timeout: float = 15.0) -> int:
     mistaking the app's own self device (`fauna`, `label_custody.rs:541`)
     for the one under test whenever that snapshot was taken before the self
     device had finished painting.
+
+    Exact only while no other row reads alike: `devices.md` § Device names
+    rule (c) suffixes every alike row ` · code`, and the session nest's roster
+    outlives one app's run of a test. So a label a test finds a card by carries
+    a run tag.
     """
     deadline = time.monotonic() + timeout
     last_nav = time.monotonic()
@@ -291,23 +296,18 @@ class TestDeviceCards:
     @pytest.mark.feature("devices")
     def test_device_card_shows_after_register(self):
         """After registering a device, device-card appears with name and status."""
-        _register_test_device(self.nest_url, self.actor_id, self.signing_key, label="my-linux-box")
+        device_name = f"my-linux-box-{secrets.token_hex(4)}"
+        _register_test_device(self.nest_url, self.actor_id, self.signing_key, label=device_name)
 
         self.app.backups.navigate_devices()
-        self.app.driver.wait_for("device-card", timeout=15)
+        # Wait for THIS test's card by the label it registered, never for "a
+        # card": an earlier test's row (the sealless one) is already painted
+        # when the page opens, so a bare `wait_for("device-card")` returns
+        # before the roster refresh brings this device in and the names read
+        # `['', <self>]`: a stale-roster read, not a custody defect.
+        mine = _wait_for_device_card_by_name(self.app, device_name)
 
-        assert self.app.driver.count("device-card") >= 1, (
-            "a registered device should render a device-card: "
-            f"{self.app.driver.diagnose('device-card')}"
-        )
-
-        name = self.app.driver.get_text("device-name", index=0)
-        assert name is not None and len(name) > 0, (
-            f"the device-card should show a non-empty name, got {name!r}: "
-            f"{self.app.driver.diagnose('device-name')}"
-        )
-
-        status = self.app.driver.get_text("device-status", index=0)
+        status = self.app.driver.get_text("device-status", index=mine)
         assert status in ("Online", "Offline"), (
             f"device-status should read Online/Offline, got {status!r}: "
             f"{self.app.driver.diagnose('device-status')}"
@@ -327,7 +327,7 @@ class TestDeviceCards:
         * **Nothing latched yet** (the enrollment's nest legs have not first
           succeeded) → the app's own id. `logged_in_app`'s session patch
           (`_login_app_as`, conftest.py) seeds it as the well-known
-          `_E2E_LOGIN_DEVICE_ID`, and the app adopts that as its real sync
+          `e2e_login_device_id`, and the app adopts that as its real sync
           identity (`media::adopt_device_id_hex`) — so the fixture row this
           test registers under that id, `this-device-under-test`, carries it.
         * **Latched** → the machine's named row, the same card: since the
@@ -352,16 +352,19 @@ class TestDeviceCards:
         session patch never reached. An app that fails the nothing-latched
         state the same way has the same bug — check that its local device-id
         store honours the patch before touching the assertions."""
-        from conftest import _E2E_LOGIN_DEVICE_ID
+        from helpers.e2e_session import e2e_login_device_id
         from common.cred_store import attach_account_store
         from helpers import enrollment
         from helpers.app_surface import app_name
 
+        run_tag = secrets.token_hex(4)
+        this_device_name = f"this-device-under-test-{run_tag}"
+        other_device_name = f"other-device-{run_tag}"
         _register_test_device(
             self.nest_url, self.actor_id, self.signing_key,
-            label="this-device-under-test", device_id=_E2E_LOGIN_DEVICE_ID,
+            label=this_device_name, device_id=e2e_login_device_id(self.app),
         )
-        _register_test_device(self.nest_url, self.actor_id, self.signing_key, label="other-device")
+        _register_test_device(self.nest_url, self.actor_id, self.signing_key, label=other_device_name)
 
         driver = self.app.driver
         client = app_name(driver)
@@ -384,9 +387,9 @@ class TestDeviceCards:
 
         def placement_matches_rule():
             before = read_enrolled()
-            expected = before or _E2E_LOGIN_DEVICE_ID
-            this_index = _find_device_card_by_name(driver, "this-device-under-test")
-            other_index = _find_device_card_by_name(driver, "other-device")
+            expected = before or e2e_login_device_id(self.app)
+            this_index = _find_device_card_by_name(driver, this_device_name)
+            other_index = _find_device_card_by_name(driver, other_device_name)
             badges = driver.count("device-this-mark-badge")
             on_this, on_other = badge_in(this_index), badge_in(other_index)
             after = read_enrolled()
@@ -401,7 +404,7 @@ class TestDeviceCards:
                 return None
             # A latch on any row but the named one is the regression the
             # one-credential shape rules out — never a state to accept.
-            if expected != _E2E_LOGIN_DEVICE_ID:
+            if expected != e2e_login_device_id(self.app):
                 return None
             if badges != 1 or on_other:
                 return None

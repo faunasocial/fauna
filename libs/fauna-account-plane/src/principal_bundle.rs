@@ -200,6 +200,20 @@ pub fn void_grant_registration<S: SecretStore + ?Sized>(credentials: &S, actor_i
     }
 }
 
+/// Whether `actor_id_hex`'s slot records a grant registration at all — what a
+/// host watching a voided latch ([`void_grant_registration`]) reads for the
+/// pass that re-registered. [`PrincipalBundle::grant_registration_row`] is the
+/// read that also names the row.
+#[cfg(all(any(target_arch = "wasm32", test), feature = "account-driver"))]
+pub fn grant_registration_recorded<S: SecretStore + ?Sized>(
+    credentials: &S,
+    actor_id_hex: &str,
+) -> bool {
+    credentials
+        .get(&attr(actor_id_hex, ATTR_GRANT_REGISTERED))
+        .is_some()
+}
+
 /// A store is stamped with the slot's writer: the mint marker is spent.
 pub fn clear_writer_unstamped<S: SecretStore + ?Sized>(credentials: &S, actor_id_hex: &str) {
     credentials.delete(&attr(actor_id_hex, WRITER_UNSTAMPED_SUFFIX));

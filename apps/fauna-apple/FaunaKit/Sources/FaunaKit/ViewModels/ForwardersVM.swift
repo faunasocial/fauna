@@ -47,13 +47,20 @@ public final class ForwardersVM {
     /// Vend the machine from APIClient and load the first feed. Idempotent.
     public func configure(api: APIClient) async {
         guard machine == nil else { return }
+        let built: ForwarderMachine
         do {
-            machine = try await api.forwardersMachine()
-            snapshot = machine?.snapshot()
+            built = try await api.forwardersMachine()
         } catch {
-            errorMessage = DisplayError.message(error)
+            // A concurrent build that succeeded owns the page; this one's
+            // failure is not the page's.
+            if machine == nil { errorMessage = DisplayError.message(error) }
             return
         }
+        // Re-entrant `configure`: the build that finishes first wins; a later
+        // one is dropped, never replaces it (same shape as `LabelerCatalogVM`).
+        guard machine == nil else { return }
+        machine = built
+        snapshot = built.snapshot()
         await hydrate()
     }
 

@@ -109,7 +109,7 @@ pub struct ResealedManifest {
     pub uploaded_count: usize,
     /// The generation the chunks sealed under, to stamp into the record;
     /// `None` for an owner-root or plaintext seal.
-    pub content_key_version: Option<u64>,
+    pub content_stamp: Option<crate::blob_seal::SealStamp>,
 }
 
 /// Re-seal the nest's copy of one recorded head under `seal_root`, **one window
@@ -138,31 +138,19 @@ pub async fn reseal_nest_copy_windowed(
     fetcher: &dyn BlobFetcher,
     keys: &FileDownloadKeys,
     manifest_hash: ContentHash,
-    content_key_version: Option<u64>,
+    content_stamp: Option<crate::blob_seal::SealStamp>,
     relative_path: &str,
-    seal_root: Option<([u8; 32], Option<u64>)>,
+    seal_root: Option<([u8; 32], Option<crate::blob_seal::SealStamp>)>,
     sink: &dyn ChunkStoreSink,
 ) -> Result<ResealedManifest> {
     // Redacted once and reused by every error string below
     // (`path-sealing.md` § Sealed names & paths, S7).
     let path_r = crate::log_redact::log_path(relative_path);
-    verify_file_by_manifest(
-        fetcher,
-        keys,
-        manifest_hash,
-        content_key_version,
-        relative_path,
-    )
-    .await
-    .context("re-seal: the nest copy does not verify against its recorded head")?;
-    let walk = ManifestWalk::open(
-        fetcher,
-        keys,
-        manifest_hash,
-        content_key_version,
-        relative_path,
-    )
-    .await?;
+    verify_file_by_manifest(fetcher, keys, manifest_hash, content_stamp, relative_path)
+        .await
+        .context("re-seal: the nest copy does not verify against its recorded head")?;
+    let walk =
+        ManifestWalk::open(fetcher, keys, manifest_hash, content_stamp, relative_path).await?;
     let mut hasher = blake3::Hasher::new();
     let mut total = 0u64;
     let mut stored = Vec::with_capacity(walk.manifest().chunk_hashes.len());
@@ -220,6 +208,6 @@ pub async fn reseal_nest_copy_windowed(
         manifest,
         manifest_hash: new_hash,
         uploaded_count,
-        content_key_version: seal_root.and_then(|(_, version)| version),
+        content_stamp: seal_root.and_then(|(_, stamp)| stamp),
     })
 }

@@ -90,6 +90,8 @@ use fauna_protocol::dns::{
     ProbeTxtVisibleReply, ProbeTxtVisibleRequest, SetHostAddressReply, SetHostAddressRequest,
     VerifyRecordsReply, VerifyRecordsRequest,
 };
+#[cfg(any(test, debug_assertions, feature = "test-helpers"))]
+use fauna_protocol::dns::{E2eMirrorTxtReply, E2eMirrorTxtRequest, E2eTxtPair};
 use fauna_protocol::tls::{
     CertHealthState as WireCertHealthState, CertStatusReply, CertStatusRequest, DomainCertStatus,
     PublishCertReply, PublishCertRequest,
@@ -127,14 +129,12 @@ mod resolvability;
 #[cfg(not(target_arch = "wasm32"))]
 pub use resolvability::AuthoritativeNsProbe;
 
-// The e2e ACME directory seed (`e2e-automation-surface-gating.md` § The ACME
-// directory seed): `FAUNA_E2E_ACME_*` → the `AcmeOrderTestSeam` the native
-// machine builder installs. A test-capable build only — a release build neither
-// reads nor names the variables.
-#[cfg(all(
-    not(target_arch = "wasm32"),
-    any(test, debug_assertions, feature = "test-helpers")
-))]
+// The e2e ACME directory seed (`e2e-gated-seeds.md` § The ACME directory
+// seed): `FAUNA_E2E_ACME_*` → the `AcmeOrderTestSeam` the native machine
+// builder installs, and on web the seeded directory alone (*The web order*). A
+// test-capable build only — a release build neither reads nor names the
+// variables.
+#[cfg(any(test, debug_assertions, feature = "test-helpers"))]
 pub mod e2e_acme_seam;
 
 // The **native** DNS-01 order driver (Phase 3, S4). `instant-acme`'s crypto
@@ -999,6 +999,24 @@ pub trait DnsNest: MaybeSendSync {
         record_name: String,
         txt_value: String,
     ) -> Result<bool, DnsNestError>;
+
+    /// `fauna.dns.e2e_mirror_txt` — the **web** e2e fake DNS provider's mirror
+    /// of a publish or withdrawal into the harness's name server, one RPC hop
+    /// away (`e2e-gated-seeds.md` § The ACME directory seed → *The web order*,
+    /// leg 3): a browser has no TCP, so the nest sends the RFC 2136 UPDATE
+    /// native's `e2e_acme_seam::mirror_fake_txt` sends in-process, to the name
+    /// server its own launch environment names. Only `SentinelDnsProvider`
+    /// calls it, and only a `test-hooks` nest serves the kind. Wasm and
+    /// `test-helpers` only.
+    #[cfg(all(
+        target_arch = "wasm32",
+        any(test, debug_assertions, feature = "test-helpers")
+    ))]
+    async fn e2e_mirror_txt(
+        &self,
+        published: Vec<(String, String)>,
+        withdrawn: Vec<(String, String)>,
+    ) -> Result<(), DnsNestError>;
 }
 
 /// The **web** arm of the DNS-01 propagation gate: a
@@ -1731,6 +1749,9 @@ fn zone_name_set(cred: &DnsProviderCredential) -> Vec<String> {
 /// sealed store on demand. The credential summaries live in `snapshot.credentials`.
 struct Inner {
     snapshot: DnsSnapshot,
+    /// `snapshot.error` came from an admin action, so it stays until their next
+    /// action; a background tick neither clears nor replaces it.
+    error_is_the_admins: bool,
     managed_domains: BTreeSet<String>,
     /// Domains the admin opted **out** of auto-renew (`DnsConfig.auto_renew_off`)
     /// — the secret-free state [`project`] needs to overlay [`DomainView::auto_renew`].
@@ -1917,10 +1938,10 @@ pub struct DnsManagementMachine {
     /// Both otherwise hardcode [`Dns01OrderConfig::lets_encrypt`], which the
     /// free-function pebble test cannot reach because it drives the order
     /// functions directly, never the machine.
-    #[cfg(all(
-        not(target_arch = "wasm32"),
-        any(test, debug_assertions, feature = "test-helpers")
-    ))]
+    ///
+    /// On web the seam is the directory alone (*The web order*): the browser's
+    /// fetch is the ACME client and the gate is always the nest-relayed probe.
+    #[cfg(any(test, debug_assertions, feature = "test-helpers"))]
     acme_order_test_seam: Option<AcmeOrderTestSeam>,
 }
 
@@ -1949,6 +1970,23 @@ pub struct AcmeOrderTestSeam {
     pub probe: Option<Box<dyn Dns01ResolvabilityProbe>>,
 }
 
+/// The **web** twin of the native seam (`e2e-gated-seeds.md` § The ACME
+/// directory seed → *The web order*): the directory and nothing else. The
+/// browser's fetch is the ACME client — pebble's certificate is trusted by the
+/// browser context, as every self-signed nest the harness dials is — and web's
+/// propagation gate is always [`NestRelayedProbe`], whose nest reads the
+/// seeded name server itself. Built from the page's seed by
+/// `e2e_acme_seam::web_seam_from_directory`. `test-helpers` only.
+#[cfg(all(
+    target_arch = "wasm32",
+    any(test, debug_assertions, feature = "test-helpers")
+))]
+pub struct AcmeOrderTestSeam {
+    /// The ACME directory URL both order paths order against, replacing
+    /// [`Dns01OrderConfig::lets_encrypt`]'s production directory.
+    pub directory_url: String,
+}
+
 // `new`/`with_credentials` take `Arc<dyn …>` seams (not FFI types), so they stay
 // in a plain (non-exported) impl alongside the private helpers. The FFI surface
 // — `snapshot` (sync) + `hydrate`/`dispatch` (async) — lives in the exported impl
@@ -1966,15 +2004,13 @@ impl DnsManagementMachine {
             actor_signing_key: None,
             inner: Mutex::new(Inner {
                 snapshot: DnsSnapshot::empty(),
+                error_is_the_admins: false,
                 managed_domains: BTreeSet::new(),
                 auto_renew_off: BTreeSet::new(),
                 pending_order: None,
                 last_publish: BTreeMap::new(),
             }),
-            #[cfg(all(
-                not(target_arch = "wasm32"),
-                any(test, debug_assertions, feature = "test-helpers")
-            ))]
+            #[cfg(any(test, debug_assertions, feature = "test-helpers"))]
             acme_order_test_seam: None,
         }
     }
@@ -1997,15 +2033,13 @@ impl DnsManagementMachine {
             actor_signing_key: Some(actor_signing_key),
             inner: Mutex::new(Inner {
                 snapshot: DnsSnapshot::empty(),
+                error_is_the_admins: false,
                 managed_domains: BTreeSet::new(),
                 auto_renew_off: BTreeSet::new(),
                 pending_order: None,
                 last_publish: BTreeMap::new(),
             }),
-            #[cfg(all(
-                not(target_arch = "wasm32"),
-                any(test, debug_assertions, feature = "test-helpers")
-            ))]
+            #[cfg(any(test, debug_assertions, feature = "test-helpers"))]
             acme_order_test_seam: None,
         }
     }
@@ -2013,11 +2047,9 @@ impl DnsManagementMachine {
     /// Install the pebble real-wire seam (S4b) on an already-built machine — the
     /// only way to exercise the manual (`open_manual_order` /
     /// `complete_manual_issue`) or managed (`issue_cert`) order against a local
-    /// CA instead of production Let's Encrypt. `test-helpers` only.
-    #[cfg(all(
-        not(target_arch = "wasm32"),
-        any(test, debug_assertions, feature = "test-helpers")
-    ))]
+    /// CA instead of production Let's Encrypt. `test-helpers` only; on web the
+    /// seam moves the directory alone.
+    #[cfg(any(test, debug_assertions, feature = "test-helpers"))]
     pub fn with_acme_order_test_seam(mut self, seam: AcmeOrderTestSeam) -> Self {
         self.acme_order_test_seam = Some(seam);
         self
@@ -3090,6 +3122,19 @@ impl DnsManagementMachine {
             )
             .await;
         }
+        // Web's seam is the directory alone: everything else is the production
+        // path, the nest-relayed probe included (*The web order*).
+        #[cfg(all(
+            target_arch = "wasm32",
+            any(test, debug_assertions, feature = "test-helpers")
+        ))]
+        let order_cfg = match &self.acme_order_test_seam {
+            Some(seam) => Dns01OrderConfig {
+                directory_url: seam.directory_url.clone(),
+                ..order_cfg
+            },
+            None => order_cfg,
+        };
         #[cfg(not(target_arch = "wasm32"))]
         let probe = AuthoritativeNsProbe::new();
         #[cfg(target_arch = "wasm32")]
@@ -3217,7 +3262,22 @@ impl DnsManagementMachine {
             let challenges = Self::project_manual_challenges(&in_progress);
             return Ok((in_progress, challenges));
         }
-        let order_cfg = Dns01OrderConfig::lets_encrypt(String::new(), vec![domain.to_string()]);
+        #[cfg_attr(
+            not(all(
+                target_arch = "wasm32",
+                any(test, debug_assertions, feature = "test-helpers")
+            )),
+            allow(unused_mut)
+        )]
+        let mut order_cfg = Dns01OrderConfig::lets_encrypt(String::new(), vec![domain.to_string()]);
+        // Web's seam is the directory alone (*The web order*).
+        #[cfg(all(
+            target_arch = "wasm32",
+            any(test, debug_assertions, feature = "test-helpers")
+        ))]
+        if let Some(seam) = &self.acme_order_test_seam {
+            order_cfg.directory_url = seam.directory_url.clone();
+        }
         let in_progress = begin_dns01_order(&order_cfg, dns.acme_account.as_deref())
             .await
             .map_err(|e| DnsDispatchError::Issuance(e.to_string()))?;
@@ -3566,8 +3626,9 @@ pub const AUTO_RENEW_CADENCE_SECS: u64 = 6 * 60 * 60;
 ///
 /// The first tick is deliberately fired *after* a full interval on every app: a
 /// short-lived session (the e2e harness included) then never triggers a real CA
-/// order. Web has no cadence at all — a browser SPA runs no background timer, so
-/// it issues on page-open instead (`tls-certificates.md` § C.3).
+/// order. Web runs the same cadence for as long as the signed-in admin's tab is
+/// open (`apps/fauna-web/src/lib/cert-auto-renew.ts`, over `fauna-wasm`'s
+/// `autoRenewPollSecs`; `tls-certificates.md` § C.3).
 #[cfg_attr(feature = "uniffi", uniffi::export)]
 pub fn auto_renew_poll_secs() -> u64 {
     AUTO_RENEW_CADENCE_SECS
@@ -3684,6 +3745,17 @@ pub fn record_recheck_secs() -> u64 {
     e2e_dns_clock_override().unwrap_or(RECORD_RECHECK_CADENCE_SECS)
 }
 
+/// Whether a background re-check moved anything the page shows: `false` when
+/// the snapshot after [`DnsManagementMachine::background_recheck`] equals the
+/// one before it. A page that rebuilds its controls imperatively skips the
+/// rebuild on `false`, so a tick that found nothing new never tears down a
+/// control the admin is using (windows `AdminDnsPage`); a diffing UI needs none
+/// of this. Taken by value — Records cross the UniFFI boundary by value.
+#[cfg_attr(feature = "uniffi", uniffi::export)]
+pub fn dns_snapshot_changed(before: DnsSnapshot, after: DnsSnapshot) -> bool {
+    before != after
+}
+
 /// The re-publish interval in force ([`REPUBLISH_MIN_INTERVAL_SECS`]; the e2e
 /// override compresses it with the re-check cadence so the two keep their
 /// order).
@@ -3698,7 +3770,7 @@ pub fn republish_min_interval_secs() -> u64 {
 /// Best-effort by construction — there is no `Result`, because no caller should
 /// stop pumping over one bad tick; the nest stays gracefully on the floor and the
 /// next tick retries.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct AutoRenewPass {
     /// Domains whose `IssueCert` dispatch succeeded this pass.
@@ -3709,7 +3781,7 @@ pub struct AutoRenewPass {
 }
 
 /// One domain's failed auto-issue within an [`AutoRenewPass`].
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct AutoRenewFailure {
     pub domain: String,
@@ -3803,13 +3875,32 @@ impl DnsManagementMachine {
     /// that changed since the page opened is checked, and re-published, at its
     /// current value rather than the one the page loaded with.
     ///
-    /// Both steps go through [`Self::dispatch`], so a failure lands on the
-    /// snapshot's `error` exactly as a tapped re-check's would; a failed matrix
-    /// read skips the verify. Writes [`BACKGROUND_RECHECK_LOG_LINE`] first, the
-    /// app's own record that the tick ran.
+    /// Both steps go through [`Self::tick_dispatch`], so a failure lands on the
+    /// snapshot's `error` as a tapped re-check's would, except over an error an
+    /// admin action left; a failed matrix read skips the verify. Writes
+    /// [`BACKGROUND_RECHECK_LOG_LINE`] first, the app's own record that the
+    /// tick ran.
     pub async fn background_recheck(&self) {
         tracing::info!(target: "fauna_dns", "{BACKGROUND_RECHECK_LOG_LINE}");
+        if self.tick_dispatch(DnsAction::Refresh).await.is_ok() {
+            let _ = self
+                .tick_dispatch(DnsAction::VerifyRecords { domain: None })
+                .await;
+        }
+    }
+
+    /// Re-read the record matrix, overlay the served-cert health, then verify
+    /// every domain. An app runs it after a local-domain action that moves the
+    /// matrix (`LocalDomainAction::moves_record_matrix`), before its next
+    /// render, so an added domain appears with its records and their status, a
+    /// removed one's rows are gone, and a rename's widened or narrowed SAN set
+    /// shows on the cert badge (`mail-multidomain.md` § Wizard steps, step 8).
+    /// The cert read sits between the two because it names the domains the
+    /// read just loaded. A failed matrix read skips the rest; each failure
+    /// lands on the snapshot's `error`.
+    pub async fn recheck_matrix(&self) {
         if self.dispatch(DnsAction::Refresh).await.is_ok() {
+            let _ = self.dispatch(DnsAction::RefreshCertStatus).await;
             let _ = self
                 .dispatch(DnsAction::VerifyRecords { domain: None })
                 .await;
@@ -3818,8 +3909,51 @@ impl DnsManagementMachine {
 
     pub async fn dispatch(&self, action: DnsAction) -> Result<(), DnsDispatchError> {
         // Clear any prior error before the new action runs.
-        self.inner.lock().expect("snapshot mutex").snapshot.error = None;
-        let result = match action {
+        {
+            let mut inner = self.inner.lock().expect("snapshot mutex");
+            inner.snapshot.error = None;
+            inner.error_is_the_admins = false;
+        }
+        let result = self.run(action).await;
+        if let Err(ref e) = result {
+            // Producer-side log for the reactive `error-message` banner: fire
+            // once here where the state is set, not in the per-tick render
+            // (observability.md § Log on the *event*, not the *paint*).
+            let message = e.to_string();
+            tracing::warn!(target: "fauna_dns", "{message}");
+            let mut inner = self.inner.lock().expect("snapshot mutex");
+            inner.snapshot.error = Some(message);
+            inner.error_is_the_admins = true;
+            inner.snapshot.status = DnsStatus::Idle;
+        }
+        result
+    }
+
+    /// [`Self::dispatch`] for a background tick, which is no action of the
+    /// admin's: it clears and reports only its own errors, and leaves standing
+    /// the error an admin action left (`Inner::error_is_the_admins`).
+    async fn tick_dispatch(&self, action: DnsAction) -> Result<(), DnsDispatchError> {
+        {
+            let mut inner = self.inner.lock().expect("snapshot mutex");
+            if !inner.error_is_the_admins {
+                inner.snapshot.error = None;
+            }
+        }
+        let result = self.run(action).await;
+        if let Err(ref e) = result {
+            let message = e.to_string();
+            tracing::warn!(target: "fauna_dns", "{message}");
+            let mut inner = self.inner.lock().expect("snapshot mutex");
+            if !inner.error_is_the_admins {
+                inner.snapshot.error = Some(message);
+            }
+            inner.snapshot.status = DnsStatus::Idle;
+        }
+        result
+    }
+
+    async fn run(&self, action: DnsAction) -> Result<(), DnsDispatchError> {
+        match action {
             DnsAction::Refresh => self.refresh().await,
             DnsAction::VerifyRecords { domain } => self.verify(domain).await,
             DnsAction::PutCredentials {
@@ -3857,18 +3991,7 @@ impl DnsManagementMachine {
             DnsAction::SetAutoRenew { domain, enabled } => {
                 self.set_auto_renew(domain, enabled).await
             }
-        };
-        if let Err(ref e) = result {
-            // Producer-side log for the reactive `error-message` banner: fire
-            // once here where the state is set, not in the per-tick render
-            // (observability.md § Log on the *event*, not the *paint*).
-            let message = e.to_string();
-            tracing::warn!(target: "fauna_dns", "{message}");
-            let mut inner = self.inner.lock().expect("snapshot mutex");
-            inner.snapshot.error = Some(message);
-            inner.snapshot.status = DnsStatus::Idle;
         }
-        result
     }
 }
 
@@ -3950,6 +4073,36 @@ impl<R: RpcRequester> DnsAdminClient<R> {
                     zone_name,
                     record_name,
                     txt_value,
+                    extra: Default::default(),
+                },
+            )
+            .await
+    }
+
+    /// `fauna.dns.e2e_mirror_txt` — mirror the web e2e fake provider's TXT
+    /// writes into the harness's name server through the nest (a `test-hooks`
+    /// nest alone serves it; [`DnsNest::e2e_mirror_txt`]). `test-helpers` only.
+    #[cfg(any(test, debug_assertions, feature = "test-helpers"))]
+    pub async fn e2e_mirror_txt(
+        &self,
+        published: Vec<(String, String)>,
+        withdrawn: Vec<(String, String)>,
+    ) -> Result<E2eMirrorTxtReply, R::Error> {
+        let pairs = |v: Vec<(String, String)>| {
+            v.into_iter()
+                .map(|(name, value)| E2eTxtPair {
+                    name,
+                    value,
+                    ..Default::default()
+                })
+                .collect()
+        };
+        self.nest
+            .request(
+                "fauna.dns.e2e_mirror_txt",
+                E2eMirrorTxtRequest {
+                    published: pairs(published),
+                    withdrawn: pairs(withdrawn),
                     extra: Default::default(),
                 },
             )
@@ -4508,6 +4661,11 @@ mod provider_seam {
     #[cfg(any(test, debug_assertions, feature = "test-helpers"))]
     pub(crate) struct SentinelDnsProvider {
         pub(crate) real: Arc<dyn DnsProviderSeam>,
+        /// Web: the nest the page holds, which mirrors every fake TXT write
+        /// into the harness's name server (`fauna.dns.e2e_mirror_txt`) — a
+        /// browser has no TCP for native's in-process UPDATE.
+        #[cfg(target_arch = "wasm32")]
+        pub(crate) nest: Arc<dyn DnsNest>,
     }
 
     /// The log line [`SentinelDnsProvider::teardown`] emits for every
@@ -4534,16 +4692,40 @@ mod provider_seam {
 
     /// The `(name, value)` of every TXT among `records` — what the fake mirrors
     /// into the harness's name server (`e2e_acme_seam::mirror_fake_txt`).
-    #[cfg(all(
-        not(target_arch = "wasm32"),
-        any(test, debug_assertions, feature = "test-helpers")
-    ))]
+    #[cfg(any(test, debug_assertions, feature = "test-helpers"))]
     fn fake_txt_pairs(records: &[PublishRecord]) -> Vec<(String, String)> {
         records
             .iter()
             .filter(|r| r.record_type.eq_ignore_ascii_case("TXT"))
             .map(|r| (r.name.clone(), r.value.clone()))
             .collect()
+    }
+
+    #[cfg(all(
+        target_arch = "wasm32",
+        any(test, debug_assertions, feature = "test-helpers")
+    ))]
+    impl SentinelDnsProvider {
+        /// Mirror a fake TXT write through the nest
+        /// ([`DnsNest::e2e_mirror_txt`]). A failure is logged, never raised —
+        /// as native's mirror: the order then fails at its propagation gate
+        /// with the gate's own error. A walk that seeds no name server talks
+        /// to a nest that answers the kind with an error, logged the same way.
+        async fn mirror_via_nest(
+            &self,
+            published: Vec<(String, String)>,
+            withdrawn: Vec<(String, String)>,
+        ) {
+            if published.is_empty() && withdrawn.is_empty() {
+                return;
+            }
+            if let Err(e) = self.nest.e2e_mirror_txt(published, withdrawn).await {
+                tracing::warn!(
+                    target: "fauna_dns",
+                    "the e2e fake DNS provider could not mirror through the nest: {e}"
+                );
+            }
+        }
     }
 
     #[cfg(any(test, debug_assertions, feature = "test-helpers"))]
@@ -4588,6 +4770,10 @@ mod provider_seam {
                 // reaches pebble and the propagation gate.
                 #[cfg(not(target_arch = "wasm32"))]
                 crate::e2e_acme_seam::mirror_fake_txt(&fake_txt_pairs(records), &[]).await;
+                // Web: the same write, one RPC hop away (*The web order*).
+                #[cfg(target_arch = "wasm32")]
+                self.mirror_via_nest(fake_txt_pairs(records), Vec::new())
+                    .await;
                 // The e2e witness: the fake zone lives only in this process, so
                 // this line — in the app's own log (native `app.err`, the web
                 // console ring) — is the only proof a publish reached the
@@ -4628,6 +4814,9 @@ mod provider_seam {
                 }
                 #[cfg(not(target_arch = "wasm32"))]
                 crate::e2e_acme_seam::mirror_fake_txt(&[], &fake_txt_pairs(records)).await;
+                #[cfg(target_arch = "wasm32")]
+                self.mirror_via_nest(Vec::new(), fake_txt_pairs(records))
+                    .await;
                 let withdrawn = records
                     .iter()
                     .map(|r| format!("{} {} {}", r.record_type, r.name, r.value))
@@ -5171,6 +5360,19 @@ mod wasm_seam {
                 .map(|r| r.visible)
                 .map_err(nest_error)
         }
+
+        #[cfg(any(test, debug_assertions, feature = "test-helpers"))]
+        async fn e2e_mirror_txt(
+            &self,
+            published: Vec<(String, String)>,
+            withdrawn: Vec<(String, String)>,
+        ) -> Result<(), DnsNestError> {
+            self.client
+                .e2e_mirror_txt(published, withdrawn)
+                .await
+                .map(|_| ())
+                .map_err(nest_error)
+        }
     }
 
     /// Build a read/verify-only [`DnsManagementMachine`] over the browser WS-RPC
@@ -5211,15 +5413,11 @@ mod wasm_seam {
         // plain `--release` build with no test-helpers `maybe_wrap_fake` compiles
         // to a pure passthrough — `SentinelDnsProvider` is not even in the binary.
         let real: Arc<dyn DnsProviderSeam> = Arc::new(RpcDnsProvider::new());
-        let provider = maybe_wrap_fake(real);
-        DnsManagementMachine::with_credentials(
-            Arc::new(RpcDnsNest {
-                client: DnsAdminClient::new(nest),
-            }),
-            config,
-            provider,
-            actor_sk,
-        )
+        let nest: Arc<dyn DnsNest> = Arc::new(RpcDnsNest {
+            client: DnsAdminClient::new(nest),
+        });
+        let provider = maybe_wrap_fake(real, &nest);
+        DnsManagementMachine::with_credentials(nest, config, provider, actor_sk)
     }
 
     /// Convention 15 rule (a) twin: the debug/test-helpers arm wraps the real
@@ -5227,16 +5425,25 @@ mod wasm_seam {
     /// production arm (no debug_assertions, no test-helpers) is a pure
     /// passthrough that never references [`SentinelDnsProvider`] at all.
     #[cfg(any(test, debug_assertions, feature = "test-helpers"))]
-    fn maybe_wrap_fake(real: Arc<dyn DnsProviderSeam>) -> Arc<dyn DnsProviderSeam> {
+    fn maybe_wrap_fake(
+        real: Arc<dyn DnsProviderSeam>,
+        nest: &Arc<dyn DnsNest>,
+    ) -> Arc<dyn DnsProviderSeam> {
         if dns_fake_enabled() {
-            Arc::new(SentinelDnsProvider { real })
+            Arc::new(SentinelDnsProvider {
+                real,
+                nest: Arc::clone(nest),
+            })
         } else {
             real
         }
     }
 
     #[cfg(not(any(test, debug_assertions, feature = "test-helpers")))]
-    fn maybe_wrap_fake(real: Arc<dyn DnsProviderSeam>) -> Arc<dyn DnsProviderSeam> {
+    fn maybe_wrap_fake(
+        real: Arc<dyn DnsProviderSeam>,
+        _nest: &Arc<dyn DnsNest>,
+    ) -> Arc<dyn DnsProviderSeam> {
         real
     }
 
@@ -5326,6 +5533,8 @@ mod tests {
         probe_fails: StdMutex<bool>,
         /// Every `probe_txt_visible` call's `(zone, record, value)`, in order.
         probe_calls: StdMutex<Vec<(String, String, String)>>,
+        /// Make `list_records` fail — models a nest a tick cannot read.
+        list_records_fails: StdMutex<bool>,
     }
 
     #[async_trait]
@@ -5334,6 +5543,9 @@ mod tests {
             &self,
             _domain: Option<String>,
         ) -> Result<Vec<DomainDns>, DnsNestError> {
+            if *self.list_records_fails.lock().unwrap() {
+                return Err(DnsNestError::Transient("list_records unavailable".into()));
+            }
             Ok(self.domains.lock().unwrap().clone())
         }
         async fn verify_records(
@@ -6676,10 +6888,131 @@ mod tests {
         );
     }
 
+    /// A domain the nest gained after the page loaded appears with its records
+    /// and their verdicts after one `recheck_matrix` — what an app runs after
+    /// an add (`mail-multidomain.md` § Wizard steps, step 8).
+    #[tokio::test]
+    async fn recheck_matrix_shows_an_added_domain_with_its_verdicts() {
+        let nest = Arc::new(FakeNest {
+            domains: StdMutex::new(vec![domain("example.com")]),
+            ..Default::default()
+        });
+        let m = DnsManagementMachine::new(nest.clone());
+        m.hydrate().await.unwrap();
+        let mut added = domain("example.org");
+        added.is_primary = false;
+        nest.domains.lock().unwrap().push(added);
+        *nest.verdicts.lock().unwrap() = vec![DomainVerifyStatus {
+            extra: Default::default(),
+            domain: "example.org".into(),
+            records: vec![status("example.org.", "MX", &[], "missing")],
+        }];
+
+        m.recheck_matrix().await;
+
+        let snap = m.snapshot();
+        let row = snap
+            .domains
+            .iter()
+            .find(|d| d.domain == "example.org")
+            .expect("the added domain is on the matrix");
+        assert_eq!(
+            row.records[0].verdict.as_ref().map(|v| v.status),
+            Some(VerifyStatus::Missing),
+            "{snap:?}"
+        );
+    }
+
     #[test]
     fn record_recheck_and_republish_cadences_are_the_shared_constants() {
         assert_eq!(record_recheck_secs(), RECORD_RECHECK_CADENCE_SECS);
         assert_eq!(republish_min_interval_secs(), REPUBLISH_MIN_INTERVAL_SECS);
+    }
+
+    /// A tick that finds nothing new leaves the snapshot equal — what lets a page
+    /// that rebuilds its controls skip the rebuild — and a verdict that moved is
+    /// a change.
+    #[tokio::test]
+    async fn dns_snapshot_changed_only_when_a_tick_moved_something() {
+        let nest = Arc::new(FakeNest {
+            domains: StdMutex::new(vec![domain("example.com")]),
+            verdicts: StdMutex::new(vec![DomainVerifyStatus {
+                extra: Default::default(),
+                domain: "example.com".into(),
+                records: vec![status("example.com.", "MX", &[], "missing")],
+            }]),
+            ..Default::default()
+        });
+        let m = DnsManagementMachine::new(nest.clone());
+        m.hydrate().await.unwrap();
+        m.dispatch(DnsAction::VerifyRecords { domain: None })
+            .await
+            .unwrap();
+        let before = m.snapshot();
+
+        m.background_recheck().await;
+        assert!(
+            !dns_snapshot_changed(before.clone(), m.snapshot()),
+            "a tick over an unchanged nest moved the snapshot: {:?}",
+            m.snapshot()
+        );
+
+        nest.verdicts.lock().unwrap()[0].records = vec![status(
+            "example.com.",
+            "MX",
+            &["10 mail.example.com."],
+            "ok",
+        )];
+        m.background_recheck().await;
+        assert!(dns_snapshot_changed(before, m.snapshot()));
+    }
+
+    /// A rejected admin action's error stays on the page through background
+    /// ticks, because a tick is no new action of the admin's: only their next
+    /// action replaces it. The fixture's tick cadence is seconds, so a tick
+    /// that cleared it would take the refusal away before anyone read it.
+    #[tokio::test]
+    async fn background_recheck_keeps_a_rejected_actions_error() {
+        let (m, _s, _p) =
+            full_machine(vec![domain("example.com")], vec![zone("z1", "example.com")]);
+        m.hydrate().await.unwrap();
+        m.dispatch(DnsAction::SetMode {
+            domain: "example.com".into(),
+            managed: true,
+        })
+        .await
+        .unwrap_err();
+        let refusal = m.snapshot().error;
+        assert!(refusal.is_some(), "the rejected opt-in reports nothing");
+
+        m.background_recheck().await;
+        assert_eq!(m.snapshot().error, refusal);
+
+        m.dispatch(DnsAction::Refresh).await.unwrap();
+        assert_eq!(m.snapshot().error, None);
+    }
+
+    /// A tick's own failure is the tick's to clear: the next tick that reads
+    /// the nest takes it off the page, with no action from the admin.
+    #[tokio::test]
+    async fn a_failed_tick_clears_on_the_next_good_tick() {
+        let nest = Arc::new(FakeNest {
+            domains: StdMutex::new(vec![domain("example.com")]),
+            ..Default::default()
+        });
+        let m = DnsManagementMachine::new(nest.clone());
+        m.hydrate().await.unwrap();
+
+        *nest.list_records_fails.lock().unwrap() = true;
+        m.background_recheck().await;
+        assert!(
+            m.snapshot().error.is_some(),
+            "the failed tick reports nothing"
+        );
+
+        *nest.list_records_fails.lock().unwrap() = false;
+        m.background_recheck().await;
+        assert_eq!(m.snapshot().error, None);
     }
 
     // ── Auto-renew (Slice C) ────────────────────────────────────────

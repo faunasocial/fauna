@@ -4,6 +4,7 @@ using System.Threading.Tasks;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Controls.Primitives;
+using FaunaApp.Helpers;
 using FaunaApp.Core.Services;
 using FaunaApp.Core.ViewModels;
 using uniffi.fauna_ffi;
@@ -374,6 +375,22 @@ public sealed partial class MailAliasesPanel : UserControl
         RenderState();
     }
 
+    /// <summary>The extend is <c>update_account_alias</c>, OnlineOnly (offline_class.rs);
+    /// a row's button is declared as it realizes, the room invitation's shape.</summary>
+    private void Extend_Loaded(object sender, RoutedEventArgs e)
+    {
+        if (sender is Button button) button.FaunaGate("fauna.bridges.update_account_alias");
+    }
+
+    /// <summary>Push a throwaway address's expiry out. The row repaints from the
+    /// re-listed alias; a refused extend lands on the page's <c>error-message</c>.</summary>
+    private async void Extend_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not Button btn || btn.Tag is not string aliasId || _vm is null) return;
+        await _vm.ExtendAsync(aliasId);
+        RenderState();
+    }
+
     private async void Revoke_Click(object sender, RoutedEventArgs e) =>
         await ArmOrConfirm(sender, "revoke");
 
@@ -411,6 +428,18 @@ public sealed partial class MailAliasesPanel : UserControl
         {
             await _vm.DeleteAsync(aliasId);
         }
+        RenderState();
+    }
+
+    /// <summary>The per-row audit toggle: opens this address's history, or closes it
+    /// when it is already the open one (the machine keeps at most one open).</summary>
+    private async void ShowAudit_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not Button btn || btn.Tag is not string aliasId || _vm is null) return;
+        var row = _vm.Aliases.FirstOrDefault(a => a.AliasIdHex == aliasId);
+        if (row is null) return;
+        if (row.AuditOpen) await _vm.HideAuditAsync();
+        else await _vm.ShowAuditAsync(aliasId);
         RenderState();
     }
 

@@ -97,6 +97,42 @@ func TestForwardAllEnqueuesForwardMessage(t *testing.T) {
 	}
 }
 
+// TestForwardCarriesTheSourceVerdicts: an MX-door forward hands nest the source
+// message's inbound verdicts, which the forwarder NDR's backscatter
+// suppressors read on a permanent failure (mail-forwarding.md § Suppression
+// matches the outbound shape).
+func TestForwardCarriesTheSourceVerdicts(t *testing.T) {
+	t.Parallel()
+	mc := newMockCaller()
+	actorBob := bytes.Repeat([]byte{0x42}, 32)
+	s := forwardingSession(t, mc, actorBob, "alice@example.org")
+	mc.forwardConfigs[hex.EncodeToString(actorBob)] = "bob-personal@example.net"
+
+	body := "From: alice@example.org\r\n" +
+		"To: bob@test.example\r\n" +
+		hermeticDmarcHeader + ": fail\r\n" +
+		"Message-ID: <msg-43@example.org>\r\n" +
+		"Subject: forward me\r\n" +
+		"\r\n" +
+		"hello\r\n"
+	if err := s.Data(bytes.NewReader([]byte(body))); err != nil {
+		t.Fatalf("Data: %v", err)
+	}
+	if got := len(mc.forwardRequests); got != 1 {
+		t.Fatalf("forward count: got %d, want 1", got)
+	}
+	got := mc.forwardRequests[0].authResults
+	if got == nil {
+		t.Fatal("the forward carried no auth_results")
+	}
+	if got.Dmarc.Kind != "fail" || got.Dmarc.Data == nil || got.Dmarc.Data.Policy != "none" {
+		t.Errorf("dmarc: got %+v, want fail under p=none", got.Dmarc)
+	}
+	if got.Spf.Kind != "none" {
+		t.Errorf("spf: got %q, want none", got.Spf.Kind)
+	}
+}
+
 // TestForwardAllFallsBackToNestMsgIDWhenNoMessageID covers the original_msgid
 // fallback: a message with no RFC 5322 Message-ID still forwards (the nest
 // hard-requires a non-empty original_msgid), keyed on the nest-assigned id.

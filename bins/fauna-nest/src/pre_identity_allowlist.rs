@@ -294,6 +294,8 @@ mod tests {
         assert!(is_pre_identity_kind("fauna.auth.verify"));
         assert!(is_pre_identity_kind("fauna.auth.nest_handshake"));
         assert!(is_pre_identity_kind("fauna.auth.device_handshake"));
+        // Its in-band sibling binds a connection that already has an identity.
+        assert!(!is_pre_identity_kind("fauna.auth.device_bind"));
         assert!(is_pre_identity_kind("fauna.auth.custody_handshake"));
         assert!(is_pre_identity_kind("fauna.auth.custodied_fleet_handshake"));
     }

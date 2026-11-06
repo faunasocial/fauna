@@ -268,7 +268,7 @@ async fn inbound_reply_merges_into_organizers_stored_event_end_to_end() {
                 after_event_id: None,
                 limit: 0,
             },
-            &DavRecipientKeys::derive(&ALICE_MSEK),
+            &DavRecipientKeys::derive(fauna_client_caldav::DavKind::Calendar, &ALICE_MSEK),
         )
         .await
         .expect("query ok");
@@ -335,7 +335,7 @@ async fn alice_stored_ics(alice: &CalDavClient<RouterRequester>) -> String {
                 after_event_id: None,
                 limit: 0,
             },
-            &DavRecipientKeys::derive(&ALICE_MSEK),
+            &DavRecipientKeys::derive(fauna_client_caldav::DavKind::Calendar, &ALICE_MSEK),
         )
         .await
         .expect("query ok");

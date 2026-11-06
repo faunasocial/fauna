@@ -135,6 +135,7 @@ async fn handle_inject_epoch_sealed_mail(
     let pubkey = &seal_key.mls_pubkey;
     let mlkem_ek = Some(seal_key.mlkem_ek.as_slice());
     let sealed_body = match crate::bridge_routing_handlers::seal_recipient_blob(
+        fauna_mls::wrapped_blob::RecordKind::Mail,
         &raw_body,
         pubkey,
         mlkem_ek,
@@ -144,6 +145,7 @@ async fn handle_inject_epoch_sealed_mail(
         Err(e) => return ApiError::internal(format!("seal body: {e:?}")).into_response(),
     };
     let sealed_hint = match crate::bridge_routing_handlers::seal_recipient_blob(
+        fauna_mls::wrapped_blob::RecordKind::Mail,
         &index_hint,
         pubkey,
         mlkem_ek,

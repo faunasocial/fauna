@@ -133,6 +133,13 @@ table actor_last_ip
   item actor_id BLOB PRIMARY KEY
   item ip_address TEXT NOT NULL
   item updated_at INTEGER NOT NULL
+table actor_mail_enabled
+  col actor_id BLOB notnull=0 default=- pk=1 hidden=0
+  col enabled INTEGER notnull=1 default=- pk=0 hidden=0
+  col set_at INTEGER notnull=1 default=- pk=0 hidden=0
+  item actor_id BLOB PRIMARY KEY
+  item enabled INTEGER NOT NULL CHECK (enabled IN (0, 1))
+  item set_at INTEGER NOT NULL
 table actor_mail_serving
   col actor_id BLOB notnull=0 default=- pk=1 hidden=0
   col enabled INTEGER notnull=1 default=- pk=0 hidden=0
@@ -155,7 +162,15 @@ table actor_mls_pubkeys
   col mls_pubkey BLOB notnull=1 default=- pk=0 hidden=0
   col updated_at INTEGER notnull=1 default=- pk=0 hidden=0
   col mlkem_ek BLOB notnull=1 default=- pk=0 hidden=0
+  col calendar_pubkey BLOB notnull=1 default=- pk=0 hidden=0
+  col calendar_mlkem_ek BLOB notnull=1 default=- pk=0 hidden=0
+  col card_pubkey BLOB notnull=1 default=- pk=0 hidden=0
+  col card_mlkem_ek BLOB notnull=1 default=- pk=0 hidden=0
   item actor_id BLOB PRIMARY KEY
+  item calendar_mlkem_ek BLOB NOT NULL
+  item calendar_pubkey BLOB NOT NULL
+  item card_mlkem_ek BLOB NOT NULL
+  item card_pubkey BLOB NOT NULL
   item mlkem_ek BLOB NOT NULL
   item mls_pubkey BLOB NOT NULL
   item updated_at INTEGER NOT NULL
@@ -789,6 +804,7 @@ table bridge_conversation_messages
   col received_at INTEGER notnull=1 default=- pk=0 hidden=0
   col receipt TEXT notnull=0 default=- pk=0 hidden=0
   col undelivered_at INTEGER notnull=0 default=- pk=0 hidden=0
+  col removed_at INTEGER notnull=0 default=- pk=0 hidden=0
   item actor_id BLOB NOT NULL
   item created_at INTEGER NOT NULL
   item direction TEXT NOT NULL CHECK(direction IN ('in', 'out'))
@@ -796,6 +812,7 @@ table bridge_conversation_messages
   item id INTEGER PRIMARY KEY AUTOINCREMENT
   item receipt TEXT CHECK(receipt IS NULL OR receipt IN ('delivered', 'read'))
   item received_at INTEGER NOT NULL
+  item removed_at INTEGER
   item room_id BLOB NOT NULL
   item sealed_content BLOB NOT NULL
   item sender TEXT NOT NULL
@@ -826,6 +843,8 @@ table bridge_conversation_rooms
   col bridge_x25519 BLOB notnull=1 default=- pk=0 hidden=0
   col created_at INTEGER notnull=1 default=- pk=0 hidden=0
   col last_at INTEGER notnull=1 default=- pk=0 hidden=0
+  col removed_at INTEGER notnull=0 default=- pk=0 hidden=0
+  col last_removed_at INTEGER notnull=0 default=- pk=0 hidden=0
   item UNIQUE (actor_id, bridge_id, far_room_id)
   item actor_id BLOB NOT NULL
   item bridge_id TEXT NOT NULL
@@ -836,7 +855,9 @@ table bridge_conversation_rooms
   item far_room_id TEXT NOT NULL
   item label TEXT
   item last_at INTEGER NOT NULL
+  item last_removed_at INTEGER
   item participants TEXT NOT NULL DEFAULT '[]'
+  item removed_at INTEGER
   item room_id BLOB PRIMARY KEY
   item self_address TEXT
 table bridge_feed_subscriptions
@@ -1405,6 +1426,9 @@ table custody_receipts_staged
   item owner_actor_id BLOB NOT NULL
   item receipt BLOB NOT NULL
   item staged_at INTEGER NOT NULL
+table dav_pre_split_tombstone_pending
+  col id INTEGER notnull=0 default=- pk=1 hidden=0
+  item id INTEGER PRIMARY KEY CHECK (id = 1)
 table delivery_receipts
   col id INTEGER notnull=0 default=- pk=1 hidden=0
   col content_hash BLOB notnull=1 default=- pk=0 hidden=0
@@ -1781,11 +1805,13 @@ table folder_deposit_parts
   col idx INTEGER notnull=1 default=- pk=2 hidden=0
   col sealed BLOB notnull=1 default=- pk=0 hidden=0
   col byte_length INTEGER notnull=1 default=- pk=0 hidden=0
+  col plain_length INTEGER notnull=1 default=0 pk=0 hidden=0
   fk deposit_id -> folder_deposit_inbox.id update=NO ACTION delete=CASCADE
   item PRIMARY KEY (deposit_id, idx)
   item byte_length INTEGER NOT NULL
   item deposit_id INTEGER NOT NULL REFERENCES folder_deposit_inbox(id) ON DELETE CASCADE
   item idx INTEGER NOT NULL
+  item plain_length INTEGER NOT NULL DEFAULT 0
   item sealed BLOB NOT NULL
 table folder_member_access
   col channel_id BLOB notnull=1 default=- pk=1 hidden=0
@@ -1881,6 +1907,16 @@ table folders
   item web_paywall_tier TEXT
   item webdav_enabled INTEGER NOT NULL DEFAULT 0
   item website_enabled INTEGER NOT NULL DEFAULT 0
+table follow_delivery_homes
+  col post_id BLOB notnull=1 default=- pk=1 hidden=0
+  col origin_nest_id BLOB notnull=1 default=- pk=2 hidden=0
+  col origin_nest_url TEXT notnull=1 default=- pk=0 hidden=0
+  col delivered_at INTEGER notnull=1 default=- pk=0 hidden=0
+  item PRIMARY KEY (post_id, origin_nest_id)
+  item delivered_at INTEGER NOT NULL
+  item origin_nest_id BLOB NOT NULL
+  item origin_nest_url TEXT NOT NULL
+  item post_id BLOB NOT NULL
 table follow_intents_seen
   col author_id BLOB notnull=1 default=- pk=1 hidden=0
   col subscriber_id BLOB notnull=1 default=- pk=2 hidden=0
@@ -1912,10 +1948,16 @@ table forward_queue
   col rule_id_or_forward_all TEXT notnull=1 default=- pk=0 hidden=0
   col raw_message BLOB notnull=1 default=- pk=0 hidden=0
   col copy_mode TEXT notnull=0 default=- pk=0 hidden=0
+  col inbound_spf TEXT notnull=1 default='' pk=0 hidden=0
+  col inbound_dmarc TEXT notnull=1 default='' pk=0 hidden=0
+  col inbound_dmarc_pol TEXT notnull=1 default='' pk=0 hidden=0
   item actor_id BLOB NOT NULL
   item copy_mode TEXT
   item destination_address TEXT NOT NULL
   item id INTEGER PRIMARY KEY AUTOINCREMENT
+  item inbound_dmarc TEXT NOT NULL DEFAULT ''
+  item inbound_dmarc_pol TEXT NOT NULL DEFAULT ''
+  item inbound_spf TEXT NOT NULL DEFAULT ''
   item original_sender TEXT NOT NULL
   item queued_at INTEGER NOT NULL
   item raw_message BLOB NOT NULL
@@ -2043,10 +2085,6 @@ table guardian_policies
   col federation_contact INTEGER notnull=1 default=1 pk=0 hidden=0
   col feed_sources TEXT notnull=1 default='allow' pk=0 hidden=0
   col updated_at INTEGER notnull=1 default=- pk=0 hidden=0
-  col content_nsfw TEXT notnull=1 default='inherit' pk=0 hidden=0
-  col content_spam TEXT notnull=1 default='inherit' pk=0 hidden=0
-  col content_phishing TEXT notnull=1 default='inherit' pk=0 hidden=0
-  col content_commercial TEXT notnull=1 default='inherit' pk=0 hidden=0
   col content_notify INTEGER notnull=1 default=0 pk=0 hidden=0
   col screen_window_start INTEGER notnull=0 default=- pk=0 hidden=0
   col screen_window_end INTEGER notnull=0 default=- pk=0 hidden=0
@@ -2055,12 +2093,8 @@ table guardian_policies
   col features_document BLOB notnull=0 default=- pk=0 hidden=0
   col content_document BLOB notnull=0 default=- pk=0 hidden=0
   item contact_approval INTEGER NOT NULL DEFAULT 0
-  item content_commercial TEXT NOT NULL DEFAULT 'inherit'
   item content_document BLOB
   item content_notify INTEGER NOT NULL DEFAULT 0
-  item content_nsfw TEXT NOT NULL DEFAULT 'inherit'
-  item content_phishing TEXT NOT NULL DEFAULT 'inherit'
-  item content_spam TEXT NOT NULL DEFAULT 'inherit'
   item features_document BLOB
   item federation_contact INTEGER NOT NULL DEFAULT 1
   item feed_sources TEXT NOT NULL DEFAULT 'allow'
@@ -2596,6 +2630,14 @@ table mail_submission_policy
   col overrides_json TEXT notnull=1 default=- pk=0 hidden=0
   item id INTEGER PRIMARY KEY CHECK (id = 1)
   item overrides_json TEXT NOT NULL
+table materialize_deleted_collections
+  col actor_id BLOB notnull=1 default=- pk=1 hidden=0
+  col kind TEXT notnull=1 default=- pk=2 hidden=0
+  col collection_id BLOB notnull=1 default=- pk=3 hidden=0
+  item PRIMARY KEY (actor_id, kind, collection_id)
+  item actor_id BLOB NOT NULL
+  item collection_id BLOB NOT NULL
+  item kind TEXT NOT NULL
 table materialize_in_flight
   col actor_id BLOB notnull=1 default=- pk=1 hidden=0
   col kind TEXT notnull=1 default=- pk=2 hidden=0
@@ -3055,14 +3097,36 @@ table payment_providers
   col created_at INTEGER notnull=1 default=- pk=0 hidden=0
   col last_verified_at INTEGER notnull=0 default=- pk=0 hidden=0
   col last_rejected_at INTEGER notnull=0 default=- pk=0 hidden=0
+  col product_ref TEXT notnull=0 default=- pk=0 hidden=0
   item PRIMARY KEY (author_id, kind)
   item author_id BLOB NOT NULL
   item created_at INTEGER NOT NULL
   item kind TEXT NOT NULL
   item last_rejected_at INTEGER
   item last_verified_at INTEGER
+  item product_ref TEXT
   item tier_name TEXT NOT NULL
   item webhook_secret TEXT NOT NULL
+table payment_purchases
+  col author_id BLOB notnull=1 default=- pk=1 hidden=0
+  col provider TEXT notnull=1 default=- pk=2 hidden=0
+  col purchase_ref TEXT notnull=1 default=- pk=3 hidden=0
+  col tier_name TEXT notnull=1 default=- pk=0 hidden=0
+  col buyer_actor_id BLOB notnull=0 default=- pk=0 hidden=0
+  col claim_external_ref TEXT notnull=0 default=- pk=0 hidden=0
+  col created_at INTEGER notnull=1 default=- pk=0 hidden=0
+  col voided_at INTEGER notnull=0 default=- pk=0 hidden=0
+  col product_ref TEXT notnull=0 default=- pk=0 hidden=0
+  item PRIMARY KEY (author_id, provider, purchase_ref)
+  item author_id BLOB NOT NULL
+  item buyer_actor_id BLOB
+  item claim_external_ref TEXT
+  item created_at INTEGER NOT NULL
+  item product_ref TEXT
+  item provider TEXT NOT NULL
+  item purchase_ref TEXT NOT NULL
+  item tier_name TEXT NOT NULL
+  item voided_at INTEGER
 table peer_content_reports
   col content_hash BLOB notnull=1 default=- pk=1 hidden=0
   col factor TEXT notnull=1 default=- pk=2 hidden=0
@@ -3858,6 +3922,11 @@ table succession_owed_nests
   item nest_id BLOB NOT NULL
   item nest_url TEXT
   item old_actor_id BLOB NOT NULL
+table succession_pull_queue
+  col actor_id BLOB notnull=0 default=- pk=1 hidden=0
+  col turn INTEGER notnull=1 default=- pk=0 hidden=0
+  item actor_id BLOB PRIMARY KEY
+  item turn INTEGER NOT NULL
 table sync_changes
   col seq INTEGER notnull=0 default=- pk=1 hidden=0
   col actor_id BLOB notnull=1 default=- pk=0 hidden=0
@@ -3873,6 +3942,7 @@ table sync_changes
   col derived_through INTEGER notnull=0 default=- pk=0 hidden=0
   col is_resolution INTEGER notnull=0 default=- pk=0 hidden=0
   col is_retention INTEGER notnull=0 default=- pk=0 hidden=0
+  col deposited_by BLOB notnull=0 default=- pk=0 hidden=0
   col item_class TEXT notnull=0 default=- pk=0 hidden=0
   col origin_writer BLOB notnull=0 default=- pk=0 hidden=0
   col origin_seq INTEGER notnull=0 default=- pk=0 hidden=0
@@ -3891,6 +3961,7 @@ table sync_changes
   item charged INTEGER NOT NULL DEFAULT 1
   item content_key_version INTEGER
   item created_at INTEGER NOT NULL
+  item deposited_by BLOB
   item derived_through INTEGER
   item device_id BLOB
   item entry_sealed BLOB
@@ -3943,6 +4014,7 @@ table sync_conflicts
   col details_sealed BLOB notnull=0 default=- pk=0 hidden=0
   col winning_manifest_hash BLOB notnull=0 default=- pk=0 hidden=0
   col resolution TEXT notnull=0 default=- pk=0 hidden=0
+  col reporter_actor_id BLOB notnull=0 default=- pk=0 hidden=0
   fk folder_id -> folders.id update=NO ACTION delete=CASCADE
   item conflict_type TEXT NOT NULL
   item created_at INTEGER NOT NULL
@@ -3954,6 +4026,7 @@ table sync_conflicts
   item path TEXT NOT NULL
   item path_hash BLOB NOT NULL
   item path_sealed BLOB
+  item reporter_actor_id BLOB
   item resolution TEXT
   item resolved_at INTEGER
   item winning_manifest_hash BLOB
@@ -4342,7 +4415,9 @@ index idx_export_sessions_expiry: CREATE INDEX idx_export_sessions_expiry ON exp
 index idx_feed_contributors_feed: CREATE INDEX idx_feed_contributors_feed ON feed_contributors(feed_id, poll_priority)
 index idx_feeds_owner: CREATE INDEX idx_feeds_owner ON feeds(owner)
 index idx_folder_deposit_inbox_folder: CREATE INDEX idx_folder_deposit_inbox_folder ON folder_deposit_inbox(folder_id, id)
+index idx_folder_deposit_inbox_staged: CREATE INDEX idx_folder_deposit_inbox_staged ON folder_deposit_inbox (received_at) WHERE committed = 0
 index idx_folders_name_hash: CREATE UNIQUE INDEX idx_folders_name_hash ON folders(name_hash, actor_id)
+index idx_follow_delivery_homes_origin: CREATE INDEX idx_follow_delivery_homes_origin ON follow_delivery_homes (origin_nest_id)
 index idx_forward_queue_actor_fifo: CREATE INDEX idx_forward_queue_actor_fifo ON forward_queue(actor_id, id)
 index idx_greylist_tuples_last_attempt: CREATE INDEX idx_greylist_tuples_last_attempt ON greylist_tuples(last_attempt)
 index idx_guardian_mail_holds_ward: CREATE INDEX idx_guardian_mail_holds_ward ON guardian_mail_holds(supervised_actor_id)
@@ -4439,6 +4514,7 @@ index idx_spam_model_holder_copies_holder: CREATE INDEX idx_spam_model_holder_co
 index idx_spam_training_history_actor: CREATE INDEX idx_spam_training_history_actor ON spam_training_history (actor_id, created_at DESC, history_id DESC)
 index idx_subscribe_requests_author: CREATE INDEX idx_subscribe_requests_author ON subscribe_requests (author_id)
 index idx_subscribers_author_tier: CREATE INDEX idx_subscribers_author_tier ON subscribers (author_id, tier_name)
+index idx_succession_pull_queue_turn: CREATE INDEX idx_succession_pull_queue_turn ON succession_pull_queue(turn, actor_id)
 index idx_sync_changes_actor: CREATE INDEX idx_sync_changes_actor ON sync_changes(actor_id, seq)
 index idx_sync_changes_path: CREATE INDEX idx_sync_changes_path ON sync_changes(path_hash, seq)
 index idx_sync_changes_state_entry: CREATE INDEX idx_sync_changes_state_entry ON sync_changes(folder_id, path_hash, origin_writer, seq)

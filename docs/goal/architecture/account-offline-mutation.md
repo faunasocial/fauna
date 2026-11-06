@@ -1561,8 +1561,8 @@ Split verbatim out of [`account-data-plane.md`](account-data-plane.md) on 2026-0
   ⚠ **`fauna.bridges.revoke_service_user` is the "rotate" button, and that one
   mismatch is why an earlier census filed the kind as an unbuilt section.**
   Rotating an approved bridge's service-user key *is* revoking it: the approved
-  card's rotate confirm dispatches the shared machine's rotate act (the direct
-  `BridgeApprovalAction::Rotate`, or `Confirm` over an armed `BridgeConfirm::Rotate`),
+  card's rotate confirm dispatches the shared machine's rotate act (`Confirm` over an armed
+  `BridgeConfirm::Rotate`),
   which calls `nest.revoke_service_user`, after which the bridge re-enrols with a
   fresh key (`mail-bridge-lifecycle.md` § Service-user re-keying). The control
   and the kind share no vocabulary at all. **Grade a kind by following its

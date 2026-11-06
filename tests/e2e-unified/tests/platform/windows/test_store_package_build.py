@@ -93,22 +93,65 @@ def test_recipe_builds_the_production_ffi_at_the_dist_profile():
     """Installer artifacts build at the size-optimised `dist` profile; `release` is
     the dev/test inner loop (installers/windows.md § Size & build profile)."""
     code = "\n".join(_code_lines(_recipe_body(_RECIPE)))
-    assert re.search(r"\bjust windows-ffi(?:-store-safe)? dist\b", code), (
-        f"`just {_RECIPE}` must stage the production FFI at the dist profile "
-        "(`windows-ffi dist`, or its store-safe twin) — the C# bindings and "
-        "fauna_ffi.dll the app publishes come from that one recipe"
+    for ffi in ("windows-ffi", "windows-ffi-store-safe", "windows-ffi-store-no-payments"):
+        assert re.search(rf"\bjust {ffi} dist\b", code), (
+            f"`just {_RECIPE}` must stage the production FFI at the dist profile "
+            f"(`{ffi} dist` for its flavour) — the C# bindings and fauna_ffi.dll the "
+            "app publishes come from that one recipe"
+        )
+    assert not re.search(r"\bjust windows-ffi(?:-store-safe|-store-no-payments)? release\b", code)
+
+
+# Each flavour's three settings, the table the public Store workflow's
+# `Resolve the flavour` step repeats (test_public_workflows_shape.py pins the two
+# against each other). The sync agent's only default feature is `p2p-share`, the
+# share plane's ingest half: store-safe drops it, store-no-payments keeps it.
+_FLAVOURS = {
+    "store-safe": ("windows-ffi-store-safe", "--no-default-features", "-p:FaunaStoreSafe=true"),
+    "store-no-payments": ("windows-ffi-store-no-payments", "--no-default-features --features p2p-share",
+                          "-p:FaunaExcisePayments=true"),
+    "full": ("windows-ffi", "", ""),
+}
+
+
+@pytest.mark.parametrize("flavour", sorted(_FLAVOURS))
+def test_recipe_builds_each_flavour_from_one_table(flavour):
+    """One case arm per flavour sets the FFI, the agent's features and the app's
+    MSBuild property together — a flavour that set two of the three would ship an
+    app and an agent from different flavours."""
+    body = _recipe_body(_RECIPE)
+    arm = re.search(rf"^\s*{re.escape(flavour)}\)\n(.*?);;", body, re.MULTILINE | re.DOTALL)
+    assert arm, f"`just {_RECIPE}` has no `{flavour})` arm"
+    ffi, agent, publish = _FLAVOURS[flavour]
+    text = arm.group(1)
+    assert re.search(rf"\bjust {ffi} dist\b", text), f"the {flavour} arm stages no `{ffi}`"
+    assert f'AGENT_FEATURES="{agent}"' in text, f"the {flavour} arm's sync agent: {text!r}"
+    assert f'PUBLISH_FLAVOR="{publish}"' in text, f"the {flavour} arm's app property: {text!r}"
+    validate = re.search(r'case "\$FLAVOR" in\n\s*([^)]+)\) ;;', body)
+    assert validate and flavour in validate.group(1).split("|"), (
+        f"`just {_RECIPE}` refuses the {flavour} flavour before building it"
     )
-    assert not re.search(r"\bjust windows-ffi(?:-store-safe)? release\b", code)
 
 
 def test_recipe_publishes_self_contained_release():
-    code = "\n".join(_code_lines(_recipe_body(_RECIPE)))
+    code = _publish_code()
     for needed in ("-t:Publish", "Configuration=Release", "SelfContained=true",
                    "WindowsAppSDKSelfContained=true"):
         assert needed in code, (
-            f"`just {_RECIPE}`'s app publish lacks {needed!r}: the Store package must "
+            f"`just {_PUBLISH}`'s app publish lacks {needed!r}: the Store package must "
             "run on a box with no .NET / Windows App SDK runtime installed"
         )
+
+
+def test_recipe_publishes_with_msbuild_never_the_dotnet_cli():
+    """The WinUI app's XAML compiler runs in-process only under MSBuild.exe; under
+    `dotnet publish` it is the out-of-process net472 XamlCompiler.exe, which exited 1
+    with no diagnostic on both Store legs of the 0.1.5 dry run (run 39492438668)."""
+    code = _publish_code()
+    assert "dotnet publish" not in code, f"`just {_PUBLISH}` must publish with MSBuild"
+    assert re.search(r'^\s*"\{\{msbuild_exe\}\}" [^\n]*-restore -t:Publish\b', code, re.M), (
+        f"`just {_PUBLISH}` must run MSBuild.exe -restore -t:Publish"
+    )
 
 
 def test_recipe_builds_agent_and_shell_ext_in_separate_cargo_invocations():
@@ -127,11 +170,26 @@ def test_recipe_builds_agent_and_shell_ext_in_separate_cargo_invocations():
         )
 
 
+_PUBLISH = "windows-app-publish"
+
+
+def _publish_code() -> str:
+    """The app publish `just windows-store-package` runs: its call of the one
+    publish recipe (the MSI's app is published by it too), with that recipe's
+    executable lines."""
+    code = "\n".join(_code_lines(_recipe_body(_RECIPE)))
+    assert re.search(rf'^\s*just {_PUBLISH} "\$ARCH" "\$PUBLISH_FLAVOR"\s*$', code, re.M), (
+        f"`just {_RECIPE}` must publish the app through `just {_PUBLISH}`, in the "
+        "flavour's MSBuild property"
+    )
+    return "\n".join(_code_lines(_recipe_body(_PUBLISH)))
+
+
 def test_recipe_wipes_the_app_build_before_publishing():
     """A flavour flip touches no source file, so an incremental publish can hand back
     the PREVIOUS flavour's assembly — the MSI helper's e2e-agent build, sitting in
     the very same `bin/Release/<tfm>/<rid>/publish` directory."""
-    code = "\n".join(_code_lines(_recipe_body(_RECIPE)))
+    code = _publish_code()
     for sub in ("bin", "obj"):
         assert re.search(rf"rm -rf [^\n]*FaunaApp/FaunaApp/{sub}\b", code) or \
                re.search(rf"rm -rf [^\n]*\$APP/{sub}\b", code), (

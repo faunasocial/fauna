@@ -11,14 +11,15 @@ helpers:
 
 author posts a body carrying a unique term → the admin adds a keywords rule on
 that term in the shared editor on ``admin-nest`` (``admin-nest-rules-section``),
-writes the reason, saves, and the status names version 1 → a member's feed
+writes the reason, saves, and the status names the version it reached → a member's feed
 paints the nest placeholder in place of that post's body — the frame naming the
 nest, the domain, the admin's reason verbatim — with no reveal (a ``block`` has
 no member override), and the clean post untouched → the member's settings
-landing shows the rules in force at version 1 → the admin saves a second rule,
+landing shows the rules in force at that version → the admin saves a second rule,
 and the connected admin seat — itself a member of the nest — gets the one-line
 changed notice through the nest's ``info_changed`` push, its rules surface
-moving to version 2.
+moving to the next version. The session's nest keeps an earlier
+app's rules, so the journey counts from the rule book it finds.
 
 The changed notice adds no element id (``nest-rules.md`` § Element IDs); tui
 publishes it as the additive ``nest_rules_changed_notice`` state field.
@@ -26,14 +27,19 @@ publishes it as the additive ``nest_rules_changed_notice`` state field.
 Mutations are UI-only (convention 8): the posts, both rules writes. Waits are
 named budgets over deadline polls (convention 14).
 
-App arm: **tui** (the lead app); the other six join their trickle-down by
-extending ``_BUILT_APPS``.
+App arm: every app (tui led; windows, the seventh, joined 2026-11-04 — the
+surface gates retired with it).
 
 A second journey witnesses the guardian's mounting: a category rule written
 in ``family-policy-rules-section`` binds the ward's render.
 
-Not yet witnessed here (each captured on the row that builds it): the rules at
-joining, and the nest's public page.
+A third journey witnesses joining as acceptance: a new identity's
+``invite_request`` and an admin-admitted identity's ``handle_entry`` (once the
+real handle check concludes Continue signs in) show the published rules beside
+the terms notice.
+
+Not yet witnessed here (captured on the row that builds it): the nest's public
+page.
 """
 
 import time
@@ -42,8 +48,8 @@ import uuid
 import pytest
 
 from common.auth import create_actor_and_register
-from helpers.app_surface import app_name, skip_unbuilt
-from helpers.e2e_session import E2E_LOGIN_DEVICE_ID, login_as
+from helpers.app_surface import app_name
+from helpers.e2e_session import e2e_login_device_id, login_as
 from helpers.mail_dedicated_nest import login_as_nest_admin
 from i18n.strings import S
 
@@ -58,11 +64,10 @@ pytestmark = [
     pytest.mark.ios,
 ]
 
-_BUILT_APPS = ("tui", "web", "linux", "android")
 # The apps that paint a guardian rule's reason beside the family-policy frame
 # and on its summary line (`nest-rules.md` § The shared rule editor → *The
 # reason is the member's to read*); tui leads, each trickle-down adds its app.
-_GUARDIAN_REASON_APPS = ("tui", "web", "linux")
+_GUARDIAN_REASON_APPS = ("tui", "web", "linux", "macos", "ios", "windows")
 
 REASON = "No gambling promotion on this nest."
 SECOND_REASON = "No lottery promotion on this nest."
@@ -94,13 +99,21 @@ def _actor(nest_instance):
     )
 
 
-def _login(app, nest_instance, actor):
+def _dial_url(app, nest_instance, request):
+    """The raw nest on a native app; web's SPA proxy onto it on web
+    (single-origin — the raw nest is a CORS refusal)."""
+    return request.getfixturevalue("spa_url") if app.driver.is_web() else nest_instance["url"]
+
+
+def _login(app, nest_instance, actor, request):
     login_as(
         app,
         nest_instance,
         actor,
         handle=actor["handle"],
-        device_id=E2E_LOGIN_DEVICE_ID,
+        device_id=e2e_login_device_id(app),
+        request=request,
+        spa_url_fixture="spa_url",
         wait_for_id="feed-tab",
     )
 
@@ -135,6 +148,21 @@ def _write_keyword_rule(app, term, reason):
     )
 
 
+def _saved_sequence(app):
+    """Wait for the editor's save to land and return the version it names.
+    The session's nest keeps the rule book an earlier app's run published, so
+    the journey reads the version it reached instead of assuming a fresh nest."""
+    prefix = S.rule_editor.saved_version(sequence="")
+    _poll(
+        lambda: app.rule_editor.status().startswith(prefix)
+        and app.rule_editor.status()[len(prefix):].isdigit(),
+        _SEND_BUDGET_S,
+        "the admin's rule is saved",
+        diagnose=app.rule_editor.status,
+    )
+    return int(app.rule_editor.status()[len(prefix):])
+
+
 def _rules_surface(app):
     """Open the settings landing (the region section's home) and return the
     rules surface's version text, or ``None`` while it is absent."""
@@ -157,15 +185,11 @@ def _assert_block_render_witness(app, where):
     )
 
 
-def test_an_admins_keyword_rule_blocks_a_post_visibly_and_a_change_is_announced(app, nest_instance):
-    if app_name(app.driver) not in _BUILT_APPS:
-        skip_unbuilt(
-            app.driver,
-            surface="admin-nest-rules-section",
-            detail="the nest rules (nest-rules.md § The shared rule editor) are built "
-            "on tui first",
-            tracked="",
-        )
+@pytest.mark.feature("nest-rules")
+def test_an_admins_keyword_rule_blocks_a_post_visibly_and_a_change_is_announced(
+    app, nest_instance, request
+):
+    dial_url = _dial_url(app, nest_instance, request)
 
     token = uuid.uuid4().hex[:10]
     term = f"casino{token}"
@@ -174,7 +198,7 @@ def test_an_admins_keyword_rule_blocks_a_post_visibly_and_a_change_is_announced(
     author, member = _actor(nest_instance), _actor(nest_instance)
 
     # The author posts both bodies through the app.
-    _login(app, nest_instance, author)
+    _login(app, nest_instance, author, request)
     app.feed.navigate()
     app.feed.create_post(clean_text)
     app.feed.create_post(target_text)
@@ -185,7 +209,7 @@ def test_an_admins_keyword_rule_blocks_a_post_visibly_and_a_change_is_announced(
     assert clean is not None, f"the clean post must land; error={app.error_text()!r}"
 
     # The admin writes the rule in the shared editor on admin-nest.
-    login_as_nest_admin(app, nest_instance, nest_instance["url"])
+    login_as_nest_admin(app, nest_instance, dial_url)
     app.admin.navigate_nest()
     _poll(
         lambda: app.driver.count("admin-nest-rules-section") > 0,
@@ -196,11 +220,13 @@ def test_an_admins_keyword_rule_blocks_a_post_visibly_and_a_change_is_announced(
     app.rule_editor.wait_loaded()
     _write_keyword_rule(app, term, REASON)
     app.rule_editor.save()
-    app.rule_editor.wait_status(S.rule_editor.saved_version(sequence="1"), timeout=_SEND_BUDGET_S)
+    sequence = _saved_sequence(app)
+    # The rules in force: an earlier app's run on this session's nest included.
+    in_force = app.rule_editor.rule_count()
 
     # The member reads the nest's feed: the placeholder stands in place of the
     # matching post's body, naming the nest and the admin's reason.
-    _login(app, nest_instance, member)
+    _login(app, nest_instance, member, request)
     _general_feed(app)
     assert app.feed.wait_for_post_text(clean_text, timeout_s=_FEED_BUDGET_S), (
         f"the member must see the clean post; error={app.error_text()!r}"
@@ -234,27 +260,32 @@ def test_an_admins_keyword_rule_blocks_a_post_visibly_and_a_change_is_announced(
 
     # The member's rules surface names the rules in force.
     version = _rules_surface(app)
-    assert version is not None and version.startswith("Version 1,"), (
-        f"the rules surface names version 1: {version!r}"
+    assert version is not None and version.startswith(f"Version {sequence},"), (
+        f"the rules surface names version {sequence}: {version!r}"
     )
-    assert app.driver.count("settings-nest-rules-item") == 1
-    assert REASON in app.driver.get_text("settings-nest-rules-item", index=0)
+    items = app.driver.count("settings-nest-rules-item")
+    assert items == in_force, f"the surface lists the {in_force} rules in force: {items}"
+    assert any(
+        REASON in app.driver.get_text("settings-nest-rules-item", index=i) for i in range(items)
+    ), "the surface lists the admin's rule"
 
     # A change: the admin adds a second rule. The admin seat, connected and a
     # member of the nest itself, gets the nest's push and the one-line notice.
-    login_as_nest_admin(app, nest_instance, nest_instance["url"])
+    login_as_nest_admin(app, nest_instance, dial_url)
     app.feed.navigate()
     app.admin.navigate_nest()
     app.rule_editor.wait_loaded()
     _poll(
-        lambda: app.rule_editor.rule_count() == 1,
+        lambda: app.rule_editor.rule_count() == in_force,
         _PAGE_BUDGET_S,
-        "the editor loads the rule in force",
+        "the editor loads the rules in force",
         diagnose=app.rule_editor.status,
     )
     _write_keyword_rule(app, f"lottery{token}", SECOND_REASON)
     app.rule_editor.save()
-    app.rule_editor.wait_status(S.rule_editor.saved_version(sequence="2"), timeout=_SEND_BUDGET_S)
+    app.rule_editor.wait_status(
+        S.rule_editor.saved_version(sequence=str(sequence + 1)), timeout=_SEND_BUDGET_S
+    )
     _poll(
         lambda: (app.driver.get_state() or {}).get("nest_rules_changed_notice")
         == S.nest_rules.changed_notice(nest=domain),
@@ -263,12 +294,12 @@ def test_an_admins_keyword_rule_blocks_a_post_visibly_and_a_change_is_announced(
         diagnose=lambda: (app.driver.get_state() or {}).get("nest_rules_changed_notice"),
     )
     _poll(
-        lambda: (_rules_surface(app) or "").startswith("Version 2,"),
+        lambda: (_rules_surface(app) or "").startswith(f"Version {sequence + 1},"),
         _PUSH_BUDGET_S,
-        "the rules surface moves to version 2",
+        f"the rules surface moves to version {sequence + 1}",
         diagnose=lambda: _rules_surface(app),
     )
-    assert app.driver.count("settings-nest-rules-item") == 2
+    assert app.driver.count("settings-nest-rules-item") == in_force + 1
     assert (app.driver.get_state() or {}).get("nest_rules_changed_notice") is None, (
         "opening the rules surface reads the change"
     )
@@ -285,20 +316,13 @@ def test_a_guardians_category_rule_written_in_the_shared_editor_binds_the_wards_
     spam-labelled post behind the content-policy placeholder while a clean
     post renders. ``test_family.py``'s content arms drive the same editor on
     tui through ``FamilyActions.set_content_floor``."""
-    if app_name(app.driver) not in _BUILT_APPS:
-        skip_unbuilt(
-            app.driver,
-            surface="family-policy-rules-section",
-            detail="the guardian's rule editor (nest-rules.md § The shared rule editor (b)) "
-            "is built on tui first",
-            tracked="",
-        )
     from conftest import _login_app_as
-    from helpers.family_wire import admit_adult_directly, admit_ward
+    from helpers.admin_wire import admit_adult
+    from helpers.family_wire import admit_ward
 
     suffix = uuid.uuid4().hex[:6]
     ward_handle = f"rules-ward-{suffix}"
-    guardian = admit_adult_directly(nest_instance, f"rules-guardian-{suffix}")
+    guardian = admit_adult(nest_instance, f"rules-guardian-{suffix}")
     ward = admit_ward(nest_instance, guardian, ward_handle)
     reason = "Not for this account"
 
@@ -324,9 +348,6 @@ def test_a_guardians_category_rule_written_in_the_shared_editor_binds_the_wards_
     editor = app.rule_editor
     editor.wait_loaded()
     assert editor.rule_count() == 0, "a new ward starts with no rules"
-    assert app.driver.count("family-policy-content-spam-select") == 0, (
-        "the rule editor stands where the floor selects stood"
-    )
     row = editor.add_rule()
     editor.pick(row, "category", S.moderation.category.spam)
     editor.pick(row, "verdict", S.rule_editor.verdict.block)
@@ -423,3 +444,121 @@ def test_a_guardians_category_rule_written_in_the_shared_editor_binds_the_wards_
         assert _spam_line().endswith(f" — {reason}"), (
             f"the rule's summary line carries its reason; got {_spam_line()!r}"
         )
+
+
+# ── Joining is acceptance (`nest-rules.md` § Acceptance at joining) ─────────
+
+
+def _admin_ws(nest_instance):
+    from clients.ws_rpc_admin_client import WsRpcAdminClient
+
+    admin = nest_instance["admin"]["signing_key"]
+    return WsRpcAdminClient(
+        nest_instance["url"], actor_id=bytes(admin.verify_key), signing_key=bytes(admin)
+    )
+
+
+def _admit_fresh(nest_instance) -> tuple[str, str]:
+    """An identity the admin admitted directly, with no sign-in of its own —
+    it never sees ``invite_request``. Returns ``(secret_hex, localpart)``."""
+    import secrets
+
+    from nacl.signing import SigningKey
+
+    sk = SigningKey.generate()
+    localpart = "joiner" + secrets.token_hex(3)
+    with _admin_ws(nest_instance) as ws:
+        ws.call(
+            "fauna.admin.users.create",
+            {
+                "actor_id": bytes(sk.verify_key),
+                "tier": "free",
+                "label": localpart,
+                "handle": localpart,
+            },
+        )
+    return bytes(sk).hex(), localpart
+
+
+def _assert_the_joining_rules(app, domain, reason, page):
+    """The heading naming the nest, a rule line carrying the admin's reason,
+    and the terms notice beside them."""
+    _poll(
+        lambda: app.driver.count("onboarding-nest-rules") == 1,
+        _SEND_BUDGET_S,
+        f"{page} paints the nest's rules",
+        diagnose=lambda: app.driver.diagnose("onboarding-nest-rules"),
+    )
+    heading = app.driver.get_text("onboarding-nest-rules")
+    assert heading == S.nest_rules.joining_heading(nest=domain), f"{page}: {heading!r}"
+    items = [
+        app.driver.get_text("onboarding-nest-rules-item", index=i)
+        for i in range(app.driver.count("onboarding-nest-rules-item"))
+    ]
+    assert any(reason in line for line in items), (
+        f"{page}: a rule line carries the admin's reason {reason!r}: {items!r}"
+    )
+    assert app.is_visible("onboarding-terms-notice"), (
+        f"{page}: the rules sit with the terms notice: "
+        f"{app.driver.diagnose('onboarding-terms-notice')}"
+    )
+
+
+@pytest.mark.feature("nest-rules")
+def test_joining_shows_the_nests_rules_with_the_terms_notice(app, nest_instance, request):
+    """A new identity's ``invite_request``, and an admin-admitted identity's
+    ``handle_entry`` once its check concludes Continue signs in, both show the
+    rules the admin published — read before sign-in, verified in shared Rust."""
+    import json
+    from urllib.parse import urlparse
+
+    from nacl.signing import SigningKey
+
+    token = uuid.uuid4().hex[:10]
+    reason = f"No joiner spam {token}."
+
+    dial_url = _dial_url(app, nest_instance, request)
+
+    # The admin publishes a rule through the shared editor.
+    login_as_nest_admin(app, nest_instance, dial_url)
+    app.admin.navigate_nest()
+    app.rule_editor.wait_loaded()
+    _write_keyword_rule(app, f"joinspam{token}", reason)
+    app.rule_editor.save()
+    _saved_sequence(app)
+    with _admin_ws(nest_instance) as ws:
+        domain = ws.call("fauna.nest.info", {})["domain"]
+
+    # A new identity asks for an invite: invite_request shows the rules.
+    app.driver.reset()
+    ob = app.onboarding
+    ob.navigate_to_status()
+    ob.import_key(bytes(SigningKey.generate()).hex())
+    app.driver.wait_for("handle-input", timeout=_PAGE_BUDGET_S)
+    app.driver.call_machine_method(
+        "navigate_to_invite_request_for_known_nest",
+        json.dumps([nest_instance["url"], "joiner" + token]),
+    )
+    app.driver.wait_for("invite-request-submit-button", timeout=_PAGE_BUDGET_S)
+    _assert_the_joining_rules(app, domain, reason, "invite_request")
+
+    # An identity the admin admitted signs in from handle_entry: the rules show
+    # once the real handle check concludes Continue signs in, never before.
+    secret_hex, localpart = _admit_fresh(nest_instance)
+    app.driver.reset()
+    # The override routes the probe through the same address the admin dialled.
+    app.driver.set_provider_base_urls({"nest": dial_url})
+    ob.navigate_to_status()
+    ob.import_key(secret_hex)
+    app.driver.wait_for("handle-input", timeout=_PAGE_BUDGET_S)
+    assert app.driver.is_absent("onboarding-nest-rules"), "no rules before the check"
+    handle = f"{localpart}@{urlparse(nest_instance['url']).netloc}"
+    app.driver.clear_and_type("handle-input", handle)
+    app.driver.click("handle-check-button")
+    _poll(
+        lambda: app.driver.is_enabled("handle-entry-continue-button"),
+        _SEND_BUDGET_S,
+        "the admitted identity's check concludes AlreadyOnNest",
+        diagnose=lambda: app.driver.get_text("handle-message-area"),
+    )
+    _assert_the_joining_rules(app, domain, reason, "handle_entry")

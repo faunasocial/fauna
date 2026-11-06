@@ -12,7 +12,7 @@ use anyhow::{Context, Result};
 use rusqlite::OptionalExtension;
 
 use fauna_core::data::DmPeerVerdict;
-use fauna_core::obligation::{ContentFloor, ContentPolicy};
+use fauna_core::obligation::ContentPolicy;
 use fauna_core::screen_time::ScreenTimePolicy;
 
 use super::{CacheDb, now_epoch_secs};
@@ -102,14 +102,6 @@ pub struct GuardianPolicyRow {
     pub federation_contact: bool,
     pub feed_sources: String,
     pub updated_at: i64,
-    /// v1.x content pillar (`family-safety.md` § Content policy): the raw
-    /// per-category floor strings (`inherit` | `collapse` | `block`) as stored.
-    /// `policy_row_to_wire` folds these into a `ContentPolicy`, or `None` when
-    /// all four are the default `inherit` (the unsupervised-equivalent).
-    pub content_nsfw: String,
-    pub content_spam: String,
-    pub content_phishing: String,
-    pub content_commercial: String,
     /// v1.x Guardian Notify knob (`family-safety.md` § Guardian Notify): when on,
     /// the ward's client reports coarse per-category enforcement counts and the
     /// guardian is notified. Default off (the unsupervised-equivalent).
@@ -143,9 +135,8 @@ pub struct GuardianPolicyRow {
 }
 
 impl GuardianPolicyRow {
-    /// Fold the stored content-floor columns and the guardian's rule document
-    /// into a [`ContentPolicy`], or `None` when all four floors are the default
-    /// `inherit` and no document is stored (the unsupervised-equivalent).
+    /// The guardian's stored rule document as a [`ContentPolicy`], or `None`
+    /// when no document is stored (the unsupervised-equivalent).
     /// Returning `None` for the default lets the wire omit the pillar
     /// (`skip_serializing_if`), so an all-default read round-trips to the shape a
     /// v1 client sent (`family-safety.md` § Policy-update compatibility).
@@ -159,14 +150,10 @@ impl GuardianPolicyRow {
             fauna_core::content_policy::decode_document(bytes)
                 .unwrap_or_else(|_| fauna_core::content_policy::ContentPolicyDocument::unreadable())
         });
-        let cp = ContentPolicy {
-            nsfw: ContentFloor::from_wire(&self.content_nsfw),
-            spam: ContentFloor::from_wire(&self.content_spam),
-            phishing: ContentFloor::from_wire(&self.content_phishing),
-            commercial: ContentFloor::from_wire(&self.content_commercial),
-            document,
-        };
-        (cp != ContentPolicy::default()).then_some(cp)
+        document.map(|document| ContentPolicy {
+            document: Some(document),
+            compiled_floor: None,
+        })
     }
 
     /// Fold the stored screen-time columns into a [`ScreenTimePolicy`], or `None`
@@ -181,30 +168,25 @@ impl GuardianPolicyRow {
     }
 }
 
-/// The four floor values a content pillar stores, and what it does to the
-/// rule document column: `None` leaves it (absent means unchanged), `Some(None)`
-/// clears it, `Some(Some(bytes))` stores the encoded document.
+/// What a content pillar does to the rule document column: `None` leaves it
+/// (a policy carrying no document leaves the guardian's rules as they are —
+/// absent means unchanged), `Some(None)` clears it, `Some(Some(bytes))` stores
+/// the encoded document.
 ///
-/// A present document clears the floors (`nest-rules.md` § Implementation
-/// status today): the shared editor shows every floor still set as a rule, so
-/// the document it writes is the whole rule set, and a floor left beside it
-/// would bind a rule the guardian removed. A present document with no rule and
-/// no scorer clears the column: a guardian who removed every rule has authored
-/// nothing, and the ward's policy reads as it did before any document.
-fn stored_content(cp: &ContentPolicy) -> Result<([ContentFloor; 4], Option<Option<Vec<u8>>>)> {
+/// A present document with no rule and no scorer clears the column: a
+/// guardian who removed every rule has authored nothing, and the ward's policy
+/// reads as it did before any document.
+fn stored_content(cp: &ContentPolicy) -> Result<Option<Option<Vec<u8>>>> {
     match &cp.document {
         Some(document) if document.rules.is_empty() && document.scorers.is_empty() => {
-            Ok(([ContentFloor::Inherit; 4], Some(None)))
+            Ok(Some(None))
         }
-        Some(document) => Ok((
-            [ContentFloor::Inherit; 4],
-            Some(Some(
-                fauna_core::content_policy::encode_document(document)
-                    .map_err(anyhow::Error::msg)
-                    .context("encode guardian content document")?,
-            )),
-        )),
-        None => Ok(([cp.nsfw, cp.spam, cp.phishing, cp.commercial], None)),
+        Some(document) => Ok(Some(Some(
+            fauna_core::content_policy::encode_document(document)
+                .map_err(anyhow::Error::msg)
+                .context("encode guardian content document")?,
+        ))),
+        None => Ok(None),
     }
 }
 
@@ -372,7 +354,6 @@ impl CacheDb {
         let result = conn.query_row(
             "SELECT supervised_actor_id, contact_approval, unknown_sender_mail,
                     federation_contact, feed_sources, updated_at,
-                    content_nsfw, content_spam, content_phishing, content_commercial,
                     content_notify,
                     screen_window_start, screen_window_end, screen_daily_minutes,
                     unknown_peer_dm, features_document, content_document
@@ -386,17 +367,13 @@ impl CacheDb {
                     federation_contact: row.get::<_, i64>(3)? != 0,
                     feed_sources: row.get(4)?,
                     updated_at: row.get(5)?,
-                    content_nsfw: row.get(6)?,
-                    content_spam: row.get(7)?,
-                    content_phishing: row.get(8)?,
-                    content_commercial: row.get(9)?,
-                    content_notify: row.get::<_, i64>(10)? != 0,
-                    screen_window_start: row.get::<_, Option<i64>>(11)?.map(|v| v as u16),
-                    screen_window_end: row.get::<_, Option<i64>>(12)?.map(|v| v as u16),
-                    screen_daily_minutes: row.get::<_, Option<i64>>(13)?.map(|v| v as u16),
-                    unknown_peer_dm: row.get(14)?,
-                    features_document: row.get(15)?,
-                    content_document: row.get(16)?,
+                    content_notify: row.get::<_, i64>(6)? != 0,
+                    screen_window_start: row.get::<_, Option<i64>>(7)?.map(|v| v as u16),
+                    screen_window_end: row.get::<_, Option<i64>>(8)?.map(|v| v as u16),
+                    screen_daily_minutes: row.get::<_, Option<i64>>(9)?.map(|v| v as u16),
+                    unknown_peer_dm: row.get(10)?,
+                    features_document: row.get(11)?,
+                    content_document: row.get(12)?,
                 })
             },
         );
@@ -488,22 +465,11 @@ impl CacheDb {
             Box::new(feed_sources.to_string()),
             Box::new(now),
         ];
-        if let Some(cp) = content_policy {
-            let (floors, document) = stored_content(cp)?;
-            sets.push_str(
-                ", content_nsfw = ?, content_spam = ?, content_phishing = ?, \
-                 content_commercial = ?",
-            );
-            for floor in floors {
-                params.push(Box::new(floor.as_str().to_string()));
-            }
-            // Absent-means-unchanged, like every pillar: a floors-only write
-            // (an app that still paints the four selects) leaves the stored
-            // document as it is.
-            if let Some(document) = document {
-                sets.push_str(", content_document = ?");
-                params.push(Box::new(document));
-            }
+        if let Some(cp) = content_policy
+            && let Some(document) = stored_content(cp)?
+        {
+            sets.push_str(", content_document = ?");
+            params.push(Box::new(document));
         }
         if let Some(st) = screen_time {
             sets.push_str(
@@ -2153,26 +2119,20 @@ pub(super) fn insert_guardianship_tx(
                 None => None,
             };
             let cp = p.content_policy.clone().unwrap_or_default();
-            let ([nsfw, spam, phishing, commercial], content_document) = stored_content(&cp)?;
-            let content_document = content_document.flatten();
+            let content_document = stored_content(&cp)?.flatten();
             tx.execute(
                 "INSERT INTO guardian_policies (
                      supervised_actor_id, contact_approval, unknown_sender_mail,
                      federation_contact, feed_sources,
-                     content_nsfw, content_spam, content_phishing, content_commercial,
                      content_notify, unknown_peer_dm, features_document, content_document,
                      updated_at
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
                 rusqlite::params![
                     supervised,
                     p.contact_approval as i64,
                     p.unknown_sender_mail,
                     p.federation_contact as i64,
                     p.feed_sources,
-                    nsfw.as_str(),
-                    spam.as_str(),
-                    phishing.as_str(),
-                    commercial.as_str(),
                     p.content_notify.unwrap_or(false) as i64,
                     p.unknown_peer_dm.as_deref().unwrap_or("allow"),
                     features_document,

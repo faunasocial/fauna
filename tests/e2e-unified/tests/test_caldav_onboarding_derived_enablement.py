@@ -69,6 +69,8 @@ pytestmark = [
     # `spa_proxy_for`), since a browser cannot reach a raw nest, which sends no
     # CORS headers. The admin read stays on the raw URL (Python needs no CORS).
     pytest.mark.web,
+    pytest.mark.macos,
+    pytest.mark.ios,
 ]
 
 

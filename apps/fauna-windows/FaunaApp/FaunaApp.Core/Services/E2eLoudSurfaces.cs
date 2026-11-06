@@ -1,5 +1,7 @@
+#if DEBUG || FAUNA_E2E_AGENT
 using System.Collections.Generic;
 using System.Linq;
+#endif
 using uniffi.fauna_ffi;
 
 namespace FaunaApp.Core.Services;
@@ -15,10 +17,12 @@ namespace FaunaApp.Core.Services;
 /// so windows counts with the same code as tui, linux and web.
 ///
 /// <para><b>Same convention-15 shape as <see cref="E2eSessionCounters"/></b>: a
-/// gated real plus a same-signature production twin. The feed call sites are
-/// production code (the connection indicator's handler), and the wrapper types
-/// exist only in the <c>windows-ffi-test</c> flavor's bindings, so an ungated
-/// reference would not compile in Release at all.</para>
+/// gated real plus a same-signature production twin for the one member production
+/// code calls — <see cref="ObserveConnectionReport"/>, fed by the connection
+/// indicator's handler. The wrapper types exist only in the
+/// <c>windows-ffi-test</c> flavor's bindings, so an ungated reference would not
+/// compile in Release at all; every other member is called only from gated code
+/// and so has no twin.</para>
 ///
 /// <para>Both wrappers lock internally (a Rust <c>Mutex</c>), so the feeds (UI
 /// thread) and the reads (the agent's poll thread) need no lock here.</para>
@@ -56,12 +60,12 @@ internal static class E2eLoudSurfaces
 
 #else
 
-    // Production twins. Same signatures, no-ops — the agent that would publish
-    // these is itself compiled out of a Release build.
+    // The production twin of the one member a production path feeds (the connection
+    // indicator's handler, MainViewModel). Same signature, a no-op — the agent that
+    // would publish the count is itself compiled out of a Release build. The two
+    // readers and the painted-frame feed have no twin: their only callers (the
+    // agent's state serializer, Testing/PaintedErrorObserver) are gated with them.
     internal static void ObserveConnectionReport(FfiConnectionState state) { }
-    internal static string ConnectionReportsJson() => "{}";
-    internal static void ObservePaintedFrame(IEnumerable<(string Id, string Text)> frame) { }
-    internal static string PaintedErrorsJson() => "{}";
 
 #endif
 }

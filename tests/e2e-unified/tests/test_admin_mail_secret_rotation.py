@@ -17,9 +17,10 @@ forwards never share an address and the address alone cannot show whether the
 secret moved. Never from the UI alone.
 Latency-independent throughout (convention 14): each wait polls for an outcome.
 
-tui is the lead app (the first implementation); web and linux joined this
-module's marks in the batched trickle-down. android is compile- and
-unit-verified (its emulator e2e is host-gated); the rest join as they land.
+tui is the lead app (the first implementation); web, linux, macos, ios and
+windows joined this module's marks in the batched trickle-down, and android's
+Mail page paints both buttons from the same shared machine (marked, not yet run
+on a device).
 """
 
 from __future__ import annotations
@@ -41,7 +42,16 @@ from helpers.mail_wire import _connect_smtp_starttls, _wait_for_tagged
 from helpers.waiting import wait_until
 from i18n.strings import S
 
-pytestmark = [pytest.mark.tier_3, pytest.mark.tui, pytest.mark.web, pytest.mark.linux]
+pytestmark = [
+    pytest.mark.tier_3,
+    pytest.mark.tui,
+    pytest.mark.web,
+    pytest.mark.linux,
+    pytest.mark.macos,
+    pytest.mark.ios,
+    pytest.mark.android,
+    pytest.mark.windows,
+]
 
 #: A list issue rides the bridge's 30 s outbound poll (no prompt-drain nudge
 #: on the list path — tests/api/test_mail_lists_send.py); a ceiling, not a sleep.

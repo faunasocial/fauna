@@ -161,3 +161,33 @@ private final class CountingDevicesAPI: APIClient {
     #expect(refreshes?["completed"] as? Int == 0)
     #expect(refreshes?["committed_gen"] as? Int == 0)
 }
+
+/// A `folder-add-button` tap that lands while the session's machine is still
+/// being built (the page and its + button render before `devicesMachine`
+/// returns — it awaits the nest connect and the ConversationsSession) is HELD
+/// and honoured when the machine lands, never dropped: a dropped tap is a +
+/// button that does nothing, and the wizard never opens.
+@Test @MainActor func aWizardTapDuringTheBuildIsHeldUntilTheMachineLands() async {
+    let api = CountingDevicesAPI()
+    let vm = DevicesMachineVM()
+
+    async let configured: Void = vm.configure(api: api)
+    await waitUntil { api.buildIsWaiting }
+    vm.openWizard()
+    #expect(vm.wizardOpenHeld, "a tap before the machine exists must be held, not dropped")
+
+    // The stub's build fails (no nest): the connect error answers the tap,
+    // so nothing is left held to open on a later, unrelated build.
+    api.releaseBuild()
+    await configured
+    #expect(!vm.wizardOpenHeld, "a failed build drops the held tap — the connect error answers it")
+}
+
+/// A held tap belongs to the session it was made in.
+@Test @MainActor func resetDropsAHeldWizardTap() async {
+    let vm = DevicesMachineVM()
+    vm.openWizard()
+    #expect(vm.wizardOpenHeld)
+    vm.reset()
+    #expect(!vm.wizardOpenHeld)
+}

@@ -887,9 +887,18 @@ def build_reply_message(
 
 
 def _mx_accepts(port: int) -> bool:
+    """The MTA greets on `port` — its `220` banner, never a bare TCP accept.
+
+    A docker venue publishes port 25 through docker's proxy, which accepts
+    every connection whether or not the MTA inside listens yet and then closes
+    it: an accept-only probe read "serving" there while the MTA was still
+    coming up, and the first test's STARTTLS dial met a closed connection
+    with nothing in it. A standalone MTA refuses until it listens, so the
+    banner is the same answer in both modes."""
     try:
-        with socket.create_connection(("127.0.0.1", port), timeout=1.0):
-            return True
+        with socket.create_connection(("127.0.0.1", port), timeout=1.0) as sock:
+            sock.settimeout(2.0)
+            return sock.recv(4).startswith(b"220")
     except OSError:
         return False
 

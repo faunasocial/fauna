@@ -13,7 +13,9 @@ handoff, its own test). The others add their marker here as their leg lands,
 with a per-app fixture map: Playwright's bundled Chromium ships no H.264, so web
 (and linux's GStreamer) play the VP9 ``tiny-video.webm``; AVFoundation plays no
 WebM, so macos + ios (``AVPlayer`` in FaunaKit's ``VideoThumbnailView``) take the
-H.264 ``tiny-video.mp4``, and so does windows (``MediaPlayerElement`` in
+H.264 ``tiny-video.mp4``, and so does android (``MediaPlayer`` in ``FeedPostVideo.kt``,
+which packs ``state`` / ``position`` / ``source`` into one ``stateDescription``
+through ``AutomationAttributePack``), and so does windows (``MediaPlayerElement`` in
 ``VideoThumbnailView``: Media Foundation decodes H.264 on every Windows 11, while
 VP9 needs an optional codec pack no test may assume).
 
@@ -41,15 +43,15 @@ from pathlib import Path
 
 import pytest
 
-from helpers.app_surface import app_name, skip_unbuilt
+from helpers.app_surface import app_name, require_surface
 
 pytestmark = [
     pytest.mark.tier_3,
-    pytest.mark.web,
     pytest.mark.macos,
     pytest.mark.ios,
     pytest.mark.windows,
     pytest.mark.linux,
+    pytest.mark.android,
 ]
 
 FIXTURE_DIR = Path(__file__).parent.parent.parent / "fixtures"
@@ -59,6 +61,7 @@ FIXTURES = {
     "ios": FIXTURE_DIR / "tiny-video.mp4",
     "windows": FIXTURE_DIR / "tiny-video.mp4",
     "linux": FIXTURE_DIR / "tiny-video.webm",
+    "android": FIXTURE_DIR / "tiny-video.mp4",
 }
 
 _VIDEO = "document.querySelector('[data-testid=\"video-thumbnail\"] video')"
@@ -95,6 +98,7 @@ def _source(driver) -> str:
 
 
 @pytest.mark.feature("feed-images-and-video")
+@pytest.mark.web
 def test_tapping_a_video_plays_it_in_place(logged_in_app):
     """Tap a public post's ``video-thumbnail``: ``state`` walks ``idle`` →
     ``playing``, the native player's position advances, and it streams off the
@@ -107,6 +111,7 @@ FIXTURE_LENGTH_S = {"tiny-video.webm": 5.0, "tiny-video.mp4": 1.0}
 
 
 @pytest.mark.feature("feed-images-and-video")
+@pytest.mark.web
 def test_a_video_played_to_its_end_reads_its_whole_length(logged_in_app):
     """A video played to its end reads as played to its end: its ``position``
     reaches the clip's length and stays there once the stream ends, as a web
@@ -148,6 +153,7 @@ def test_a_video_played_to_its_end_reads_its_whole_length(logged_in_app):
 
 
 @pytest.mark.feature("feed-images-and-video")
+@pytest.mark.web
 def test_a_playing_video_survives_a_feed_reload(logged_in_app):
     """A feed reload landing while a video plays keeps the player: posting a
     second note re-queries the feed and prepends a card above the video, and the
@@ -162,17 +168,6 @@ def test_a_playing_video_survives_a_feed_reload(logged_in_app):
     between the thumbnail's paint and the reload (render-model.md § D6c →
     *Inline playback*: a tap must not silently fall back to ``idle``)."""
     app = logged_in_app
-    if app_name(app.driver) not in ("web", "linux", "windows"):
-        skip_unbuilt(
-            app.driver,
-            surface="a playing video kept across a feed reload",
-            detail="the shared re-fold keeps the media; this app's card keeping "
-            "its live player across the landed page is not yet witnessed",
-            tracked=(
-                "render-model.md § D6c → Inline playback (each app keeps its "
-                "player across a reload)"
-            ),
-        )
     _post_and_play_a_video(app)
 
     text = f"after-the-video-{uuid.uuid4().hex[:8]}"
@@ -188,6 +183,7 @@ def test_a_playing_video_survives_a_feed_reload(logged_in_app):
 
 
 @pytest.mark.feature("feed-images-and-video")
+@pytest.mark.web
 def test_leaving_the_feed_while_a_video_plays_keeps_the_app_running(logged_in_app):
     """Leave the feed while a video plays, then come back: the app answers
     through the page change, and ``video-thumbnail`` is back on the card.
@@ -214,6 +210,134 @@ def test_leaving_the_feed_while_a_video_plays_keeps_the_app_running(logged_in_ap
     )
 
 
+# ── The sealed arm: a video on a tier-gated post ─────────────────────────────
+#
+# render-model.md § D6c → *Inline playback*, answer (1): a video on a gated post
+# folds to a `Video` whose bytes are sealed under the post's key, so
+# `playback_source` answers `Sealed { hash }` and no URL can serve its
+# plaintext. The app fetches the blob, opens it through the manager
+# (`openMediaBytes` / `open_media_bytes` / `OpenMediaBytes`) and plays the opened
+# bytes from what it holds itself — apple an owner-only temp file
+# (`SealedPlaybackFile`), linux a memory stream, windows an in-memory stream,
+# android a cache-dir file — publishing `source` as `sealed:<hash>`
+# (`fauna_feed::held_video_source`, the one spelling every native app reads).
+# The journey is the gated-photo one (`test_gated_post_compose.py`): a dedicated
+# nest, a fresh author, a tier made in §1 My tiers, the composer's gate select,
+# then the author's own unlock on detail open — the item is named only inside
+# the opened body, so the thumbnail appears only on this side of the unlock.
+
+GATED_PREVIEW = "Sealed video — public teaser."
+GATED_MARKER = "the-sealed-video-body-marker"
+GATED_BODY = f"Sealed video full body: {GATED_MARKER} for subscribers only."
+
+
+@pytest.fixture
+def sealed_video_nest(request, nest_mode, tmp_path_factory):
+    """A dedicated fresh nest — the gated journeys' shape (`gated_nest`): own
+    nest, own author, so the tier and the post never meet another test's."""
+    from conftest import _start_dedicated_nest
+
+    nest, cleanup = _start_dedicated_nest(
+        request, nest_mode, tmp_path_factory, "sealed-video-nest")
+    yield nest
+    cleanup()
+
+
+@pytest.mark.feature("feed-images-and-video")
+def test_a_sealed_video_plays_after_its_post_unlocks(app, request, sealed_video_nest):
+    """Post a video to a tier, unlock the post as its author, tap the detail's
+    ``video-thumbnail``: ``state`` walks ``idle`` → ``playing``, the position
+    advances, and the player was handed the opened sealed item —
+    ``source=sealed:<hash>``, never a blob-route path, which would serve only
+    ciphertext."""
+    from nacl.signing import SigningKey
+
+    from common.auth import create_actor_and_register
+    from helpers.e2e_session import login_as
+
+    fixture = FIXTURES[app_name(app.driver)]
+    assert fixture.exists(), f"{fixture} missing"
+    nest = sealed_video_nest
+    admin_sk = nest["admin"]["signing_key"]
+    if not isinstance(admin_sk, SigningKey):
+        admin_sk = SigningKey(bytes.fromhex(admin_sk))
+    author = create_actor_and_register(
+        nest["port"], base_url=nest["url"], admin_signing_key=admin_sk,
+    )
+    login_as(app, nest, author, handle="e2e-sealed-video", device_id="test-device-sealed-video")
+
+    tier = f"gold-{uuid.uuid4().hex[:8]}"
+    subs = app.subscriptions
+    subs.navigate()
+    subs.open_tiers_tab()
+    subs.create_tier(tier, rank=1, price_hint="$5/mo")
+    assert subs.wait_for_tier(tier), (
+        f"created tier {tier!r} should appear in §1 My tiers; error={subs.error_text()!r}"
+    )
+
+    app.driver.set_state({"nav": {"stack": [{"view": "feed"}]}})
+    app.driver.wait_for("feed-view")
+    app.feed.create_gated_post(GATED_BODY, GATED_PREVIEW, tier, image_path=str(fixture))
+
+    app.feed.open_post_detail(0)
+    app.driver.wait_for("feed-post-detail-body")
+    deadline = time.monotonic() + 15
+    body = ""
+    while time.monotonic() < deadline:
+        body = app.feed.post_detail_body()
+        if GATED_MARKER in body:
+            break
+        time.sleep(0.5)  # sleep-ok: poll interval inside a deadline loop, not a settle wait
+    assert GATED_MARKER in body, (
+        f"the author's own gated post should unseal on detail open, got {body!r}; "
+        f"error-message={app.error_text()!r}"
+    )
+
+    scope = "feed-post-detail-dialog"
+    deadline = time.monotonic() + 20
+    while app.driver.count("video-thumbnail", scope=scope) < 1 and time.monotonic() < deadline:
+        time.sleep(0.25)
+    assert app.driver.count("video-thumbnail", scope=scope) >= 1, (
+        f"the unlocked post's video never painted its thumbnail in the detail: "
+        f"{app.driver.diagnose('video-thumbnail')}"
+    )
+    assert app.driver.get_attr("video-thumbnail", "state", scope=scope) == "idle", (
+        "a video must never autoplay: before the tap the thumbnail is idle"
+    )
+
+    app.driver.click("video-thumbnail", scope=scope)
+    deadline = time.monotonic() + 30
+    state = None
+    while time.monotonic() < deadline:
+        state = app.driver.get_attr("video-thumbnail", "state", scope=scope)
+        if state in ("playing", "error"):
+            break
+        time.sleep(0.25)
+    assert state == "playing", (
+        f"the tap should reach state=playing through the sealed arm (fetch, open, "
+        f"play the opened bytes), got {state!r}: {app.driver.diagnose('video-thumbnail')}"
+    )
+
+    def position() -> float | None:
+        try:
+            return float(app.driver.get_attr("video-thumbnail", "position", scope=scope))
+        except (TypeError, ValueError):
+            return None
+
+    pos = position()
+    deadline = time.monotonic() + 10
+    while not pos and time.monotonic() < deadline:
+        time.sleep(0.1)
+        pos = position()
+    assert pos and pos > 0, f"playback position should advance past 0, got {pos!r}"
+
+    source = str(app.driver.get_attr("video-thumbnail", "source", scope=scope))
+    assert re.fullmatch(r"sealed:[0-9a-f]{64}", source), (
+        f"a sealed video plays the opened item the app holds, never a nest URL "
+        f"(which serves only ciphertext): source={source!r}"
+    )
+
+
 # ── The TLS twin: a nest on its self-signed floor ────────────────────────────
 #
 # `security.md` § Transport trust → *The native-player leg* (ruled 2026-10-08): a
@@ -225,10 +349,11 @@ def test_leaving_the_feed_while_a_video_plays_keeps_the_app_running(logged_in_ap
 # `RangedNestReader`, never a URL. The plain-HTTP session nest above cannot see
 # any of this, so the twin runs the same journey on the two TLS fixtures: the
 # loopback floor (`self_signed_logged_in_app`) and a LAN-IP dial whose cert is
-# trusted by the pin alone (`spki_pinned_logged_in_app`). Both fixtures declare
-# web absent before they log in (`_declare_no_web_cert_trust`): the SPA is
-# same-origin with its nest, so the browser's `<video>` already is the pinned
-# peer and there is no app-side trust decision to witness.
+# trusted by the pin alone (`spki_pinned_logged_in_app`). The twin is MARKED for
+# the native seats (feature-catalog.md § Cell semantics, the marked-witness
+# rule): the SPA is same-origin with its nest, so the browser's `<video>` already
+# is the pinned peer, there is no app-side trust decision to witness, and web's
+# playback is witnessed by `test_tapping_a_video_plays_it_in_place`.
 
 @pytest.mark.feature("feed-images-and-video")
 @pytest.mark.parametrize(
@@ -239,19 +364,6 @@ def test_a_video_plays_against_a_self_signed_nest(request, app, tls_app):
     whose cert no public CA signed: the player reaches ``state=playing`` because
     it reads through the app's pinned byte source, and the ``source`` it
     publishes is still the blob route's nest-relative path."""
-    # Each native app's reader-backed adapter lands on its own, red first; apple's
-    # joins the twin with its own. Skipped before the TLS fixture spends a nest.
-    if app_name(app.driver) in ("macos", "ios"):
-        skip_unbuilt(
-            app.driver,
-            surface="inline playback against a self-signed nest (the reader-backed player)",
-            detail="the Url arm still hands AVPlayer a nest URL, which the OS media "
-            "stack refuses on the self-signed floor",
-            tracked=(
-                "security.md § Transport trust → The native-player leg"
-                ""
-            ),
-        )
     _post_and_play_a_video(request.getfixturevalue(tls_app))
 
 
@@ -261,8 +373,19 @@ def _post_and_play_a_video(app) -> None:
     fixture = FIXTURES[app_name(app.driver)]
     assert fixture.exists(), f"{fixture} missing"
     text = f"video-play-{uuid.uuid4().hex[:8]}"
+    # The feed may already hold this user's video from an earlier leg (the ios
+    # seat shares the session user with macos), and a card can paint its
+    # thumbnail a beat after the post itself shows: wait for this post's
+    # thumbnail to join the list, or the tap lands on the older card and the new
+    # one, prepended above it, reads `idle`.
+    before = app.driver.count("video-thumbnail")
     app.feed.create_post_with_video(text=text, video_path=str(fixture))
-    app.driver.wait_for("video-thumbnail", timeout=20)
+    deadline = time.monotonic() + 20
+    while app.driver.count("video-thumbnail") <= before and time.monotonic() < deadline:
+        time.sleep(0.25)
+    assert app.driver.count("video-thumbnail") > before, (
+        f"the posted video's thumbnail never appeared: {app.driver.diagnose('video-thumbnail')}"
+    )
 
     assert app.driver.get_attr("video-thumbnail", "state") == "idle", (
         "a video must never autoplay: before the tap the thumbnail is idle"
@@ -312,6 +435,7 @@ MEDIA_FILES = {
     "ios": ("/clip.mp4", "video/mp4"),
     "windows": ("/clip.mp4", "video/mp4"),
     "linux": ("/clip.webm", "video/webm"),
+    "android": ("/clip.mp4", "video/mp4"),
 }
 
 
@@ -363,6 +487,7 @@ def bridged_video_spa_url(static_dir, bridged_video_nest):
 
 @pytest.mark.standalone_only
 @pytest.mark.feature("feed-images-and-video")
+@pytest.mark.web
 def test_tapping_a_bridged_video_plays_it_through_the_ticketed_proxy(
     request, app, bridged_video_nest, remote_media
 ):
@@ -377,18 +502,16 @@ def test_tapping_a_bridged_video_plays_it_through_the_ticketed_proxy(
     from drivers.port_util import find_free_port
 
     name = app_name(app.driver)
-    if name not in ("web", "windows", "linux"):
-        skip_unbuilt(
-            app.driver,
-            surface="ProxiedVideo playback (video-thumbnail on a bridged post)",
-            detail="the thumbnail paints the glyph + path inert; the tap is not "
-            "wired to playback_source's ticketed Url yet",
-            tracked=(
-                "render-model.md § D6c → Inline playback (each native app wires its "
-                "ProxiedVideo tap)"
-            ),
-        )
+    require_surface(app.driver, "proxied-video-playback")
     nest = bridged_video_nest
+    # The remote outlives this leg (module scope), and in a two-app run the
+    # previous app's leg already fetched the same path: judge only what this
+    # leg's own app asked for.
+    seen_before = len(remote_media.requests)
+
+    def fetched() -> list[str]:
+        return remote_media.requests[seen_before:]
+
     path, content_type = MEDIA_FILES[name]
     user = _make_user(nest)
     username, actor_url = enable_ap(nest, user)
@@ -437,16 +560,20 @@ def test_tapping_a_bridged_video_plays_it_through_the_ticketed_proxy(
             assert "▶" in label, (
                 f"a ProxiedVideo thumbnail paints the play glyph, got {label!r}"
             )
-        assert path not in remote_media.requests, (
+        assert path not in fetched(), (
             "a ProxiedVideo thumbnail must load no remote byte before the tap; "
-            f"the remote saw {remote_media.requests!r}"
+            f"the remote saw {fetched()!r}"
         )
 
         app.driver.click("video-thumbnail")
         state = _wait_state(app.driver, "playing", timeout=20)
+        # An empty source is `playback_source` answering `Unplayable` (a refused
+        # ticket mint); a source with no remote request is the player failing
+        # before the proxy fetched anything.
         assert state == "playing", (
             f"the tap should reach state=playing, got {state!r}: "
-            f"{app.driver.diagnose('video-thumbnail')}"
+            f"source={_source(app.driver)!r}, the remote saw "
+            f"{fetched()!r}; {app.driver.diagnose('video-thumbnail')}"
         )
         position = _position(app.driver)
         deadline = time.monotonic() + 10
@@ -464,9 +591,9 @@ def test_tapping_a_bridged_video_plays_it_through_the_ticketed_proxy(
         assert re.search(r"[?&]exp=\d+", current_src) and re.search(
             r"[?&]sig=[A-Za-z0-9_-]+", current_src
         ), f"the proxied path must carry the playback ticket, got {current_src!r}"
-        assert path in remote_media.requests, (
+        assert path in fetched(), (
             "the remote file should have been fetched through the proxy; "
-            f"the remote saw {remote_media.requests!r}"
+            f"the remote saw {fetched()!r}"
         )
     finally:
         if restore is not None:

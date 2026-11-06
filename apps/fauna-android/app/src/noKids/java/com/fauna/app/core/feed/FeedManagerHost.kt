@@ -1,5 +1,8 @@
 package com.fauna.app.core.feed
 
+import androidx.lifecycle.DefaultLifecycleObserver
+import androidx.lifecycle.LifecycleOwner
+import androidx.lifecycle.ProcessLifecycleOwner
 import com.fauna.app.core.ApiClient
 import com.fauna.app.core.ShellLog
 import com.fauna.app.core.conversations.ConversationsManagerHost
@@ -45,7 +48,7 @@ import javax.inject.Singleton
 class FeedManagerHost @Inject constructor(
     private val api: ApiClient,
     private val conversationsManagerHost: ConversationsManagerHost,
-) {
+) : DefaultLifecycleObserver {
     private val _snapshot = MutableStateFlow<FeedSnapshot?>(null)
 
     /**
@@ -119,9 +122,54 @@ class FeedManagerHost @Inject constructor(
             seen = m
             _snapshot.value = m.snapshot()
             restoreDrafts(m)
+            registerLeaveFlushDoor()
             draftsScope.launch { installRoomPostSeam(m) }
         }
         return m
+    }
+
+    private var registeredForLifecycle = false
+
+    /**
+     * Register the background-transition leave door once for the process
+     * lifetime (`reserved-folders.md` § The leave-flush promise: on a phone the
+     * OS may kill a backgrounded app at any moment, so a pending debounced save
+     * must not wait for its timer) — the twin of
+     * `ConversationsManagerHost.startDraftsSync`. [onStop] is a no-op between
+     * sessions (no sync handle, or no manager), so nothing unregisters.
+     * `addObserver` is main-thread only and [manager] can be called from any
+     * thread, hence the post.
+     */
+    private fun registerLeaveFlushDoor() {
+        val register = synchronized(this) { (!registeredForLifecycle).also { registeredForLifecycle = true } }
+        if (register) {
+            android.os.Handler(android.os.Looper.getMainLooper()).post {
+                ProcessLifecycleOwner.get().lifecycle.addObserver(this)
+            }
+        }
+    }
+
+    /**
+     * The leave-flush: an immediate `saveIfChanged` of the feed manager's drafts
+     * snapshot, bypassing the debounce, on the app's background transition —
+     * the posts-rail leg of `drafts-survive` outcome 5, twin of
+     * `ConversationsManagerHost.onStop`. Best-effort like any such handler.
+     * The launch gate and unchanged-snapshot dedup stay in `saveIfChanged`.
+     */
+    override fun onStop(owner: LifecycleOwner) {
+        val sync = synchronized(this) {
+            draftsSaveJob?.cancel()
+            draftsSaveJob = null
+            api.postsDraftsSync() ?: return
+        }
+        val m = seen ?: return
+        draftsScope.launch {
+            try {
+                sync.saveIfChanged(m.draftsSnapshotBytes())
+            } catch (e: Exception) {
+                ShellLog.d("FeedDrafts", "leave-flush drafts failed: ${e.message}")
+            }
+        }
     }
 
     private var blobHosts: FfiPostBlobHosts? = null

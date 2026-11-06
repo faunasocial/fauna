@@ -1,44 +1,56 @@
-//! `build_archive_import_machine` — the native WS-RPC implementation of
+//! `build_archive_import_machine` — the WS-RPC implementation of
 //! [`crate::ArchiveNest`], delegating each seam method to the `fauna-client-*`
 //! crates (`archive-import.md` § The wizard and its machine).
 //!
-//! Native-only by construction (`#[cfg(all(feature = "rpc-glue", not(target_arch
-//! = "wasm32")))]` on the `mod` line): everything here rides `Arc<NestClient>`,
-//! the HTTP chunk store and a tokio runtime, none of which the web SPA has —
-//! the SPA implements the same seam over its own `WsRpcClient`.
+//! One implementation for every app: [`RpcArchiveNest`] is generic over the
+//! WS-RPC transport and takes the bulk-binary legs it cannot reach over
+//! WS-RPC — the identity seed, the chunk store's reads and writes, the blob
+//! route — as one [`ArchivePlane`]. Natively the transport is
+//! `Arc<NestClient>` and the plane [`NativePlane`] (the HTTP chunk store and
+//! the content API); the web SPA passes its `WsRpcClient` and its browser
+//! plane (`fauna-wasm`), so the folder writes, the licensed reads and the
+//! posts, tiers and events go through this one body on both targets.
 //!
-//! The three shapes it provides:
+//! The shapes it provides:
 //!
-//! - [`RpcArchiveNest`] — the fourteen [`ArchiveNest`] methods. Folder writes go
-//!   through the sink-agnostic seal (`fauna_sync_engine::seal::seal_blob` under
-//!   the owner's `BackupKey` chunk root) → the chunk store (`check_chunks`,
-//!   `POST /api/v1/chunks`, `POST /api/v1/manifests`) → one
+//! - [`RpcArchiveNest`] — the [`ArchiveNest`] methods. Folder writes go
+//!   through the sink-agnostic seal (`fauna_core::blob_seal::seal_blob` under
+//!   the owner's `BackupKey` chunk root) → the plane's chunk store
+//!   (`POST /api/v1/chunks`, `POST /api/v1/manifests`) → one
 //!   `fauna.sync.changes.record` row per path, and reads run the shared walk
 //!   (`fauna_core::file_download`) back over the same store
 //!   (`archive-import.md` § Storage).
-//! - [`FolderArchiveSource`] — the byte-range bridge that lets the zip *stay* in
-//!   the folder: an [`ArchiveSource`] (a sync, seeking reader — what
-//!   `zip::ZipArchive` consumes) over async range reads, with a one-block
+//! - [`FolderArchiveSource`] (native) — the byte-range bridge that lets the
+//!   zip *stay* in the folder: an [`ArchiveSource`] (a sync, seeking reader —
+//!   what `zip::ZipArchive` consumes) over async range reads, with a one-block
 //!   read-ahead cache so a central-directory walk does not fetch a chunk per
-//!   `read`.
-//! - [`FileOpener`] — the platform [`ArchiveOpener`] on native: a path on disk.
+//!   `read`. The browser has one thread and no way to wait on a fetch inside
+//!   a synchronous read, so on wasm a resume reads the folder's zip whole.
+//! - [`FileOpener`] (native) — the platform [`ArchiveOpener`]: a path on disk.
 
-use std::collections::HashSet;
+use std::collections::HashMap;
+#[cfg(not(target_arch = "wasm32"))]
 use std::io;
 use std::sync::{Arc, Mutex};
 
+#[cfg(not(target_arch = "wasm32"))]
 use anyhow::Context as _;
+#[cfg(not(target_arch = "wasm32"))]
 use fauna_archive::ArchiveSource;
+#[cfg(not(target_arch = "wasm32"))]
 use fauna_archive::source::FileSource;
+#[cfg(not(target_arch = "wasm32"))]
+use fauna_client::NestClient;
+#[cfg(not(target_arch = "wasm32"))]
 use fauna_client::media_upload::{
     PeriodMediaSeal, UploadedBlob, upload_gated_post_blob, upload_period_sealed_media,
     upload_public_post_blob_bytes,
 };
-use fauna_client::{NestClient, NestClientError, SetupStatusReply, SetupStatusRequest};
 use fauna_client_account::AccountClient;
 use fauna_client_caldav::bridge_routing::ListCalendarsRequest;
 use fauna_client_caldav::{CalDavClient, EventFields, FaunaEventExt, PutEventError, uid_hash};
 use fauna_client_config::dav_store_context;
+use fauna_client_contacts::ContactsClient;
 use fauna_client_folders::FoldersClient;
 use fauna_client_folders::folders::FolderCreateRequest;
 use fauna_client_posts::PostsClient;
@@ -51,15 +63,18 @@ use fauna_client_sync::licensed_read::{LicensedManifestReader, SetAddress};
 use fauna_client_sync::row_judge::ReaderSeat;
 use fauna_client_sync::sync::SyncFile;
 use fauna_core::apply_failure::{PermanentApplyFailure, permanent_reason};
+use fauna_core::blob_seal::SealedBlob;
 use fauna_core::crypto::BackupKey;
-use fauna_core::data::{ContentHash, Timestamp};
-use fauna_core::file_download::{
-    BlobFetcher, FileDownloadKeys, download_file_bytes_by_manifest,
-    download_file_range_by_manifest, file_len_by_manifest,
-};
+use fauna_core::data::{ContactStatus, ContentHash, Timestamp};
+use fauna_core::file_download::{BlobFetcher, FileDownloadKeys, download_file_bytes_by_manifest};
+#[cfg(not(target_arch = "wasm32"))]
+use fauna_core::file_download::{download_file_range_by_manifest, file_len_by_manifest};
 use fauna_core::identity::ActorKeypair;
+use fauna_core::subscription::FOLLOWERS_TIER;
 use fauna_protocol::discovery::capability::HIDDEN_TIERS;
+use fauna_protocol::discovery::{SetupStatusReply, SetupStatusRequest};
 use fauna_protocol::{RpcErrorClass, RpcRequester};
+#[cfg(not(target_arch = "wasm32"))]
 use fauna_sync_engine::nest_client::SyncClient as ChunkStore;
 
 use crate::machine::ArchiveImportMachine;
@@ -79,7 +94,13 @@ const BEARER_ONLY: &str = "bearer-only connection";
 /// (many small `read`s) costs one fetch, small enough that seeking to one
 /// member of a multi-gigabyte export never reads the file (§ Storage — "reads
 /// one zip member at a time, never the gigabytes of zip").
+#[cfg(not(target_arch = "wasm32"))]
 const READ_AHEAD_BLOCK: u64 = 1 << 20;
+
+/// The code `fauna.posts.get` answers for a post the nest does not hold (or
+/// holds quarantined from this caller) — the answer that sends
+/// [`ArchiveNest::fetch_post`] on to the claimant's home nest.
+const POST_NOT_FOUND: &str = "fauna.posts.not_found";
 
 // ── error mapping ──────────────────────────────────────────────────────────
 
@@ -137,7 +158,7 @@ fn licence_err(e: anyhow::Error) -> ArchiveNestError {
 /// cannot be gated (a `Transport` would stop the whole run, and every resume
 /// would stop at the same record). The rest (mint, custody, self-delegation,
 /// retries exhausted) are transient local failures with no code to carry.
-fn author_err(e: AuthorError<NestClientError>) -> ArchiveNestError {
+fn author_err<E: RpcErrorClass + core::fmt::Display>(e: AuthorError<E>) -> ArchiveNestError {
     match e {
         AuthorError::Transport(e) => nest_err(e),
         permanent @ (AuthorError::NoPeriodKey(_)
@@ -155,7 +176,7 @@ fn author_err(e: AuthorError<NestClientError>) -> ArchiveNestError {
     }
 }
 
-fn put_event_err(e: PutEventError<NestClientError>) -> ArchiveNestError {
+fn put_event_err<E: RpcErrorClass + core::fmt::Display>(e: PutEventError<E>) -> ArchiveNestError {
     match e {
         PutEventError::Transport(e) => nest_err(e),
         PutEventError::Seal(e) => ArchiveNestError::Transport(format!("seal event: {e}")),
@@ -173,6 +194,7 @@ fn gate_of(material: TierGateMaterial) -> TierGate {
 }
 
 /// The nest's hex blob hash → the `MediaItem` input the machine carries.
+#[cfg(not(target_arch = "wasm32"))]
 fn uploaded_media(blob: UploadedBlob) -> Result<UploadedMedia, ArchiveNestError> {
     let blob_hash = fauna_core::hex32::decode(&blob.blob_hash)
         .map_err(|e| ArchiveNestError::Transport(format!("blob hash: {e}")))?;
@@ -198,6 +220,7 @@ fn rfc3339_utc(ts: Timestamp) -> String {
 /// One byte-range read against a folder-resident file. The production
 /// implementation walks the manifest ([`download_file_range_by_manifest`]);
 /// tests slice a `Vec`.
+#[cfg(not(target_arch = "wasm32"))]
 #[async_trait::async_trait]
 pub trait RangeReader: Send + Sync {
     async fn read_range(&self, offset: u64, len: u64) -> Result<Vec<u8>, ArchiveNestError>;
@@ -205,18 +228,26 @@ pub trait RangeReader: Send + Sync {
 
 /// An [`ArchiveSource`] over a folder-resident zip, read by byte range.
 ///
-/// ⚠ **Requires a multi-thread tokio runtime.** [`ArchiveSource::read_at`] is
-/// synchronous (it is what `zip::ZipArchive` calls through `Read + Seek`) while
-/// the range fetch is async, so the bridge is
-/// `tokio::task::block_in_place(|| handle.block_on(..))` over a [`Handle`]
-/// captured at construction. `block_in_place` moves the current worker off the
-/// pool for the duration; on a **current-thread** runtime there is no pool and
-/// it would panic, so that flavour is refused with an `io::Error` instead. Every
-/// native consumer qualifies: tui's `#[tokio::main]`, linux's
-/// `Builder::new_multi_thread`, and the uniffi faces' tokio runtime are all
-/// multi-thread.
+/// [`ArchiveSource::read_at`] is synchronous (it is what `zip::ZipArchive`
+/// calls through `Read + Seek`) while the range fetch is async, so each block
+/// is awaited with `handle.block_on(..)` over a [`Handle`] captured at
+/// construction — from a thread that may block:
+///
+/// * **the run's reads** arrive on a blocking-pool thread
+///   ([`crate::offload::off_runtime`]), where `block_on` is valid on either
+///   runtime flavor and the runtime's own threads keep driving the fetch. This
+///   is the path that matters on the native apps, whose UniFFI face runs on a
+///   **current-thread** runtime (it was assumed multi-thread until a windows
+///   resume skipped every record that reads the archive, 2026-10-28);
+/// * **any other caller** on a multi-thread worker goes through
+///   `tokio::task::block_in_place`, and on a current-thread runtime — where
+///   blocking the one thread would starve the very fetch it waits for — is
+///   refused with an `io::Error`.
 ///
 /// [`Handle`]: tokio::runtime::Handle
+///
+/// [`Handle`]: tokio::runtime::Handle
+#[cfg(not(target_arch = "wasm32"))]
 pub struct FolderArchiveSource {
     reader: Arc<dyn RangeReader>,
     len: u64,
@@ -228,6 +259,7 @@ pub struct FolderArchiveSource {
     block: Mutex<Option<(u64, Vec<u8>)>>,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl FolderArchiveSource {
     /// Capture the current runtime handle. Called from an async context (the
     /// seam's `open_folder_archive`), so a handle always exists.
@@ -241,6 +273,16 @@ impl FolderArchiveSource {
     }
 
     fn fetch(&self, offset: u64, len: u64) -> io::Result<Vec<u8>> {
+        let reader = Arc::clone(&self.reader);
+        // The run's own reads arrive here on a blocking-pool thread
+        // (`crate::offload::off_runtime`), where waiting on the fetch is valid
+        // on either runtime flavor: the runtime's threads stay free to drive it.
+        if crate::offload::on_offloaded_read() {
+            return self
+                .handle
+                .block_on(reader.read_range(offset, len))
+                .map_err(io::Error::other);
+        }
         if matches!(
             self.handle.runtime_flavor(),
             tokio::runtime::RuntimeFlavor::CurrentThread
@@ -249,12 +291,12 @@ impl FolderArchiveSource {
                 "reading an archive out of its folder needs a multi-thread tokio runtime",
             ));
         }
-        let reader = Arc::clone(&self.reader);
         tokio::task::block_in_place(|| self.handle.block_on(reader.read_range(offset, len)))
             .map_err(io::Error::other)
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl ArchiveSource for FolderArchiveSource {
     fn len(&self) -> u64 {
         self.len
@@ -296,20 +338,24 @@ impl ArchiveSource for FolderArchiveSource {
 /// The production [`RangeReader`]: the shared byte-range walk over one file's
 /// manifest. Each opened chunk is verified against the manifest's plaintext
 /// hash by the walk itself (§ Storage — a range has no whole-file address).
+#[cfg(not(target_arch = "wasm32"))]
 struct ManifestRangeReader {
-    fetcher: ChunkStoreFetcher,
+    plane: Arc<dyn ArchivePlane>,
     file: LicensedFile,
     path: String,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 #[async_trait::async_trait]
 impl RangeReader for ManifestRangeReader {
     async fn read_range(&self, offset: u64, len: u64) -> Result<Vec<u8>, ArchiveNestError> {
         download_file_range_by_manifest(
-            &self.fetcher,
+            &*self.plane,
             &self.file.keys,
             self.file.manifest,
-            self.file.content_key_version,
+            self.file
+                .content_key_version
+                .map(fauna_core::blob_seal::SealStamp::Version),
             &self.path,
             offset,
             len,
@@ -319,14 +365,70 @@ impl RangeReader for ManifestRangeReader {
     }
 }
 
-/// The two content-address GETs the shared walk needs, over the authenticated
-/// HTTP chunk store.
-struct ChunkStoreFetcher {
-    store: Arc<ChunkStore>,
+// ── the platform plane ─────────────────────────────────────────────────────
+
+/// The legs of the seam that do not ride WS-RPC, as one platform seam: the
+/// identity seed the folder seals under, the content-addressed chunk store's
+/// reads ([`BlobFetcher`]) and writes, and the blob route a post's media and
+/// a gated post's body go to — the bulk-binary carve-out
+/// (`docs/goal/architecture/api-layers.md`). Natively [`NativePlane`]; on web
+/// the SPA's browser plane in `fauna-wasm`, over the same routes. The seal,
+/// the change records and every licence stay in [`RpcArchiveNest`], so
+/// neither plane decides anything.
+///
+/// `MaybeSendSync` (through [`BlobFetcher`]) + the dual `async_trait` arm, as
+/// every seam the machine holds.
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+pub trait ArchivePlane: BlobFetcher {
+    /// The connection's identity seed, or `None` on a bearer-only connection.
+    /// Read per call rather than cached: a stale owner root would fail
+    /// *silently* (wrong key ⇒ unopenable chunks, not an error) — the
+    /// `RpcMailImportNest::owner_custody` precedent.
+    fn identity_seed(&self) -> Option<zeroize::Zeroizing<[u8; 32]>>;
+
+    /// Store one sealed file's chunks, then its manifest — never a manifest
+    /// ahead of a chunk it names. Idempotent: the store is content-addressed
+    /// and the seal deterministic, so a plane may skip the chunks the store
+    /// already holds.
+    async fn put_sealed(&self, sealed: &SealedBlob) -> anyhow::Result<()>;
+
+    /// A public post's media item: processed, sealed for the public audience
+    /// and posted to the blob route, as the feed composer's public upload.
+    async fn post_public_media(&self, name: &str, bytes: &[u8]) -> Result<UploadedMedia, String>;
+
+    /// A gated post's media item, sealed under the tier's period key.
+    async fn post_period_sealed_media(
+        &self,
+        name: &str,
+        bytes: &[u8],
+        seal: &MediaSeal,
+    ) -> Result<UploadedMedia, String>;
+
+    /// A gated post's already-sealed body; answers the blob's hex hash.
+    async fn post_gated_body(&self, sealed: Vec<u8>) -> Result<String, String>;
 }
 
+/// The native [`ArchivePlane`]: the authenticated HTTP chunk store the sync
+/// engine uses, and the connection's content API for the blob route.
+#[cfg(not(target_arch = "wasm32"))]
+pub struct NativePlane {
+    nest: Arc<NestClient>,
+    store: ChunkStore,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl NativePlane {
+    /// `device_id` stamps the chunk store's requests, as every sync surface's.
+    pub fn new(nest: Arc<NestClient>, device_id: &[u8; 32]) -> Self {
+        let store = ChunkStore::new(Arc::clone(nest.auth()), device_id);
+        Self { nest, store }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 #[async_trait::async_trait]
-impl BlobFetcher for ChunkStoreFetcher {
+impl BlobFetcher for NativePlane {
     async fn fetch_manifest(&self, hash: &ContentHash) -> anyhow::Result<Vec<u8>> {
         self.store.download_manifest(hash).await
     }
@@ -354,25 +456,89 @@ impl BlobFetcher for ChunkStoreFetcher {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+#[async_trait::async_trait]
+impl ArchivePlane for NativePlane {
+    fn identity_seed(&self) -> Option<zeroize::Zeroizing<[u8; 32]>> {
+        self.nest
+            .auth()
+            .keypair()
+            .map(|keypair| zeroize::Zeroizing::new(*keypair.secret_bytes()))
+    }
+
+    async fn put_sealed(&self, sealed: &SealedBlob) -> anyhow::Result<()> {
+        let store_keys: Vec<ContentHash> = sealed.chunks.iter().map(|(h, _)| *h).collect();
+        let missing: std::collections::HashSet<ContentHash> = self
+            .store
+            .check_chunks(&store_keys)
+            .await?
+            .into_iter()
+            .collect();
+        // Sequential, like the fetcher's download loop above and for the same
+        // reason: the engine's pooled transfer path is private to it. The
+        // same follow-up lifts that pool behind a public seam for both
+        // directions; the raw zip's chunk set is where it will show first.
+        for (hash, body) in &sealed.chunks {
+            if missing.contains(hash) {
+                self.store.upload_chunk(hash, body).await?;
+            }
+        }
+        self.store.upload_manifest(&sealed.manifest_bytes).await
+    }
+
+    async fn post_public_media(&self, name: &str, bytes: &[u8]) -> Result<UploadedMedia, String> {
+        let api = self.nest.auth().content_api();
+        let blob = upload_public_post_blob_bytes(&api, name, bytes).await?;
+        uploaded_media(blob).map_err(|e| e.to_string())
+    }
+
+    async fn post_period_sealed_media(
+        &self,
+        name: &str,
+        bytes: &[u8],
+        seal: &MediaSeal,
+    ) -> Result<UploadedMedia, String> {
+        let api = self.nest.auth().content_api();
+        let period = PeriodMediaSeal {
+            seal_id: seal.seal_id,
+            tier: seal.tier.clone(),
+            period_version: seal.period_version,
+            period_key: seal.period_key.clone(),
+        };
+        let blob = upload_period_sealed_media(&api, name, bytes, &period).await?;
+        uploaded_media(blob).map_err(|e| e.to_string())
+    }
+
+    async fn post_gated_body(&self, sealed: Vec<u8>) -> Result<String, String> {
+        let api = self.nest.auth().content_api();
+        upload_gated_post_blob(&api, sealed).await
+    }
+}
+
 // ── the seam ───────────────────────────────────────────────────────────────
 
-/// [`ArchiveNest`] over a live `NestClient`: WS-RPC for the control plane
-/// (folders, change records, posts, tiers, calendar) and the authenticated
-/// bulk-HTTP plane for chunks, manifests and blobs.
-pub struct RpcArchiveNest {
-    nest: Arc<NestClient>,
+/// [`ArchiveNest`] over a live connection: WS-RPC for the control plane
+/// (folders, change records, posts, tiers, calendar) over the transport `R`,
+/// and the platform's [`ArchivePlane`] for chunks, manifests and blobs.
+///
+/// The [`ArchiveNest`] impl is concrete per transport natively
+/// (`Arc<NestClient>`) and generic on wasm — a generic transport's request
+/// future is only provably `Send` per concrete impl, so the body is written
+/// once in `impl_archive_nest!` (the `impl_rpc_user_config_store!` shape).
+pub struct RpcArchiveNest<R> {
+    nest: R,
     /// Hex of the sync device id every change record is stamped with.
     device_id_hex: String,
-    sync_http: Arc<ChunkStore>,
+    plane: Arc<dyn ArchivePlane>,
     /// `<handle>@<domain>` — the VEVENT `ORGANIZER` on every imported event.
     /// Resolved once (two RPCs) and shared by every `put_event` in a run.
-    self_email: tokio::sync::OnceCell<String>,
+    self_email: Mutex<Option<String>>,
     /// Each archive folder's set nonce — the binding every change record the
     /// run writes into it is signed under, and every read of it is judged
     /// under — resolved once per folder (two RPCs) rather than per file. A
     /// folder whose nonce did not resolve is not cached: the next write or
     /// read asks again, and until then refuses.
-    set_nonces: tokio::sync::Mutex<std::collections::HashMap<String, [u8; 32]>>,
+    set_nonces: Mutex<HashMap<String, [u8; 32]>>,
     /// The owner's period-key custody (`fauna.state.subscriptions`) the
     /// reserved tiers' gate material is read from and recorded into.
     period_keys: fauna_client_subscriptions::SharedPeriodKeyStore,
@@ -385,25 +551,21 @@ pub struct RpcArchiveNest {
     mail: Arc<dyn fauna_client_config::MailStore>,
 }
 
-impl RpcArchiveNest {
+impl<R> RpcArchiveNest<R>
+where
+    R: RpcRequester<Error: RpcErrorClass> + Clone,
+{
     /// The connection's identity keypair, or the keyless refusal.
     ///
-    /// Derived per call rather than cached: the connection's keypair is not
-    /// fixed for the life of this struct, and a stale owner root would fail
-    /// *silently* (wrong key ⇒ unopenable chunks, not an error) — the
-    /// `RpcMailImportNest::owner_custody` precedent.
-    fn keypair(&self) -> Result<&ActorKeypair, ArchiveNestError> {
-        self.nest
-            .auth()
-            .keypair()
+    /// Derived per call rather than cached ([`ArchivePlane::identity_seed`]):
+    /// the connection's keypair is not fixed for the life of this struct.
+    /// `ActorKeypair` is deliberately not `Clone` (it holds zeroizing secret
+    /// material), so each caller holds its own.
+    fn keypair(&self) -> Result<ActorKeypair, ArchiveNestError> {
+        self.plane
+            .identity_seed()
+            .map(|seed| ActorKeypair::from_secret(*seed))
             .ok_or_else(|| ArchiveNestError::Unsupported(BEARER_ONLY.to_string()))
-    }
-
-    /// A detached copy of the identity, for the client surfaces that take one by
-    /// value (the subscriptions author). `ActorKeypair` is deliberately not `Clone` (it
-    /// holds zeroizing secret material), so this is the fleet-wide idiom.
-    fn identity(&self) -> Result<ActorKeypair, ArchiveNestError> {
-        Ok(ActorKeypair::from_secret(*self.keypair()?.secret_bytes()))
     }
 
     /// `folder`'s set nonce, resolved once per folder from the roster plus
@@ -417,11 +579,12 @@ impl RpcArchiveNest {
     /// of the folder is licensed by a judged, writer-signed row
     /// ([`licensed_file`]). The run stops and a resume retries.
     async fn set_nonce(&self, folder: &str) -> Result<[u8; 32], ArchiveNestError> {
-        let mut cache = self.set_nonces.lock().await;
-        if let Some(nonce) = cache.get(folder) {
+        // Never held across the resolution's awaits: two first writes into
+        // one folder may both resolve, and agree.
+        if let Some(nonce) = self.lock_nonces().get(folder) {
             return Ok(*nonce);
         }
-        let files = FoldersClient::new(Arc::clone(&self.nest));
+        let files = FoldersClient::new(self.nest.clone());
         let nonce = fauna_client_folders::record_nonce(&files, &*self.folder_keys, folder)
             .await
             .map_err(|e| {
@@ -435,26 +598,27 @@ impl RpcArchiveNest {
                         .to_string(),
                 )
             })?;
-        cache.insert(folder.to_string(), nonce);
+        self.lock_nonces().insert(folder.to_string(), nonce);
         Ok(nonce)
+    }
+
+    fn lock_nonces(&self) -> std::sync::MutexGuard<'_, HashMap<String, [u8; 32]>> {
+        self.set_nonces.lock().expect("set-nonce cache mutex")
     }
 
     /// The record client for `folder`: signed with the connection's identity
     /// under the folder's nonce ([`Self::set_nonce`]) — never unsigned.
-    async fn record_client(
-        &self,
-        folder: &str,
-    ) -> Result<SyncRpc<Arc<NestClient>>, ArchiveNestError> {
-        let identity = self.identity()?;
+    async fn record_client(&self, folder: &str) -> Result<SyncRpc<R>, ArchiveNestError> {
+        let identity = self.keypair()?;
         let nonce = self.set_nonce(folder).await?;
-        Ok(SyncRpc::new(Arc::clone(&self.nest)).with_record_signing(
-            fauna_client_sync::RecordSigning {
+        Ok(
+            SyncRpc::new(self.nest.clone()).with_record_signing(fauna_client_sync::RecordSigning {
                 signer: Arc::new(fauna_protocol::sync_writer_sig::ChangeSigner::direct(
                     &identity,
                 )),
                 set_nonce: fauna_client_sync::SetNonceSource::Fixed(nonce),
-            },
-        ))
+            }),
+        )
     }
 
     /// The seat every read of `folder` is judged from: this identity, under
@@ -487,16 +651,10 @@ impl RpcArchiveNest {
         Ok(BackupKey::derive(self.keypair()?.secret_bytes()).convergent_chunk_root())
     }
 
-    fn fetcher(&self) -> ChunkStoreFetcher {
-        ChunkStoreFetcher {
-            store: Arc::clone(&self.sync_http),
-        }
-    }
-
-    fn author(&self) -> Result<SubscriptionsAuthor<Arc<NestClient>>, ArchiveNestError> {
+    fn author(&self) -> Result<SubscriptionsAuthor<R>, ArchiveNestError> {
         Ok(SubscriptionsAuthor::new(
-            SubscriptionsClient::new(Arc::clone(&self.nest)),
-            self.identity()?,
+            SubscriptionsClient::new(self.nest.clone()),
+            self.keypair()?,
             Arc::clone(&self.period_keys),
         ))
     }
@@ -509,7 +667,7 @@ impl RpcArchiveNest {
         path: &str,
     ) -> Result<Option<LicensedFile>, ArchiveNestError> {
         licensed_head(
-            &SyncRpc::new(Arc::clone(&self.nest)),
+            &SyncRpc::new(self.nest.clone()),
             &self.owner_keys()?,
             folder,
             path,
@@ -529,7 +687,7 @@ impl RpcArchiveNest {
         let Some(file) = self.head_file(folder, path).await? else {
             return Ok(None);
         };
-        read_licensed(&self.fetcher(), &file, path).await.map(Some)
+        read_licensed(&*self.plane, &file, path).await.map(Some)
     }
 
     /// The actor's own email (`<handle>@<domain>`) — the CAL-ADDRESS an imported
@@ -538,31 +696,32 @@ impl RpcArchiveNest {
     /// `fauna.setup.status`; a resolution failure yields `""` (roster and
     /// organizer omitted), which is the same safe degrade
     /// `FfiCalDavClient::self_email` takes.
-    async fn self_email(&self) -> &str {
-        self.self_email
-            .get_or_init(|| async {
-                let handle = AccountClient::new(Arc::clone(&self.nest))
-                    .get()
-                    .await
-                    .ok()
-                    .and_then(|r| r.handle)
-                    .unwrap_or_default();
-                let domain = self
-                    .nest
-                    .request::<SetupStatusRequest, SetupStatusReply>(
-                        "fauna.setup.status",
-                        SetupStatusRequest::default(),
-                    )
-                    .await
-                    .map(|r| r.domain)
-                    .unwrap_or_default();
-                if handle.is_empty() && domain.is_empty() {
-                    String::new()
-                } else {
-                    format!("{handle}@{domain}")
-                }
-            })
+    async fn self_email(&self) -> String {
+        if let Some(email) = self.self_email.lock().expect("self-email mutex").clone() {
+            return email;
+        }
+        let handle = AccountClient::new(self.nest.clone())
+            .get()
             .await
+            .ok()
+            .and_then(|r| r.handle)
+            .unwrap_or_default();
+        let domain = self
+            .nest
+            .request::<SetupStatusRequest, SetupStatusReply>(
+                "fauna.setup.status",
+                SetupStatusRequest::default(),
+            )
+            .await
+            .map(|r| r.domain)
+            .unwrap_or_default();
+        let email = if handle.is_empty() && domain.is_empty() {
+            String::new()
+        } else {
+            format!("{handle}@{domain}")
+        };
+        *self.self_email.lock().expect("self-email mutex") = Some(email.clone());
+        email
     }
 
     /// `(actor_id, msek)` for an encrypted CalDAV write, or `None` when
@@ -588,7 +747,7 @@ impl RpcArchiveNest {
         &self,
         actor_id: [u8; 32],
     ) -> Result<Option<[u8; 32]>, ArchiveNestError> {
-        let listing = CalDavClient::new(Arc::clone(&self.nest))
+        let listing = CalDavClient::new(self.nest.clone())
             .list_calendars(ListCalendarsRequest {
                 actor_id: actor_id.to_vec(),
             })
@@ -601,10 +760,17 @@ impl RpcArchiveNest {
     }
 }
 
-#[async_trait::async_trait]
-impl ArchiveNest for RpcArchiveNest {
+/// The [`ArchiveNest`] body, written once and instantiated per transport: for
+/// the concrete `Arc<NestClient>` natively, where `async_trait`'s `Send`
+/// boxing needs each request future provably `Send`, and for any transport on
+/// wasm, where nothing is `Send` (the `impl_rpc_user_config_store!` shape).
+macro_rules! impl_archive_nest {
+    ([$($generics:tt)*] $ty:ty) => {
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl<$($generics)*> ArchiveNest for $ty {
     async fn supports_hidden_tiers(&self) -> Result<bool, ArchiveNestError> {
-        SubscriptionsClient::new(Arc::clone(&self.nest))
+        SubscriptionsClient::new(self.nest.clone())
             .nest_supports(HIDDEN_TIERS)
             .await
             .map_err(nest_err)
@@ -616,7 +782,7 @@ impl ArchiveNest for RpcArchiveNest {
         // label custody, and a sealed set rests no plaintext name — the
         // rendered `list` would drop every archive folder. Archive folders are
         // owner-created, so custody names every one of them.
-        let listing = FoldersClient::new(Arc::clone(&self.nest))
+        let listing = FoldersClient::new(self.nest.clone())
             .list_wire()
             .await
             .map_err(nest_err)?;
@@ -672,7 +838,7 @@ impl ArchiveNest for RpcArchiveNest {
         // client carries no label custody.
         let owner = BackupKey::derive(self.keypair()?.secret_bytes());
         fauna_client_folders::create_set_with_owner_root(
-            &FoldersClient::new(Arc::clone(&self.nest)),
+            &FoldersClient::new(self.nest.clone()),
             &*self.folder_keys,
             FolderCreateRequest {
                 name: name.to_string(),
@@ -700,32 +866,9 @@ impl ArchiveNest for RpcArchiveNest {
         path: &str,
         bytes: Vec<u8>,
     ) -> Result<(), ArchiveNestError> {
-        let sealed = fauna_sync_engine::seal::seal_blob(&bytes, Some((self.seal_root()?, None)))
+        let sealed = fauna_core::blob_seal::seal_blob(&bytes, Some((self.seal_root()?, None)))
             .map_err(walk_err)?;
-        let store_keys: Vec<ContentHash> = sealed.chunks.iter().map(|(h, _)| *h).collect();
-        let missing: HashSet<ContentHash> = self
-            .sync_http
-            .check_chunks(&store_keys)
-            .await
-            .map_err(walk_err)?
-            .into_iter()
-            .collect();
-        // Sequential, like the fetcher's download loop below and for the same
-        // reason: the engine's pooled transfer path is private to it. The
-        // same follow-up lifts that pool behind a public seam for both
-        // directions; the raw zip's chunk set is where it will show first.
-        for (hash, body) in &sealed.chunks {
-            if missing.contains(hash) {
-                self.sync_http
-                    .upload_chunk(hash, body)
-                    .await
-                    .map_err(walk_err)?;
-            }
-        }
-        self.sync_http
-            .upload_manifest(&sealed.manifest_bytes)
-            .await
-            .map_err(walk_err)?;
+        self.plane.put_sealed(&sealed).await.map_err(walk_err)?;
         // Sealed path label, under the same owner root the chunks sealed under.
         // `None` (no root, or a seal failure) records plaintext-only — the
         // ratified degrade, never a user-facing error
@@ -753,6 +896,7 @@ impl ArchiveNest for RpcArchiveNest {
                 None,
                 None,
                 None,
+                None,
             )
             .await
             .map_err(nest_err)?;
@@ -775,20 +919,32 @@ impl ArchiveNest for RpcArchiveNest {
         let Some(file) = self.head_file(folder, path).await? else {
             return Ok(None);
         };
-        let len = file_len_by_manifest(
-            &self.fetcher(),
-            &file.keys,
-            file.manifest,
-            file.content_key_version,
-        )
-        .await
-        .map_err(walk_err)?;
-        let reader = Arc::new(ManifestRangeReader {
-            fetcher: self.fetcher(),
-            file,
-            path: path.to_string(),
-        });
-        Ok(Some(Arc::new(FolderArchiveSource::new(reader, len))))
+        // Natively the zip stays in the folder and is read by byte range.
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let len = file_len_by_manifest(
+                &*self.plane,
+                &file.keys,
+                file.manifest,
+                file.content_key_version.map(fauna_core::blob_seal::SealStamp::Version),
+            )
+            .await
+            .map_err(walk_err)?;
+            let reader = Arc::new(ManifestRangeReader {
+                plane: Arc::clone(&self.plane),
+                file,
+                path: path.to_string(),
+            });
+            Ok(Some(Arc::new(FolderArchiveSource::new(reader, len))))
+        }
+        // The browser's one thread cannot wait on a fetch inside the parser's
+        // synchronous read, so a resume there reads the folder's zip whole —
+        // as large in memory as the fresh run's raw upload already is.
+        #[cfg(target_arch = "wasm32")]
+        {
+            let bytes = read_licensed(&*self.plane, &file, path).await?;
+            Ok(Some(Arc::new(fauna_archive::VecSource(bytes))))
+        }
     }
 
     async fn provision_owner_only_tier(&self) -> Result<TierGate, ArchiveNestError> {
@@ -808,7 +964,7 @@ impl ArchiveNest for RpcArchiveNest {
     }
 
     async fn create_post(&self, signed_bytes: Vec<u8>) -> Result<String, ArchiveNestError> {
-        PostsClient::new(Arc::clone(&self.nest))
+        PostsClient::new(self.nest.clone())
             .posts_create(signed_bytes)
             .await
             .map(|reply| reply.post_id)
@@ -820,11 +976,10 @@ impl ArchiveNest for RpcArchiveNest {
         name: &str,
         bytes: Vec<u8>,
     ) -> Result<UploadedMedia, ArchiveNestError> {
-        let api = self.nest.auth().content_api();
-        let blob = upload_public_post_blob_bytes(&api, name, &bytes)
+        self.plane
+            .post_public_media(name, &bytes)
             .await
-            .map_err(ArchiveNestError::Transport)?;
-        uploaded_media(blob)
+            .map_err(ArchiveNestError::Transport)
     }
 
     async fn upload_sealed_media(
@@ -833,22 +988,15 @@ impl ArchiveNest for RpcArchiveNest {
         bytes: Vec<u8>,
         seal: &MediaSeal,
     ) -> Result<UploadedMedia, ArchiveNestError> {
-        let api = self.nest.auth().content_api();
-        let period = PeriodMediaSeal {
-            seal_id: seal.seal_id,
-            tier: seal.tier.clone(),
-            period_version: seal.period_version,
-            period_key: seal.period_key.clone(),
-        };
-        let blob = upload_period_sealed_media(&api, name, &bytes, &period)
+        self.plane
+            .post_period_sealed_media(name, &bytes, seal)
             .await
-            .map_err(ArchiveNestError::Transport)?;
-        uploaded_media(blob)
+            .map_err(ArchiveNestError::Transport)
     }
 
     async fn upload_gated_body(&self, sealed: Vec<u8>) -> Result<String, ArchiveNestError> {
-        let api = self.nest.auth().content_api();
-        upload_gated_post_blob(&api, sealed)
+        self.plane
+            .post_gated_body(sealed)
             .await
             .map_err(ArchiveNestError::Transport)
     }
@@ -873,7 +1021,7 @@ impl ArchiveNest for RpcArchiveNest {
         };
         // The owner's own answer: their roster line with its PARTSTAT, the
         // organizer only when they hosted (`ImportedEvent::owner_reply`).
-        let reply = event.owner_reply(self.self_email().await);
+        let reply = event.owner_reply(&self.self_email().await);
         let end = event
             .end
             .unwrap_or(Timestamp(event.start.0.saturating_add(3_600 * 1_000_000)));
@@ -911,7 +1059,7 @@ impl ArchiveNest for RpcArchiveNest {
             // the way the organizer binding did.
             ..Default::default()
         };
-        CalDavClient::new(Arc::clone(&self.nest))
+        CalDavClient::new(self.nest.clone())
             .seal_and_put_event(
                 &actor_id,
                 &calendar_id,
@@ -928,7 +1076,78 @@ impl ArchiveNest for RpcArchiveNest {
             .map_err(put_event_err)?;
         Ok(())
     }
+
+    async fn contact_status(&self, peer_hex: &str) -> Result<Option<String>, ArchiveNestError> {
+        ContactsClient::new(self.nest.clone())
+            .contacts_status(peer_hex.to_string())
+            .await
+            .map(|reply| reply.status)
+            .map_err(nest_err)
+    }
+
+    async fn accepted_contacts(&self) -> Result<Vec<String>, ArchiveNestError> {
+        let reply = ContactsClient::new(self.nest.clone())
+            .contacts_list()
+            .await
+            .map_err(nest_err)?;
+        Ok(reply
+            .contacts
+            .into_iter()
+            .filter(|row| {
+                matches!(
+                    ContactStatus::from_wire(&row.status),
+                    Some(ContactStatus::Accepted | ContactStatus::Confirmed)
+                )
+            })
+            .map(|row| row.peer_id)
+            .collect())
+    }
+
+    async fn fetch_post(
+        &self,
+        post_id_hex: &str,
+        sender_hex: &str,
+    ) -> Result<Option<Vec<u8>>, ArchiveNestError> {
+        fetch_post_or_relay(&self.nest, post_id_hex, sender_hex).await
+    }
+
+    async fn is_followers_subscriber(&self, peer_hex: &str) -> Result<bool, ArchiveNestError> {
+        let roster = SubscriptionsClient::new(self.nest.clone())
+            .subscribers_list(FOLLOWERS_TIER)
+            .await
+            .map_err(nest_err)?;
+        Ok(roster
+            .iter()
+            .any(|entry| entry.subscriber_id.to_hex().eq_ignore_ascii_case(peer_hex)))
+    }
+
+    async fn own_profile_base(
+        &self,
+        keypair: &fauna_core::identity::ActorKeypair,
+    ) -> Result<fauna_client_profile::OwnProfileBase, ArchiveNestError> {
+        // No registry-recorded predecessors reach the machine: the read proves
+        // in-line whatever succession link the base needs (the edit form's own
+        // read, `fetch_own_profile_base`'s doc).
+        fauna_client_profile::fetch_own_profile_base(self.nest.clone(), keypair, &[])
+            .await
+            .map_err(|fauna_client_profile::LearnPredecessorsError::Fetch(e)| nest_err(e))
+    }
+
+    async fn set_profile(&self, signed: Vec<u8>) -> Result<(), ArchiveNestError> {
+        fauna_client_profile::ProfileClient::new(self.nest.clone())
+            .profile_set(signed)
+            .await
+            .map(|_| ())
+            .map_err(nest_err)
+    }
 }
+    };
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl_archive_nest!([] RpcArchiveNest<Arc<NestClient>>);
+#[cfg(target_arch = "wasm32")]
+impl_archive_nest!([R: RpcRequester<Error: RpcErrorClass> + Clone + 'static] RpcArchiveNest<R>);
 
 // ── the licensed read ──────────────────────────────────────────────────────
 
@@ -941,6 +1160,65 @@ struct LicensedFile {
     /// The licensing row's signed stamp (`None` for this owner-only folder,
     /// which carries no M2 generation — read off the row, never assumed).
     content_key_version: Option<u64>,
+}
+
+/// [`ArchiveNest::fetch_post`] over any transport: the reply a `Claimed`
+/// item names, fetched where it lives (`archive-import.md` § Linking and
+/// merging (phase two), ruling 9). The owner's own nest first; only its
+/// `fauna.posts.not_found` sends the read on to the claimant's home nest —
+/// the roster's `home_nest_url` for `sender_hex` — through
+/// `fauna.posts.get_remote` (the own-nest-first shape of
+/// `ProfileClient::profile_header_read`). A claimant with no known home keeps
+/// the own nest's `None`, and so does a home that refuses the read: the item
+/// stays unrecorded until a later round names it again. A transport fault on
+/// either leg propagates. The bytes are trusted no further for having been
+/// fetched: the caller verifies the signature and author either way.
+async fn fetch_post_or_relay<R>(
+    nest: &R,
+    post_id_hex: &str,
+    sender_hex: &str,
+) -> Result<Option<Vec<u8>>, ArchiveNestError>
+where
+    R: RpcRequester,
+    R::Error: RpcErrorClass + core::fmt::Display,
+{
+    let posts = PostsClient::new(nest);
+    let reply = match posts.posts_get(post_id_hex).await.map_err(nest_err) {
+        Err(ArchiveNestError::Rejected { code, .. }) if code == POST_NOT_FOUND => {
+            let Some(home) = contact_home(nest, sender_hex).await? else {
+                return Ok(None);
+            };
+            match posts
+                .posts_get_remote(post_id_hex.to_string(), home)
+                .await
+                .map_err(nest_err)
+            {
+                Err(ArchiveNestError::Rejected { .. }) => return Ok(None),
+                other => other?,
+            }
+        }
+        other => other?,
+    };
+    Ok((!reply.body.is_empty()).then(|| reply.body.into_vec()))
+}
+
+/// The home nest URL the roster records for `peer_hex` — set for a federated
+/// peer whose edge carries a verified origin, `None` for a local peer or an
+/// unknown home (`ContactItem::home_nest_url`).
+async fn contact_home<R>(nest: &R, peer_hex: &str) -> Result<Option<String>, ArchiveNestError>
+where
+    R: RpcRequester,
+    R::Error: RpcErrorClass + core::fmt::Display,
+{
+    let reply = ContactsClient::new(nest)
+        .contacts_list()
+        .await
+        .map_err(nest_err)?;
+    Ok(reply
+        .contacts
+        .into_iter()
+        .find(|row| row.peer_id.eq_ignore_ascii_case(peer_hex))
+        .and_then(|row| row.home_nest_url))
 }
 
 /// The live record for `path` in `folder`, or `None` when no live record
@@ -1019,7 +1297,8 @@ async fn read_licensed(
         fetcher,
         &file.keys,
         file.manifest,
-        file.content_key_version,
+        file.content_key_version
+            .map(fauna_core::blob_seal::SealStamp::Version),
         path,
     )
     .await
@@ -1063,8 +1342,10 @@ fn find_head(files: Vec<SyncFile>, path: &str) -> Option<SyncFile> {
 // ── the platform opener ────────────────────────────────────────────────────
 
 /// The native [`ArchiveOpener`]: the export zip is a file on disk.
+#[cfg(not(target_arch = "wasm32"))]
 pub struct FileOpener;
 
+#[cfg(not(target_arch = "wasm32"))]
 impl ArchiveOpener for FileOpener {
     fn open(&self, path: &str) -> Result<SharedSource, ArchiveNestError> {
         match FileSource::open(path) {
@@ -1085,7 +1366,7 @@ impl ArchiveOpener for FileOpener {
     }
 }
 
-// ── the constructor ────────────────────────────────────────────────────────
+// ── the constructors ───────────────────────────────────────────────────────
 
 /// Build the machine over a live connection: the WS-RPC seam, the native file
 /// opener, and the owner's identity (every imported post is signed by the app of
@@ -1102,6 +1383,7 @@ impl ArchiveOpener for FileOpener {
 /// the account's folder-key custody the archive folder's nonce lives in;
 /// `mail` the account's mail custody — the MSEK an imported event's encrypted
 /// CalDAV write seals under.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn build_archive_import_machine(
     nest: Arc<NestClient>,
     device_id: [u8; 32],
@@ -1109,28 +1391,89 @@ pub fn build_archive_import_machine(
     folder_keys: Arc<dyn fauna_client_folders::FolderKeyStore>,
     mail: Arc<dyn fauna_client_config::MailStore>,
 ) -> Result<ArchiveImportMachine, ArchiveNestError> {
-    let secret = {
-        let Some(keypair) = nest.auth().keypair() else {
-            return Err(ArchiveNestError::Unsupported(BEARER_ONLY.to_string()));
-        };
-        *keypair.secret_bytes()
-    };
-    let sync_http = Arc::new(ChunkStore::new(Arc::clone(nest.auth()), &device_id));
-    let seam = RpcArchiveNest {
+    let plane = Arc::new(NativePlane::new(Arc::clone(&nest), &device_id));
+    build_archive_import_machine_over(
         nest,
-        device_id_hex: hex::encode(device_id),
-        sync_http,
-        self_email: tokio::sync::OnceCell::new(),
-        set_nonces: tokio::sync::Mutex::new(std::collections::HashMap::new()),
+        plane,
+        device_id,
         period_keys,
         folder_keys,
         mail,
-    };
-    Ok(ArchiveImportMachine::new(
-        Arc::new(seam),
         Arc::new(FileOpener),
-        ActorKeypair::from_secret(secret),
+    )
+}
+
+/// The native [`ArchiveNest`] alone — what a reader of the archive folders
+/// needs without the wizard: the `Archive` rail's thread source
+/// ([`crate::threads`]) and the folded comments' source ([`crate::comments`])
+/// wired at login. The same seam [`build_archive_import_machine`] drives, so
+/// the folders are read through the one licensed reader. `Err` on a
+/// bearer-only session, as there.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn build_archive_nest(
+    nest: Arc<NestClient>,
+    device_id: [u8; 32],
+    period_keys: fauna_client_subscriptions::SharedPeriodKeyStore,
+    folder_keys: Arc<dyn fauna_client_folders::FolderKeyStore>,
+    mail: Arc<dyn fauna_client_config::MailStore>,
+) -> Result<Arc<dyn ArchiveNest>, ArchiveNestError> {
+    let plane = Arc::new(NativePlane::new(Arc::clone(&nest), &device_id));
+    build_archive_nest_over(nest, plane, device_id, period_keys, folder_keys, mail)
+}
+
+/// [`build_archive_import_machine`] over any transport the seam is
+/// implemented for, its platform [`ArchivePlane`] and [`ArchiveOpener`] — the
+/// door the web SPA builds through (`fauna-wasm`), and the native builder's
+/// own body.
+pub fn build_archive_import_machine_over<R>(
+    nest: R,
+    plane: Arc<dyn ArchivePlane>,
+    device_id: [u8; 32],
+    period_keys: fauna_client_subscriptions::SharedPeriodKeyStore,
+    folder_keys: Arc<dyn fauna_client_folders::FolderKeyStore>,
+    mail: Arc<dyn fauna_client_config::MailStore>,
+    opener: Arc<dyn ArchiveOpener>,
+) -> Result<ArchiveImportMachine, ArchiveNestError>
+where
+    RpcArchiveNest<R>: ArchiveNest + 'static,
+{
+    let Some(seed) = plane.identity_seed() else {
+        return Err(ArchiveNestError::Unsupported(BEARER_ONLY.to_string()));
+    };
+    let seam = build_archive_nest_over(nest, plane, device_id, period_keys, folder_keys, mail)?;
+    Ok(ArchiveImportMachine::new(
+        seam,
+        opener,
+        ActorKeypair::from_secret(*seed),
     ))
+}
+
+/// [`build_archive_nest`] over any transport the seam is implemented for and
+/// its platform [`ArchivePlane`].
+pub fn build_archive_nest_over<R>(
+    nest: R,
+    plane: Arc<dyn ArchivePlane>,
+    device_id: [u8; 32],
+    period_keys: fauna_client_subscriptions::SharedPeriodKeyStore,
+    folder_keys: Arc<dyn fauna_client_folders::FolderKeyStore>,
+    mail: Arc<dyn fauna_client_config::MailStore>,
+) -> Result<Arc<dyn ArchiveNest>, ArchiveNestError>
+where
+    RpcArchiveNest<R>: ArchiveNest + 'static,
+{
+    if plane.identity_seed().is_none() {
+        return Err(ArchiveNestError::Unsupported(BEARER_ONLY.to_string()));
+    }
+    Ok(Arc::new(RpcArchiveNest {
+        nest,
+        device_id_hex: hex::encode(device_id),
+        plane,
+        self_email: Mutex::new(None),
+        set_nonces: Mutex::new(HashMap::new()),
+        period_keys,
+        folder_keys,
+        mail,
+    }))
 }
 
 #[cfg(test)]
@@ -1138,6 +1481,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::*;
+    use fauna_client::NestClientError;
 
     /// A `RangeReader` over a `Vec`, counting fetches.
     struct CountingReader {
@@ -1210,6 +1554,56 @@ mod tests {
         assert!(read(&source, 3 * READ_AHEAD_BLOCK, 16).is_empty());
         assert_eq!(reader.fetches.load(Ordering::SeqCst), 3);
         assert_eq!(read(&source, 3 * READ_AHEAD_BLOCK - 4, 16).len(), 4);
+    }
+
+    /// A `RangeReader` whose fetch is a task on the runtime — it completes only
+    /// while the runtime's own thread is free to run it, as a real fetch needs
+    /// that thread to drive its IO.
+    struct SpawningReader {
+        bytes: Arc<Vec<u8>>,
+    }
+
+    #[async_trait::async_trait]
+    impl RangeReader for SpawningReader {
+        async fn read_range(&self, offset: u64, len: u64) -> Result<Vec<u8>, ArchiveNestError> {
+            let bytes = Arc::clone(&self.bytes);
+            Ok(tokio::spawn(async move {
+                let start = (offset as usize).min(bytes.len());
+                let end = (start + len as usize).min(bytes.len());
+                bytes[start..end].to_vec()
+            })
+            .await
+            .expect("the fetch task"))
+        }
+    }
+
+    /// The native apps' UniFFI face runs on a CURRENT-thread runtime. The run's
+    /// reads go through `off_runtime`, so they reach a folder source on a
+    /// blocking-pool thread and are served while the runtime's one thread
+    /// drives the fetch; the same read made on that thread itself is still
+    /// refused, never blocking the thread its own fetch needs.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_folder_source_serves_the_runs_reads_on_a_current_thread_runtime() {
+        let bytes: Vec<u8> = (0..2 * READ_AHEAD_BLOCK).map(|i| (i % 251) as u8).collect();
+        let reader = Arc::new(SpawningReader {
+            bytes: Arc::new(bytes.clone()),
+        });
+        let source = Arc::new(FolderArchiveSource::new(reader, bytes.len() as u64));
+
+        let offloaded = {
+            let source = Arc::clone(&source);
+            crate::offload::off_runtime(move || read(&source, 10, 1000))
+                .await
+                .expect("the offloaded read ran")
+        };
+        assert_eq!(offloaded, bytes[10..1010]);
+
+        // The second block, so the read-ahead slot cannot answer it.
+        let mut buf = [0u8; 16];
+        let refused = source
+            .read_at(READ_AHEAD_BLOCK + 5, &mut buf)
+            .expect_err("a read on the runtime's own thread is refused");
+        assert!(refused.to_string().contains("multi-thread"), "{refused}");
     }
 
     /// The glue's half of the run's folder-naming contract
@@ -1567,7 +1961,8 @@ mod licence_tests {
                 &fetcher,
                 &file.keys,
                 file.manifest,
-                file.content_key_version,
+                file.content_key_version
+                    .map(fauna_core::blob_seal::SealStamp::Version),
             )
             .await
         })
@@ -1667,5 +2062,109 @@ mod licence_tests {
         let err = read(&nest, &fetcher, MODEL).expect_err("refused");
         assert!(matches!(err, ArchiveNestError::Transport(_)), "{err}");
         assert_eq!(fetcher.fetches(), (0, 0));
+    }
+}
+
+/// A `Claimed` item's reply is fetched where it lives (`archive-import.md`
+/// § Linking and merging (phase two), ruling 9): the owner's own nest first,
+/// and — only on `fauna.posts.not_found` — the claimant's home nest the
+/// roster records, through `fauna.posts.get_remote`.
+#[cfg(test)]
+mod fetch_post_tests {
+    use super::*;
+    use fauna_client_testkit::{RejectingRequester, block_on};
+    use fauna_protocol::contacts::{ContactItem, ContactListReply};
+    use fauna_protocol::posts::PostGetReply;
+    use fauna_protocol::{ByteBuf, LocalizedText, RpcError};
+
+    const GET: &str = "fauna.posts.get";
+    const GET_REMOTE: &str = "fauna.posts.get_remote";
+    const CONTACTS: &str = "fauna.contacts.list";
+    const HOME: &str = "https://home.example";
+
+    fn post_id() -> String {
+        "ab".repeat(32)
+    }
+
+    fn sender() -> String {
+        "cd".repeat(32)
+    }
+
+    fn not_found() -> RpcError {
+        RpcError {
+            code: POST_NOT_FOUND.into(),
+            message: Box::new(LocalizedText::new("error.x")),
+            details: None,
+            extra: Default::default(),
+        }
+    }
+
+    fn body(bytes: &[u8]) -> PostGetReply {
+        PostGetReply {
+            body: ByteBuf::from(bytes.to_vec()),
+            ..Default::default()
+        }
+    }
+
+    fn roster(home: Option<&str>) -> ContactListReply {
+        ContactListReply {
+            contacts: vec![ContactItem {
+                peer_id: sender(),
+                status: "accepted".into(),
+                created_at: 1,
+                home_nest_url: home.map(str::to_string),
+                ..Default::default()
+            }],
+            extra: Default::default(),
+        }
+    }
+
+    fn fetch(nest: &RejectingRequester) -> Result<Option<Vec<u8>>, ArchiveNestError> {
+        block_on(fetch_post_or_relay(nest, &post_id(), &sender()))
+    }
+
+    #[test]
+    fn a_reply_held_by_the_own_nest_reads_without_the_roster() {
+        let nest = RejectingRequester::new().reply(GET, &body(b"own"));
+        assert_eq!(fetch(&nest).unwrap(), Some(b"own".to_vec()));
+        assert_eq!(nest.kinds(), [GET]);
+    }
+
+    #[test]
+    fn a_reply_homed_on_the_claimants_nest_is_fetched_from_that_home() {
+        let nest = RejectingRequester::new()
+            .reject(GET, not_found())
+            .reply(CONTACTS, &roster(Some(HOME)))
+            .reply(GET_REMOTE, &body(b"remote"));
+        assert_eq!(fetch(&nest).unwrap(), Some(b"remote".to_vec()));
+        assert_eq!(nest.kinds(), [GET, CONTACTS, GET_REMOTE]);
+        let (_, payload) = nest.payloads().pop().unwrap();
+        assert_eq!(payload["nest_url"], HOME);
+        assert_eq!(payload["post_id"], post_id());
+    }
+
+    #[test]
+    fn a_claimant_with_no_known_home_keeps_the_own_nest_answer() {
+        let nest = RejectingRequester::new()
+            .reject(GET, not_found())
+            .reply(CONTACTS, &roster(None));
+        assert_eq!(fetch(&nest).unwrap(), None);
+        assert_eq!(nest.kinds(), [GET, CONTACTS]);
+    }
+
+    #[test]
+    fn a_home_that_refuses_leaves_the_item_unverified() {
+        let nest = RejectingRequester::new()
+            .reject(GET, not_found())
+            .reply(CONTACTS, &roster(Some(HOME)))
+            .reject(GET_REMOTE, not_found());
+        assert_eq!(fetch(&nest).unwrap(), None);
+    }
+
+    #[test]
+    fn an_own_nest_transport_fault_propagates_without_a_relay() {
+        let nest = RejectingRequester::new();
+        assert!(matches!(fetch(&nest), Err(ArchiveNestError::Transport(_))));
+        assert_eq!(nest.kinds(), [GET]);
     }
 }

@@ -137,7 +137,40 @@ public final class FeedVM {
     /// submit, so a stale one never masks a fresh manager error.
     private var composeGlueError: String?
 
-    public init() {}
+    public init() { isAuthorWindow = false }
+
+    /// `true` for a view model bound to an author window (``authorWindow(actorId:)``)
+    /// rather than to the timeline. A window is a READ of one author's posts: it
+    /// never mirrors into ``lastLoadedPosts`` (the TestAgent's feed-page state
+    /// read, which belongs to the timeline) and owns no compose draft.
+    public let isAuthorWindow: Bool
+
+    private init(authorWindow manager: FfiFeedManager, api: APIClient?) {
+        isAuthorWindow = true
+        self.api = api
+        let box = FeedObserverBox()
+        manager.addObserver(observer: box)
+        box.target = self
+        self.manager = manager
+        self.observerBox = box
+    }
+
+    /// A view model over ONE author's posts — the profile page's Posts tab
+    /// (`ui/profile.md` § Layout & flow → *The Posts tab*; the window itself is
+    /// `ui/feed.md` § State & data shape → *The author window*): the timeline
+    /// manager's `authorWindow`, which shares its transport, secret and installed
+    /// seams (the room-post seam included), behind the same getters and verbs the
+    /// feed page's cards already call — so a card on the profile likes, reposts,
+    /// replies and opens its ⋯ menu against the window. Its first page is read
+    /// here; the next pages through ``loadMore()``. `nil` until the timeline
+    /// manager is built. A fresh window per open of the tab: no client cache
+    /// (`profile.md` § Persistence). Mirrors android's window-bound `FeedVM`.
+    public func authorWindow(actorId: String) async -> FeedVM? {
+        guard let manager, !isReconfiguring else { return nil }
+        let window = FeedVM(authorWindow: manager.authorWindow(actorId: actorId), api: api)
+        await window.manager?.refreshCurrentFeed()
+        return window
+    }
 
     /// The actor secret the current `manager` was built for — so `configure`
     /// can tell a same-actor re-entry (keep the manager) from an actor change (a
@@ -177,6 +210,32 @@ public final class FeedVM {
     /// which can change while the feed is off screen (another tab), so a
     /// `secretHex`-keyed dismissal misses the change. `@Observable`.
     public private(set) var managerGeneration: Int = 0
+
+    /// The engagement-cue capture tracker of `manager` — see ``cueTracker()``.
+    @ObservationIgnored private var cueTrackerOf: (manager: FfiFeedManager, tracker: FfiCueTracker)?
+
+    /// The ONE engagement-cue capture tracker of the current manager — one per
+    /// auth, never one per Feed-page mount, so what the tracker holds (its
+    /// frozen test clock included, `fauna_feed::CueTracker` § The test clock)
+    /// outlives a trip off the page, as on tui, linux, web and android
+    /// (`FeedManagerHost.cueTracker`). A rebuilt manager (a re-auth or account
+    /// switch) gets a fresh tracker; `nil` before the manager exists.
+    ///
+    /// apple's feed (`FeedListView` on iOS, `MacFeedDetailView` on macOS) is a
+    /// deliberately non-virtualizing eager `ScrollView { VStack }` — every
+    /// post-card view stays realized regardless of scroll position, so a row
+    /// that merely could not be measured this sample is mid-layout, never
+    /// disposed. `.holdUnmeasured` is the matching leave model (linux's GTK
+    /// `ListBox` and windows' non-virtualizing `StackPanel` use the same one;
+    /// android's virtualizing `LazyColumn` is the one app on `.absenceIsLeave`).
+    public func cueTracker() -> FfiCueTracker? {
+        guard let manager else { return nil }
+        if let held = cueTrackerOf, held.manager === manager { return held.tracker }
+        let tracker = FfiCueTracker(leaveModel: .holdUnmeasured)
+        cueTrackerOf = (manager, tracker)
+        return tracker
+    }
+
     /// Drop everything this view model holds for the account it was scoped to —
     /// called by ``ActorScope/dropAppOwnedState(criticalAlertsHost:conversationsVM:feedVM:screenTime:modelContainer:appState:newModelContainer:)``,
     /// the ONE canonical drop (`account-scoping.md` § The scoping taxonomy, the
@@ -232,6 +291,7 @@ public final class FeedVM {
         storeChangeWatch?.cancel()
         storeChangeWatch = nil
         manager = nil
+        cueTrackerOf = nil
         roomPostSession = nil
         roomPostObservedManager = nil
         roomPostObserverBox = nil
@@ -263,7 +323,11 @@ public final class FeedVM {
         onManagerChanged()
     }
 
-    public func configure(api: APIClient, secretHex: String) async {
+    /// `deviceIdHex` is this client's sync device id (`FaunaClient.deviceId`) — the
+    /// manager's folded archive comments read through it (`APIClient.feedManager`).
+    /// Required, not defaulted: every site configures the ONE timeline manager,
+    /// and whichever builds it first decides whether it can fold.
+    public func configure(api: APIClient, secretHex: String, deviceIdHex: String) async {
         self.api = api
         if manager != nil, configuredSecret == secretHex { return }
         if configuringSecret == secretHex { return }   // a build for this actor is already in flight
@@ -287,7 +351,7 @@ public final class FeedVM {
             }
         }
         do {
-            let mgr = try await api.feedManager(secret: secretHex)
+            let mgr = try await api.feedManager(secret: secretHex, deviceIdHex: deviceIdHex)
             guard configuringSecret == secretHex else { return }   // a newer configure superseded us
             // Build once per (re)configure, alongside the manager it restores into —
             // `try?` mirrors the app-level `try? await faunaClient.api.draftsSync(...)`
@@ -335,6 +399,9 @@ public final class FeedVM {
         // the real state; we also mirror the post list into the static the macOS
         // TestAgent serializes from.
         _observerTick &+= 1
+        // An author window is not the timeline: the mirror and the draft
+        // autosave below are the timeline's alone.
+        if isAuthorWindow { return }
         // Blank the mirrored list while an actor change is rebuilding, so the
         // TestAgent's state serialization can't surface the previous actor's posts
         // either (mirrors the `posts` getter's `isReconfiguring` guard).
@@ -438,11 +505,49 @@ public final class FeedVM {
     /// (`FeedManager::select_feed` clears this; `select_trending_feed` sets it
     /// and clears `selectedFeedId`).
     public var trendingSelected: Bool { snapshot?.trendingSelected ?? false }
+
+    /// The imported-posts selection (`feed.md` § State & data shape → *The
+    /// imported-posts selection*): the archive platform token
+    /// (`facebook` | `instagram`) while the feed lists only imported posts,
+    /// `nil` otherwise — `snapshot.importedSelected`.
+    public var importedSelected: String? { snapshot?.importedSelected }
+
+    /// The notice's platform label (`feed-imported-notice`'s `{platform}`) —
+    /// the shared `classifySources` label for the selection's token.
+    public var importedPlatformLabel: String? {
+        guard let token = importedSelected else { return nil }
+        return classifySources(sourceField: token, bridges: []).first?.label ?? token
+    }
+
+    /// Select the imported-posts view for one archive platform token — the
+    /// shared `FeedManager::select_imported` (archive import's View imported).
+    public func selectImported(token: String) async {
+        searchText = ""
+        searchTask?.cancel()
+        await manager?.selectImported(token: token)
+    }
+
+    /// Leave the imported-posts selection (`feed-imported-clear`) — the shared
+    /// `FeedManager::clear_imported`.
+    public func clearImported() async {
+        await manager?.clearImported()
+    }
     /// The rendered post list. Blanked while an actor change is rebuilding the
     /// manager (`isReconfiguring`) so the previous actor's posts — which stay in the
     /// still-live old manager's snapshot until the swap — never reach the new
     /// actor's feed (no cross-actor leak); the ensuing reload repopulates it.
     public var posts: [PostSummary] { isReconfiguring ? [] : (snapshot?.posts ?? []) }
+    /// Whether the `feed-search-bar` is on screen — whenever posts are, NOT only
+    /// when a custom feed is selected: search is a nest re-query that works on
+    /// the LOCAL feed too (`query_local_feed_core` applies `search`; pinned by
+    /// tests/api/test_feed_search_api.py), and the Local feed is the default.
+    /// `!searchText.isEmpty` is the ZERO-RESULT case: a Local search matching
+    /// nothing empties `posts`, and a `posts`-only gate would take the field and
+    /// its clear button away mid-search, stranding the user with their query
+    /// (`test_feed_search_clear_restores_feed`).
+    public var showsSearchBar: Bool {
+        selectedFeedId != nil || !posts.isEmpty || !searchText.isEmpty
+    }
     /// Re-read a post's live snapshot state so manager re-emits — remote-image
     /// reveal (D3) and the lazy media / quoted-post fold — reach the detail
     /// view. `post` is a value snapshot captured at navigation and never
@@ -611,9 +716,24 @@ public final class FeedVM {
     /// create/delete/subscribe/unsubscribe. `refreshAvailableBridges` drives the
     /// list-driven subscribe selector + its gating (Dim 3 consumption).
     public func loadFeeds() async {
+        refreshArchiveComments()
         await manager?.refreshFeeds()
         await manager?.refreshBridgeFeeds()
         await manager?.refreshAvailableBridges()
+    }
+    /// Re-read the folded archive comments in the background (`archive-import.md`
+    /// § What each category becomes → *Placement under the owner's own post*) —
+    /// on every page entry, so an import finished since login folds under the
+    /// owner's post without a re-login; the manager re-emits when it changes.
+    /// Mirrors tui's `feed::refresh_archive_comments`. A failed read keeps what
+    /// the last one folded.
+    private func refreshArchiveComments() {
+        guard let manager else { return }
+        Task {
+            do { try await manager.refreshArchiveComments() } catch {
+                logMessage(level: .info, target: "fauna.feed", message: "archive comments: \(error)")
+            }
+        }
     }
     public func selectFeed(_ id: String) async {
         searchText = ""
@@ -628,6 +748,17 @@ public final class FeedVM {
         searchText = ""
         searchTask?.cancel()
         await manager?.selectFeed(feedId: nil)
+    }
+    /// Open the Bluesky thread page on `postId` (`bridges.md` § Bluesky-native
+    /// thread view) — the shared `open_thread`; the page state is
+    /// `snapshot.thread`, which lands only while the page is still open on it.
+    public func openThread(_ postId: String) async {
+        await manager?.openThread(postId: postId)
+    }
+    /// Leave the thread page — the shared `close_thread`, so a slow fetch never
+    /// lands on a page the reader left.
+    public func closeThread() {
+        manager?.closeThread()
     }
     /// Select the built-in Trending virtual feed (`feed-trending-item`) —
     /// the `selectFeed`/`rehydrate` sibling that drives `select_trending_feed`.
@@ -1162,6 +1293,13 @@ public final class FeedVM {
     /// `resolveMedia`/`resolveQuotedPost`/`resolveLinkPreview`.
     public func resolvePostTips(_ postId: String) async { await manager?.resolvePostTips(postId: postId) }
     #endif
+    /// Name a post's remote author from their own signed profile (`ui/feed.md` §
+    /// The read model → *The remote author's byline*): the manager folds the face
+    /// into `PostSummary.authorDisplay` of every rendered post by that author and
+    /// home, then notifies. Fire-once by construction (every outcome writes a face,
+    /// an empty one included), so the caller guards on `homeNestUrl != nil &&
+    /// authorDisplay == nil`. Mirrors `resolveMedia`/`resolvePostTips`.
+    public func resolveAuthorFace(_ postId: String) async { await manager?.resolveAuthorFace(postId: postId) }
     /// Resolve the buyer's price read for a sold post (gap (2c), `monetization.md` §
     /// Per-post pay-to-unlock → *the buyer's price read is post-addressed*) into
     /// `PostSummary.unlockOffer`; the card/detail repaints when the snapshot
@@ -1339,30 +1477,49 @@ public final class FeedVM {
     @ObservationIgnored private var sealedPlaybackFiles: [String: URL] = [:]
 
     /// What a tapped `video-thumbnail` plays (`render-model.md` § D6c → *Inline
-    /// playback*), as a URL `AVPlayer` opens — `nil` when nothing plays. The
-    /// decision is the shared manager's `playbackSource`; this only turns its
-    /// answer into a URL, as web's `playbackUrl` does: a nest-relative path gets
-    /// the nest origin (the blob route is unauthenticated by design, so the
-    /// player needs no bearer), and a sealed item goes through the same fetch +
+    /// playback*) — `nil` when nothing plays. The decision is the shared
+    /// manager's `playbackSource`; this only turns its answer into something the
+    /// player opens: a nest-relative path streams through the pinned ranged reader
+    /// on this nest's URL — the exact string the WS login minted on, so the
+    /// reader's pin-store key matches (`transport-trust.md` § Transport trust →
+    /// *The native-player leg*) — and a sealed item goes through the same fetch +
     /// `openMediaBytes` a sealed image does — the raw opened bytes, written to an
     /// owner-only temp file, since no URL can serve its plaintext.
-    public func videoPlaybackURL(_ hash: String, home: FfiPostBlobHome?) async -> URL? {
+    public func videoPlayback(_ hash: String, home: FfiPostBlobHome?) async -> VideoPlaybackMedia? {
+        await playback(block: .video(hash: hash, alt: ""), hash: hash, home: home)
+    }
+
+    /// What a tapped bridged `video-thumbnail` plays: the same decision for a
+    /// post's `ProxiedVideo` (§ D6c → *Proxied video*), whose `Url` answer is
+    /// the ticketed proxied path the shared manager minted — this nest's media
+    /// proxy serves it whatever the post's home, so it always streams, through
+    /// the same pinned reader, its ticket carried verbatim in the path.
+    public func proxiedVideoPlayback(_ path: String) async -> VideoPlaybackMedia? {
+        await playback(block: .proxiedVideo(path: path, alt: ""), hash: nil, home: nil)
+    }
+
+    /// The one turn of a `playbackSource` answer into what the player opens, for
+    /// both video arms. `hash` is the blob a `Video` names (`nil` for a
+    /// `ProxiedVideo`, which has no blob and is never fetched through the plane).
+    private func playback(block: RenderBlock, hash: String?, home: FfiPostBlobHome?) async -> VideoPlaybackMedia? {
         guard let manager, let api else { return nil }
         // The answer belongs to the manager that gave it (see
         // ``startPostMediaFetch(_:home:)``): one outliving its actor is dropped.
         let generation = managerGeneration
-        let source = await manager.playbackSource(block: .video(hash: hash, alt: ""))
+        let source = await manager.playbackSource(block: block)
         guard generation == managerGeneration else { return nil }
         switch VideoPlaybackPlan(source) {
         case .stream(let path):
             // A post homed on another nest is never streamed: the player dials
             // only this nest, so its bytes come through the shared plane (the
             // post's own home, capped and content-address checked) and play from
-            // a file, like a sealed item.
-            guard home != nil else { return api.contentUrl(path: path)?.absoluteURL }
+            // a file, like a sealed item. A proxied path has no blob to fetch.
+            guard let hash, home != nil else { return .stream(nestUrl: api.nodeUrl.absoluteString, path: path) }
             return await openedPlaybackFile(hash, home: home, generation: generation)
+                .map { VideoPlaybackMedia.file($0, held: .home, hash: hash) }
         case .openSealed(let sealedHash):
             return await openedPlaybackFile(sealedHash, home: home, generation: generation)
+                .map { VideoPlaybackMedia.file($0, held: .sealed, hash: sealedHash) }
         case .unplayable:
             return nil
         }
@@ -1449,6 +1606,20 @@ public final class FeedVM {
         return (try? await api.trainedTopicsList()) ?? []
     }
 
+    /// The `labeler:<hex>` factors of every labeler the caller is subscribed
+    /// to — the create-feed `feed-factor-select` picker's second source.
+    /// One-shot read of the same `LabelerCatalogMachine` the catalog page
+    /// builds (windows' `AppendSubscribedLabelerFactorsAsync`); unsubscribed
+    /// rows are excluded (composing one writes an entry the nest has no
+    /// scores for). Best-effort: empty on failure, never blocks the page.
+    public func subscribedLabelerFactors() async -> [String] {
+        guard let api else { return [] }
+        let observer = LabelerCatalogObserverBox()
+        guard let machine = try? await api.labelerCatalogMachine(observer: observer) else { return [] }
+        await machine.refresh()
+        return machine.snapshot().entries.filter(\.subscribed).map(\.factor)
+    }
+
     // ── Interaction bar (client glue — NOT a manager action) ────────────────
     /// The last failure a feed verb (like / repost / reply / quote) landed on
     /// the page's `error-message`, so the verb's next success clears exactly
@@ -1512,6 +1683,15 @@ public final class FeedVM {
     /// repost ever existed). Mirrors `likePost` above.
     public func repostPost(postId: String) async {
         await runVerb { try await $0.repost(postId: postId) }
+    }
+    /// Toggle the viewer's own reaction of `emoji` on a post — one verb,
+    /// `FeedManager::react` composes or deletes the wordless `React` post and
+    /// folds the tally itself (`feed.md` § Layout & flow → *Reaction posts
+    /// count and paint*). A bridged target is refused shared-side
+    /// (`REACT_REFUSED_NOT_NATIVE`) and surfaces on `error-message` via
+    /// `runVerb`. Drives `post-reaction-pill`.
+    public func reactPost(postId: String, emoji: String) async {
+        await runVerb { try await $0.react(postId: postId, emoji: emoji) }
     }
 
     // Reply/quote are COMPOSED posts, not one-way interact calls: the nest's

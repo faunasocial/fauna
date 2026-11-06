@@ -57,30 +57,30 @@ Stamped 2026-09-19 at f62a5e4e1c.
 | web | — absent | |
 | linux | — absent | |
 | windows | — absent | |
-| macos |  no run recorded | |
-| ios | ✅ full | 0.1.2-dev+fe03cd4e standalone |
+| macos | ❌ failing | 0.1.6-dev+8438e5ce standalone |
+| ios | ✅ full | 0.1.5-dev+b88bb52f standalone |
 | android |  no run recorded | |
 | tui | — absent | |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
 | 1 | app | `tests/e2e-unified/tests/test_photo_backup_library_ingest.py::test_a_photo_in_the_library_reaches_the_nest_and_shows_in_media` | ios (macos): passed |
-| 1 | app | `tests/e2e-unified/tests/real_session/test_photo_backup_macos.py::test_a_photo_in_the_library_reaches_the_nest_and_shows_in_media` | — |
+| 1 | app | `tests/e2e-unified/tests/real_session/test_photo_backup_macos.py::test_a_photo_in_the_library_reaches_the_nest_and_shows_in_media` | macos (macos): error |
 | 2 | app | `tests/e2e-unified/tests/test_photo_backup_library_ingest.py::test_a_photo_in_the_library_reaches_the_nest_and_shows_in_media` | ios (macos): passed |
-| 2 | app | `tests/e2e-unified/tests/real_session/test_photo_backup_macos.py::test_a_photo_in_the_library_reaches_the_nest_and_shows_in_media` | — |
+| 2 | app | `tests/e2e-unified/tests/real_session/test_photo_backup_macos.py::test_a_photo_in_the_library_reaches_the_nest_and_shows_in_media` | macos (macos): error |
 | 3 | app | `tests/e2e-unified/tests/test_photo_backup_unattended.py::test_a_new_photo_goes_up_with_nothing_pressed` | ios (macos): passed |
 | 3 | app | `tests/e2e-unified/tests/test_photo_backup_unattended.py::test_the_scheduled_background_pass_runs_the_real_ingest` | ios (macos): passed |
 | 3 | app | `tests/e2e-unified/tests/test_photo_backup_pass_coalescing.py::test_a_photo_arriving_mid_pass_is_backed_up_once_by_one_trailing_pass` | ios (macos): passed |
-| 3 | app | `tests/e2e-unified/tests/real_session/test_photo_backup_macos.py::test_a_new_photo_goes_up_with_nothing_pressed` | — |
-| 3 | app | `tests/e2e-unified/tests/real_session/test_photo_backup_macos.py::test_a_photo_arriving_mid_pass_is_backed_up_once_by_one_trailing_pass` | — |
+| 3 | app | `tests/e2e-unified/tests/real_session/test_photo_backup_macos.py::test_a_new_photo_goes_up_with_nothing_pressed` | macos (macos): error |
+| 3 | app | `tests/e2e-unified/tests/real_session/test_photo_backup_macos.py::test_a_photo_arriving_mid_pass_is_backed_up_once_by_one_trailing_pass` | macos (macos): error |
 | 4 | app | `tests/e2e-unified/tests/test_photo_backup_library_ingest.py::test_a_photo_in_the_library_reaches_the_nest_and_shows_in_media` | ios (macos): passed |
-| 4 | app | `tests/e2e-unified/tests/real_session/test_photo_backup_macos.py::test_a_photo_in_the_library_reaches_the_nest_and_shows_in_media` | — |
+| 4 | app | `tests/e2e-unified/tests/real_session/test_photo_backup_macos.py::test_a_photo_in_the_library_reaches_the_nest_and_shows_in_media` | macos (macos): error |
 | 5 | app | `tests/e2e-unified/tests/test_photo_backup_pass_progress.py::test_a_running_pass_shows_how_far_it_has_got` | ios (macos): passed |
-| 5 | app | `tests/e2e-unified/tests/real_session/test_photo_backup_macos.py::test_a_running_pass_shows_how_far_it_has_got` | — |
+| 5 | app | `tests/e2e-unified/tests/real_session/test_photo_backup_macos.py::test_a_running_pass_shows_how_far_it_has_got` | macos (macos): error |
 | 6 | app | `tests/e2e-unified/tests/test_photo_backup_pass_progress.py::test_sync_now_starts_a_pass_that_nothing_else_would_have_started` | ios (macos): passed |
-| 6 | app | `tests/e2e-unified/tests/real_session/test_photo_backup_macos.py::test_sync_now_starts_a_pass_that_nothing_else_would_have_started` | — |
+| 6 | app | `tests/e2e-unified/tests/real_session/test_photo_backup_macos.py::test_sync_now_starts_a_pass_that_nothing_else_would_have_started` | macos (macos): error |
 | 7 | app | `tests/e2e-unified/tests/test_photo_backup_one_way.py::test_deleting_the_backed_up_copy_leaves_the_camera_roll_alone` | ios (macos): passed |
-| 7 | app | `tests/e2e-unified/tests/real_session/test_photo_backup_macos.py::test_deleting_the_backed_up_copy_leaves_the_camera_roll_alone` | — |
+| 7 | app | `tests/e2e-unified/tests/real_session/test_photo_backup_macos.py::test_deleting_the_backed_up_copy_leaves_the_camera_roll_alone` | macos (macos): error |
 | 8 | app | `tests/e2e-unified/tests/test_photo_backup_byte_fidelity.py::test_the_stored_copy_is_the_phones_pixels_with_only_the_metadata_gone` | ios (macos): passed |
-| 8 | app | `tests/e2e-unified/tests/real_session/test_photo_backup_macos.py::test_the_stored_copy_is_the_phones_pixels_with_only_the_metadata_gone` | — |
+| 8 | app | `tests/e2e-unified/tests/real_session/test_photo_backup_macos.py::test_the_stored_copy_is_the_phones_pixels_with_only_the_metadata_gone` | macos (macos): error |
 <!-- features-render:end -->

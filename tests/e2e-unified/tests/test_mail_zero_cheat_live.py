@@ -1,6 +1,7 @@
 """tier_4 (live-remote, OPT-IN): a believable mail RECEIVE round-trip against a
 live nest, where **the test uses NO nest APIs** — every nest-side
-step is driven through the linux app UI. The only non-UI component is a plain
+step is driven through the app UI (every app's driver; the CD gate runs it on
+tui). The only non-UI component is a plain
 **IMAP client acting as the external MUA** (the stand-in for macOS Mail /
 Thunderbird), which is exactly the second mail party a real inbound needs.
 
@@ -33,9 +34,8 @@ This test calls NONE of those. The flow:
      replaces it later.
   6. **See that same mail in the client's conversations view** (UI).
 
-Navigation note: the linux e2e driver implements every "go to page X" via the
-client's nav-state hook (`set_state({"nav": ...})`) — the platform's standard
-equivalent of clicking a tab, used by ALL linux e2e tests. The test does NOT
+Navigation note: pages are reached by clicks — the tab, then the shell rail's
+row (``helpers/live_admin.py``). The test does NOT
 inject a session, fake auth, or inject the inbound message; it really signs
 in/claims, really resets, and the inbound is a real IMAP delivery.
 
@@ -74,7 +74,6 @@ import time
 
 import pytest
 
-from helpers.app_surface import skip_unbuilt
 from helpers.live_admin import (
     approve_pending_bridges,
     enable_mail,
@@ -148,15 +147,6 @@ def _reclaim_after_ui_reset(app) -> None:
 
 @pytest.mark.feature("email-in-conversations")
 def test_live_mail_receive_ui_only(app):
-    if not app.driver.is_linux():
-        skip_unbuilt(
-            app.driver,
-            surface="the live mail receive-and-render-in-conversations drive",
-            detail="drives the linux Fauna app UI + conversations; the "
-            "other apps are the remaining cross-app follow-on",
-            tracked="mail-settings.md",
-        )
-
     # 0) Preflight (skipped with a claim code: an unclaimed box is then the
     #    expected start): a box that does not know the resolved seed skips as
     #    environment, naming the seed's source.
@@ -164,7 +154,10 @@ def test_live_mail_receive_ui_only(app):
         live_box_door.preflight_admin(URL, SECRET, SECRET_SOURCE)
 
     # 1) Reach the admin shell purely through the wizard (claim or sign in).
-    state = reach_admin_shell(app, nest_url=URL, secret_hex=SECRET, claim_code=CLAIM_CODE)
+    state = reach_admin_shell(
+        app, nest_url=URL, secret_hex=SECRET, claim_code=CLAIM_CODE,
+        claim_handle=ADDRESS if CLAIM_CODE else "",
+    )
     print(f"\n[zero-cheat] reached admin shell via: {state}")
 
     # Wait for the WS-RPC to actually connect before driving any nest-backed UI

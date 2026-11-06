@@ -74,26 +74,26 @@ Stamped 2026-10-01 at dfa27a899f.
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ⚠ partial | 0.1.5-dev+110d1248 standalone |
-| linux | ✅ full | 0.1.4-dev+ea391d07 standalone |
-| windows | ⚠ partial | 0.1.2-dev+068e152c.dirty standalone |
-| macos | ⚠ partial | 0.1.5-dev+61b844ca standalone |
-| ios | ⚠ partial | 0.1.5-dev+61b844ca standalone |
-| android |  no run recorded | |
-| tui | ⚠ partial | 0.1.3-dev+6e958b22 standalone |
+| web | ✅ full | 0.1.5-dev+1e755069 standalone |
+| linux | ✅ full | 0.1.5-dev+1e755069 standalone |
+| windows | ✅ full | 0.1.5-dev+517219d5 standalone |
+| macos | ✅ full | 0.1.5-dev+3f9f2b95 standalone |
+| ios | ✅ full | 0.1.5-dev+1e755069 standalone |
+| android | 🚧 unbuilt | 0.1.5-dev+1e755069 standalone |
+| tui | ✅ full | 0.1.5-dev+1e755069 standalone |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
-| 1 | app | `tests/e2e-unified/tests/test_subscriptions.py::test_subscription_approve_grants_keyblob` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 1 | app | `tests/e2e-unified/tests/test_subscriptions.py::test_follow_auto_grants_in_encrypted_mode` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 1 | app | `tests/e2e-unified/tests/test_subscriptions.py::test_the_author_pumps_poll_backstop_grants_a_ui_subscribe_with_no_author_action` | web (linux): skipped, linux (linux): passed, windows (windows): skipped, macos (macos): error, ios (macos): error, tui (linux): passed |
-| 1 | app | `tests/e2e-unified/tests/test_subscriptions.py::test_ui_subscribe_publishes_pq_hybrid_encapsulation_key` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 2 | app | `tests/e2e-unified/tests/test_profile.py::test_other_profile_offers_render_and_subscribe` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 2 | app | `tests/e2e-unified/tests/test_profile.py::test_activating_the_tiers_tab_rereads_the_offers_section` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): failed |
-| 3 | app | `tests/e2e-unified/tests/test_subscriptions.py::test_subscription_settings_lists_active_subscription_and_unsubscribes` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 4 | app | `tests/e2e-unified/tests/test_subscription_payments.py::test_provider_config_add_and_remove` | web (linux): failed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 1 | app | `tests/e2e-unified/tests/test_subscriptions.py::test_subscription_approve_grants_keyblob` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 1 | app | `tests/e2e-unified/tests/test_subscriptions.py::test_follow_auto_grants_in_encrypted_mode` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 1 | app | `tests/e2e-unified/tests/test_subscriptions.py::test_the_author_pumps_poll_backstop_grants_a_ui_subscribe_with_no_author_action` — requires `profile-offers-browse` (not built: android) | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 1 | app | `tests/e2e-unified/tests/test_subscriptions.py::test_ui_subscribe_publishes_pq_hybrid_encapsulation_key` — requires `profile-offers-browse` (not built: android) | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 2 | app | `tests/e2e-unified/tests/test_profile.py::test_other_profile_offers_render_and_subscribe` — requires `profile-offers-browse` (not built: android) | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 2 | app | `tests/e2e-unified/tests/test_profile.py::test_activating_the_tiers_tab_rereads_the_offers_section` — requires `profile-offers-browse` (not built: android) | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 3 | app | `tests/e2e-unified/tests/test_subscriptions.py::test_subscription_settings_lists_active_subscription_and_unsubscribes` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 4 | app | `tests/e2e-unified/tests/test_subscription_payments.py::test_provider_config_add_and_remove` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 4 | app | `tests/e2e-unified/tests/test_subscription_payments.py::test_provider_webhook_url_preview` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 4 | app | `tests/e2e-unified/tests/test_subscription_payments.py::test_provider_return_url_display` | web (linux): passed, linux (linux): passed, tui (linux): passed |
+| 4 | app | `tests/e2e-unified/tests/test_subscription_payments.py::test_provider_return_url_display` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 4 | app | `tests/e2e-unified/tests/test_subscription_payments.py::test_claim_redeem_via_ui` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 4 | app | `tests/e2e-unified/tests/test_subscription_payments.py::test_manual_claim_mint_and_list` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 5 | nest | `tests/e2e-unified/tests/api/test_payments_webhook.py::test_signed_webhook_with_reference_enqueues_the_grant` | nest (linux): passed |
@@ -101,18 +101,18 @@ Stamped 2026-10-01 at dfa27a899f.
 | 5 | nest | `tests/e2e-unified/tests/api/test_payments_webhook.py::test_claims_mint_and_list_cover_the_manual_no_api_path` | nest (linux): passed |
 | 5 | nest | `tests/e2e-unified/tests/api/test_payments_webhook.py::test_refund_before_approval_strips_the_payment_marker` | nest (linux): passed |
 | 5 | nest | `tests/e2e-unified/tests/api/test_payments_webhook.py::test_bad_signature_and_unknown_provider_are_non_2xx` | nest (linux): passed |
-| 6 | app | `tests/e2e-unified/tests/test_subscriptions.py::test_subscription_approve_grants_keyblob` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 7 | app | `tests/e2e-unified/tests/test_subscription_tier_management.py::test_editing_a_tier_changes_what_it_offers` | web (linux): passed, linux (linux): passed, tui (linux): passed |
-| 8 | app | `tests/e2e-unified/tests/test_subscription_tier_management.py::test_deleting_a_tier_removes_it` | web (linux): passed, linux (linux): passed, tui (linux): passed |
-| 9 | app | `tests/e2e-unified/tests/test_subscriptions.py::test_subscription_approve_grants_keyblob` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 10 | app | `tests/e2e-unified/tests/test_subscription_tier_management.py::test_turning_a_subscribe_request_down` | web (linux): passed, linux (linux): passed, tui (linux): passed |
-| 11 | app | `tests/e2e-unified/tests/test_subscriptions.py::test_subscription_approve_grants_keyblob` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 12 | app | `tests/e2e-unified/tests/test_subscription_tier_management.py::test_removing_a_subscriber_cuts_them_off_from_later_posts` | web (linux): passed, linux (linux): passed, tui (linux): passed |
-| 13 | app | `tests/e2e-unified/tests/test_subscription_tier_management.py::test_a_higher_tier_opens_every_lower_tiers_posts` | web (linux): passed, linux (linux): passed, tui (linux): passed |
+| 6 | app | `tests/e2e-unified/tests/test_subscriptions.py::test_subscription_approve_grants_keyblob` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 7 | app | `tests/e2e-unified/tests/test_subscription_tier_management.py::test_editing_a_tier_changes_what_it_offers` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 8 | app | `tests/e2e-unified/tests/test_subscription_tier_management.py::test_deleting_a_tier_removes_it` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 9 | app | `tests/e2e-unified/tests/test_subscriptions.py::test_subscription_approve_grants_keyblob` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 10 | app | `tests/e2e-unified/tests/test_subscription_tier_management.py::test_turning_a_subscribe_request_down` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 11 | app | `tests/e2e-unified/tests/test_subscriptions.py::test_subscription_approve_grants_keyblob` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 12 | app | `tests/e2e-unified/tests/test_subscription_tier_management.py::test_removing_a_subscriber_cuts_them_off_from_later_posts` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 13 | app | `tests/e2e-unified/tests/test_subscription_tier_management.py::test_a_higher_tier_opens_every_lower_tiers_posts` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 14 | nest | `tests/e2e-unified/tests/api/test_payments_webhook.py::test_a_paid_subscription_ends_when_its_window_runs_out_and_a_renewal_extends_it` | nest (linux): passed |
 | 15 | nest | `tests/e2e-unified/tests/api/test_payments_webhook.py::test_a_refund_on_a_granted_subscription_ends_access` | nest (linux): passed |
 | 16 | nest | `tests/e2e-unified/tests/api/test_payments_webhook.py::test_providers_list_shows_config_without_secret` | nest (linux): passed |
 | 17 | nest | `tests/e2e-unified/tests/api/test_reserved_room_tier_name.py::test_a_creator_cannot_name_a_tier_room` | nest (linux): passed |
-| 18 | app | `tests/e2e-unified/tests/test_subscription_payments.py::test_manual_claim_void` | web (linux): passed, linux (linux): passed, tui (linux): passed |
-| 19 | app | `tests/e2e-unified/tests/test_federated_follow_cross_nest.py::test_a_reader_follows_an_author_on_another_nest_and_their_posts_reach_the_readers_feed` | linux (linux): passed, tui (linux): passed |
+| 18 | app | `tests/e2e-unified/tests/test_subscription_payments.py::test_manual_claim_void` — requires `subscription-claim-void-button` (not built: android) | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 19 | app | `tests/e2e-unified/tests/test_federated_follow_cross_nest.py::test_a_reader_follows_an_author_on_another_nest_and_their_posts_reach_the_readers_feed` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 <!-- features-render:end -->

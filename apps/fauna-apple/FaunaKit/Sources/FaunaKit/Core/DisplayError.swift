@@ -54,6 +54,16 @@ public enum DisplayError {
         return "\(error)"
     }
 
+    /// The failure text when it is the first-listing gate's refusal
+    /// (`common.needs_nest` / `common.needs_other_device`), else `nil` — the one
+    /// shared `refusedAsNotReady` predicate over ``message(_:)``, so a preference
+    /// page whose background load is otherwise retried or defaulted quietly says
+    /// why it has not loaded (`account-client-lifecycle.md` § The client-side
+    /// lifecycle → *The first listing*, clauses (4) and (5)).
+    public static func firstListingRefusal(_ error: Error) -> String? {
+        message(error).flatMap { refusedAsNotReady(reason: $0) ? $0 : nil }
+    }
+
     /// Was this error a cancellation rather than a failure?
     ///
     /// Three spellings reach us and all three mean the same thing: Swift

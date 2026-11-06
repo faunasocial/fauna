@@ -32,8 +32,15 @@ pub struct ProviderSetRequest {
     /// Webhook-verification secret — verify-only (checks webhook
     /// signatures; can never move money or read payout accounts).
     pub webhook_secret: String,
-    /// The tier a verified payment entitles (first cut: one mapping).
+    /// The tier a verified payment entitles.
     pub tier: String,
+    /// The product the tier is sold as, in the provider's own reference
+    /// (Stripe: the Payment Link id, `plink_…`) — a verified payment for
+    /// anything else on the account mints nothing (monetization.md § Pillar 3
+    /// → *Configuration*). Absent keeps the saved value (an older client
+    /// never clears it); an empty string clears it, mapping every payment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub product_ref: Option<String>,
     /// Forward-compat catch-all: unknown keys from a newer peer are
     /// preserved here and re-emitted on encode (transport.md § Schema
     /// and forward-compat discipline, rule 4).
@@ -78,6 +85,10 @@ pub struct ProviderItem {
     pub last_verified_at: Option<u64>,
     #[serde(default)]
     pub last_rejected_at: Option<u64>,
+    /// The product the tier is sold as ([`ProviderSetRequest::product_ref`]);
+    /// absent = every verified payment maps to the tier.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub product_ref: Option<String>,
     /// Forward-compat catch-all: unknown keys from a newer peer are
     /// preserved here and re-emitted on encode (transport.md § Schema
     /// and forward-compat discipline, rule 4).

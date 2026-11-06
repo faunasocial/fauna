@@ -80,6 +80,22 @@ public final class AppMessages {
         if fallback != message { write(slot, fallback) }
     }
 
+    /// A navigation patch's clear: errors belong to the page that raised them, so
+    /// the three slots empty — except that a banner still on screen after the
+    /// navigation (a STANDING condition the destination page keeps painting,
+    /// e.g. the conversations page's "update the app" refusal, whose banner was
+    /// already mounted before the patch landed) fired its `onAppear` BEFORE the
+    /// clear and will not fire it again, so the clear would leave the slot empty
+    /// under a visible banner and the state-protocol read of `messages.error`
+    /// would say "no error". Banners of departed pages have already retracted
+    /// their entries (`bannerDisappeared`), so what is left is what is shown.
+    /// One implementation for macOS and iOS.
+    public static func clearForNavigation() {
+        error = showing[.error]?.last?.message
+        warning = showing[.warning]?.last?.message
+        info = showing[.info]?.last?.message
+    }
+
     /// Forget every showing banner and empty the three slots — the unit tests'
     /// clean page.
     static func resetBannerSlots() {

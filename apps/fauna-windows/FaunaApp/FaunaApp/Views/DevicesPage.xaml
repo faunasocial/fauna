@@ -101,6 +101,7 @@
                                 <Grid.RowDefinitions>
                                     <RowDefinition Height="Auto" />
                                     <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="Auto" />
                                 </Grid.RowDefinitions>
 
                                 <Ellipse Grid.Column="0" Width="8" Height="8" VerticalAlignment="Center"
@@ -208,9 +209,9 @@
                                 <!-- Whether this device takes part in peer transfers
                                      (behavior/p2p.md § Per-device participation): the own
                                      row's switch is the device's own, both directions; any
-                                     other row can only be asked off. The paint's two arms
-                                     are Core.ViewModels.DeviceParticipationPaint (tui's,
-                                     rule for rule). A CheckBox, as tui's checkbox: its
+                                     other row can only be asked off. The paint is the
+                                     machine's published DeviceSummary.p2pParticipationPaint,
+                                     drawn as is (a null paint draws nothing). A CheckBox, as tui's checkbox: its
                                      TogglePattern is the `checked` mirror the driver reads,
                                      and its Content TextBlock is the label get_text reads
                                      (no static Name). Disabled when the gesture could not
@@ -220,9 +221,39 @@
                                           Content="{Binding ParticipationLabel}"
                                           IsChecked="{Binding ParticipationChecked, Mode=OneWay}"
                                           IsEnabled="{Binding ParticipationActionable}"
+                                          Visibility="{Binding ParticipationVisibility}"
                                           MinWidth="0" VerticalAlignment="Center"
                                           Tag="{Binding Index}" Click="ParticipationToggle_Click" />
+                                <!-- The rename affordance (ui/devices.md § Device names; IDs
+                                     user-approved 2026-11-01): on every card, opens the one
+                                     editor below keyed by device_id. Literal id for the same
+                                     reason as device-card above. -->
+                                <Button
+                                        AutomationProperties.AutomationId="device-rename-button"
+                                        Content="{loc:Localize Key=devices/rename}"
+                                        Padding="8,2" FontSize="12" VerticalAlignment="Center"
+                                        Click="RenameOpen_Click" />
                                 </controls:WrapStack>
+                                <!-- The open name editor (one at a time, keyed by device_id).
+                                     Collapsed on every other card so count() sees at most one
+                                     of each id. -->
+                                <StackPanel Grid.Row="2" Grid.Column="1" Grid.ColumnSpan="2"
+                                            Orientation="Horizontal" Spacing="8"
+                                            Visibility="{Binding EditorVisibility}">
+                                    <TextBox AutomationProperties.AutomationId="device-rename-input"
+                                             Header="{loc:Localize Key=devices/rename_label}"
+                                             Text="{Binding EditorDraft}" MinWidth="200"
+                                             TextChanged="RenameInput_TextChanged"
+                                             KeyDown="RenameInput_KeyDown" />
+                                    <Button AutomationProperties.AutomationId="device-rename-confirm-button"
+                                            Content="{loc:Localize Key=devices/rename_confirm}"
+                                            VerticalAlignment="Bottom"
+                                            Click="RenameConfirm_Click" />
+                                    <Button AutomationProperties.AutomationId="device-rename-cancel-button"
+                                            Content="{loc:Localize Key=common/cancel}"
+                                            VerticalAlignment="Bottom"
+                                            Click="RenameCancel_Click" />
+                                </StackPanel>
                                 <Button Grid.Column="2"
                                         AutomationProperties.AutomationId="device-remove-button"
                                         Content="&#xE74D;" FontFamily="Segoe MDL2 Assets"
@@ -395,6 +426,15 @@
                                            Opacity="0.6" FontSize="12" />
                                 <TextBlock AutomationProperties.AutomationId="custody-held-bytes"
                                            Text="{Binding Bytes}" FontSize="12" />
+                                <!-- custody-held-restore-address (devices.md § Custody
+                                     facet): a NEST-form hold only — the accept's URL
+                                     verbatim, selectable so the host can copy it out to
+                                     the owner. Collapsed (absent) for a device-form hold. -->
+                                <TextBlock AutomationProperties.AutomationId="custody-held-restore-address"
+                                           Text="{Binding RestoreAddress}"
+                                           Visibility="{Binding RestoreAddressVisibility}"
+                                           IsTextSelectionEnabled="True"
+                                           TextWrapping="Wrap" FontSize="12" />
                                 <!-- The budget commits on Enter AND on blur — the
                                      FoldersPage member-cap shape: Enter never moves focus
                                      off a single-line TextBox, and the e2e driver's click

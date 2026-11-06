@@ -98,8 +98,10 @@ pub const KEYPACKAGE_FETCH_TARGET_LIMITER_CONFIG: LimiterConfig = LimiterConfig 
 /// family, each under its own bucket key and the `*_TARGET_MAX` below
 /// ([`Limiter::check_with_max`]), so the sweep's cutoff is right for all of
 /// them. Each key names something this nest owns — a hosted account, the
-/// admin's queue, the whole store — never the self-minted origin `nest_id`, so a
-/// stranger minting fresh keypairs cannot multiply it. Hard constants (abuse
+/// admin's queue, the whole store — never the self-minted origin `nest_id` alone, so a
+/// stranger minting fresh keypairs cannot multiply it (an origin-keyed bucket
+/// only ever sits AHEAD of such a key, narrowing one origin's share of it —
+/// [`OBLIGATION_DELIVER_ORIGIN_TARGET_MAX`]). Hard constants (abuse
 /// bounds the binary sets, not admin preferences — the one-configuration-surface
 /// rule).
 pub const FEDERATION_TARGET_LIMITER_CONFIG: LimiterConfig = LimiterConfig {
@@ -130,6 +132,13 @@ pub const ABUSE_REPORT_SUBJECT_TARGET_MAX: u32 = 10;
 /// `fauna.federation.abuse_report.deliver`, over the whole nest — the admin's
 /// queue and doorbell: bucket key `(0, 0, "abuse_report")`.
 pub const ABUSE_REPORT_NEST_TARGET_MAX: u32 = 100;
+
+/// `fauna.federation.moderation.obligation.deliver`, per origin nest, checked
+/// ahead of the two below: bucket key `(origin nest_id, 0,
+/// "obligation_deliver_origin")`. The one key here naming the caller's own id:
+/// it only narrows what one origin may take of the shared pair, so a stranger
+/// minting fresh keypairs still meets the nest-wide bound.
+pub const OBLIGATION_DELIVER_ORIGIN_TARGET_MAX: u32 = 20;
 
 /// `fauna.federation.moderation.obligation.deliver`, per hosted author: bucket
 /// key `(author, 0, "obligation_deliver")` (`moderation.md` § Legal takedown →

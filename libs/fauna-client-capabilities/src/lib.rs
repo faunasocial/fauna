@@ -48,7 +48,8 @@ use fauna_mls::wrapped_blob::{
     GrantBlob, GrantWindow, PriorMsekGeneration, ScopeTuple, ScopeWraps, WrapError,
     WrappedScopeKey, bounded_mail_epoch_wraps, bounded_mail_epoch_wraps_for_range,
     build_bounded_mail_grant, build_grant_blob, build_grant_blob_with_epochs, build_renewal_wraps,
-    derive_recipient_mail_capability_secret, mail_sealing_epoch_of,
+    derive_recipient_calendar_capability_secret, derive_recipient_mail_capability_secret,
+    mail_sealing_epoch_of,
 };
 
 /// Advisory default grant window: ~90 days, in seconds — `GrantWindow`'s wire
@@ -118,6 +119,17 @@ pub enum DerivePayloadError {
     /// created that tier in encrypted mode (`custody::current_period`).
     #[error("no period key held for tier {0:?} (not created in encrypted mode)")]
     TierNotFound(String),
+    /// `content.read{post:tier}` named a reserved system tier — the free
+    /// `followers` tier, the hidden `only-me` tier or the constant `room`
+    /// tier (`fauna_core::subscription::is_reserved_tier`). Their period
+    /// keys never leave the owner's apps as a grant payload: the web-serve
+    /// holder exists to serve the author's **paid** web-published posts, and
+    /// nobody pays for a reserved tier (`ui/nests.md` § Trust facet — grants
+    /// → *Mint* → *Which tiers*, ruled 2026-10-23). Refused whether or not the
+    /// key is held, so the catalog's derivability probe and a hand-built
+    /// `Mint` answer alike.
+    #[error("tier {0:?} is a reserved system tier; its period key is never a grant payload")]
+    ReservedTier(String),
     /// `content.read{post:tier}` was asked of a caller that read no period-key
     /// custody (the store was not up, or the caller mints no post tier) —
     /// never answered as "no key held", which is [`Self::TierNotFound`].
@@ -195,7 +207,20 @@ pub fn derive_scope_payload(
 ) -> Result<Option<Vec<u8>>, DerivePayloadError> {
     match tuple.class.as_str() {
         ScopeTuple::CLASS_CONTENT_READ => match tuple.kind.as_deref() {
-            Some(ScopeTuple::KIND_MAIL) | Some(ScopeTuple::KIND_CALENDAR) => {
+            // The calendar's OWN standing secret — never the mail one, so the
+            // calendar grant opens `calendar-record` envelopes and nothing else
+            // (`owner-key-material.md` § Path B-sibling-5 → *Capability
+            // payload*; `key-material-hierarchy.md` § Don't do these). Same
+            // `32 + 2400` byte contract as the mail arm below, so the holder's
+            // length-dispatch opener is unchanged.
+            Some(ScopeTuple::KIND_CALENDAR) => {
+                let msek = mail
+                    .msek
+                    .as_ref()
+                    .ok_or(DerivePayloadError::MailNotEnabled)?;
+                Ok(Some(derive_recipient_calendar_capability_secret(msek)))
+            }
+            Some(ScopeTuple::KIND_MAIL) => {
                 let msek = mail
                     .msek
                     .as_ref()
@@ -221,6 +246,12 @@ pub fn derive_scope_payload(
                     .tier
                     .as_deref()
                     .ok_or(DerivePayloadError::PostMissingTier)?;
+                // Before the custody lookup, so the answer does not depend on
+                // whether this device happens to hold the key: a reserved
+                // tier is refused as such, never as "not held".
+                if fauna_core::subscription::is_reserved_tier(tier) {
+                    return Err(DerivePayloadError::ReservedTier(tier.to_string()));
+                }
                 let custody = period_keys
                     .ok_or_else(|| DerivePayloadError::PeriodKeysUnread(tier.to_string()))?;
                 let period = current_period(custody, tier)
@@ -308,36 +339,46 @@ fn check_content_write(tuple: &ScopeTuple) -> Result<(), String> {
 }
 
 /// A `deposit` tuple's shape: exactly [`ScopeTuple::folder_deposit`] over
-/// some folder id — the canonical decimal spelling, nothing else.
+/// some folder id and some writer — the canonical decimal spelling and a
+/// canonical `writer:<hex>` factor, nothing else (`folder-deposit.md` § The
+/// depositor signs, the owner's device verifies: a deposit scope is never
+/// minted blind of its writer).
 fn check_deposit(tuple: &ScopeTuple) -> Result<(), String> {
     let id = tuple
         .set
         .as_deref()
         .and_then(|s| s.parse::<i64>().ok())
         .ok_or_else(|| format!("set {:?} is not a folder id", tuple.set))?;
-    if tuple.is_folder_deposit_for(id) {
+    let writer = tuple
+        .factor
+        .as_deref()
+        .and_then(fauna_core::grant_event::parse_writer_factor)
+        .ok_or_else(|| format!("factor {:?} is not a canonical writer:<hex>", tuple.factor))?;
+    if tuple.names_deposit_writer(id, &writer) {
         Ok(())
     } else {
-        Err("a deposit tuple carries only its folder id, canonically spelled".into())
+        Err("a deposit tuple carries only its folder id and its writer, canonically spelled".into())
     }
 }
 
 /// The folder deposit twin's tuples (`file-sync.md` § Third-party deposit
-/// ingress): one keyless `deposit` tuple per folder, wrapping nothing — the
-/// audit + revocation record the nest's deposit door re-resolves at every
-/// deposit. What [`ext_consent::prepare_ext_consent_grant`] adds to the
-/// consent's one grant for its `fauna:folder:deposit:<id>` scopes.
+/// ingress): one keyless `deposit` tuple per folder, each confined to the
+/// principal's attested writer key, wrapping nothing — the audit + revocation
+/// record the nest's deposit door re-resolves at every deposit. What
+/// [`ext_consent::prepare_ext_consent_grant`] adds to the consent's one grant
+/// for its `fauna:folder:deposit:<id>` scopes.
 #[must_use]
-pub fn folder_deposit_scope_wraps(folder_ids: &[i64]) -> Vec<ScopeWraps> {
+pub fn folder_deposit_scope_wraps(folder_ids: &[i64], writer: &[u8; 32]) -> Vec<ScopeWraps> {
     folder_ids
         .iter()
-        .map(|id| (ScopeTuple::folder_deposit(*id), Vec::new()))
+        .map(|id| (ScopeTuple::folder_deposit(*id, writer), Vec::new()))
         .collect()
 }
 
 /// The folder deposit twin as a grant of its own — [`folder_deposit_scope_wraps`]
-/// held by the principal's attested X25519 key, minus the ledger `Mint` (the
-/// consent-time mint is [`ext_consent::prepare_ext_consent_grant`]'s).
+/// held by the principal's attested X25519 key and confined to its attested
+/// writer key, minus the ledger `Mint` (the consent-time mint is
+/// [`ext_consent::prepare_ext_consent_grant`]'s).
 ///
 /// # Errors
 ///
@@ -346,6 +387,7 @@ pub fn mint_folder_deposit_grant(
     owner_actor_id: &[u8; 32],
     grant_id: &[u8; 16],
     holder_pubkey: &[u8; 32],
+    writer: &[u8; 32],
     window: GrantWindow,
     folder_ids: &[i64],
 ) -> Result<GrantBlob, MintGrantError> {
@@ -355,7 +397,7 @@ pub fn mint_folder_deposit_grant(
         holder_pubkey,
         None,
         window,
-        &folder_deposit_scope_wraps(folder_ids),
+        &folder_deposit_scope_wraps(folder_ids, writer),
     )?)
 }
 
@@ -434,12 +476,14 @@ fn delegable_pair_payload(
     payload
 }
 
-/// A grant built only of delegable-kind tuples — the consent-time grant's
-/// `ext.*` reads with their writer-confined `content.write` tuples, and the
+/// A grant built only of the consent's principal tuples — the consent-time
+/// grant's `ext.*` reads with their writer-confined `content.write` tuples,
+/// its writer-confined folder `deposit` tuples, and the
 /// `fauna:personalization:rw` twin's reads, in any mix — rebuilt tuple for
 /// tuple over `delegable`: each read re-wraps that schedule's pair for its
-/// kind, each write tuple carries its writer verbatim. `None` when any tuple
-/// is of another shape, so the caller's other arms keep it.
+/// kind, each write and deposit tuple carries its writer (and folder)
+/// verbatim. `None` when any tuple is of another shape, or when the grant has
+/// neither a read nor a deposit, so the caller's other arms keep it.
 ///
 /// The succession re-mint's delegable arm
 /// ([`succession::remint_capability_grants`]): the successor re-wraps its
@@ -455,6 +499,13 @@ pub fn delegable_kinds_scope_wraps(
     };
     let mut scopes = Vec::with_capacity(tuples.len());
     for t in tuples {
+        if t.class == ScopeTuple::CLASS_DEPOSIT {
+            // Keyless and confined to its writer: carried verbatim, but only
+            // in its one canonical shape.
+            check_deposit(t).ok()?;
+            scopes.push((t.clone(), Vec::new()));
+            continue;
+        }
         let kind = t.kind.as_deref()?;
         if t.tier.is_some() || t.set.is_some() {
             return None;
@@ -473,7 +524,9 @@ pub fn delegable_kinds_scope_wraps(
     }
     scopes
         .iter()
-        .any(|(t, _)| t.class == ScopeTuple::CLASS_CONTENT_READ)
+        .any(|(t, _)| {
+            t.class == ScopeTuple::CLASS_CONTENT_READ || t.class == ScopeTuple::CLASS_DEPOSIT
+        })
         .then_some(scopes)
 }
 
@@ -1381,11 +1434,21 @@ mod tests {
         assert_eq!(&payload[32..], xwing.secret.mlkem_decaps_key());
     }
 
+    /// **The design's pinning test, at the mint** (`owner-key-material.md`
+    /// § Path B-sibling-5 → *Capability payload*): the `content.read{calendar}`
+    /// payload is the calendar's own secret in the mail byte contract — it
+    /// opens a `calendar-record` the MDA would seal, and NOT a `mail-record` or
+    /// a `card-record` of the same user; the `content.read{mail}` payload opens
+    /// no `calendar-record`.
     #[test]
-    fn calendar_scope_derives_the_same_xwing_superset() {
-        // calendar reuses the mail recipient key (same MSEK-derived seal key).
+    fn calendar_scope_payload_opens_calendar_records_only() {
+        use fauna_mls::wrapped_blob::{
+            DavKind, RecordKind, derive_dav_root, derive_recipient_dav_xwing_keypair,
+            seal_record_to_recipient_xwing, seal_to_recipient_xwing, unseal_record_hybrid,
+        };
+        let msek = [0x42u8; 32];
         let mail = MailConfig {
-            msek: Some([0x42u8; 32].into()),
+            msek: Some(msek.into()),
             ..MailConfig::default()
         };
         let cal = ScopeTuple {
@@ -1395,10 +1458,46 @@ mod tests {
             set: None,
             factor: None,
         };
-        let payload = derive_scope_payload(None, &mail, &cal)
+        let cal_payload = derive_scope_payload(None, &mail, &cal)
             .unwrap()
             .expect("calendar is key-bearing");
-        assert_eq!(payload.len(), 32 + MLKEM768_DECAPS_KEY_LEN);
+        let mail_payload = derive_scope_payload(None, &mail, &mail_scope())
+            .unwrap()
+            .expect("mail is key-bearing");
+        assert_eq!(cal_payload.len(), 32 + MLKEM768_DECAPS_KEY_LEN);
+        assert_ne!(cal_payload, mail_payload);
+
+        let dav_pub = |kind: DavKind| {
+            derive_recipient_dav_xwing_keypair(kind, &derive_dav_root(kind, &msek)).public
+        };
+        let calendar_record = seal_record_to_recipient_xwing(
+            RecordKind::Calendar,
+            b"VEVENT",
+            &dav_pub(DavKind::Calendar),
+        )
+        .unwrap();
+        let card_record =
+            seal_record_to_recipient_xwing(RecordKind::Card, b"VCARD", &dav_pub(DavKind::Card))
+                .unwrap();
+        let mail_record =
+            seal_to_recipient_xwing(b"RFC 5322", &derive_recipient_xwing_keypair(&msek).public)
+                .unwrap();
+        let open = |kind: RecordKind, env, payload: &[u8]| {
+            let sk: [u8; 32] = payload[..32].try_into().unwrap();
+            let dk: [u8; MLKEM768_DECAPS_KEY_LEN] = payload[32..].try_into().unwrap();
+            unseal_record_hybrid(kind, env, &sk, &dk)
+        };
+        assert_eq!(
+            open(RecordKind::Calendar, &calendar_record, &cal_payload).unwrap(),
+            b"VEVENT"
+        );
+        assert!(open(RecordKind::Mail, &mail_record, &cal_payload).is_err());
+        assert!(open(RecordKind::Card, &card_record, &cal_payload).is_err());
+        assert!(open(RecordKind::Calendar, &calendar_record, &mail_payload).is_err());
+        assert_eq!(
+            open(RecordKind::Mail, &mail_record, &mail_payload).unwrap(),
+            b"RFC 5322"
+        );
     }
 
     #[test]
@@ -1436,6 +1535,42 @@ mod tests {
             derive_scope_payload(None, &MailConfig::default(), &post_scope("gold")),
             Err(DerivePayloadError::PeriodKeysUnread("gold".into()))
         );
+    }
+
+    /// The reserved system tiers' period keys never leave the owner's apps as
+    /// a grant payload (`ui/nests.md` § Trust facet — grants → *Mint* → *Which
+    /// tiers*, ruled 2026-10-23): the free `followers` key exists on nearly
+    /// every author's device (recorded at the first approved follow) and the
+    /// hidden `only-me` key on every archive importer's, and neither gates
+    /// anything a web visitor can pay for. Refused with the key HELD — the
+    /// case the one-tap trust offer used to mint — and refused as reserved,
+    /// not as unheld, so a caller can tell the two apart.
+    #[test]
+    fn post_scope_over_a_reserved_tier_is_refused_even_when_its_key_is_held() {
+        use fauna_core::subscription::{FOLLOWERS_TIER, OWNER_ONLY_TIER, ROOM_POST_TIER};
+        let mail = MailConfig::default();
+        let mut custody = fauna_core::data::SubscriptionsConfig::default();
+        for (tier, byte) in [(FOLLOWERS_TIER, 0x33u8), (OWNER_ONLY_TIER, 0x44)] {
+            fauna_client_subscriptions::custody::record_new_tier(
+                &mut custody,
+                fauna_core::identity::ActorId([9u8; 32]),
+                tier,
+                [byte; 32],
+                1000,
+            );
+        }
+        for tier in [FOLLOWERS_TIER, OWNER_ONLY_TIER, ROOM_POST_TIER] {
+            assert_eq!(
+                derive_scope_payload(Some(&custody), &mail, &post_scope(tier)),
+                Err(DerivePayloadError::ReservedTier(tier.into())),
+                "{tier}: refused as reserved, key held or not"
+            );
+            // The refusal does not depend on the custody having been read.
+            assert_eq!(
+                derive_scope_payload(None, &mail, &post_scope(tier)),
+                Err(DerivePayloadError::ReservedTier(tier.into()))
+            );
+        }
     }
 
     #[test]
@@ -1582,21 +1717,26 @@ mod tests {
     fn a_deposit_tuple_is_keyless_over_exactly_one_folder() {
         let mail = MailConfig::default();
         assert_eq!(
-            derive_scope_payload(None, &mail, &ScopeTuple::folder_deposit(42)),
+            derive_scope_payload(None, &mail, &ScopeTuple::folder_deposit(42, &[5; 32])),
             Ok(None)
         );
-        for (set, kind) in [
-            (None, None),
-            (Some("x"), None),
-            (Some("042"), None),
-            (Some("42"), Some("mail")),
+        let writer = Some(fauna_core::grant_event::writer_factor(&[5; 32]));
+        for (set, kind, factor) in [
+            (None, None, writer.clone()),
+            (Some("x"), None, writer.clone()),
+            (Some("042"), None, writer.clone()),
+            (Some("42"), Some("mail"), writer.clone()),
+            // A deposit scope is never blind of its writer.
+            (Some("42"), None, None),
+            (Some("42"), None, Some("writer:zz".to_string())),
+            (Some("42"), None, Some("labeler:00".to_string())),
         ] {
             let tuple = ScopeTuple {
                 class: ScopeTuple::CLASS_DEPOSIT.into(),
                 kind: kind.map(str::to_string),
                 tier: None,
                 set: set.map(str::to_string),
-                factor: None,
+                factor,
             };
             assert!(
                 matches!(
@@ -1610,13 +1750,23 @@ mod tests {
 
     #[test]
     fn a_folder_deposit_grant_wraps_nothing() {
-        let blob =
-            mint_folder_deposit_grant(&[1; 32], &[2; 16], &[3; 32], GrantWindow(0, 100), &[7, 9])
-                .expect("mints");
+        let blob = mint_folder_deposit_grant(
+            &[1; 32],
+            &[2; 16],
+            &[3; 32],
+            &[5; 32],
+            GrantWindow(0, 100),
+            &[7, 9],
+        )
+        .expect("mints");
         assert!(blob.wrapped_keys.is_empty(), "deposit is keyless");
         assert_eq!(
             blob.scope,
-            vec![ScopeTuple::folder_deposit(7), ScopeTuple::folder_deposit(9)]
+            vec![
+                ScopeTuple::folder_deposit(7, &[5; 32]),
+                ScopeTuple::folder_deposit(9, &[5; 32])
+            ],
+            "the mint carries the writer factor"
         );
     }
 

@@ -4,15 +4,17 @@
 //! as an ordinary change and retired once durable — idempotently on the
 //! deposit id.
 
-use std::sync::Arc;
+use std::collections::BTreeSet;
+use std::sync::{Arc, Mutex};
 
+use ed25519_dalek::SigningKey;
 use fauna_core::crypto::BackupKey;
 use fauna_core::data::{ContentHash, FoldersConfig};
 use fauna_core::format::FormatRegistry;
 use fauna_core::identity::ActorKeypair;
 use fauna_core::secret::SecretArray32;
 use fauna_nest_http::{BearerSource, StaticBearer};
-use fauna_protocol::folders::{DepositEnvelope, DepositPart, ParkedDeposit};
+use fauna_protocol::folders::{DepositEnvelope, DepositPart, DepositStatement, ParkedDeposit};
 use wiremock::MockServer;
 
 use crate::adaptive::AdaptiveConcurrency;
@@ -59,8 +61,16 @@ fn test_sync_engine(server_uri: &str, watch_dir: std::path::PathBuf) -> SyncEngi
     )
 }
 
-/// The account's mail custody, as the account store answers it.
-struct MailCustody(Vec<[u8; 32]>);
+/// The writers the owner's grant log authorizes for [`FOLDER`], shared with
+/// the test so it can land a `Mint` between passes.
+type Writers = Arc<Mutex<BTreeSet<[u8; 32]>>>;
+
+/// The account's mail custody and grant log, as the account store answers
+/// them.
+struct MailCustody {
+    mseks: Vec<[u8; 32]>,
+    writers: Writers,
+}
 
 #[async_trait::async_trait]
 impl fauna_client_folders::FolderKeyReader for MailCustody {
@@ -68,20 +78,72 @@ impl fauna_client_folders::FolderKeyReader for MailCustody {
         Ok(FoldersConfig::default())
     }
     async fn recipient_mseks(&self) -> anyhow::Result<Vec<SecretArray32>> {
-        Ok(self.0.iter().map(|m| (*m).into()).collect())
+        Ok(self.mseks.iter().map(|m| (*m).into()).collect())
+    }
+    async fn deposit_writers(&self, folder_id: i64) -> anyhow::Result<BTreeSet<[u8; 32]>> {
+        if folder_id != FOLDER {
+            return Ok(BTreeSet::new());
+        }
+        Ok(self.writers.lock().unwrap().clone())
     }
 }
 
-fn envelope(name: &str, body: &[u8]) -> Vec<u8> {
-    fauna_protocol::encode_canonical(&DepositEnvelope {
+/// The depositor the owner's log authorizes — the app the consent named.
+fn depositor() -> SigningKey {
+    SigningKey::from_bytes(&[0xD1; 32])
+}
+
+/// Another principal's writer key, which the log never named for [`FOLDER`].
+fn stranger() -> SigningKey {
+    SigningKey::from_bytes(&[0xD2; 32])
+}
+
+fn writer_of(key: &SigningKey) -> [u8; 32] {
+    key.verifying_key().to_bytes()
+}
+
+/// How a test envelope is signed.
+enum Signing<'a> {
+    /// Over its own statement, by this key — what an honest door parks.
+    By(&'a SigningKey),
+    /// Names no writer and carries no signature.
+    Unsigned,
+    /// Names `writer` but is signed over another body.
+    OverOtherBytes(&'a SigningKey),
+}
+
+/// A single-message envelope, signed as `signing` says.
+fn envelope_signed(name: &str, body: &[u8], signing: &Signing<'_>) -> DepositEnvelope {
+    let mut env = DepositEnvelope {
         name: name.into(),
         content_type: "text/plain".into(),
         body: body.to_vec().into(),
         parts: 0,
-        extra: Default::default(),
-    })
-    .unwrap()
-    .to_vec()
+        ..Default::default()
+    };
+    sign(&mut env, body, signing);
+    env
+}
+
+/// Stamp `env` with the writer and the signature over `body` as `signing`
+/// says — the statement the nest's door verified before it parked the item.
+fn sign(env: &mut DepositEnvelope, body: &[u8], signing: &Signing<'_>) {
+    let (key, signed_body): (&SigningKey, &[u8]) = match signing {
+        Signing::Unsigned => return,
+        Signing::By(key) => (key, body),
+        Signing::OverOtherBytes(key) => (key, b"bytes the depositor never sent"),
+    };
+    let statement = DepositStatement::for_body(FOLDER, &env.name, &env.content_type, signed_body);
+    env.writer = Some(writer_of(key));
+    env.sig = statement.sign(key).to_vec().into();
+}
+
+fn envelope(name: &str, body: &[u8]) -> Vec<u8> {
+    encode(&envelope_signed(name, body, &Signing::By(&depositor())))
+}
+
+fn encode(env: &DepositEnvelope) -> Vec<u8> {
+    fauna_protocol::encode_canonical(env).unwrap().to_vec()
 }
 
 /// Seal any plaintext as the nest's door seals it: X-Wing to the owner's
@@ -101,14 +163,15 @@ fn sealed_hybrid(msek: &[u8; 32], name: &str, body: &[u8]) -> Vec<u8> {
 /// A larger item as the staged upload parks it: a header naming the part
 /// count, and each part sealed on its own with its index inside the seal.
 fn park_parts(control: &FakeSyncControl, id: i64, name: &str, parts: &[&[u8]]) {
-    let header = fauna_protocol::encode_canonical(&DepositEnvelope {
+    let mut header = DepositEnvelope {
         name: name.into(),
         content_type: "application/octet-stream".into(),
         body: Vec::new().into(),
         parts: u32::try_from(parts.len()).unwrap(),
-        extra: Default::default(),
-    })
-    .unwrap();
+        ..Default::default()
+    };
+    sign(&mut header, &parts.concat(), &Signing::By(&depositor()));
+    let header = encode(&header);
     control.park_deposit(FOLDER, parked(id, seal_xwing(&MSEK, &header)));
     for (i, body) in parts.iter().enumerate() {
         park_part(
@@ -154,21 +217,37 @@ struct Seat {
     engine: SyncEngine,
     watch: tempfile::TempDir,
     control: FakeSyncControl,
+    /// The writers the owner's log authorizes for [`FOLDER`] — a test lands a
+    /// `Mint` by inserting one.
+    writers: Writers,
     _server: MockServer,
 }
 
+/// A seat whose log authorizes [`depositor`] for [`FOLDER`].
 async fn seat(mseks: Vec<[u8; 32]>) -> Seat {
+    seat_authorizing(mseks, [writer_of(&depositor())].into()).await
+}
+
+async fn seat_authorizing(mseks: Vec<[u8; 32]>, writers: BTreeSet<[u8; 32]>) -> Seat {
     let server = MockServer::start().await;
     MockNest::new().mount(&server).await;
     let watch = tempfile::tempdir().unwrap();
     let engine = test_sync_engine(&server.uri(), watch.path().to_path_buf());
     let control = FakeSyncControl::accepting();
     engine.set_control_api(Arc::new(control.clone()));
-    engine.set_deposit_inbox(FOLDER, Arc::new(MailCustody(mseks)));
+    let writers: Writers = Arc::new(Mutex::new(writers));
+    engine.set_deposit_inbox(
+        FOLDER,
+        Arc::new(MailCustody {
+            mseks,
+            writers: Arc::clone(&writers),
+        }),
+    );
     Seat {
         engine,
         watch,
         control,
+        writers,
         _server: server,
     }
 }
@@ -212,6 +291,21 @@ async fn a_parked_deposit_lands_and_retires_once_its_row_is_durable() {
         vec![1],
         "not durable, not retired"
     );
+    // Ruling 3 (`folder-deposit.md`): whichever upload records exactly these
+    // bytes at this path names the admitted writer as the depositor; other
+    // bytes there are the owner's own edit.
+    let hash = ContentHash::of_raw(BODY);
+    assert_eq!(
+        s.engine.deposit_mark("note.txt", &hash),
+        Some(writer_of(&depositor())),
+        "the landed bytes carry their depositor into the record"
+    );
+    assert_eq!(
+        s.engine
+            .deposit_mark("note.txt", &ContentHash::of_raw(b"an edit")),
+        None,
+        "an edit after the landing is not the deposit"
+    );
 
     // The record landed (as the watcher's own upload, or a later pass's).
     s.engine
@@ -227,6 +321,11 @@ async fn a_parked_deposit_lands_and_retires_once_its_row_is_durable() {
         }
     );
     assert!(s.control.parked_ids(FOLDER).is_empty());
+    assert_eq!(
+        s.engine.deposit_mark("note.txt", &hash),
+        None,
+        "a retired item's mark is forgotten"
+    );
     assert_eq!(
         user_files(&s),
         vec!["note.txt".to_string()],
@@ -340,12 +439,13 @@ async fn a_multi_part_item_lands_its_parts_in_order() {
 #[tokio::test]
 async fn a_part_out_of_its_place_leaves_the_item_parked() {
     let s = seat(vec![MSEK]).await;
-    let header = fauna_protocol::encode_canonical(&DepositEnvelope {
+    let mut header = DepositEnvelope {
         name: "scan.bin".into(),
         parts: 2,
         ..Default::default()
-    })
-    .unwrap();
+    };
+    sign(&mut header, b"ab", &Signing::By(&depositor()));
+    let header = encode(&header);
     s.control
         .park_deposit(FOLDER, parked(5, seal_xwing(&MSEK, &header)));
     park_part(&s.control, 5, 0, 1, b"b");
@@ -442,4 +542,180 @@ async fn an_on_demand_root_lands_the_item_beside_a_placeholder_holding_its_name(
         }
     );
     assert!(s.control.parked_ids(FOLDER).is_empty());
+}
+
+/// Park `env` as item `id`, sealed to the owner's recipient key — what a nest
+/// can always do, the key being public.
+fn park(s: &Seat, id: i64, env: &DepositEnvelope) {
+    s.control
+        .park_deposit(FOLDER, parked(id, seal_xwing(&MSEK, &encode(env))));
+}
+
+/// Nothing of the item landed, and it is still parked.
+fn assert_left_parked(s: &Seat, id: i64, name: &str) {
+    assert!(
+        !s.watch.path().join(name).exists(),
+        "a refused item lands nothing"
+    );
+    assert!(
+        s.control.parked_ids(FOLDER).contains(&id),
+        "a refused item is never retired"
+    );
+}
+
+/// **The adopter's check** (`folder-deposit.md` § The depositor signs, the
+/// owner's device verifies): an item sealed to the owner's public recipient
+/// key but naming no writer and carrying no signature — what a nest could
+/// park of its own making — is refused and left parked.
+#[tokio::test]
+async fn an_unsigned_item_is_refused_and_left_parked() {
+    let s = seat(vec![MSEK]).await;
+    park(
+        &s,
+        1,
+        &envelope_signed("forged.txt", BODY, &Signing::Unsigned),
+    );
+    let done = s.engine.adopt_deposits().await.unwrap();
+    assert_eq!(
+        done,
+        DepositAdoption {
+            refused: 1,
+            ..Default::default()
+        }
+    );
+    assert_left_parked(&s, 1, "forged.txt");
+}
+
+/// A signature that does not verify over the statement the seat rebuilds —
+/// signed over other bytes, or with the writer swapped — is refused.
+#[tokio::test]
+async fn a_signature_over_other_bytes_is_refused() {
+    let s = seat(vec![MSEK]).await;
+    park(
+        &s,
+        1,
+        &envelope_signed("swapped.txt", BODY, &Signing::OverOtherBytes(&depositor())),
+    );
+    let mut renamed = envelope_signed("orig.txt", BODY, &Signing::By(&depositor()));
+    renamed.name = "renamed.txt".into();
+    park(&s, 2, &renamed);
+    let done = s.engine.adopt_deposits().await.unwrap();
+    assert_eq!(done.refused, 2);
+    assert_left_parked(&s, 1, "swapped.txt");
+    assert_left_parked(&s, 2, "renamed.txt");
+}
+
+/// A writer the log never authorized for this folder — a validly signed item
+/// from another principal (or a key a nest minted for itself) — is refused and
+/// left parked; once the `Mint` naming it reaches this replica, the first pass
+/// after adopts it.
+#[tokio::test]
+async fn an_unauthorized_writer_waits_parked_until_its_mint_lands() {
+    let s = seat(vec![MSEK]).await;
+    park(
+        &s,
+        9,
+        &envelope_signed("late.txt", BODY, &Signing::By(&stranger())),
+    );
+    let first = s.engine.adopt_deposits().await.unwrap();
+    assert_eq!(first.refused, 1);
+    assert_left_parked(&s, 9, "late.txt");
+
+    s.writers.lock().unwrap().insert(writer_of(&stranger()));
+    let second = s.engine.adopt_deposits().await.unwrap();
+    assert_eq!(second.refused, 0);
+    assert_eq!(
+        std::fs::read(s.watch.path().join("late.txt")).unwrap(),
+        BODY,
+        "the first pass after the Mint lands it"
+    );
+}
+
+/// A source holding no grant log answers no writer, which licenses nothing.
+#[tokio::test]
+async fn a_source_with_no_log_adopts_nothing() {
+    let s = seat_authorizing(vec![MSEK], BTreeSet::new()).await;
+    park(
+        &s,
+        1,
+        &envelope_signed("a.txt", BODY, &Signing::By(&depositor())),
+    );
+    assert_eq!(s.engine.adopt_deposits().await.unwrap().refused, 1);
+    assert_left_parked(&s, 1, "a.txt");
+}
+
+/// **Ever minted, revoked or not**: the writer set is every `Mint` or `Renew`
+/// that ever named the writer for the folder, so an item a revoked principal
+/// deposited before its grant ended still lands.
+#[tokio::test]
+async fn a_revoked_writers_item_still_lands() {
+    use fauna_core::grant_event::{
+        CLASS_DEPOSIT, GRANT_EVENT_SIGNATURE_LEN, GrantEvent, GrantEventKind, GrantEventScope,
+        deposit_folder_token, writer_factor,
+    };
+    // The fold the reader answers from: a Mint naming the depositor for the
+    // folder, then its Revoke.
+    let writer = writer_of(&depositor());
+    let event = |kind, at| GrantEvent {
+        grant_id: vec![1; 16],
+        holder: vec![2; 32],
+        kind,
+        scope: vec![
+            GrantEventScope {
+                class: CLASS_DEPOSIT.into(),
+                kind: Some(deposit_folder_token(FOLDER)),
+                tier: None,
+            }
+            .with_factor(&writer_factor(&writer)),
+        ],
+        window_start: 1_000,
+        window_end: 2_000,
+        at,
+        sig: vec![0; GRANT_EVENT_SIGNATURE_LEN],
+    };
+    let authorized = fauna_core::grant_event::deposit_authorizations(&[
+        event(GrantEventKind::Mint, 1_000),
+        event(GrantEventKind::Revoke, 1_500),
+    ])
+    .remove(&FOLDER)
+    .unwrap_or_default();
+    assert!(authorized.contains(&writer), "the revoke drops nothing");
+
+    let s = seat_authorizing(vec![MSEK], authorized).await;
+    park(
+        &s,
+        1,
+        &envelope_signed("kept.txt", BODY, &Signing::By(&depositor())),
+    );
+    let done = s.engine.adopt_deposits().await.unwrap();
+    assert_eq!(done.refused, 0);
+    assert_eq!(
+        std::fs::read(s.watch.path().join("kept.txt")).unwrap(),
+        BODY
+    );
+}
+
+/// A larger item signed over another body is refused once its parts are
+/// staged and hashed, and its stage leaves nothing behind.
+#[tokio::test]
+async fn a_multi_part_item_signed_over_other_bytes_leaves_no_stage() {
+    let s = seat(vec![MSEK]).await;
+    let mut header = DepositEnvelope {
+        name: "scan.bin".into(),
+        parts: 2,
+        ..Default::default()
+    };
+    sign(&mut header, b"not-these-bytes", &Signing::By(&depositor()));
+    s.control
+        .park_deposit(FOLDER, parked(6, seal_xwing(&MSEK, &encode(&header))));
+    park_part(&s.control, 6, 0, 0, b"a");
+    park_part(&s.control, 6, 1, 1, b"b");
+    assert_eq!(s.engine.adopt_deposits().await.unwrap().refused, 1);
+    assert_left_parked(&s, 6, "scan.bin");
+    let leftovers: Vec<_> = std::fs::read_dir(s.watch.path())
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .filter(|n| n.to_string_lossy().starts_with(".fauna-deposit-"))
+        .collect();
+    assert!(leftovers.is_empty(), "{leftovers:?}");
 }

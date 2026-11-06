@@ -49,13 +49,12 @@ public sealed class SignalSharePublishedRow
 /// machine here, just a plain bool + read-only list.
 ///
 /// <para>Deliberately does NOT call <c>HydrateSignalOptinAsync</c> — that FFI
-/// face is producer-internal (primes the manager's cached opt-in for a
-/// not-yet-built windows capture shell) and no shipped client's pane calls it
-/// either (engagement-cues.md § Implementation status today: linux/android/
-/// apple's panes all skip it). This lift proves only the toggle round-trip +
-/// pane render, exactly as apple's landing did — the producer side (a real
-/// dwell-derived verdict) needs a windows capture shell, a separate,
-/// not-yet-scoped track.</para>
+/// face is producer-internal (primes the manager's cached opt-in for the
+/// capture shell) and no shipped client's pane calls it; the Feed page calls
+/// it at feed init (<c>FeedPage.Page_Loaded</c>, beside <c>HydrateCues</c>), so
+/// a persisted opt-in reaches the producer without opening this pane
+/// (engagement-cues.md § Implementation status today). This VM covers the
+/// toggle round-trip + pane render.</para>
 /// </summary>
 public partial class SignalShareViewModel : ViewModelBase
 {

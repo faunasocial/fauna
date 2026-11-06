@@ -57,6 +57,7 @@ ordering rather than a fixture's.
 
 import json
 import ssl
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -120,6 +121,46 @@ def domained_issuer_nest(request, nest_mode, tmp_path_factory):
 
     nest, cleanup = _start_dedicated_nest(
         request, nest_mode, tmp_path_factory, "oauth-issuer-domained",
+        claim_domain=ISSUER_DOMAIN,
+    )
+    yield nest
+    cleanup()
+
+
+@pytest.fixture(scope="module")
+def consent_issuer_nest(request, nest_mode, tmp_path_factory):
+    """A second domained nest, for the consent ceremony's tests.
+
+    Every AS endpoint meters per (route, source) at the shipped 10 per 5 minutes
+    (`oauth_as_rate_limit.rs`), and under `--nest docker` every request reaches a
+    nest from the one gateway address — so one nest serving the whole module
+    spent about 17 PARs and a dozen consent-page reads in a minute and answered
+    the rest 429. The module fits the shipped budget by spreading its tests over
+    three nests, each kept under ten per route (`testing.md` § Default app and
+    nest mode, the shipped-limit fit rule): never a paced retry, never a lifted
+    limit. Spend per route, with the latest-nonce reuse below — the contract
+    nest (`domained_issuer_nest`): PAR 8, token 6; this one: PAR 6, authorize 9;
+    `oidc_issuer_nest`: PAR 3, authorize 3, token 3, revoke 9. A test added here
+    states the routes it spends and goes on the nest with room.
+    """
+    from conftest import _start_dedicated_nest
+
+    nest, cleanup = _start_dedicated_nest(
+        request, nest_mode, tmp_path_factory, "oauth-issuer-consent",
+        claim_domain=ISSUER_DOMAIN,
+    )
+    yield nest
+    cleanup()
+
+
+@pytest.fixture(scope="module")
+def oidc_issuer_nest(request, nest_mode, tmp_path_factory):
+    """A third domained nest, for the OIDC sign-ins and the revocation
+    endpoint — the split `consent_issuer_nest` explains."""
+    from conftest import _start_dedicated_nest
+
+    nest, cleanup = _start_dedicated_nest(
+        request, nest_mode, tmp_path_factory, "oauth-issuer-oidc",
         claim_domain=ISSUER_DOMAIN,
     )
     yield nest
@@ -625,8 +666,10 @@ def _post_par(nest, body, headers=None):
     )
     try:
         with urllib.request.urlopen(request, context=_tls_context(nest)) as resp:
+            _note_nonce(nest, resp.headers)
             return resp.status, resp.headers, json.loads(resp.read())
     except urllib.error.HTTPError as e:
+        _note_nonce(nest, e.headers)
         raw = e.read()
         try:
             parsed = json.loads(raw)
@@ -655,8 +698,33 @@ def _valid_par_form(client_id=LOOPBACK_CLIENT_ID, scope="atproto", **overrides):
     return _form(**fields)
 
 
-def _fresh_nonce(nest):
-    """The nonce a first-contact client gets from its own first refusal."""
+#: The latest `DPoP-Nonce` each nest handed back, by base URL, with when it
+#: arrived — the nonce a real client keeps per authorization server and sends
+#: up front (RFC 9449 § 8: the one from the most recent response). One minter
+#: serves every endpoint here (`oauth_as_state.rs::NonceMinter`), so a nonce from
+#: any answer proves the next request to any of them. Reusing it is what keeps a
+#: proved request at ONE metered call instead of two (refusal, then retry).
+_LATEST_NONCE: dict[str, tuple[str, float]] = {}
+
+#: How old a remembered nonce may be and still be sent. The nest accepts a nonce
+#: for the rest of its 2-minute window plus one more (`DPOP_NONCE_WINDOW_SECS` ×
+#: `DPOP_NONCE_ACCEPTED_WINDOWS`), so one under a minute old is always current —
+#: by construction, not by timing luck; an older one is replaced by a refusal.
+_NONCE_REUSE_SECS = 60.0
+
+
+def _note_nonce(nest, headers):
+    nonce = headers.get("DPoP-Nonce") if headers is not None else None
+    if nonce:
+        _LATEST_NONCE[nest["url"]] = (nonce, time.monotonic())
+
+
+def _server_nonce(nest):
+    """A nonce this nest will accept: the latest one it answered with, else the
+    one a first-contact client gets from its own first refusal."""
+    remembered = _LATEST_NONCE.get(nest["url"])
+    if remembered is not None and time.monotonic() - remembered[1] < _NONCE_REUSE_SECS:
+        return remembered[0]
     status, headers, body = _post_par(nest, _form(client_id="x"), FORM_HEADERS)
     assert status == 400, f"expected the no-proof refusal, got {status}: {body!r}"
     nonce = headers.get("DPoP-Nonce")
@@ -713,7 +781,7 @@ def test_par_accepts_a_dpop_bound_request_and_issues_a_request_uri(domained_issu
     from helpers.dpop import DpopKey, make_proof
 
     key = DpopKey()
-    nonce = _fresh_nonce(domained_issuer_nest)
+    nonce = _server_nonce(domained_issuer_nest)
     proof = make_proof(key, htm="POST", htu=PAR_ENDPOINT_URL, nonce=nonce)
     status, headers, body = _post_par(
         domained_issuer_nest, _valid_par_form(), {**FORM_HEADERS, "DPoP": proof}
@@ -736,7 +804,7 @@ def test_par_refuses_a_replayed_proof(domained_issuer_nest):
     from helpers.dpop import DpopKey, make_proof
 
     key = DpopKey()
-    nonce = _fresh_nonce(domained_issuer_nest)
+    nonce = _server_nonce(domained_issuer_nest)
     proof = make_proof(
         key, htm="POST", htu=PAR_ENDPOINT_URL, nonce=nonce, jti="replayed-once"
     )
@@ -764,7 +832,7 @@ def test_par_refuses_a_client_supplied_request_uri(domained_issuer_nest):
     from helpers.dpop import DpopKey, make_proof
 
     key = DpopKey()
-    nonce = _fresh_nonce(domained_issuer_nest)
+    nonce = _server_nonce(domained_issuer_nest)
     proof = make_proof(key, htm="POST", htu=PAR_ENDPOINT_URL, nonce=nonce)
     status, _, body = _post_par(
         domained_issuer_nest,
@@ -793,7 +861,7 @@ def test_par_refuses_a_permission_set_rather_than_guessing_at_it(domained_issuer
     from helpers.dpop import DpopKey, make_proof
 
     key = DpopKey()
-    nonce = _fresh_nonce(domained_issuer_nest)
+    nonce = _server_nonce(domained_issuer_nest)
     proof = make_proof(key, htm="POST", htu=PAR_ENDPOINT_URL, nonce=nonce)
     client_id = (
         "http://localhost?scope=atproto+include%3Acom.example.set"
@@ -848,7 +916,7 @@ def _push_par(nest, *, login_hint=None):
     from helpers.dpop import DpopKey, make_proof
 
     key = DpopKey()
-    nonce = _fresh_nonce(nest)
+    nonce = _server_nonce(nest)
     proof = make_proof(key, htm="POST", htu=PAR_ENDPOINT_URL, nonce=nonce)
     fields = {} if login_hint is None else {"login_hint": login_hint}
     status, _, body = _post_par(
@@ -930,7 +998,7 @@ def _binding_code(page_html):
     return match.group(1)
 
 
-def test_the_consent_page_renders_the_request_and_locks_itself_down(domained_issuer_nest):
+def test_the_consent_page_renders_the_request_and_locks_itself_down(consent_issuer_nest):
     """The page names the requesting client, shows a binding code, and forbids
     every origin.
 
@@ -938,8 +1006,8 @@ def test_the_consent_page_renders_the_request_and_locks_itself_down(domained_iss
     and the page are only one artifact once they leave the same handler — a page
     whose script the CSP does not permit is a page that silently never polls.
     """
-    request_uri = _push_par(domained_issuer_nest, login_hint=ADMIN_HANDLE)
-    status, headers, page = _get_authorize(domained_issuer_nest, request_uri)
+    request_uri = _push_par(consent_issuer_nest, login_hint=ADMIN_HANDLE)
+    status, headers, page = _get_authorize(consent_issuer_nest, request_uri)
     assert status == 200, f"expected the consent page, got {status}: {page[:400]}"
 
     assert "Approve this in your Fauna app" in page
@@ -954,7 +1022,7 @@ def test_the_consent_page_renders_the_request_and_locks_itself_down(domained_iss
     assert headers.get("Cache-Control") == "no-store", dict(headers)
 
 
-def test_a_request_uri_is_single_use(domained_issuer_nest):
+def test_a_request_uri_is_single_use(consent_issuer_nest):
     """The second use of a `request_uri` is refused — and refused with the same
     wording as an expired or unknown one.
 
@@ -962,16 +1030,16 @@ def test_a_request_uri_is_single_use(domained_issuer_nest):
     wording is deliberate: a caller poking at handles must not learn which kind
     of dead it found.
     """
-    request_uri = _push_par(domained_issuer_nest, login_hint=ADMIN_HANDLE)
-    first, _, _ = _get_authorize(domained_issuer_nest, request_uri)
+    request_uri = _push_par(consent_issuer_nest, login_hint=ADMIN_HANDLE)
+    first, _, _ = _get_authorize(consent_issuer_nest, request_uri)
     assert first == 200
 
-    second, _, page = _get_authorize(domained_issuer_nest, request_uri)
+    second, _, page = _get_authorize(consent_issuer_nest, request_uri)
     assert second == 400, f"a spent request_uri was accepted again: {second}"
     assert "Unknown or expired request" in page
 
     unknown, _, unknown_page = _get_authorize(
-        domained_issuer_nest, "urn:ietf:params:oauth:request_uri:never-issued"
+        consent_issuer_nest, "urn:ietf:params:oauth:request_uri:never-issued"
     )
     assert unknown == 400
     assert unknown_page == page, (
@@ -979,7 +1047,7 @@ def test_a_request_uri_is_single_use(domained_issuer_nest):
     )
 
 
-def test_a_mismatched_client_id_cannot_redeem_someone_elses_request(domained_issuer_nest):
+def test_a_mismatched_client_id_cannot_redeem_someone_elses_request(consent_issuer_nest):
     """RFC 9126 §4: the authorization request's `client_id` must identify the
     same client the pushed request was made for.
 
@@ -987,18 +1055,18 @@ def test_a_mismatched_client_id_cannot_redeem_someone_elses_request(domained_iss
     store's rule, and a mismatched attempt is precisely the replay it exists to
     spend.
     """
-    request_uri = _push_par(domained_issuer_nest, login_hint=ADMIN_HANDLE)
+    request_uri = _push_par(consent_issuer_nest, login_hint=ADMIN_HANDLE)
     status, _, page = _get_authorize(
-        domained_issuer_nest, request_uri, client_id="http://localhost"
+        consent_issuer_nest, request_uri, client_id="http://localhost"
     )
     assert status == 400, f"a mismatched client_id was accepted: {status}"
     assert "Unknown or expired request" in page
 
-    again, _, _ = _get_authorize(domained_issuer_nest, request_uri)
+    again, _, _ = _get_authorize(consent_issuer_nest, request_uri)
     assert again == 400, "the mismatched attempt did not spend the handle"
 
 
-def test_an_unknown_flow_token_is_answered_without_holding(domained_issuer_nest):
+def test_an_unknown_flow_token_is_answered_without_holding(consent_issuer_nest):
     """A poll credential nobody was issued is answered immediately.
 
     No hold and no consent read, so guessing costs a map lookup inside the
@@ -1007,7 +1075,7 @@ def test_an_unknown_flow_token_is_answered_without_holding(domained_issuer_nest)
     import time
 
     started = time.monotonic()
-    status, body = _poll(domained_issuer_nest, "not-a-flow-token-we-minted")
+    status, body = _poll(consent_issuer_nest, "not-a-flow-token-we-minted")
     elapsed = time.monotonic() - started
     assert status == 404, f"expected 404, got {status}: {body!r}"
     assert body["status"] == "expired", body
@@ -1017,7 +1085,7 @@ def test_an_unknown_flow_token_is_answered_without_holding(domained_issuer_nest)
     assert elapsed < 10, f"an unknown token was held for {elapsed:.1f}s"
 
 
-def test_a_declined_request_redirects_the_client_to_its_own_callback(domained_issuer_nest):
+def test_a_declined_request_redirects_the_client_to_its_own_callback(consent_issuer_nest):
     """A decline is an ANSWER, not a timeout: the page redirects into the
     client's own callback carrying `error=access_denied`, the client's `state`,
     and RFC 9207's `iss`.
@@ -1025,12 +1093,12 @@ def test_a_declined_request_redirects_the_client_to_its_own_callback(domained_is
     That is what stops a declined ceremony hanging on a page the user has
     already finished with.
     """
-    request_uri = _push_par(domained_issuer_nest, login_hint=ADMIN_HANDLE)
-    _, _, page = _get_authorize(domained_issuer_nest, request_uri)
+    request_uri = _push_par(consent_issuer_nest, login_hint=ADMIN_HANDLE)
+    _, _, page = _get_authorize(consent_issuer_nest, request_uri)
     flow = _flow_token(page)
-    _resolve_consent(domained_issuer_nest, _binding_code(page), approved=False)
+    _resolve_consent(consent_issuer_nest, _binding_code(page), approved=False)
 
-    status, body = _poll(domained_issuer_nest, flow)
+    status, body = _poll(consent_issuer_nest, flow)
     assert status == 200, f"{status}: {body!r}"
     assert body["status"] == "resolved", body
     redirect = body["redirect"]
@@ -1042,7 +1110,7 @@ def test_a_declined_request_redirects_the_client_to_its_own_callback(domained_is
 
 
 def test_an_approval_the_account_cannot_complete_says_so_rather_than_hanging(
-    domained_issuer_nest,
+    consent_issuer_nest,
 ):
     """The admin approves, but holds no ACTIVE ATProto identity — so the
     ceremony ends in an honest refusal redirect rather than a code that could
@@ -1054,12 +1122,12 @@ def test_an_approval_the_account_cannot_complete_says_so_rather_than_hanging(
     approval over that account's own WS-RPC resolved it, the poll saw the
     resolution and built exactly one redirect out of it.
     """
-    request_uri = _push_par(domained_issuer_nest, login_hint=ADMIN_HANDLE)
-    _, _, page = _get_authorize(domained_issuer_nest, request_uri)
+    request_uri = _push_par(consent_issuer_nest, login_hint=ADMIN_HANDLE)
+    _, _, page = _get_authorize(consent_issuer_nest, request_uri)
     flow = _flow_token(page)
-    _resolve_consent(domained_issuer_nest, _binding_code(page), approved=True)
+    _resolve_consent(consent_issuer_nest, _binding_code(page), approved=True)
 
-    status, body = _poll(domained_issuer_nest, flow)
+    status, body = _poll(consent_issuer_nest, flow)
     assert status == 200, f"{status}: {body!r}"
     assert body["status"] == "resolved", body
     redirect = body["redirect"]
@@ -1070,7 +1138,7 @@ def test_an_approval_the_account_cannot_complete_says_so_rather_than_hanging(
     assert "state=client-csrf-token" in redirect, redirect
 
 
-def test_a_resolved_flow_answers_the_same_redirect_twice(domained_issuer_nest):
+def test_a_resolved_flow_answers_the_same_redirect_twice(consent_issuer_nest):
     """A lost poll response must not cost the user their ceremony.
 
     The retry re-reads the memoized answer rather than minting a second one —
@@ -1078,13 +1146,13 @@ def test_a_resolved_flow_answers_the_same_redirect_twice(domained_issuer_nest):
     structural. Asserted from outside, because the store-level test cannot see
     that the HTTP path actually goes through the memoization.
     """
-    request_uri = _push_par(domained_issuer_nest, login_hint=ADMIN_HANDLE)
-    _, _, page = _get_authorize(domained_issuer_nest, request_uri)
+    request_uri = _push_par(consent_issuer_nest, login_hint=ADMIN_HANDLE)
+    _, _, page = _get_authorize(consent_issuer_nest, request_uri)
     flow = _flow_token(page)
-    _resolve_consent(domained_issuer_nest, _binding_code(page), approved=False)
+    _resolve_consent(consent_issuer_nest, _binding_code(page), approved=False)
 
-    first_status, first = _poll(domained_issuer_nest, flow)
-    second_status, second = _poll(domained_issuer_nest, flow)
+    first_status, first = _poll(consent_issuer_nest, flow)
+    second_status, second = _poll(consent_issuer_nest, flow)
     assert first_status == second_status == 200
     assert first["redirect"] == second["redirect"], (
         f"the ceremony answered twice differently:\n{first!r}\n{second!r}"
@@ -1141,9 +1209,42 @@ def _post_oauth(nest, path, body, headers=None):
     )
     try:
         with urllib.request.urlopen(request, context=_tls_context(nest)) as resp:
+            _note_nonce(nest, resp.headers)
             return resp.status, resp.headers, resp.read().decode()
     except urllib.error.HTTPError as e:
+        _note_nonce(nest, e.headers)
         return e.code, e.headers, e.read().decode()
+
+
+def _post_declaring_a_body_it_never_sends(nest, path, declared_length):
+    """POST ``path`` with headers declaring ``declared_length`` bytes of form
+    body, send only its first few bytes, and return ``(status, body-text)``.
+
+    The way to ask "is this answered before the body is read?" without racing the
+    answer: a gate that precedes the read answers with the body still owed, and a
+    read-first nest would wait for the rest and never answer inside the timeout.
+    Sending the whole body instead (urllib's only mode) loses the answer to the
+    connection the nest rightly closes on an unread body — the write hits EPIPE
+    before the response is read, as it does behind the docker port proxy.
+    """
+    import http.client
+
+    split = urllib.parse.urlsplit(nest["url"])
+    if split.scheme == "https":
+        conn = http.client.HTTPSConnection(
+            split.hostname, split.port, timeout=30, context=_tls_context(nest)
+        )
+    else:
+        conn = http.client.HTTPConnection(split.hostname, split.port, timeout=30)
+    try:
+        conn.putrequest("POST", path)
+        conn.putheader("Content-Type", FORM_HEADERS["Content-Type"])
+        conn.putheader("Content-Length", str(declared_length))
+        conn.endheaders(b"grant_type=aaaa")
+        resp = conn.getresponse()
+        return resp.status, resp.read().decode()
+    finally:
+        conn.close()
 
 
 def _oauth_error(raw):
@@ -1156,17 +1257,15 @@ def _oauth_error(raw):
 def _proved(nest, endpoint_url, form):
     """A form request carrying a fresh, valid DPoP proof for `endpoint_url`.
 
-    The nonce comes from this endpoint's own refusal, which is how a real
-    first-contact client gets one — so the helper walks the same two-step round
-    trip rather than borrowing PAR's nonce.
+    The nonce is the nest's latest (`_server_nonce`), as a real client sends it:
+    each endpoint's own no-proof refusal handing one back is asserted by that
+    endpoint's own refusal test, and walking it again here doubled every proved
+    call's spend of the endpoint's shipped budget.
     """
     from helpers.dpop import DpopKey, make_proof
 
     path = urllib.parse.urlparse(endpoint_url).path
-    status, headers, _ = _post_oauth(nest, path, _form(x="1"), FORM_HEADERS)
-    assert status in (400, 401), f"expected the no-proof refusal, got {status}"
-    nonce = headers.get("DPoP-Nonce")
-    assert nonce, f"a refusal must hand back a usable nonce; headers={dict(headers)!r}"
+    nonce = _server_nonce(nest)
     key = DpopKey()
     proof = make_proof(key, htm="POST", htu=endpoint_url, nonce=nonce)
     return _post_oauth(nest, path, form, {**FORM_HEADERS, "DPoP": proof})
@@ -1197,8 +1296,8 @@ def test_token_reads_no_body_before_a_proof_is_presented(domained_issuer_nest):
     and an anonymous caller would have made the nest buffer a megabyte before
     proving anything at all.
     """
-    status, _, raw = _post_oauth(
-        domained_issuer_nest, TOKEN_PATH, "grant_type=" + "a" * 1_000_000, FORM_HEADERS
+    status, raw = _post_declaring_a_body_it_never_sends(
+        domained_issuer_nest, TOKEN_PATH, 1_000_011
     )
     assert status == 400, f"{status}: {raw[:200]!r}"
     assert _oauth_error(raw).get("error") == "invalid_dpop_proof", (
@@ -1263,7 +1362,7 @@ def test_a_garbage_refresh_token_is_refused_as_a_bad_grant(domained_issuer_nest)
     assert _oauth_error(raw).get("error") == "invalid_grant", raw
 
 
-def test_revoke_requires_a_proof_and_a_token(domained_issuer_nest):
+def test_revoke_requires_a_proof_and_a_token(oidc_issuer_nest):
     """Both refusals are about the REQUEST, which is why they are not the
     uniform 200 every token OUTCOME gets.
 
@@ -1272,19 +1371,19 @@ def test_revoke_requires_a_proof_and_a_token(domained_issuer_nest):
     a denial of service reachable with a credential that is otherwise useless.
     """
     status, headers, raw = _post_oauth(
-        domained_issuer_nest, REVOKE_PATH, _form(token="anything"), FORM_HEADERS
+        oidc_issuer_nest, REVOKE_PATH, _form(token="anything"), FORM_HEADERS
     )
     assert status == 400, f"{status}: {raw!r}"
     assert _oauth_error(raw).get("error") == "invalid_dpop_proof", raw
     assert headers.get("DPoP-Nonce"), f"headers={dict(headers)!r}"
 
-    status, _, raw = _proved(domained_issuer_nest, REVOKE_ENDPOINT_URL, _form(client_id="x"))
+    status, _, raw = _proved(oidc_issuer_nest, REVOKE_ENDPOINT_URL, _form(client_id="x"))
     assert status == 400, f"{status}: {raw!r}"
     assert _oauth_error(raw).get("error") == "invalid_request", raw
 
 
 def test_revoke_answers_an_identical_empty_200_to_every_token_it_cannot_place(
-    domained_issuer_nest,
+    oidc_issuer_nest,
 ):
     """The oracle rule, which is this endpoint's whole design.
 
@@ -1306,7 +1405,7 @@ def test_revoke_answers_an_identical_empty_200_to_every_token_it_cannot_place(
         "a.b.c",
     ):
         status, headers, raw = _proved(
-            domained_issuer_nest, REVOKE_ENDPOINT_URL, _form(token=token)
+            oidc_issuer_nest, REVOKE_ENDPOINT_URL, _form(token=token)
         )
         answers.add((status, raw, headers.get("Cache-Control")))
     assert len(answers) == 1, (
@@ -1319,7 +1418,7 @@ def test_revoke_answers_an_identical_empty_200_to_every_token_it_cannot_place(
     assert cache == "no-store", cache
 
 
-def test_the_hint_orders_the_search_and_never_limits_it(domained_issuer_nest):
+def test_the_hint_orders_the_search_and_never_limits_it(oidc_issuer_nest):
     """RFC 7009 §2.1: a server that cannot honour `token_type_hint` must extend
     its search to the other type.
 
@@ -1335,7 +1434,7 @@ def test_the_hint_orders_the_search_and_never_limits_it(domained_issuer_nest):
         if hint is not None:
             fields["token_type_hint"] = hint
         status, _, raw = _proved(
-            domained_issuer_nest, REVOKE_ENDPOINT_URL, _form(**fields)
+            oidc_issuer_nest, REVOKE_ENDPOINT_URL, _form(**fields)
         )
         seen.add((status, raw))
     assert len(seen) == 1, f"the hint changed the outcome: {seen!r}"
@@ -1426,8 +1525,10 @@ def _userinfo(nest, headers):
     )
     try:
         with urllib.request.urlopen(request, context=_tls_context(nest)) as resp:
+            _note_nonce(nest, resp.headers)
             return resp.status, resp.headers, json.loads(resp.read())
     except urllib.error.HTTPError as e:
+        _note_nonce(nest, e.headers)
         return e.code, e.headers, None
 
 
@@ -1448,7 +1549,7 @@ def _oidc_sign_in(nest, *, scope, nonce):
     from helpers.dpop import DpopKey, make_proof
 
     key = DpopKey()
-    proof = make_proof(key, htm="POST", htu=PAR_ENDPOINT_URL, nonce=_fresh_nonce(nest))
+    proof = make_proof(key, htm="POST", htu=PAR_ENDPOINT_URL, nonce=_server_nonce(nest))
     status, _, body = _post_par(
         nest,
         _valid_par_form(
@@ -1472,9 +1573,7 @@ def _oidc_sign_in(nest, *, scope, nonce):
     )
 
     path = urllib.parse.urlparse(TOKEN_ENDPOINT_URL).path
-    status, headers, _ = _post_oauth(nest, path, _form(x="1"), FORM_HEADERS)
-    token_nonce = headers.get("DPoP-Nonce")
-    assert token_nonce, dict(headers)
+    token_nonce = _server_nonce(nest)
     status, _, raw = _post_oauth(
         nest,
         path,
@@ -1494,11 +1593,11 @@ def _oidc_sign_in(nest, *, scope, nonce):
     return key, json.loads(raw)
 
 
-def test_an_openid_sign_in_mints_an_id_token_the_jwks_verifies(domained_issuer_nest):
+def test_an_openid_sign_in_mints_an_id_token_the_jwks_verifies(oidc_issuer_nest):
     """The ID token verifies against ``/oauth/jwks`` and says exactly what
     § OIDC says it says — and the discovery document advertises the members a
     relying party reads to check it."""
-    nest = domained_issuer_nest
+    nest = oidc_issuer_nest
     doc = _get_json(nest, DISCOVERY_PATHS[1])
     assert doc["userinfo_endpoint"] == USERINFO_ENDPOINT_URL, doc
     assert doc["id_token_signing_alg_values_supported"] == ["ES256"], doc
@@ -1528,13 +1627,13 @@ def test_an_openid_sign_in_mints_an_id_token_the_jwks_verifies(domained_issuer_n
 
 
 def test_userinfo_answers_under_the_dpop_bound_access_token_and_refuses_a_bearer(
-    domained_issuer_nest,
+    oidc_issuer_nest,
 ):
     """UserInfo releases the same claims as the ID token under the access token
     AND its DPoP proof; the same token presented as a ``Bearer`` is refused."""
     from helpers.dpop import make_proof
 
-    nest = domained_issuer_nest
+    nest = oidc_issuer_nest
     key, reply = _oidc_sign_in(nest, scope="openid profile", nonce="n-userinfo")
     access = reply["access_token"]
 
@@ -1570,13 +1669,13 @@ def test_userinfo_answers_under_the_dpop_bound_access_token_and_refuses_a_bearer
     assert "DPoP" in (headers.get("WWW-Authenticate") or ""), dict(headers)
 
 
-def test_an_id_token_is_refused_where_an_access_token_is_required(domained_issuer_nest):
+def test_an_id_token_is_refused_where_an_access_token_is_required(oidc_issuer_nest):
     """The ``typ`` separation, from outside: the ID token is signed by the SAME
     key and carries a valid proof over itself, and UserInfo still refuses it,
     because ``typ: JWT`` is not ``typ: at+jwt`` inside the signed bytes."""
     from helpers.dpop import make_proof
 
-    nest = domained_issuer_nest
+    nest = oidc_issuer_nest
     key, reply = _oidc_sign_in(nest, scope="openid", nonce="n-typ")
     id_token = reply["id_token"]
     proof = make_proof(
@@ -1600,7 +1699,7 @@ def test_profile_without_openid_is_refused_at_par(domained_issuer_nest):
 
     nest = domained_issuer_nest
     client_id = "http://localhost?scope=profile&redirect_uri=http%3A%2F%2F127.0.0.1%2Fcb"
-    proof = make_proof(DpopKey(), htm="POST", htu=PAR_ENDPOINT_URL, nonce=_fresh_nonce(nest))
+    proof = make_proof(DpopKey(), htm="POST", htu=PAR_ENDPOINT_URL, nonce=_server_nonce(nest))
     status, _, body = _post_par(
         nest,
         _valid_par_form(client_id=client_id, scope="profile"),

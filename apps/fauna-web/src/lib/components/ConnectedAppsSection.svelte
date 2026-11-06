@@ -240,6 +240,7 @@
              the scopes and the binding code. -->
         {#if install}
           <h4 data-testid={IDS.CONNECTED_APPS_REQUEST_INSTALL}>{resolveComposed(install.heading)}</h4>
+          {#if install.framing}<p>{resolveComposed(install.framing)}</p>{/if}
           <p data-testid={IDS.CONNECTED_APPS_REQUEST_INSTALL_FORM} data-form={request.install?.execution_form ?? ''}>{resolveComposed(install.form)}</p>
           <p data-testid={IDS.CONNECTED_APPS_REQUEST_INSTALL_PUBLISHER}>{resolveComposed(install.publisher)}</p>
           <p data-testid={IDS.CONNECTED_APPS_REQUEST_INSTALL_DIGEST}>{resolveComposed(install.digest)}</p>

@@ -1,5 +1,6 @@
 import type { SharedRpcPort } from '../../static/fauna_wasm_atproto_settings.js';
 import { asset } from '$app/paths';
+import { joinChunk } from './chunk-join';
 import type { AtprotoSettingsMachine } from '../../static/fauna_wasm_atproto_settings.js';
 import type { AtprotoSettingsSnapshot } from './atproto-settings-machine';
 import type { LocalizedText } from './i18n/localized';
@@ -41,6 +42,8 @@ export function ensureAtprotoSettingsWasm(): Promise<void> {
     wasmInit = (async () => {
       const mod = await import('../../static/fauna_wasm_atproto_settings.js');
       await mod.default(asset('fauna_wasm_atproto_settings_bg.wasm'));
+      // Its tracing to the ring, its identity-store doors (chunk-join.ts).
+      joinChunk(mod);
       wasmModule = mod;
       // This chunk hosts feeder #1's critical-alerts registry (see the Rust
       // module doc in `libs/fauna-wasm-atproto-settings/src/lib.rs`) — wire it

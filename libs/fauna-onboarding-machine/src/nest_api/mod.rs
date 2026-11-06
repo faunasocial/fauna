@@ -210,4 +210,10 @@ pub trait NestApi: Send + Sync + std::fmt::Debug {
         base_url: &str,
         secret_hex: &str,
     ) -> Result<i64, LockAccountError>;
+
+    /// `fauna.nest.info` — the nest's signed rules, read before sign-in for
+    /// `invite_request` and for `handle_entry` while its Continue signs in
+    /// (`nest-rules.md` § Acceptance at joining). The identity is the one the
+    /// connection proves; the machine verifies the rules against it.
+    async fn read_nest_rules(&self, base_url: &str) -> Result<NestRulesAnswer, NestRulesError>;
 }

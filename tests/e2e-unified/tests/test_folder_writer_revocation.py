@@ -83,10 +83,7 @@ def _recorded_path_hashes(nest, owner, set_name: str) -> set[str]:
 
 
 def _member_row(b, set_name: str) -> int | None:
-    for i in range(b.folder_count()):
-        if set_name in b.folder_title(i):
-            return i
-    return None
+    return b.folder_index(set_name)
 
 
 @pytest.mark.parametrize(
@@ -94,14 +91,16 @@ def _member_row(b, set_name: str) -> int | None:
     [
         ("tui", "tui"),
         ("linux", "linux"),
-        # macOS as the demoted MEMBER — the side this journey is about. A tui
-        # owner does the demoting: apple carries no owner-side access-grant UI
-        # (a declared absence, `ui/folders.md`), so a macOS owner cannot take
-        # write access away. `real_sync_agent` because
+        # macOS as the demoted MEMBER — the side this journey is about, a tui
+        # owner doing the demoting. `real_sync_agent` because
         # macOS spawns its agent only under that marker.
         pytest.param(
             "tui", "macos", marks=[pytest.mark.macos, pytest.mark.real_sync_agent]
         ),
+        # macOS as the demoting OWNER: its member row's role select grants and
+        # then takes write access away from a tui member. The owner binds no
+        # folder here, so it needs no agent.
+        pytest.param("macos", "tui", marks=pytest.mark.macos),
         # windows as the demoted MEMBER, a tui owner again: two windows seats in
         # one run would share ONE agent, because the isolated agent's pipe and
         # data dir are session-scoped (`conftest.isolated_sync_agent_pipe_name`),

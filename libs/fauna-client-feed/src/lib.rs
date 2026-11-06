@@ -260,12 +260,16 @@ impl<R: RpcRequester> FeedClient<R> {
     /// `fauna.feed.author.posts` — one author's posts (`feed.md` § The read
     /// model → *The author read*): the profile page's Posts tab, always
     /// chronological on the `created_at` keyset `cursor`. `author` is the
-    /// hex actor id.
+    /// hex actor id. `search` and `sources` narrow the read (body substring;
+    /// origin-platform `fauna_core::source` tokens) — the imported-posts
+    /// selection's read; the profile tab passes neither.
     pub async fn feed_author_posts(
         &self,
         author: impl Into<String>,
         cursor: Option<i64>,
         limit: Option<i64>,
+        search: Option<String>,
+        sources: Option<Vec<String>>,
     ) -> Result<FeedAuthorPostsReply, R::Error> {
         self.nest
             .request(
@@ -274,7 +278,9 @@ impl<R: RpcRequester> FeedClient<R> {
                     author: author.into(),
                     cursor,
                     limit,
-                    extra: std::collections::BTreeMap::new(),
+                    search,
+                    sources,
+                    ..Default::default()
                 },
             )
             .await
@@ -686,8 +692,14 @@ mod tests {
     #[test]
     fn feed_author_posts_composes_kind_and_payload() {
         let (rec, c) = client();
-        block_on(c.feed_author_posts("ab".repeat(32), Some(1_700_000_000_000_000), Some(25)))
-            .expect("infallible mock");
+        block_on(c.feed_author_posts(
+            "ab".repeat(32),
+            Some(1_700_000_000_000_000),
+            Some(25),
+            Some("beach".into()),
+            Some(vec!["instagram".into()]),
+        ))
+        .expect("infallible mock");
         let (kind, payload) = rec.recorded();
         assert_eq!(kind, "fauna.feed.author.posts");
         let req: feed::FeedAuthorPostsRequest =
@@ -695,6 +707,8 @@ mod tests {
         assert_eq!(req.author, "ab".repeat(32));
         assert_eq!(req.cursor, Some(1_700_000_000_000_000));
         assert_eq!(req.limit, Some(25));
+        assert_eq!(req.search.as_deref(), Some("beach"));
+        assert_eq!(req.sources, Some(vec!["instagram".to_string()]));
     }
 
     #[test]

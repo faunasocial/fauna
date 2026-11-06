@@ -99,6 +99,35 @@ where
         Ok(mail.msek.into_iter().chain(mail.prior_mseks).collect())
     }
 
+    /// The writers the owner's grant log authorizes to deposit into
+    /// `folder_id`: the succession ledger's chain-signed fold as the runtime's
+    /// own identity reads it, through `deposit_authorizations` — read fresh
+    /// each pass, so a consent given after the engine was built reaches the
+    /// next adoption.
+    async fn deposit_writers(
+        &self,
+        folder_id: i64,
+    ) -> anyhow::Result<std::collections::BTreeSet<[u8; 32]>> {
+        use fauna_client_config::SuccessionLedgerStore as _;
+        let handle = (self.source)().ok_or_else(|| anyhow::anyhow!(RUNTIME_ABSENT))?;
+        let ledger = handle.succession_ledger(handle.self_actor()?).await?;
+        Ok(fauna_core::grant_event::deposit_writers_for(
+            &ledger.grant_events,
+            folder_id,
+        ))
+    }
+
+    /// The scope's ring off the store's group plane
+    /// (`AccountStoreHandle::group_set_keys`). An absent runtime answers at
+    /// once, as [`Self::load`] does — the group set builds nothing.
+    async fn group_set_keys(
+        &self,
+        scope_id: &[u8; 32],
+    ) -> anyhow::Result<Option<fauna_core::group_content::GroupContentKeys>> {
+        let handle = (self.source)().ok_or_else(|| anyhow::anyhow!(RUNTIME_ABSENT))?;
+        Ok(Some(handle.group_set_keys(*scope_id).await?))
+    }
+
     /// A plain put — the set's engine is the key's only writer. No wait for a
     /// runtime still assembling: the request is best-effort, and the engine
     /// that makes it was built over a store already mounted.
@@ -164,6 +193,16 @@ where
         use fauna_client_config::SuccessionLedgerStore as _;
         let handle = self.handle_for_write().await?;
         Ok(handle.self_actor().ok())
+    }
+
+    /// The runtime's set-scoped share-endpoints door
+    /// (`AccountStoreHandle::tombstone_share_endpoints_of_set`), waiting out an
+    /// assembly still in flight as every write does.
+    async fn drop_set_share_endpoints(&self, channel_id: &[u8; 32]) -> anyhow::Result<usize> {
+        self.handle_for_write()
+            .await?
+            .tombstone_share_endpoints_of_set(*channel_id)
+            .await
     }
 
     /// The runtime's store-change notice ([`crate::store_change`]): it wakes

@@ -27,7 +27,6 @@ import time
 import pytest
 
 from clients.ws_rpc_admin_client import WsRpcAdminClient
-from helpers.app_surface import app_name, skip_unbuilt
 from i18n.strings import S
 
 # tui leads (the lead app); the other six apps join by adding their marker once
@@ -36,11 +35,6 @@ pytestmark = [pytest.mark.tier_3, pytest.mark.tui, pytest.mark.linux, pytest.mar
 
 DOMAIN = "lists-controls-e2e.test"
 MEMBER_DOMAIN = "external.test"
-
-# Apps that render `mail-list-members-import-result` (outcome 9); tui led.
-_TALLY_BUILT_APPS = {"tui", "linux", "macos", "ios", "web", "windows"}
-# Apps whose sheet Submit arms on an off-server archive link (outcome 15); tui led.
-_ARCHIVE_CONFIRM_BUILT_APPS = {"tui", "linux", "macos", "ios", "web", "windows"}
 
 
 def _user_client(nest_instance, user):
@@ -319,19 +313,13 @@ def test_resubscribe_from_the_members_page(logged_in_app, test_user, nest_instan
             _reset(api)
 
 
+@pytest.mark.android
 @pytest.mark.feature("mailing-lists")
 def test_import_tally_says_how_many_were_skipped(logged_in_app, test_user, nest_instance):
     """Outcome 9: a pasted batch with invalid lines and an address already on
     the list subscribes the good ones, and the page says how many were added,
     already there, and skipped as invalid — the nest's own counts."""
     app = logged_in_app
-    if app_name(app.driver) not in _TALLY_BUILT_APPS:
-        skip_unbuilt(
-            app.driver,
-            surface="mail-list-members-import-result",
-            detail="the import tally is built on tui first",
-            tracked="",
-        )
     tag = secrets.token_hex(3)
     fresh = [f"new1-{tag}@{MEMBER_DOMAIN}", f"new2-{tag}@{MEMBER_DOMAIN}"]
     with _user_client(nest_instance, test_user) as api:
@@ -366,6 +354,7 @@ def test_import_tally_says_how_many_were_skipped(logged_in_app, test_user, nest_
             _reset(api)
 
 
+@pytest.mark.android
 @pytest.mark.feature("mailing-lists")
 def test_an_off_server_archive_link_asks_once_before_saving(
     logged_in_app, test_user, nest_instance
@@ -375,13 +364,6 @@ def test_an_off_server_archive_link_asks_once_before_saving(
     second saves it. Once saved, editing the list again does not re-ask about
     the same link."""
     app = logged_in_app
-    if app_name(app.driver) not in _ARCHIVE_CONFIRM_BUILT_APPS:
-        skip_unbuilt(
-            app.driver,
-            surface="mail-lists-add-sheet-submit-button (off-server archive confirm)",
-            detail="the armed Submit is built on tui first",
-            tracked="",
-        )
     local_part = "archived" + secrets.token_hex(3)
     off_server = "https://archive.example.org/" + local_part
     submit = "mail-lists-add-sheet-submit-button"

@@ -55,7 +55,7 @@ from __future__ import annotations
 
 import pytest
 
-from common.auth import sync_changes_list, user_folders_list
+from common.auth import sync_changes_list
 from helpers import budgets
 from helpers.photo_backup import (
     a_real_png,
@@ -66,6 +66,7 @@ from helpers.photo_backup import (
     funnel,
     granted,
     passes,
+    photo_library_set,
     prepare_photos_access,
 )
 from helpers.rpc_hold import arm_rpc_hold, release_rpc_hold, wait_for_held_rpc
@@ -80,17 +81,6 @@ pytestmark = [
 #: `SyncEngine::upload_file` → `record_change`. Holding it parks a pass inside its
 #: first file, which is where a second trigger has to find it.
 INGEST_KIND = "fauna.sync.changes.record"
-
-
-def _photo_set(port: int, secret_key: str) -> str:
-    """The set the ingress resolved to, asked of the nest — the shared resolver
-    names it `"Photo Library"` (`folders.md` § Photo backup → *Target set
-    model*)."""
-    folders = user_folders_list(port, secret_key=secret_key).get("folders", [])
-    return next(
-        (f["name"] for f in folders if f.get("name") == "Photo Library"),
-        "",
-    )
 
 
 def _changes(port: int, secret_key: str, folder: str) -> list[dict]:
@@ -117,7 +107,7 @@ def test_a_photo_arriving_mid_pass_is_backed_up_once_by_one_trailing_pass(
     await_quiet(driver)
 
     folder = wait_until(
-        lambda: _photo_set(port, secret_key) or None,
+        lambda: photo_library_set(port, secret_key) or None,
         budgets.RPC_ROUNDTRIP_S,
         diagnose=lambda: (
             "the nest holds no photo-library set after enabling backup, so the "

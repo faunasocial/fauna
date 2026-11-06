@@ -153,6 +153,11 @@ struct DbBackedHost {
     /// remote create land exactly as production folds it. Empty for most tests: their
     /// rows are seeded, and an empty fold writes nothing.
     fold_on_repull: Vec<fauna_protocol::sync::SyncChange>,
+    /// How long a `repull` takes before it folds — the nest round-trip, slow (a nest that is
+    /// down answers only once the control plane gives up). `None`: at once.
+    repull_delay: Option<Duration>,
+    /// Set as a `repull` starts — so a test knows the loop's re-pull is out.
+    repulling: Arc<std::sync::atomic::AtomicBool>,
 }
 
 #[async_trait::async_trait(?Send)]
@@ -265,6 +270,10 @@ impl HydrationHost for DbBackedHost {
     }
 
     async fn repull(&self) -> Result<PlaceholderFold> {
+        self.repulling.store(true, Ordering::SeqCst);
+        if let Some(delay) = self.repull_delay {
+            tokio::time::sleep(delay).await;
+        }
         self.engine.fold_changes_for_test(&self.fold_on_repull)
     }
 
@@ -277,6 +286,16 @@ impl HydrationHost for DbBackedHost {
 
     async fn adopt_deposits(&self, _folder: &str) -> Vec<String> {
         Vec::new()
+    }
+
+    // The real engine's own sibling pass: a harness engine holds no sibling
+    // registry, so it pulls nothing and its admission arm stays pending.
+    async fn pull_siblings(&self, folder: &str) {
+        HydrationHost::pull_siblings(&self.engine, folder).await
+    }
+
+    fn sibling_admissions(&self) -> Option<watch::Receiver<u64>> {
+        HydrationHost::sibling_admissions(&self.engine)
     }
 
     async fn refresh_and_converge_corpus(&self, _folder: &str) {}
@@ -394,6 +413,10 @@ fn seeded_manifest_hash(rel: &str) -> ContentHash {
 async fn harness_against_nest(rows: &[(&str, i64)], nest_base_url: &str) -> Harness {
     let tmp = tempfile::tempdir().expect("tempdir");
     let paths = SyncPaths::at(tmp.path().to_path_buf());
+    // Scoped to a test account as a provision scopes it: the binding store is an
+    // account's, and an agent with none refuses the binds below
+    // (`pipe_server::require_an_account`).
+    paths.set_actor_scope(Some(hex::encode([0x7eu8; 32])));
     let root = tmp.path().join("root");
     std::fs::create_dir_all(&root).expect("create sync root");
 
@@ -493,6 +516,8 @@ impl Harness {
             blobs: Arc::new(std::sync::Mutex::new(blobs)),
             reconnect: watch::channel(0),
             fold_on_repull: Vec::new(),
+            repull_delay: None,
+            repulling: Default::default(),
         }
     }
 
@@ -735,7 +760,13 @@ fn write_from_another_process(scratch: &std::path::Path, dst: &std::path::Path, 
 /// The **control plane** (`changes.record`, WS-RPC) stays unconnected and fails-and-logs, so
 /// `upload_file` still completes — the same arrangement `fauna-sync-engine`'s
 /// `upload_thumbnail_test` runs under.
-async fn mount_nest_byte_plane(server: &MockServer) -> Arc<AtomicUsize> {
+///
+/// `chunk_delay` holds every chunk POST's reply that long — a slow uplink. The counter still
+/// moves when the request arrives, so a non-zero count says an upload is inside its POST.
+async fn mount_nest_byte_plane(
+    server: &MockServer,
+    chunk_delay: Option<Duration>,
+) -> Arc<AtomicUsize> {
     // POST /chunks/check → report every requested hash as missing, so the upload actually
     // transfers rather than dedup'ing to a no-op (which would make a broken uploader look fine).
     Mock::given(method("POST"))
@@ -764,7 +795,11 @@ async fn mount_nest_byte_plane(server: &MockServer) -> Arc<AtomicUsize> {
             .and(path("/api/v1/chunks"))
             .respond_with(move |_req: &wiremock::Request| {
                 chunk_posts.fetch_add(1, Ordering::SeqCst);
-                ResponseTemplate::new(200)
+                let reply = ResponseTemplate::new(200);
+                match chunk_delay {
+                    Some(delay) => reply.set_delay(delay),
+                    None => reply,
+                }
             })
             .mount(server)
             .await;
@@ -1497,7 +1532,7 @@ async fn an_edit_plus_unpin_uploads_the_edit_but_does_not_free_it_until_recorded
     const EDITED: &[u8] = b"the user's final words, which MUST reach the nest";
 
     let nest = MockServer::start().await;
-    let chunk_posts = mount_nest_byte_plane(&nest).await;
+    let chunk_posts = mount_nest_byte_plane(&nest, None).await;
 
     let h = harness_against_nest(&[("notes.txt", ORIGINAL.len() as i64)], &nest.uri()).await;
     let host = h.host(HashMap::from([(
@@ -1657,7 +1692,7 @@ async fn a_save_during_an_upload_survives_the_in_sync_flip_and_a_free_up_space()
     const NEWER: &[u8] = b"E2: saved while E1 was uploading -- the only copy of it anywhere";
 
     let nest = MockServer::start().await;
-    let chunk_posts = mount_nest_byte_plane(&nest).await;
+    let chunk_posts = mount_nest_byte_plane(&nest, None).await;
     let h = harness_against_nest(&[("notes.txt", RECORDED.len() as i64)], &nest.uri()).await;
     let _conn = hydrate_recorded_notes(&h, RECORDED).await;
 
@@ -2039,7 +2074,7 @@ fn head_moved_to(rel: &str, manifest: ContentHash, size: usize) -> StaleHydrated
         relative_path: rel.to_string(),
         manifest_hash: manifest,
         size_bytes: size as i64,
-        content_key_version: None,
+        content_stamp: None,
         remote_mtime: 1_700_000_100,
         version_num: 2,
         signed_as: None,
@@ -3341,6 +3376,172 @@ async fn a_redescribe_of_a_file_being_fetched_never_holds_up_the_root() {
     }
 }
 
+/// **An open is answered while the loop uploads another file** (`on-demand-files.md` § *A
+/// placeholder describes the version its row resolves*, the rule *Nothing the serve loop waits
+/// on holds up the root*). A program edits the hydrated `notes.txt`, and the loop's upload of
+/// it is inside a chunk POST the nest answers 8 s late — a large file on a slow uplink. Another
+/// program opening the cloud-only `other.txt` meanwhile is served at once. Until the rule was
+/// built the loop polled the platform only between its arms, so the open waited out the rest of
+/// the upload — the late POST and the change record after it, which this harness's control
+/// plane cannot answer (`drive_until_asserted`): measured red at 13.0 s.
+#[tokio::test]
+async fn an_open_of_a_cloud_only_file_is_answered_while_the_loop_uploads_another() {
+    const EDITED_REL: &str = "notes.txt";
+    const OTHER: &str = "other.txt";
+    const ORIGINAL: &[u8] = b"hello world";
+    const EDITED: &[u8] = b"the user typed this instead";
+    const OTHER_BODY: &[u8] = b"another file\n";
+    const CHUNK_DELAY: Duration = Duration::from_secs(8);
+
+    let nest = MockServer::start().await;
+    let chunk_posts = mount_nest_byte_plane(&nest, Some(CHUNK_DELAY)).await;
+    let h = harness_against_nest(
+        &[
+            (EDITED_REL, ORIGINAL.len() as i64),
+            (OTHER, OTHER_BODY.len() as i64),
+        ],
+        &nest.uri(),
+    )
+    .await;
+    let host = h.host(HashMap::from([
+        (EDITED_REL.to_string(), ORIGINAL.to_vec()),
+        (OTHER.to_string(), OTHER_BODY.to_vec()),
+    ]));
+    let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+    let cancel = CancellationToken::new();
+    let _conn = crate::cfapi_host::register_and_connect(&h.root, cmd_tx).expect("connect");
+    let loop_fut = run_hydration_loop(
+        host,
+        CfapiInvalidator,
+        cmd_rx,
+        None,
+        h.root.clone(),
+        FOLDER.to_string(),
+        cancel.clone(),
+        None,
+        None,
+    );
+
+    let driver = async {
+        let root_str = h.root_str();
+        let (rs, edited, dst) = (
+            root_str.clone(),
+            format!("{root_str}\\{EDITED_REL}"),
+            h._tmp.path().join("hydrated.bin"),
+        );
+        let bytes = tokio::task::spawn_blocking(move || {
+            dir_from_another_process(&rs);
+            read_from_another_process(&edited, &dst)
+        })
+        .await
+        .expect("browse and hydrate");
+        assert_eq!(bytes, ORIGINAL, "the file hydrates before it is edited");
+
+        write_from_another_process(
+            &h._tmp.path().join("scratch.bin"),
+            &h.root.join(EDITED_REL),
+            EDITED,
+        );
+        eventually(
+            || chunk_posts.load(Ordering::SeqCst) > 0,
+            Duration::from_secs(15),
+            "the edit's upload to be inside its late chunk POST",
+        )
+        .await;
+
+        let opening = std::time::Instant::now();
+        let (p, dst) = (
+            format!("{root_str}\\{OTHER}"),
+            h._tmp.path().join("other.bin"),
+        );
+        let other = tokio::task::spawn_blocking(move || read_from_another_process(&p, &dst))
+            .await
+            .expect("open the other file");
+        // Timed on the wall clock: a loop held up on this thread holds `eventually` up too.
+        let took = opening.elapsed();
+        eprintln!("[measure] the other file opened in {took:?} while the upload was out");
+        assert_eq!(other, OTHER_BODY, "the other file is served whole");
+        assert!(
+            took < Duration::from_secs(5),
+            "another file opens at once while the loop uploads, not after {took:?}: the loop \
+             answers the platform across the upload"
+        );
+        cancel.cancel();
+    };
+
+    drive_until_asserted(loop_fut, driver).await;
+}
+
+/// **An open is answered while the loop re-pulls the nest** (`on-demand-files.md` § *A
+/// placeholder describes the version its row resolves*, the rule *Nothing the serve loop waits
+/// on holds up the root*). The nest nudges the folder and the re-pull takes 20 s to answer — a
+/// nest that is slow, or down while the control plane retries. A program opening the cloud-only
+/// `other.txt` meanwhile is served at once. Until the rule was built the open waited for the
+/// re-pull — measured red at 19.9 s. On a linux root a listing of the root waited with it.
+#[tokio::test]
+async fn an_open_is_answered_while_the_loop_repulls_the_nest() {
+    const OTHER: &str = "other.txt";
+    const OTHER_BODY: &[u8] = b"another file\n";
+    const REPULL_DELAY: Duration = Duration::from_secs(20);
+
+    let h = harness(&[(OTHER, OTHER_BODY.len() as i64)]).await;
+    let mut host = h.host(HashMap::from([(OTHER.to_string(), OTHER_BODY.to_vec())]));
+    host.repull_delay = Some(REPULL_DELAY);
+    let repulling = Arc::clone(&host.repulling);
+    let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+    let (wake_tx, wake_rx) = mpsc::channel(4);
+    let cancel = CancellationToken::new();
+    let _conn = crate::cfapi_host::register_and_connect(&h.root, cmd_tx).expect("connect");
+    let loop_fut = run_hydration_loop(
+        host,
+        CfapiInvalidator,
+        cmd_rx,
+        None,
+        h.root.clone(),
+        FOLDER.to_string(),
+        cancel.clone(),
+        Some(wake_rx),
+        None,
+    );
+
+    let driver = async {
+        let root_str = h.root_str();
+        let rs = root_str.clone();
+        tokio::task::spawn_blocking(move || dir_from_another_process(&rs))
+            .await
+            .expect("browse");
+
+        wake_tx.send(()).await.expect("nudge the loop");
+        eventually(
+            || repulling.load(Ordering::SeqCst),
+            Duration::from_secs(10),
+            "the loop's re-pull to be out",
+        )
+        .await;
+
+        let opening = std::time::Instant::now();
+        let (p, dst) = (
+            format!("{root_str}\\{OTHER}"),
+            h._tmp.path().join("other.bin"),
+        );
+        let other = tokio::task::spawn_blocking(move || read_from_another_process(&p, &dst))
+            .await
+            .expect("open the other file");
+        // Timed on the wall clock: a loop held up on this thread holds `eventually` up too.
+        let took = opening.elapsed();
+        eprintln!("[measure] the other file opened in {took:?} while the re-pull was out");
+        assert_eq!(other, OTHER_BODY, "the other file is served whole");
+        assert!(
+            took < Duration::from_secs(5),
+            "another file opens at once while the loop re-pulls, not after {took:?}: the loop \
+             answers the platform across the re-pull"
+        );
+        cancel.cancel();
+    };
+
+    drive_until_asserted(loop_fut, driver).await;
+}
+
 /// **A file the user keeps on this device takes another device's edit whole, and stays kept**
 /// (`on-demand-files.md` § *Sync direction*: another device's edit reaches an on-demand folder's
 /// disk as it reaches an always-resident one's, whatever the file's pin). cfapi frees no pinned
@@ -3476,7 +3677,7 @@ async fn a_remote_edit_never_overwrites_a_pinned_file_with_an_unsynced_local_edi
         relative_path: "notes.txt".to_string(),
         manifest_hash: ContentHash::of_raw(b"the other device's head"),
         size_bytes: HEAD.len() as i64,
-        content_key_version: None,
+        content_stamp: None,
         remote_mtime: 1_700_000_100,
         version_num: 1,
         signed_as: None,
@@ -3825,7 +4026,7 @@ async fn a_restore_whose_free_was_refused_is_completed_by_the_providers_own_free
     const RESTORED: &[u8] = b"the old one\n";
 
     let nest = MockServer::start().await;
-    let chunk_posts = mount_nest_byte_plane(&nest).await;
+    let chunk_posts = mount_nest_byte_plane(&nest, None).await;
     let h = harness_against_nest(&[(REL, CURRENT.len() as i64)], &nest.uri()).await;
     let host = h.host_with_residency(
         HashMap::from([(REL.to_string(), CURRENT.to_vec())]),
@@ -3919,7 +4120,7 @@ async fn an_edit_of_a_refused_restores_stale_cache_still_uploads() {
     const EDITED: &[u8] = b"the user typed this over the stale copy\n";
 
     let nest = MockServer::start().await;
-    let chunk_posts = mount_nest_byte_plane(&nest).await;
+    let chunk_posts = mount_nest_byte_plane(&nest, None).await;
     let h = harness_against_nest(&[(REL, CURRENT.len() as i64)], &nest.uri()).await;
     let host = h.host(HashMap::from([(REL.to_string(), CURRENT.to_vec())]));
     let nest_serves = Arc::clone(&host.blobs);
@@ -4448,7 +4649,7 @@ async fn a_remote_edit_never_frees_an_unsynced_local_edit() {
         relative_path: "notes.txt".to_string(),
         manifest_hash: ContentHash::of_raw(b"the other device's head"),
         size_bytes: 300,
-        content_key_version: None,
+        content_stamp: None,
         remote_mtime: 1_700_000_100,
         version_num: 1,
         signed_as: None,
@@ -5780,7 +5981,7 @@ async fn a_local_edit_by_another_process_is_detected_and_uploaded() {
     const EDITED: &[u8] = b"the user typed this instead";
 
     let nest = MockServer::start().await;
-    let chunk_posts = mount_nest_byte_plane(&nest).await;
+    let chunk_posts = mount_nest_byte_plane(&nest, None).await;
 
     let h = harness_against_nest(&[("notes.txt", ORIGINAL.len() as i64)], &nest.uri()).await;
     let host = h.host(HashMap::from([(
@@ -5927,7 +6128,7 @@ async fn a_backup_mode_set_on_an_on_demand_folder_uploads() {
     const FRESH: &[u8] = b"a file the user just dropped into their backup folder";
 
     let nest = MockServer::start().await;
-    let chunk_posts = mount_nest_byte_plane(&nest).await;
+    let chunk_posts = mount_nest_byte_plane(&nest, None).await;
 
     // One tracked, cloud-only file already in the set — the placeholder the watcher must NOT
     // mistake for a user's creation when we materialize it.
@@ -6706,4 +6907,204 @@ fn a_present_ignore_file_still_loads_from_a_root_whose_provider_dropped() {
         matcher.is_ignored("secret-plans.txt"),
         "the user's own pattern must be read, never defaulted away"
     );
+}
+
+/// The latest *Free up space* sweep of the harness's location, as `ListLocations` reports
+/// it — the reading every app's row mirrors (`LocationInfo::free_space`) — plus the bytes
+/// it says are still on this device.
+async fn latest_sweep(h: &Harness) -> (Option<fauna_ipc::sync::FreeSpaceRun>, Option<u64>) {
+    let res = handle_request(
+        &Request {
+            id: 70,
+            method: RequestMethod::ListLocations,
+        },
+        &h.state,
+    )
+    .await
+    .result;
+    let ResponseResult::Ok(ResponsePayload::Locations(rows)) = res else {
+        panic!("ListLocations must answer the bound location, got {res:?}");
+    };
+    let row = rows
+        .into_iter()
+        .find(|r| r.path == h.root_str())
+        .expect("the harness's location is listed");
+    (row.free_space, row.on_device_bytes)
+}
+
+/// Press the location's *Free up space* (`FreeLocationSpace` through the real handler)
+/// and wait for its sweep to finish, returning what it did. Bounded: a sweep that never
+/// ends is a failure, never a hang.
+async fn sweep_the_location(h: &Harness) -> fauna_ipc::sync::FreeSpaceRun {
+    let res = handle_request(
+        &Request {
+            id: 71,
+            method: RequestMethod::FreeLocationSpace { path: h.root_str() },
+        },
+        &h.state,
+    )
+    .await
+    .result;
+    assert!(
+        matches!(res, ResponseResult::Ok(ResponsePayload::Empty)),
+        "the verb must be accepted on a served on-demand root, got {res:?}"
+    );
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        if let (Some(run), _) = latest_sweep(h).await
+            && !run.running
+        {
+            return run;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the sweep never finished within 30 s: {:?}",
+            latest_sweep(h).await
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+/// **The location-level *Free up space* on a cloud-files root** (`on-demand-files.md`
+/// § The free-up-space gesture where the OS offers none — "On windows the sweep walks the
+/// same rows through `handle_free_space`'s per-file body"). The agent answers once the
+/// sweep is accepted and walks every row with bytes on this device: a pinned file is kept
+/// and counted (the OS keeps the pin here), a file whose bytes are the recorded content is
+/// freed by the real `CfDehydratePlaceholder`, recorded `Placeholder` and counted with its
+/// size — and the location then reads nothing on this device. Red before the windows arm:
+/// the verb answered *unsupported on this platform*.
+#[tokio::test]
+async fn freeing_a_location_frees_what_is_recorded_and_keeps_what_is_pinned() {
+    const RECORDED: &[u8] = b"E1: the content whose change record reached the nest";
+
+    let h = harness(&[("notes.txt", RECORDED.len() as i64)]).await;
+    let _conn = hydrate_recorded_notes(&h, RECORDED).await;
+    // The root's loop is registered as serving: the verb refuses a root nobody serves.
+    let (engine_cmd_tx, _engine_cmd_rx) = mpsc::channel(2);
+    h.state
+        .engine_cmd_senders
+        .lock()
+        .await
+        .insert(FOLDER_REF.to_wire(), 0, engine_cmd_tx);
+    let abs = h.root.join("notes.txt");
+    let placeholder = abs.to_string_lossy().to_string();
+    assert_eq!(
+        latest_sweep(&h).await,
+        (None, Some(RECORDED.len() as u64)),
+        "before any sweep: no outcome, and the hydrated file is on this device"
+    );
+
+    // Kept on this device by the user: kept, and counted as such.
+    fauna_cfapi::set_pin_state(&abs, true).expect("pin");
+    let kept = sweep_the_location(&h).await;
+    assert_eq!(
+        (kept.freed_files, kept.kept_pinned, kept.kept_unsynced),
+        (0, 1, 0),
+        "a pinned file is kept by the sweep: {kept:?}"
+    );
+    assert!(!bytes_are_freed(&placeholder), "the pinned bytes stay");
+
+    // Unpinned, its recorded bytes are freed — the file stays, its bytes go.
+    fauna_cfapi::set_pin_state(&abs, false).expect("unpin");
+    let freed = sweep_the_location(&h).await;
+    assert_eq!(
+        (
+            freed.freed_files,
+            freed.freed_bytes,
+            freed.kept_pinned,
+            freed.kept_unsynced
+        ),
+        (1, RECORDED.len() as u64, 0, 0),
+        "the recorded file is freed and counted with its size: {freed:?}"
+    );
+    assert!(bytes_are_freed(&placeholder), "the bytes left this disk");
+    assert_eq!(
+        std::fs::metadata(&abs).expect("stat").len(),
+        RECORDED.len() as u64,
+        "the file stays listed at its size"
+    );
+    assert_eq!(
+        h.db_state("notes.txt"),
+        Some(SyncState::Placeholder),
+        "the free is recorded"
+    );
+    assert_eq!(
+        latest_sweep(&h).await.1,
+        Some(0),
+        "the location reads nothing on this device"
+    );
+}
+
+/// **A recorded file the root has not vouched in sync yet is freed too** — the state a
+/// folder's own files are in right after it goes on-demand: on the disk as this
+/// device's own record, recorded on the nest, but never asserted in-sync, so the OS
+/// refuses the bare dehydrate. The sweep repairs the stale refusal through the one
+/// in-sync road (anchor, USN, proof, assert) and frees it — the pin reaction's repair.
+/// Red before it: the refusal was counted nowhere and the row read *Freed 0 files*
+/// (`test_folder_location_free_space.py`, outcome 4, on a windows host).
+#[tokio::test]
+async fn freeing_a_location_repairs_a_stale_refusal_of_a_recorded_file() {
+    const MINE: &[u8] = b"written here before the folder went on-demand";
+
+    let h = harness(&[]).await;
+    record_own_write(&h, "mine.txt", MINE);
+    // A full folder: the nest holds this device's own record, so freeing it is lossless.
+    SyncDb::open(&h.db_path)
+        .expect("open per-folder db")
+        .set_residency_reading(false)
+        .expect("persist the residency reading");
+    let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
+    let _conn = crate::cfapi_host::register_and_connect(&h.root, cmd_tx).expect("connect");
+    let (engine_cmd_tx, _engine_cmd_rx) = mpsc::channel(2);
+    h.state
+        .engine_cmd_senders
+        .lock()
+        .await
+        .insert(FOLDER_REF.to_wire(), 0, engine_cmd_tx);
+    let abs = h.root.join("mine.txt");
+    assert!(
+        fauna_cfapi::dehydrate_placeholder(&abs).is_err(),
+        "precondition: the OS refuses the bare dehydrate"
+    );
+
+    let run = sweep_the_location(&h).await;
+    assert_eq!(
+        (run.freed_files, run.freed_bytes, run.kept_unsynced),
+        (1, MINE.len() as u64, 0),
+        "the recorded file is freed after the repair: {run:?}"
+    );
+    assert!(
+        bytes_are_freed(&abs.to_string_lossy()),
+        "the bytes left this disk"
+    );
+    assert_eq!(h.db_state("mine.txt"), Some(SyncState::Placeholder));
+}
+
+/// The verb's refusals on a cloud-files root are the linux root's: a path that is no
+/// bound location's root, and a root nobody serves, are refused with their reason —
+/// never a silent no-op, never *unsupported*.
+#[tokio::test]
+async fn freeing_a_location_refuses_what_it_cannot_sweep() {
+    let h = harness(&[]).await;
+    for (path, why) in [
+        (
+            h.root.join("sub").to_string_lossy().to_string(),
+            "not a bound location's root",
+        ),
+        (h.root_str(), "is not running"),
+    ] {
+        let res = handle_request(
+            &Request {
+                id: 72,
+                method: RequestMethod::FreeLocationSpace { path },
+            },
+            &h.state,
+        )
+        .await
+        .result;
+        let ResponseResult::Err(reason) = res else {
+            panic!("expected a refusal naming {why:?}, got {res:?}");
+        };
+        assert!(reason.contains(why), "{why:?} not in the refusal: {reason}");
+    }
 }

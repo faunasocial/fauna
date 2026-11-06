@@ -52,7 +52,8 @@ import pytest
 import fauna_ffi
 
 from clients.ws_rpc_admin_client import WsRpcAdminClient
-from common.auth import open_registration, register_handled_actor
+from common.auth import open_registration
+from helpers.admin_wire import admit_adult
 
 from tests.api import ws_api
 from tests.api.bare import sign_and_encode_post
@@ -137,7 +138,7 @@ def test_publishing_alone_gives_a_front_page_and_a_feed(routing_nest):
     """
     nest = routing_nest
     handle = "annike"
-    actor = register_handled_actor(nest["port"], handle=handle, domain=NEST_DOMAIN)
+    actor = admit_adult(nest, handle, domain=NEST_DOMAIN, token=True)
     fqdn = f"{handle}.{NEST_DOMAIN}"
 
     _publish(nest, actor, "First Light", "first-light")
@@ -191,7 +192,7 @@ def test_no_user_site_answers_at_the_reserved_hosts_and_paths(routing_nest):
     nest = routing_nest
     url, port = nest["url"], nest["port"]
     handle = "bodil"
-    actor = register_handled_actor(port, handle=handle, domain=NEST_DOMAIN)
+    actor = admit_adult(nest, handle, domain=NEST_DOMAIN, token=True)
     fqdn = f"{handle}.{NEST_DOMAIN}"
 
     marker = "reserved-address-shadow-marker"
@@ -281,7 +282,7 @@ def test_a_verified_custom_domain_serves_the_site_and_stops_when_withdrawn(routi
 
     nest = routing_nest
     url, port = nest["url"], nest["port"]
-    actor = register_handled_actor(port, handle="carol", domain=NEST_DOMAIN)
+    actor = admit_adult(nest, "carol", domain=NEST_DOMAIN, token=True)
 
     _publish(nest, actor, "Carol On Her Own Domain", "own-domain")
 

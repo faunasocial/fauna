@@ -169,8 +169,10 @@ fauna-client-accounts = { path = "../fauna-client-accounts", features = ["web-lo
 [dev-dependencies]
 # The in-memory `FakeNest` requester the ceremony tests drive: it needs the
 # serde bounds `RpcRequester::request` names, and re-encodes replies through the
-# same canonical codec the wire uses.
-tokio = { workspace = true }
+# same canonical codec the wire uses. `test-util` is `ceremony`'s
+# `#[tokio::test(start_paused = true)]` — featureless it only compiled through
+# workspace feature unification, and the per-crate feature build had no paused clock.
+tokio = { workspace = true, features = ["test-util"] }
 # ⚠ A dev-dependency on THIS crate, with the feature on: an integration test is
 # its own crate and does not inherit the lib's features, so a `#[cfg(feature)]`
 # gate there is simply always false. This makes the witness's durable-anchor

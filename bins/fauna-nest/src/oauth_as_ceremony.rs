@@ -262,6 +262,10 @@ pub struct StoredAuthCode {
     pub nonce: Option<String>,
     /// The keys the PAR attested — what the principal row records.
     pub attested: crate::db::third_party_principals::AttestedKeys,
+    /// The kind manifest the card showed, read back from the consent row's
+    /// binding like `scopes`: what the principal row records, so a document
+    /// republished before the redemption never widens it.
+    pub fauna_manifest: Option<String>,
     pub expires: i64,
 }
 
@@ -784,6 +788,7 @@ mod tests {
             dpop_jkt: "thumbprint".into(),
             nonce: None,
             attested: crate::db::third_party_principals::AttestedKeys::default(),
+            fauna_manifest: None,
             expires,
         }
     }

@@ -59,6 +59,7 @@ public enum ConversationsUI {
         case .fauna:    .faunaMls
         case .email:    .smtp
         case .bridged:  .bridged
+        case .archive:  .archive
         case .unknown:  nil
         }
     }

@@ -88,8 +88,10 @@ def test_the_apex_and_its_vhosts_are_the_production_project_for_both_purposes(ho
     assert cp.project_for(host, purpose="dns") == "production"
 
 
-def test_the_legacy_dev_box_is_in_todays_project_which_becomes_production():
-    assert cp.project_for("dev.example.com") == "production"
+def test_the_retired_dev_zone_is_outside_the_map():
+    # The old dev nest dev.example.com was deleted 2026-10-23; its zone names no
+    # organisation box now.
+    assert cp.project_for("dev.example.com") is None
 
 
 @pytest.mark.parametrize("host", ["nest.example.org", "notfauna.build.example", "xfauna.social"])
@@ -159,18 +161,17 @@ def test_no_purpose_falls_back_to_another_projects_token(home):
     assert cp.token_for("fauna.build", purpose="cloud") == ""
 
 
-def test_a_uac_box_never_falls_back_to_a_production_token(home):
+def test_a_uat_box_never_falls_back_to_a_production_token(home):
     _write(home, cp.token_file("production"), "tok-prod\n")
-    _write(home, cp.LEGACY_TOKEN_FILE, "tok-legacy\n", mode=0o664)
     assert cp.token_for("dev.fauna.build") == ""
     assert cp.token_for(None) == ""
 
 
-def test_production_falls_back_to_the_legacy_file(home):
-    _write(home, cp.LEGACY_TOKEN_FILE, "tok-legacy\n", mode=0o664)
-    assert cp.token_for("dev.example.com") == "tok-legacy"
-    _write(home, cp.token_file("production"), "tok-prod\n")
-    assert cp.token_for("dev.example.com") == "tok-prod"
+def test_the_pre_split_token_file_is_never_read(home):
+    # ~/.hetzner-token is the retired example.com project's token, not production's.
+    _write(home, "~/.hetzner-token", "tok-legacy\n")
+    assert cp.token_for("fauna.social") == ""
+    assert cp.token_for("dev.example.com") == ""
 
 
 def test_a_host_outside_the_map_reads_no_file(home):
@@ -195,5 +196,60 @@ def test_where_to_put_names_the_projects_file():
     assert "~/.config/fauna/cloud/uat.token" in cp.where_to_put("dev.fauna.build")
     assert "~/.config/fauna/cloud/zone.token" in cp.where_to_put("dev.fauna.build", purpose="dns")
     assert "~/.config/fauna/cloud/acceptance.token" in cp.where_to_put("fauna.build")
-    assert "~/.hetzner-token" in cp.where_to_put("fauna.social")
+    assert "~/.config/fauna/cloud/production.token" in cp.where_to_put("fauna.social")
+    assert "hetzner-token" not in cp.where_to_put("fauna.social")
     assert "not one of the organisation's boxes" in cp.where_to_put("nest.example.org")
+
+
+# ── The admin app's own DNS credential, one per nest ─────────────────────────
+#
+# `org-nests.md` § One zone, one project: the credential each nest's admin app
+# keeps for managed DNS is a zone-project token of its own, never the fleet's
+# token file — the app keeps it sealed on the box and in cleartext on every
+# admin device, so revoking it must cost nothing fleet-side.
+
+def test_the_app_dns_token_is_the_nests_own_file(home):
+    _write(home, "~/.config/fauna/cloud/zone.token", "fleet-zone\n")
+    _write(home, "~/.config/fauna/cloud/app-dns/fauna.build.token", "acceptance-admin\n")
+    assert cp.app_dns_token_for("fauna.build") == "acceptance-admin"
+    assert cp.app_dns_token_for("dev.fauna.build") == ""
+
+
+def test_the_app_dns_token_never_falls_back_to_the_fleet_token(home, monkeypatch):
+    _write(home, "~/.config/fauna/cloud/zone.token", "fleet-zone\n")
+    monkeypatch.setenv(cp.ENV_VAR, "ci-token")
+    assert cp.app_dns_token_for("fauna.build") == ""
+
+
+@pytest.mark.parametrize("fleet", ["zone", "uat", "acceptance", "production"])
+def test_an_app_dns_token_equal_to_a_fleet_token_is_refused(home, fleet):
+    _write(home, f"~/.config/fauna/cloud/{fleet}.token", "same\n")
+    _write(home, "~/.config/fauna/cloud/app-dns/fauna.build.token", "same\n")
+    with pytest.raises(cp.AppTokenReuseError, match=fleet):
+        cp.app_dns_token_for("fauna.build")
+
+
+def test_an_app_dns_token_equal_to_the_env_token_is_refused(home, monkeypatch):
+    _write(home, "~/.config/fauna/cloud/app-dns/test.fauna.build.token", "same\n")
+    monkeypatch.setenv(cp.ENV_VAR, "same")
+    with pytest.raises(cp.AppTokenReuseError):
+        cp.app_dns_token_for("test.fauna.build")
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX mode bits")
+def test_an_app_dns_token_file_others_can_read_is_refused(home):
+    _write(home, "~/.config/fauna/cloud/app-dns/fauna.build.token", "t\n", mode=0o644)
+    with pytest.raises(cp.TokenFileModeError):
+        cp.app_dns_token_for("fauna.build")
+
+
+def test_a_host_outside_the_org_zone_has_no_app_dns_token(home):
+    with pytest.raises(ValueError):
+        cp.app_dns_token_file("nest.example.org")
+    assert cp.app_dns_token_for("nest.example.org") == ""
+
+
+def test_app_dns_where_to_put_names_the_nests_file():
+    hint = cp.app_dns_where_to_put("Fauna.Build.")
+    assert "~/.config/fauna/cloud/app-dns/fauna.build.token" in hint
+    assert "zone project" in hint

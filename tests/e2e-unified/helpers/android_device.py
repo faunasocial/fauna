@@ -162,6 +162,19 @@ def resolve_adb_server(raw: str | None, environ=None) -> str | None:
     return text
 
 
+def _sdk_adb() -> str | None:
+    """adb under the Android SDK when it is not on PATH (the primary dev VM
+    sets `ANDROID_HOME=$HOME/android-sdk` in the login shell only)."""
+    roots = [os.environ.get("ANDROID_HOME"), os.environ.get("ANDROID_SDK_ROOT"),
+             os.path.join(os.path.expanduser("~"), "android-sdk")]
+    for root in roots:
+        if root:
+            path = os.path.join(root, "platform-tools", "adb")
+            if os.path.isfile(path) and os.access(path, os.X_OK):
+                return path
+    return None
+
+
 def adb_argv(serial: str | None, adb_server: str | None = None) -> list[str]:
     """The adb command prefix for this run: the executable, then `-L <spec>`
     when the run names an adb server, then `-s <serial>` when it names a device.
@@ -176,9 +189,12 @@ def adb_argv(serial: str | None, adb_server: str | None = None) -> list[str]:
     the bare word: on Windows CreateProcess appends only `.exe` to a bare name,
     so an adb reached through a `.cmd`/`.bat` wrapper on PATH (PATHEXT) would be
     "file not found" although a shell finds it. The bare name stays the
-    fallback so a missing adb still fails loudly at the first call.
+    fallback so a missing adb still fails loudly at the first call. Off PATH —
+    a process without the login shell's environment, like the fleet broker's
+    service probing the android venue — it is looked for under the SDK:
+    `$ANDROID_HOME/platform-tools`, then the primary dev VM's `~/android-sdk`.
     """
-    argv = [shutil.which("adb") or "adb"]
+    argv = [shutil.which("adb") or _sdk_adb() or "adb"]
     if adb_server:
         argv += ["-L", adb_server]
     if serial:

@@ -86,6 +86,26 @@ impl PendingActionSummary {
     pub fn description(&self) -> String {
         describe_pending_action(&self.action_type, self.target.as_deref())
     }
+
+    /// Still open to cancel — `status == "pending"`. The one predicate every
+    /// app lists by (an `executing` / `executed` / `cancelled` / `expired` row
+    /// has no cancel window left).
+    pub fn is_pending(&self) -> bool {
+        self.status == STATUS_PENDING
+    }
+}
+
+/// The wire spelling of a still-open action's `status`.
+pub const STATUS_PENDING: &str = "pending";
+
+impl PendingActionsListReply {
+    /// The reply's still-`pending` rows, served order (newest first) kept.
+    pub fn into_pending(self) -> Vec<PendingActionSummary> {
+        self.actions
+            .into_iter()
+            .filter(|a| a.is_pending())
+            .collect()
+    }
 }
 
 /// What will happen, as one sentence — verb + target
@@ -198,6 +218,32 @@ mod tests {
     use super::*;
     use crate::codec::test_support::assert_round_trips;
     use crate::codec::{decode_strict as decode, encode_canonical};
+
+    #[test]
+    fn only_pending_rows_survive_into_pending_in_served_order() {
+        let row = |id: i64, status: &str| PendingActionSummary {
+            id,
+            action_type: "account.delete".into(),
+            target: None,
+            status: status.into(),
+            created_at: 0,
+            execute_after: 0,
+            requires_quorum: 0,
+            approvals: vec![],
+            extra: BTreeMap::new(),
+        };
+        let reply = PendingActionsListReply {
+            actions: vec![
+                row(4, "pending"),
+                row(3, "executing"),
+                row(2, "cancelled"),
+                row(1, "pending"),
+            ],
+            extra: BTreeMap::new(),
+        };
+        let ids: Vec<i64> = reply.into_pending().iter().map(|a| a.id).collect();
+        assert_eq!(ids, vec![4, 1]);
+    }
 
     #[test]
     fn list_request_and_reply_round_trip() {

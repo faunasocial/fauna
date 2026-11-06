@@ -20,8 +20,8 @@ use std::task::{Context, Poll};
 
 use bytes::Bytes;
 use futures_util::{Sink, Stream};
-use gloo_net::websocket::Message;
 use gloo_net::websocket::futures::WebSocket;
+use gloo_net::websocket::{Message, State};
 
 use crate::error::WsRpcError;
 
@@ -65,25 +65,22 @@ pub enum AdapterError {
     Transport(String),
 }
 
-/// Build the `wss|ws` URL — `{base}/api/v1/ws/{actor_id}`, no `?token=`
-/// (Spec Y retired the query form). Mirrors `fauna_client::ws_adapter`.
-pub(crate) fn build_ws_url(nest_url: &str, actor_id_hex: &str) -> String {
-    let base = fauna_core::web::http_to_ws(nest_url);
-    format!("{base}/api/v1/ws/{actor_id_hex}")
-}
-
-/// Build the `wss|ws` URL for the **anonymous** (pre-identity) endpoint:
-/// `{base}/api/v1/ws` — no `{actor_id}` segment (an anonymous connection has no
-/// proven actor to key on). Mirrors `fauna_client::ws_adapter::build_anon_ws_url`.
-pub(crate) fn build_anon_ws_url(nest_url: &str) -> String {
-    let base = fauna_core::web::http_to_ws(nest_url);
-    format!("{base}/api/v1/ws")
-}
-
 /// Bytes-shaped Stream+Sink over a gloo-net browser `WebSocket`.
 pub struct GlooAdapter {
-    ws: WebSocket,
+    ws: Rc<RefCell<WebSocket>>,
     signal_cell: SignalCell,
+}
+
+/// Reads whether a dial's socket has opened, after the adapter moved into the
+/// dispatcher. The establish probe alone cannot say: a socket still connecting
+/// when the probe elapses outlived it too, and the reach hint must tell the two
+/// apart (`onboarding-provisioning.md` § Reach hint).
+pub(crate) struct SocketOpen(Rc<RefCell<WebSocket>>);
+
+impl SocketOpen {
+    pub(crate) fn is_open(&self) -> bool {
+        matches!(self.0.borrow().state(), State::Open)
+    }
 }
 
 impl GlooAdapter {
@@ -92,12 +89,12 @@ impl GlooAdapter {
     /// the offered protocols with `, `; nest echoes `fauna.v1`). Per
     /// `transport.md` § Connection lifecycle.
     pub fn connect(nest_url: &str, actor_id_hex: &str, token: &str) -> Result<Self, WsRpcError> {
-        let url = build_ws_url(nest_url, actor_id_hex);
+        let url = fauna_core::transport::actor_ws_url(nest_url, actor_id_hex);
         let protocols = ["fauna.v1".to_string(), format!("bearer.{token}")];
         let ws = WebSocket::open_with_protocols(&url, &protocols)
             .map_err(|e| WsRpcError::Connect(e.to_string()))?;
         Ok(Self {
-            ws,
+            ws: Rc::new(RefCell::new(ws)),
             signal_cell: Rc::new(RefCell::new(None)),
         })
     }
@@ -109,12 +106,12 @@ impl GlooAdapter {
     /// the connection down (transport.md § Pre-identity). The bearer twin is
     /// [`connect`](Self::connect).
     pub fn connect_anonymous(nest_url: &str) -> Result<Self, WsRpcError> {
-        let url = build_anon_ws_url(nest_url);
+        let url = fauna_core::transport::anon_ws_url(nest_url);
         let protocols = ["fauna.v1".to_string()];
         let ws = WebSocket::open_with_protocols(&url, &protocols)
             .map_err(|e| WsRpcError::Connect(e.to_string()))?;
         Ok(Self {
-            ws,
+            ws: Rc::new(RefCell::new(ws)),
             signal_cell: Rc::new(RefCell::new(None)),
         })
     }
@@ -123,6 +120,11 @@ impl GlooAdapter {
     /// the adapter is moved into the dispatcher.
     pub fn signal_cell(&self) -> SignalCell {
         Rc::clone(&self.signal_cell)
+    }
+
+    /// The dial's open reading, for the reconnect loop to hold past the move.
+    pub(crate) fn socket_open(&self) -> SocketOpen {
+        SocketOpen(Rc::clone(&self.ws))
     }
 
     fn record(&self, signal: ReconnectSignal) {
@@ -137,7 +139,7 @@ impl Stream for GlooAdapter {
         use gloo_net::websocket::WebSocketError as WsErr;
         let this = self.get_mut();
         loop {
-            match Pin::new(&mut this.ws).poll_next(cx) {
+            match Pin::new(&mut *this.ws.borrow_mut()).poll_next(cx) {
                 Poll::Ready(Some(Ok(Message::Bytes(b)))) => {
                     return Poll::Ready(Some(Ok(Bytes::from(b))));
                 }
@@ -169,28 +171,28 @@ impl Sink<Bytes> for GlooAdapter {
 
     fn poll_ready(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         let this = self.get_mut();
-        Pin::new(&mut this.ws)
+        Pin::new(&mut *this.ws.borrow_mut())
             .poll_ready(cx)
             .map_err(|e| AdapterError::Transport(e.to_string()))
     }
 
     fn start_send(self: Pin<&mut Self>, item: Bytes) -> Result<(), Self::Error> {
         let this = self.get_mut();
-        Pin::new(&mut this.ws)
+        Pin::new(&mut *this.ws.borrow_mut())
             .start_send(Message::Bytes(item.to_vec()))
             .map_err(|e| AdapterError::Transport(e.to_string()))
     }
 
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         let this = self.get_mut();
-        Pin::new(&mut this.ws)
+        Pin::new(&mut *this.ws.borrow_mut())
             .poll_flush(cx)
             .map_err(|e| AdapterError::Transport(e.to_string()))
     }
 
     fn poll_close(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         let this = self.get_mut();
-        Pin::new(&mut this.ws)
+        Pin::new(&mut *this.ws.borrow_mut())
             .poll_close(cx)
             .map_err(|e| AdapterError::Transport(e.to_string()))
     }
@@ -212,30 +214,6 @@ mod tests {
     // defaults to a Node target this machine can't run and silently skips
     // every test.
     wasm_bindgen_test_configure!(run_in_browser);
-
-    #[wasm_bindgen_test]
-    fn build_ws_url_swaps_scheme_and_appends_actor() {
-        assert_eq!(
-            build_ws_url("https://nest.example.com", "abcd"),
-            "wss://nest.example.com/api/v1/ws/abcd"
-        );
-        assert_eq!(
-            build_ws_url("http://localhost:8080", "ff"),
-            "ws://localhost:8080/api/v1/ws/ff"
-        );
-    }
-
-    #[wasm_bindgen_test]
-    fn build_anon_ws_url_swaps_scheme_and_omits_actor() {
-        assert_eq!(
-            build_anon_ws_url("https://nest.example.com"),
-            "wss://nest.example.com/api/v1/ws"
-        );
-        assert_eq!(
-            build_anon_ws_url("http://localhost:8080"),
-            "ws://localhost:8080/api/v1/ws"
-        );
-    }
 
     #[wasm_bindgen_test]
     fn close_codes_map_to_signals() {

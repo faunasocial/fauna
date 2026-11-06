@@ -113,7 +113,7 @@ func (m *mkcalendarInterceptor) ServeHTTP(w http.ResponseWriter, r *http.Request
 		}
 	}
 
-	sealed, err := SealCollectionMetadata(meta, sess.MLSPubkey(), sess.MlkemEk())
+	sealed, err := SealCollectionMetadata(meta, sess.CalendarPubkey(), sess.CalendarMlkemEk())
 	if err != nil {
 		http.Error(w, fmt.Sprintf("caldav: seal new calendar metadata: %v", err), http.StatusInternalServerError)
 		return

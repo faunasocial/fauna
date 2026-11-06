@@ -208,7 +208,7 @@ fn a_development_install_card_paints_no_key() {
 fn app_with_machine() -> App {
     let mut app = authed_app();
     app.settings.connected_apps.machine = Some(ConnectedAppsMachine::new(
-        Arc::new(NoopObserver),
+        Arc::new(NullObserver),
         Arc::new(fauna_client_connected_apps::FakeConnectedAppsNestApi::new()),
     ));
     app
@@ -1063,7 +1063,7 @@ async fn the_consent_route_lands_its_card_in_the_tray() {
     );
     let mut app = authed_app();
     app.settings.connected_apps.machine =
-        Some(ConnectedAppsMachine::new(Arc::new(NoopObserver), fake));
+        Some(ConnectedAppsMachine::new(Arc::new(NullObserver), fake));
     let op = app
         .apply_route(fauna_core::app_route::AppRoute::Consent {
             request_uri: HANDLE.into(),

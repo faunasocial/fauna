@@ -89,7 +89,7 @@ class RecoveryEntryVM @Inject constructor(
                         host,
                         registry,
                         secret,
-                        context.getString(R.string.onboarding_session_error_persist_successor),
+                        context.getString(R.string.onboarding_session_error_persist_identity),
                         "RecoveryEntryVM",
                     )
                     if (!committed) return

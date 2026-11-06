@@ -22,64 +22,13 @@ class ContactsActions:
 
         linux + windows + apple + tui drive the scripted CardDAV MUA seed via a
         KNOWN bridge password (`enable_mail_plain`); web joined too — its own `enable_mail_plain` path is proven
-        directly by `test_mail_credentials.py`'s web marker. android is the
-        one still owed (route-3 follow-on, per `test_events`).
+        directly by `test_mail_credentials.py`'s web marker; android's mail-settings
+        form drives it the same way (`test_carddav_roundtrip.py`).
         """
         driver = self.driver
-        if not (
-            driver.is_linux()
-            or driver.is_windows()
-            or driver.is_macos()
-            or driver.is_ios()
-            or driver.is_tui()
-            or driver.is_web()
-        ):
-            from helpers.app_surface import skip_unbuilt
+        from helpers.app_surface import require_surface
 
-            skip_unbuilt(
-                driver,
-                surface="the enable_mail_plain seeded CardDAV-read path",
-                detail="enabling mail with a KNOWN bridge password is wired for "
-                       "linux + windows + apple + tui; web + android join once "
-                       "their enable-mail-plain e2e is confirmed",
-                tracked="route-3 follow-on, per test_events",
-            )
-
-    def require_address_book_live_refresh(self) -> None:
-        """Skip unless this app re-reads its open Address Book on the
-        ``fauna.addressbook.changed`` push — convention 7.
-
-        The shared classifier folds the kind to ``StaleSurfaces::address_book``;
-        tui (``apply_resync``), linux (``apply_stale``), web (the contacts
-        page's ``onPushEvent``), macos + ios (``FaunaClient.startPushObserver``
-        → ``.onAddressBookChanged`` → ``AddressBookVM.refreshFromPush``) and now
-        windows (``NestRpcClient.DispatchPush`` → ``AddressBookPushChanged`` →
-        ``ContactsPage``) re-read the books and the open book's cards off it.
-        The UniFFI apps receive the push typed
-        (``FfiPushEvent::AddressBookChanged``) and android's page is wired;
-        android's run stays parked behind the host emulator — parity debt
-        (``skip_unbuilt``), not an absence.
-        """
-        if not (
-            self.driver.is_tui()
-            or self.driver.is_linux()
-            or self.driver.is_web()
-            or self.driver.is_macos()
-            or self.driver.is_ios()
-            or self.driver.is_windows()
-        ):
-            from helpers.app_surface import skip_unbuilt
-
-            skip_unbuilt(
-                self.driver,
-                surface="the Address Book's live refresh on fauna.addressbook.changed",
-                detail=(
-                    "tui, linux, web, macos, ios and windows re-read the open "
-                    "book off StaleSurfaces::address_book; android's run is "
-                    "emulator-parked"
-                ),
-                tracked="transport.md § Push events (fauna.addressbook.changed); the cross-app lift",
-            )
+        require_surface(driver, "enable-mail-plain-carddav-read")
 
     def open_contact_profile(self, actor_id_hex: str, timeout: float = 10.0) -> None:
         """Open another actor's profile by tapping their contact row.
@@ -175,25 +124,6 @@ class ContactsActions:
         self.driver.click("contact-actor-id-lookup")
         time.sleep(1)
 
-    def require_find_result_opens_profile(self) -> None:
-        """Skip unless this app paints the Find User result's
-        ``contact-actor-id-open-profile-button`` (convention 7). tui leads
-        (`contacts.md` § Layout & flow region 3); android and linux have lifted it and the
-        other four lift it in the batched trickle-down — parity debt, so
-        ``skip_unbuilt``."""
-        if not (self.driver.is_tui() or self.driver.is_android() or self.driver.is_linux()):
-            from helpers.app_surface import skip_unbuilt
-
-            skip_unbuilt(
-                self.driver,
-                surface="contact-actor-id-open-profile-button",
-                detail=(
-                    "the Find User result's door into the found actor's "
-                    "Profile, carrying the lookup's nest URL as its home"
-                ),
-                tracked="contacts.md § Implementation status today; the batched per-app trickle-down",
-            )
-
     def open_found_profile(self) -> None:
         """Open the Find User result's actor on the Profile page."""
         self.driver.click("contact-actor-id-open-profile-button")
@@ -252,35 +182,6 @@ class ContactsActions:
     #     once an ask is outstanding (read from the ward's own
     #     status.contact_requests, so it survives a restart).
 
-    def require_contact_request_ask(self) -> None:
-        """Skip unless this app builds the ward-side ask — convention 7, the
-        platform check lives in the action layer.
-
-        tui shipped it 2026-08-14 as the lead app; macOS + iOS (through the
-        shared FaunaKit ``ContactAskRow``), linux and web lifted it 2026-09-26;
-        windows lifted it with the rest of the batch; the remaining apps lift it
-        (parity debt, hence skip_unbuilt rather than declared_absence)."""
-        if not (
-            self.driver.is_tui()
-            or self.driver.is_macos()
-            or self.driver.is_ios()
-            or self.driver.is_linux()
-            or self.driver.is_web()
-            or self.driver.is_windows()
-        ):
-            from helpers.app_surface import skip_unbuilt
-
-            skip_unbuilt(
-                self.driver,
-                surface="contact-request-guardian-button",
-                detail=(
-                    "the ward's in-app 'ask your guardian'; tui shipped it "
-                    "2026-08-14 over the shared refusal predicate, macOS, iOS, "
-                    "linux and web 2026-09-26"
-                ),
-                tracked="family-safety.md § Child-initiated contact requests → App affordance",
-            )
-
     def guardian_ask_offered(self) -> bool:
         return self.driver.count("contact-request-guardian-button") > 0
 
@@ -291,7 +192,16 @@ class ContactsActions:
         self.driver.click("contact-request-guardian-button")
 
     def contact_request_pending_text(self) -> str:
-        if not self.driver.is_visible("contact-request-pending"):
+        """The find result's ``contact-request-pending`` text, or ``""``.
+
+        The label sits under the roster, so a ward with a few contacts has it
+        below the page's fold, and windows' ``is_visible`` (UIA ``IsOffscreen``)
+        reads it as not visible though it is painted. So a present label is
+        brought into view first (``is_visible_scrolled``); an absent one returns
+        on the count, never paying web's scroll wait."""
+        if self.driver.count("contact-request-pending") == 0:
+            return ""
+        if not self.driver.is_visible_scrolled("contact-request-pending"):
             return ""
         return self.driver.get_text("contact-request-pending")
 
@@ -328,27 +238,6 @@ class ContactsActions:
             for i in range(self.driver.count("knock-sender"))
         ]
 
-    def require_knock_guardian_pending(self) -> None:
-        """Skip unless this app paints ``knock-guardian-pending`` — convention 7,
-        the platform check lives in the action layer. tui leads (2026-10-17,
-        ids user-approved 2026-10-16); linux, web and android lifted it
-        (2026-10-18); windows and macos/ios lift it with their family batch
-        (parity debt, hence skip_unbuilt)."""
-        if not (
-            self.driver.is_tui()
-            or self.driver.is_linux()
-            or self.driver.is_web()
-            or self.driver.is_android()
-        ):
-            from helpers.app_surface import skip_unbuilt
-
-            skip_unbuilt(
-                self.driver,
-                surface="knock-guardian-pending",
-                detail="the ward's knock row marked as waiting for the guardian",
-                tracked="family-safety.md § App surface",
-            )
-
     def knock_guardian_pending_texts(self) -> list[str]:
         """Every ``knock-guardian-pending`` text on the page, in row order."""
         return [
@@ -356,16 +245,20 @@ class ContactsActions:
             for i in range(self.driver.count("knock-guardian-pending"))
         ]
 
-    def knock_index_for(self, sender_hex: str) -> int | None:
+    def knock_index_for(self, sender_hex: str, handle: str | None = None) -> int | None:
         """The knock row whose sender is ``sender_hex``, or ``None``.
 
         ``knock-sender`` renders the shared ``fauna_core::format::short_id`` (12
         hex characters and an ellipsis — ``value-formatting.md`` § Short id), so
         the match is on that form; ``test_knock_sender_display.py`` pins that
-        every app renders exactly it."""
+        every app renders exactly it for a stranger. A sender the contact roster
+        already holds a handle for is named by it instead (§ Peer display
+        label), so a caller that knows that handle passes it and either form
+        matches."""
         short = sender_hex if len(sender_hex) <= 12 else sender_hex[:12] + "…"
+        forms = {short} | ({handle} if handle else set())
         for i, text in enumerate(self.knock_senders()):
-            if text == short:
+            if text in forms:
                 return i
         return None
 

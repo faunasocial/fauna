@@ -30,6 +30,23 @@
 //! not yet durable, then retires. A retire answering "already gone" is
 //! success.
 //!
+//! **Only an item its depositor signed, as a writer the owner's own grant
+//! log authorizes for the folder, is adopted** (`folder-deposit.md` § The
+//! depositor signs, the owner's device verifies → *The adopter's check*). The
+//! seal keeps the nest out of the content, not out of the authorship: the
+//! recipient key is public, so a nest could seal an item of its own making.
+//! Having opened an item, the seat rebuilds its [`DepositStatement`] from
+//! what it holds — the folder it is armed with, the envelope's name and media
+//! type, the body's length and the hash it computes anyway — verifies the
+//! envelope's `sig` under the envelope's `writer`, and admits the writer only
+//! when [`fauna_client_folders::FolderKeyReader::deposit_writers`] names it
+//! for this folder (any `Mint` or `Renew` ever, revoked or not). An item
+//! failing either check is **left parked** — never landed, recorded or
+//! retired — counted as refused and logged at warn: an honest nest's door
+//! refuses it before parking, so one found parked is a detection signal; and
+//! an item that arrives before its `Mint` reaches this replica is admitted by
+//! the first pass after it does.
+//!
 //! **Only the owner's seats adopt.** The item is sealed to the owner's
 //! recipient key, which a member never holds; an engine is armed with an
 //! inbox ([`SyncEngine::set_deposit_inbox`]) only for a set the account owns
@@ -39,9 +56,12 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use fauna_core::data::ContentHash;
+use std::collections::BTreeSet;
+
 use fauna_protocol::folders::{
-    DepositEnvelope, DepositPart, FolderDepositsListRequest, FolderDepositsPartRequest,
-    FolderDepositsRetireRequest, MAX_DEPOSIT_PARTS, ParkedDeposit, is_deposit_name,
+    DepositEnvelope, DepositPart, DepositStatement, FolderDepositsListRequest,
+    FolderDepositsPartRequest, FolderDepositsRetireRequest, MAX_DEPOSIT_PARTS, ParkedDeposit,
+    is_deposit_name,
 };
 
 use super::SyncEngine;
@@ -64,10 +84,67 @@ pub struct DepositAdoption {
     /// Items left parked for a later pass (unopenable, no free name, the
     /// record not yet durable).
     pub deferred: usize,
+    /// Items left parked because the adopter's check refused them — no
+    /// signature, one that does not verify, or a writer the owner's grant log
+    /// never authorized for this folder. Kept apart from [`Self::deferred`]:
+    /// an honest nest's door never parks such an item, so one is a detection
+    /// signal, not a backlog.
+    pub refused: usize,
     /// The path of every item this pass retired (adopted or found landed), in
     /// order — what an on-demand root flips to the platform's in-sync mark,
     /// as it flips every other recorded upload.
     pub landed: Vec<String>,
+}
+
+/// What [`SyncEngine::adopt_one`] did with one item.
+#[derive(Debug, PartialEq, Eq)]
+enum Outcome {
+    /// Landed at the path — `true` by this call, `false` found already there
+    /// — and retired.
+    Retired(bool, String),
+    /// Left parked for a later pass.
+    Deferred,
+    /// Left parked: the adopter's check refused it, for the reason named.
+    Refused(&'static str),
+}
+
+/// The adopter's check before the body is read: the item names a writer and
+/// carries a signature, and the owner's grant log authorizes that writer for
+/// this folder. `Err` = the refusal's reason.
+fn admitted_writer(
+    envelope: &DepositEnvelope,
+    writers: &BTreeSet<[u8; 32]>,
+) -> Result<[u8; 32], &'static str> {
+    let Some(writer) = envelope.writer else {
+        return Err("unsigned");
+    };
+    if envelope.sig.is_empty() {
+        return Err("unsigned");
+    }
+    if !writers.contains(&writer) {
+        return Err("writer not authorized");
+    }
+    Ok(writer)
+}
+
+/// The adopter's check over the body: the statement rebuilt from what the
+/// seat holds verifies under the admitted writer.
+fn statement_verifies(
+    folder_id: i64,
+    envelope: &DepositEnvelope,
+    writer: &[u8; 32],
+    len: u64,
+    hash: &ContentHash,
+) -> bool {
+    DepositStatement {
+        folder_id,
+        name: envelope.name.clone(),
+        content_type: envelope.content_type.clone(),
+        len,
+        hash: hash.digest(),
+    }
+    .verify(writer, &envelope.sig)
+    .is_ok()
 }
 
 /// Where one item lands, and whether its bytes are already there.
@@ -277,6 +354,7 @@ impl SyncEngine {
         let control = Arc::clone(&*self.control.read().unwrap());
         let mut after = 0;
         let mut key = None;
+        let mut writers = BTreeSet::new();
         loop {
             let page = control
                 .list_deposits(FolderDepositsListRequest {
@@ -296,12 +374,15 @@ impl SyncEngine {
                     return Ok(done);
                 }
                 key = Some(recipient_key(&mseks));
+                // Read once per pass, as the key is: a consent given since
+                // the last pass reaches this one.
+                writers = inbox.keys.deposit_writers(inbox.folder_id).await?;
             }
             let key = key.as_deref().expect("set above");
             for item in &page.items {
                 after = after.max(item.id);
-                match self.adopt_one(inbox.folder_id, item, key).await {
-                    Ok(Some((fresh, path))) => {
+                match self.adopt_one(inbox.folder_id, item, key, &writers).await {
+                    Ok(Outcome::Retired(fresh, path)) => {
                         if fresh {
                             done.adopted += 1;
                         } else {
@@ -309,7 +390,15 @@ impl SyncEngine {
                         }
                         done.landed.push(path);
                     }
-                    Ok(None) => done.deferred += 1,
+                    Ok(Outcome::Deferred) => done.deferred += 1,
+                    Ok(Outcome::Refused(why)) => {
+                        done.refused += 1;
+                        tracing::warn!(
+                            deposit = item.id,
+                            reason = why,
+                            "deposit refused by the adopter's check; left parked"
+                        );
+                    }
                     Err(e) => {
                         done.deferred += 1;
                         tracing::warn!(deposit = item.id, "deposit adoption deferred: {e:#}");
@@ -322,21 +411,27 @@ impl SyncEngine {
         }
     }
 
-    /// Adopt one item: `Some((true, path))` landed at `path` and retired by
-    /// this call, `Some((false, path))` found already landed there and
-    /// retired, `None` left parked.
+    /// Adopt one item: landed and retired, deferred, or refused by the
+    /// adopter's check — the last two leave it parked ([`Outcome`]).
     async fn adopt_one(
         &self,
         folder_id: i64,
         item: &ParkedDeposit,
         key: &[u8],
-    ) -> Result<Option<(bool, String)>> {
+        writers: &BTreeSet<[u8; 32]>,
+    ) -> Result<Outcome> {
         let envelope = open_deposit(&item.sealed, key)?;
         // The nest's door checked the name; the seat checks again, as every
         // remote door re-guards what it materializes.
         if !is_deposit_name(&envelope.name) {
             anyhow::bail!("the deposit's name is not one plain file-name component");
         }
+        // Before any part is fetched: an unsigned item, or one from a writer
+        // the log never authorized here, is refused without reading its body.
+        let writer = match admitted_writer(&envelope, writers) {
+            Ok(writer) => writer,
+            Err(why) => return Ok(Outcome::Refused(why)),
+        };
         let (body, hash) = if envelope.parts == 0 {
             let inline = envelope.body.as_ref();
             (Body::Inline(inline), ContentHash::of_raw(inline))
@@ -353,13 +448,22 @@ impl SyncEngine {
             let hash = staged.hash;
             (Body::Staged(staged), hash)
         };
+        // The statement over what the seat holds; a refused item's unlanded
+        // stage goes with `body`.
+        if !statement_verifies(folder_id, &envelope, &writer, body.len(), &hash) {
+            return Ok(Outcome::Refused("signature"));
+        }
         let Some(target) = self.deposit_target(&envelope.name, item.id, body.len(), &hash)? else {
             tracing::warn!(
                 deposit = item.id,
                 "no free name to adopt the deposit under; left parked"
             );
-            return Ok(None);
+            return Ok(Outcome::Deferred);
         };
+        // The depositor rides on whichever upload records exactly these bytes
+        // here — this pass's, or the watcher's of the landed file (ruling 3).
+        let (Target::Fresh(marked) | Target::Landed(marked)) = &target;
+        self.mark_deposit(marked, hash, writer);
         let (path, fresh) = match target {
             Target::Fresh(path) => {
                 let full = fauna_core::path_guard::contained_apply_target(&self.watch_dir, &path)?;
@@ -386,16 +490,17 @@ impl SyncEngine {
         if !self.recorded_as(&path, &hash) && !self.upload_file(&path).await?.recorded {
             // On disk, not yet recorded: the next pass (or the watcher's
             // upload) finds it landed and retires it once durable.
-            return Ok(None);
+            return Ok(Outcome::Deferred);
         }
         control_retire(self, folder_id, item.id).await?;
+        self.clear_deposit_mark(&path);
         tracing::info!(
             deposit = item.id,
             path = %fauna_core::log_redact::log_path(&path),
             fresh,
             "third-party deposit adopted"
         );
-        Ok(Some((fresh, path)))
+        Ok(Outcome::Retired(fresh, path))
     }
 
     /// Is `path`'s recorded head exactly `hash` — the item's change row

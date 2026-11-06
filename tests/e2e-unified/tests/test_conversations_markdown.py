@@ -66,12 +66,16 @@ def test_list_snippet_is_plaintext_not_markdown(logged_in_app):
 # render-model document via DocumentPainter.Apply(BodyText="dm-message-text",
 # _document) (markdown parsed shared-side into inlines, `**` stripped in the
 # painted text — the same path apple/linux/web use); inject_and_open_thread is
-# driver-agnostic (conversation-item rows). (Only this DETAIL test generalizes to
+# driver-agnostic (conversation-item rows). android: ConversationDetailScreen.kt walks
+# the shared RenderDocument under `DM_MESSAGE_TEXT` (`DocumentBlocks`) and its
+# `conversations_inject_inbound` hands the whole payload to the shared parser; its device
+# run is not yet recorded. (Only this DETAIL test generalizes to
 # windows — `dm-subject` is a list-row element on linux/web but a bubble element
 # on windows, so the list-snippet test above stays linux+web.)
 @pytest.mark.macos
 @pytest.mark.ios
 @pytest.mark.windows
+@pytest.mark.android
 @pytest.mark.feature("message-formatting")
 def test_detail_renders_markdown_on_select(logged_in_app):
     """Selecting a FaunaMls conversation opens the detail pane with its message

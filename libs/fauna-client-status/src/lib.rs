@@ -132,8 +132,8 @@ pub struct BuildLeg {
 }
 
 impl BuildLeg {
-    /// From the compile-time stamp — `option_env!("FAUNA_BUILD_COMMIT")` in
-    /// the binary crate, stamped by `fauna-build-commit`'s `emit()`. `None`,
+    /// From the compile-time stamp — `fauna_build_commit::commit!()`, expanded
+    /// in the crate that IS the artifact, never in a library. `None`,
     /// the empty string and `dev` (the two values the environment uses to mean
     /// "nothing was passed") all read as *unknown*.
     pub fn from_stamp(stamp: Option<&str>) -> Self {

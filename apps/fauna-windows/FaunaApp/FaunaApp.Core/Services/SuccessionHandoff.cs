@@ -35,7 +35,9 @@ internal static class SuccessionHandoff
     private static string? _predecessorActorIdHex;
     private static string? _successorActorIdHex;
     private static long? _succeededAtUnix;
+#if DEBUG || FAUNA_E2E_AGENT
     private static string? _sweepStateJson;
+#endif
     private static FfiSweepView? _sweep;
 
     private static string? _sweepOwedTo;
@@ -108,8 +110,14 @@ internal static class SuccessionHandoff
     /// <para>⚠ Not a painting surface: its vocabulary (<c>no_engine</c>)
     /// deliberately differs from <c>FfiSweepView.Kind</c>'s (<c>no-engine</c>),
     /// which is the human one.</para>
+    ///
+    /// <para>The serializer is its only reader, so it and its field compile out of a
+    /// Release build (convention 15, e2e-automation-surface-gating.md); the writers
+    /// keep their signatures and store it only where the agent can read it.</para>
     /// </summary>
+#if DEBUG || FAUNA_E2E_AGENT
     internal static string? SweepStateJson { get { lock (Gate) return _sweepStateJson; } }
+#endif
 
     /// <summary>
     /// The pre-switch group sweep's own account of what it managed, as a surface
@@ -138,7 +146,9 @@ internal static class SuccessionHandoff
             _predecessorActorIdHex = predecessorActorIdHex;
             _successorActorIdHex = landed.newActorIdHex;
             _succeededAtUnix = landed.succeededAt;
+#if DEBUG || FAUNA_E2E_AGENT
             _sweepStateJson = landed.sweepStateJson;
+#endif
             _sweep = landed.sweep;
         }
     }
@@ -232,7 +242,9 @@ internal static class SuccessionHandoff
         lock (Gate)
         {
             _sweep = fresh;
+#if DEBUG || FAUNA_E2E_AGENT
             _sweepStateJson = stateJson;
+#endif
         }
     }
 
@@ -247,7 +259,9 @@ internal static class SuccessionHandoff
             _predecessorActorIdHex = null;
             _successorActorIdHex = null;
             _succeededAtUnix = null;
+#if DEBUG || FAUNA_E2E_AGENT
             _sweepStateJson = null;
+#endif
             _sweep = null;
             _sweepOwedTo = null;
         }

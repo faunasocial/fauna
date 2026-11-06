@@ -151,6 +151,27 @@ public partial class AdminSettingsViewModel : ViewModelBase
         }
     }
 
+    /// <summary>Remove one tier via <c>fauna.admin.tiers.delete</c> (admin.md § 3 →
+    /// <i>Removing a tier</i>), keyed by the row's name — <c>free</c>'s row included, since
+    /// which tier is removable is the nest's call. No confirm dialog. A refusal (the
+    /// in-use <c>fauna.admin.conflict</c>) arrives already worded by the UniFFI face, so
+    /// the exception text goes into <c>delete_tier_error</c> as is — no per-app code
+    /// check. Non-optimistic: the row drops only after the refetch of
+    /// <c>tiers.list</c>. Mirrors tui <c>Op::DeleteTier</c> and the add-tier error shape.</summary>
+    public async Task DeleteTierAsync(AdminTierRow row)
+    {
+        ErrorMessage = null;
+        try
+        {
+            await _rpc.AdminTiersDeleteAsync(row.Name);
+            await ReloadTiersAsync();
+        }
+        catch (Exception ex)
+        {
+            SetError(Strings.Get("admin/settings_page/delete_tier_error").Replace("{message}", Strings.Error(ex)));
+        }
+    }
+
     // The add-a-tier form's drafts (admin-settings-tier-add-*, admin.md § 3 →
     // Defining a new tier): a name plus the same five raw-i64 cap texts a row edits,
     // empty until typed. Two-way bound to the page's inputs.

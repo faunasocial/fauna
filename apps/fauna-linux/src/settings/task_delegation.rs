@@ -51,7 +51,8 @@ use fauna_client_delegation::{
     HeavyTaskCapability, PinOption, TaskDelegationRow, TaskDelegationView,
 };
 use fauna_core::data::ParticipantRef;
-use fauna_devices_machine::{DevicesObserver, build_devices_machine};
+use fauna_devices_machine::build_devices_machine;
+use fauna_devices_machine::observer::NullObserver;
 
 use crate::async_helper::{hydrate_with_retry, spawn_with_snapshot};
 use crate::i18n::strings::{self, task_delegation as S};
@@ -70,13 +71,6 @@ pub const TITLE: &str = S::TITLE;
 struct Loaded {
     rows: Result<Vec<TaskDelegationRow>, String>,
     labels: HashMap<String, String>,
-}
-
-/// No-op `DevicesMachine` observer: this page reads the roster once per reload
-/// (for display names) rather than reacting to it, so it needs no reactivity.
-struct NoopObserver;
-impl DevicesObserver for NoopObserver {
-    fn on_changed(&self) {}
 }
 
 /// Widget handles the render + event closures need.
@@ -419,7 +413,7 @@ async fn device_labels(nest: Nest) -> HashMap<String, String> {
     let devices = build_devices_machine(
         nest,
         Some(crate::account_runtime::folder_key_store()),
-        Arc::new(NoopObserver),
+        Arc::new(NullObserver),
     );
     devices.refresh().await;
     devices

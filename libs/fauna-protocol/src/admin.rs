@@ -1124,6 +1124,14 @@ pub struct AdminPendingActionSummary {
     pub extra: BTreeMap<String, Value>,
 }
 
+impl AdminPendingActionSummary {
+    /// Still open to approve / veto — `status == "pending"`, the same predicate
+    /// as [`crate::pending_actions::PendingActionSummary::is_pending`].
+    pub fn is_pending(&self) -> bool {
+        self.status == crate::pending_actions::STATUS_PENDING
+    }
+}
+
 /// fauna.admin.pending_actions.list (≡ GET /admin/api/pending-actions) — no
 /// params. The cross-actor admin list, **distinct** from B20's user-scoped
 /// `fauna.pending_actions.list` (which is keyed on the connection actor).

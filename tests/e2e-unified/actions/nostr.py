@@ -70,7 +70,7 @@ class NostrActions:
         `SettingsPage.nostr`) and the iOS `SettingsView` `NavigationStack`
         (`applyNavPatch` reads `stack[1].id` → `selectedSettingsPage`). When the
         page isn't on screen yet (iOS reaches it from a settings row rather than
-        a rail), fall back to clicking the `nostr-settings-link` row — a safe
+        a rail), fall back to clicking the `settings-nav-row[nostr]` row — a safe
         no-op where the rail already swapped (same pattern as linked-nests).
         """
         self.driver.set_state({
@@ -79,7 +79,7 @@ class NostrActions:
         time.sleep(1)
         if not self._on_nostr_page():
             try:
-                self.driver.click("nostr-settings-link")
+                self.driver.click("settings-nav-row[nostr]")
                 time.sleep(1)
             except Exception:
                 pass

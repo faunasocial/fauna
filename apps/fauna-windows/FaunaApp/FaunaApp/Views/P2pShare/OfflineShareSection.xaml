@@ -16,7 +16,7 @@
   every one into the generated .g.cs and the per-page .xbf, both of which ship.
   Removing the ITEM is the only construct that removes the markup, so
   FaunaApp.csproj drops `Views\P2pShare\**` from Page and Compile when
-  `/p:FaunaStoreSafe=true` (dynamic-features.md § Platform-family surface
+  `/p:FaunaExciseP2pShare=true` (dynamic-features.md § Platform-family surface
   excision) — the same shape Views\Payments\ takes for `payments`.
 
   Consequences, both load-bearing:

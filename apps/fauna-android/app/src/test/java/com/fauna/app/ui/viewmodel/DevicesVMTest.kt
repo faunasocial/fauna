@@ -91,6 +91,7 @@ class DevicesVMTest {
         val reconnectTick = MutableSharedFlow<Unit>(replay = 0, extraBufferCapacity = 1)
         whenever(api.folderChangedTick).thenReturn(tick)
         whenever(api.reconnectTick).thenReturn(reconnectTick)
+        whenever(api.devicesStaleTick).thenReturn(MutableSharedFlow())
         // The store-change notice (`ApiClient.storeChangedTick`), collected in
         // `init` beside the two above.
         val storeChangedTick = MutableSharedFlow<Unit>(replay = 0, extraBufferCapacity = 1)
@@ -129,13 +130,14 @@ class DevicesVMTest {
     }
 
     @Test
-    fun aFailedReadDegradesToAnEmptyListNotAPageError() = runTest {
+    fun aFailedReadDegradesToAnEmptyListAndSaysSo() = runTest {
         val (vm, api, _) = makeVm()
         whenever(api.folderDevices("photos")).thenThrow(RuntimeException("boom"))
 
         vm.setFolderExpanded("photos", 1L, true)
 
         assertEquals(emptyList<FfiFolderDevice>(), vm.folderDeviceActivity.value["photos"])
+        assertEquals("fauna.folders.devices: boom", vm.sharingError.value)
     }
 
     // ── The live-update half: fauna.sync.changed re-fetches EXPANDED rows only ──

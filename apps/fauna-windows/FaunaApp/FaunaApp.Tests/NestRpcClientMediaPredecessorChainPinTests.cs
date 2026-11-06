@@ -27,7 +27,7 @@ public class NestRpcClientMediaPredecessorChainPinTests
     private static string BuildMediaMachineBody()
     {
         var source = File.ReadAllText(SourcePath);
-        const string startAnchor = "public async Task<MediaMachine> BuildMediaMachineAsync(MediaObserver observer)";
+        const string startAnchor = "public async Task<MediaMachine> BuildMediaMachineAsync(MediaObserver observer, ConversationsSession? convSession)";
         const string endAnchor = "public async Task WireMediaFollowedFoldersAsync(";
         var start = source.IndexOf(startAnchor, StringComparison.Ordinal);
         Assert.True(start >= 0, $"`{startAnchor}` moved or was renamed — update this test's anchor");
@@ -70,5 +70,20 @@ public class NestRpcClientMediaPredecessorChainPinTests
             "BuildMediaMachineAsync no longer reads the registry's paired predecessor chain — a bare key never opens a predecessor-signed row, so the inherited corpus stays unopenable");
         RequireIndex(body, "machine.SetPredecessorChain(", read,
             "BuildMediaMachineAsync reads the paired chain but never hands it to the machine");
+    }
+
+    // media.md § Encryption at rest → *The filter and the upload target address
+    // the row*, (c): unwired, the machine drops every shared set's row, so a set
+    // shared with the caller is never offered by its row nor labelled with its
+    // owner, and a writer member can never pick it as an upload target. Pinned
+    // here for the same reason as the two facts above: the build binds a live
+    // socket. The page calls the build with the session (`MediaPage.Page_Loaded`).
+    [Fact]
+    public void BuildMediaMachineWiresTheMemberRowJoinFilterOverTheConversationsSession()
+    {
+        var body = BuildMediaMachineBody();
+
+        RequireIndex(body, "FaunaFfiMethods.WireMediaMlsQuery(machine, convSession)", 0,
+            "BuildMediaMachineAsync no longer wires the media machine's MLS join-filter — every shared set's row is dropped and a same-named shared set merges into the own one");
     }
 }

@@ -5,10 +5,8 @@ import (
 )
 
 // TestSessionMlkemEkAccessor pins the leg-D2a session plumbing: the AUTH'd
-// actor's ML-KEM ek (cached at auth beside the MLS pubkey) is surfaced via
-// MlkemEk() to the CalDAV and CardDAV body seals (put.go,
-// encrypted_metadata.go), which pass it to mailfauna.EncryptToRecipientHybrid
-// to seal X-Wing. nil only on a session with no key cached — the synthetic
+// actor's mail ML-KEM ek (cached at auth beside the MLS pubkey) is surfaced
+// via MlkemEk(). nil only on a session with no key cached — the synthetic
 // NewSession a terminator's tests build. MlkemEk() returns a copy so callers
 // cannot mutate session state — same contract as MLSPubkey()/IndexKey().
 func TestSessionMlkemEkAccessor(t *testing.T) {

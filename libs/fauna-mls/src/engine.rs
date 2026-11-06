@@ -332,6 +332,68 @@ fn parked_folder_succession_key(channel_id: &ChannelId) -> Vec<u8> {
     key
 }
 
+/// Provider-KV key prefix under which the engine **keeps a group's room-post
+/// secret for an epoch it has left** — the [`ROOM_POST_EXPORT_LABEL`] exporter
+/// output at that epoch, written just before every merge that advances the
+/// group ([`MlsEngine::remember_room_post_secret`]), read by
+/// [`MlsEngine::room_post_secret_at`]. One key per `(channel, epoch)`:
+/// `fauna:room_post_epoch:<8-byte big-endian epoch><32-byte channel id>` —
+/// the channel id last, as every per-channel marker's, so the launch swap
+/// carries a local-only group's kept secrets beside its openMLS entries
+/// ([`is_fauna_channel_key`]). Value: the 32-byte secret.
+///
+/// **Why the provider KV and not a device-local store** (ruled 2026-10-24; owner `restricted-posts.md` § Encryption at
+/// rest, ruling 6 and *Built* detail (i)): an exporter answers only for the
+/// group's current epoch, so a past epoch's secret is state only the device
+/// that processed the commit can produce — `devices.md` § Durability rules,
+/// rule 3's case — and until this key existed it rested in native's SQLite
+/// alone, so a second device restored from the replica never held the epochs
+/// before its restore, and the web app, which has no local MLS store at all,
+/// held none. In the KV it rides the replica with the merge that produced it
+/// and every device of the account opens what the account held. The merge
+/// converges by construction: the keys are add-only and the values
+/// deterministic (one commit stream, one exporter), so a both-sides-added key
+/// carries one value — which is also why it is one key per epoch and not one
+/// map per channel, where a lagging device's map would overwrite a leading
+/// one's under the merge's theirs-wins arm. **Never cleared, `forget_group`
+/// included**: ruling 6 makes the end-to-end class's "keeps what it held"
+/// exact and unbounded (the removed member's device, and the member's device
+/// that later leaves the room, open the posts written while seated), and the
+/// cost is one 32-byte value and a 62-byte key per membership change per
+/// room, beside ratchet trees that dwarf it. Same additive at-rest compat
+/// argument as [`PENDING_COMMIT_HASH_PREFIX`]: an older snapshot simply lacks
+/// the keys, an older binary carries them inertly.
+const ROOM_POST_EPOCH_SECRET_PREFIX: &[u8] = b"fauna:room_post_epoch:";
+
+/// The blob twin of [`ROOM_POST_EPOCH_SECRET_PREFIX`]: a group's
+/// `fauna.blob.v1` exporter output at an epoch it has left, written by
+/// [`MlsEngine::process_commit`] just before the merge, read by
+/// [`MlsEngine::blob_key_for_epoch`] so a conversation attachment sealed at
+/// that epoch still opens after the group moves on (the cross-epoch
+/// grace-decrypt). The same key layout, the same retention and the same
+/// reasons — one mechanism for both kept secrets, as the ruling asks.
+const BLOB_EPOCH_KEY_PREFIX: &[u8] = b"fauna:blob_epoch:";
+
+/// The provider-KV key under `prefix` holding `channel_id`'s kept secret for
+/// `epoch` ([`ROOM_POST_EPOCH_SECRET_PREFIX`], [`BLOB_EPOCH_KEY_PREFIX`]).
+fn kept_epoch_secret_key(prefix: &[u8], channel_id: &ChannelId, epoch: u64) -> Vec<u8> {
+    let mut key = Vec::with_capacity(prefix.len() + 8 + 32);
+    key.extend_from_slice(prefix);
+    key.extend_from_slice(&epoch.to_be_bytes());
+    key.extend_from_slice(&channel_id.0);
+    key
+}
+
+/// The native `mls_state` `store_type`s that held the kept secrets before
+/// they moved into the provider KV (2026-10-24), paired with the KV prefix
+/// each lifts into. Read once by [`MlsEngine::new`]'s lift and then emptied;
+/// a database written by a binary from before the move loses nothing.
+#[cfg(feature = "native")]
+const LEGACY_KEPT_SECRET_STORES: [(&str, &[u8]); 2] = [
+    ("room_post_epoch_key", ROOM_POST_EPOCH_SECRET_PREFIX),
+    ("blob_epoch_key", BLOB_EPOCH_KEY_PREFIX),
+];
+
 /// Result of decrypting with ordering checks.
 pub enum OrderedDecryptResult {
     /// Message is in order, deliver it.
@@ -819,7 +881,7 @@ impl MlsEngine {
             .map(|(cid, _)| *cid)
             .collect();
 
-        Ok(Self {
+        let engine = Self {
             provider,
             identity,
             credential: credential_with_key,
@@ -830,7 +892,73 @@ impl MlsEngine {
             retired: AtomicBool::new(false),
             resumed_pending_channels: Mutex::new(resumed),
             replica_listed: Mutex::new(replica_listed),
-        })
+        };
+        engine.lift_kept_epoch_secrets_from_sqlite();
+        Ok(engine)
+    }
+
+    /// Move every kept per-epoch secret a pre-2026-10-24 binary wrote to its
+    /// own `mls_state` rows ([`LEGACY_KEPT_SECRET_STORES`]) into the provider
+    /// KV ([`ROOM_POST_EPOCH_SECRET_PREFIX`], [`BLOB_EPOCH_KEY_PREFIX`]) —
+    /// expand, migrate and contract in one pass: a row is deleted only after
+    /// the snapshot carrying its key has been saved, so a crash anywhere in
+    /// the pass leaves at least one copy. A KV key already present wins (the
+    /// values are the same exporter output either way). Best-effort: a failed
+    /// lift logs and leaves the rows for the next open.
+    #[cfg(feature = "native")]
+    fn lift_kept_epoch_secrets_from_sqlite(&self) {
+        let mut lifted: Vec<(&str, Vec<u8>)> = Vec::new();
+        {
+            let mut values = self.provider.storage().values.write().unwrap();
+            for (store_type, prefix) in LEGACY_KEPT_SECRET_STORES {
+                let rows = match self.storage.list_keys(store_type) {
+                    Ok(rows) => rows,
+                    Err(e) => {
+                        tracing::warn!("listing the legacy {store_type} rows failed: {e}");
+                        continue;
+                    }
+                };
+                for composite in rows {
+                    // `channel_id ++ epoch.to_be_bytes()`, the legacy layout.
+                    if composite.len() != 40 {
+                        continue;
+                    }
+                    let Ok(Some(secret)) = self.storage.get(store_type, &composite) else {
+                        continue;
+                    };
+                    if secret.len() != 32 {
+                        continue;
+                    }
+                    let mut channel = [0u8; 32];
+                    channel.copy_from_slice(&composite[..32]);
+                    let epoch = u64::from_be_bytes(composite[32..40].try_into().unwrap());
+                    values
+                        .entry(kept_epoch_secret_key(prefix, &ChannelId(channel), epoch))
+                        .or_insert(secret);
+                    lifted.push((store_type, composite));
+                }
+            }
+        }
+        if lifted.is_empty() {
+            return;
+        }
+        if let Err(e) = self.save_state() {
+            tracing::warn!(
+                "saving the provider snapshot after lifting {} kept epoch secrets failed: {e} \
+                 — the legacy rows stay for the next open",
+                lifted.len()
+            );
+            return;
+        }
+        for (store_type, composite) in &lifted {
+            if let Err(e) = self.storage.delete(store_type, composite) {
+                tracing::warn!("deleting a lifted {store_type} row failed: {e}");
+            }
+        }
+        tracing::info!(
+            count = lifted.len(),
+            "lifted the kept per-epoch secrets from their legacy rows into the provider KV"
+        );
     }
 
     /// Create a new MLS engine without persistent storage.
@@ -3016,17 +3144,20 @@ impl MlsEngine {
                     }
                 }
 
-                // Cache the current epoch's blob key before advancing.
-                #[cfg(feature = "native")]
+                // Keep the current epoch's blob key before advancing, so an
+                // attachment sealed at this epoch still opens after the group
+                // moves on (`BLOB_EPOCH_KEY_PREFIX`) ...
+                if let Ok(secret) =
+                    group.export_secret(self.provider.crypto(), "fauna.blob.v1", &[], 32)
                 {
-                    let epoch = group.epoch().as_u64();
-                    if let Ok(secret) =
-                        group.export_secret(self.provider.crypto(), "fauna.blob.v1", &[], 32)
-                    {
-                        let mut key = [0u8; 32];
-                        key.copy_from_slice(&secret);
-                        let _ = self.storage.put_blob_epoch_key(&channel_id.0, epoch, &key);
-                    }
+                    let mut key = [0u8; 32];
+                    key.copy_from_slice(&secret);
+                    self.keep_epoch_secret(
+                        BLOB_EPOCH_KEY_PREFIX,
+                        channel_id,
+                        group.epoch().as_u64(),
+                        &key,
+                    );
                 }
                 // ...and its room-post secret, so a room-restricted post sealed
                 // at this epoch still opens here after the group moves on.
@@ -3911,21 +4042,19 @@ impl MlsEngine {
         Ok(key)
     }
 
-    /// The blob encryption key for a specific `epoch` — the cached historical
-    /// key (native grace-decrypt, populated by [`Self::process_commit`] when the
-    /// group advances past an epoch) when present, otherwise the current epoch's
-    /// exported key. On wasm (no key cache) this is always the current key, so
-    /// cross-epoch grace-decrypt is unavailable there (the same limitation
-    /// `fauna-wasm::mls_decrypt_blob` documents). Both the cache and
-    /// [`Self::export_blob_key`] produce the MLS-exporter "fauna.blob.v1" secret,
-    /// so a key from either path opens a blob sealed by [`Self::seal_conversation_blob`]
-    /// at the matching epoch.
+    /// The blob encryption key for a specific `epoch` — the kept historical
+    /// key ([`BLOB_EPOCH_KEY_PREFIX`], written by [`Self::process_commit`] just
+    /// before the group advances past an epoch; the cross-epoch grace-decrypt)
+    /// when present, otherwise the current epoch's exported key. The kept key
+    /// lives in the provider KV, so it answers on every platform and on every
+    /// device of the account the replica reaches (the key's own doc). Both the
+    /// kept key and [`Self::export_blob_key`] are the MLS-exporter
+    /// "fauna.blob.v1" secret, so a key from either path opens a blob sealed
+    /// by [`Self::seal_conversation_blob`] at the matching epoch.
     pub fn blob_key_for_epoch(&self, channel_id: &ChannelId, epoch: u64) -> Result<[u8; 32]> {
-        #[cfg(feature = "native")]
-        if let Ok(Some(key)) = self.storage.get_blob_epoch_key(&channel_id.0, epoch) {
+        if let Some(key) = self.kept_epoch_secret(BLOB_EPOCH_KEY_PREFIX, channel_id, epoch) {
             return Ok(key);
         }
-        let _ = epoch;
         self.export_blob_key(channel_id)
     }
 
@@ -4146,10 +4275,14 @@ impl MlsEngine {
     /// for every member. What it does not do is reach an epoch this device never
     /// saw — a member who joined after it, as MLS intends.
     ///
+    /// The kept secret is a provider-KV entry ([`ROOM_POST_EPOCH_SECRET_PREFIX`]),
+    /// so it answers on every platform — the web app included, which has no
+    /// local MLS store — and on every device of the account the replica
+    /// reaches, not only the one that processed the commit.
+    ///
     /// # Errors
     /// [`MlsError::EpochSecretNotHeld`] when the group is elsewhere and nothing
-    /// was kept for `epoch` (always the case on wasm, which keeps no per-epoch
-    /// secrets — the limit `blob_key_for_epoch` already carries there).
+    /// was kept for `epoch`: an epoch this account never held.
     pub fn room_post_secret_at(&self, channel_id: &ChannelId, epoch: u64) -> Result<[u8; 32]> {
         {
             let groups = self.groups.lock().unwrap();
@@ -4159,11 +4292,8 @@ impl MlsEngine {
                 return self.room_post_secret_of(group);
             }
         }
-        #[cfg(feature = "native")]
-        if let Ok(Some(key)) = self.storage.get_room_post_epoch_key(&channel_id.0, epoch) {
-            return Ok(key);
-        }
-        Err(MlsError::EpochSecretNotHeld { epoch })
+        self.kept_epoch_secret(ROOM_POST_EPOCH_SECRET_PREFIX, channel_id, epoch)
+            .ok_or(MlsError::EpochSecretNotHeld { epoch })
     }
 
     /// `group`'s room-post secret at its current epoch.
@@ -4179,17 +4309,49 @@ impl MlsEngine {
     /// Keep `group`'s room-post secret for its **current** epoch — called just
     /// before every merge that advances the group, whoever authored the
     /// commit, so [`Self::room_post_secret_at`] can still answer for the epoch
-    /// being left. Best-effort: a failed keep costs that epoch's posts on this
-    /// device and nothing else, so it must never fail the merge it precedes.
+    /// being left ([`ROOM_POST_EPOCH_SECRET_PREFIX`]). Best-effort: a failed
+    /// export costs that epoch's posts and nothing else, so it must never fail
+    /// the merge it precedes.
     fn remember_room_post_secret(&self, channel_id: &ChannelId, group: &MlsGroup) {
-        #[cfg(feature = "native")]
         if let Ok(key) = self.room_post_secret_of(group) {
-            let _ =
-                self.storage
-                    .put_room_post_epoch_key(&channel_id.0, group.epoch().as_u64(), &key);
+            self.keep_epoch_secret(
+                ROOM_POST_EPOCH_SECRET_PREFIX,
+                channel_id,
+                group.epoch().as_u64(),
+                &key,
+            );
         }
-        #[cfg(not(feature = "native"))]
-        let _ = (channel_id, group);
+    }
+
+    /// The kept secret under `prefix` for `channel_id` at `epoch`, when this
+    /// engine's provider KV holds one ([`kept_epoch_secret_key`]).
+    fn kept_epoch_secret(
+        &self,
+        prefix: &[u8],
+        channel_id: &ChannelId,
+        epoch: u64,
+    ) -> Option<[u8; 32]> {
+        let values = self.provider.storage().values.read().unwrap();
+        let v = values.get(&kept_epoch_secret_key(prefix, channel_id, epoch))?;
+        v.as_slice().try_into().ok()
+    }
+
+    /// Keep `secret` under `prefix` for `channel_id` at `epoch` in the provider
+    /// KV — idempotent, and a key already present is left as it is (the values
+    /// are one exporter's output, so they are equal). The write reaches the
+    /// snapshot with the merge it precedes: native's `save_state` and the
+    /// replica flush both export the whole KV.
+    fn keep_epoch_secret(
+        &self,
+        prefix: &[u8],
+        channel_id: &ChannelId,
+        epoch: u64,
+        secret: &[u8; 32],
+    ) {
+        let mut values = self.provider.storage().values.write().unwrap();
+        values
+            .entry(kept_epoch_secret_key(prefix, channel_id, epoch))
+            .or_insert_with(|| secret.to_vec());
     }
 
     /// Find the DM peer in a 2-member group (the member whose credential is not ours).
@@ -6270,9 +6432,18 @@ mod tests {
         // Bob processes commit — should cache epoch 1 key
         bob.process_commit(&channel_id, &commit).unwrap();
 
-        // Old epoch key should be cached in storage
-        let cached = bob.storage.get_blob_epoch_key(&channel_id.0, 1).unwrap();
-        assert_eq!(cached, Some(key_before));
+        // The epoch's key is kept — in the provider KV, where the replica
+        // carries it — and answers for the epoch the group left.
+        assert_eq!(bob.blob_key_for_epoch(&channel_id, 1).unwrap(), key_before);
+        assert!(
+            bob.export_provider_storage()
+                .contains_key(&kept_epoch_secret_key(
+                    BLOB_EPOCH_KEY_PREFIX,
+                    &channel_id,
+                    1
+                )),
+            "the kept blob key is a provider-KV entry"
+        );
 
         // Current (new epoch) key should be different
         let key_after = bob.export_blob_key(&channel_id).unwrap();
@@ -6342,6 +6513,119 @@ mod tests {
             alice.export_room_post_secret(&channel_id).unwrap().1,
             "the epoch it joined at is every member's"
         );
+    }
+
+    /// The kept secrets are provider-KV entries (`restricted-posts.md`
+    /// § Encryption at rest, ruling 6 as ruled 2026-10-24): they ride the
+    /// snapshot the replica carries, so a second device of the same account,
+    /// restored from it, opens the room posts and the attachments sealed at
+    /// an epoch the first device left — and the web app, whose only MLS store
+    /// IS that snapshot, keeps them too. The keys are per-channel `fauna:`
+    /// markers, so the launch swap carries a local-only group's kept secrets.
+    #[test]
+    fn a_kept_epoch_secret_rides_the_provider_snapshot_to_another_device() {
+        let (alice, _a) = make_engine();
+        let bob_tmp = NamedTempFile::new().unwrap();
+        let bob = MlsEngine::new(ActorKeypair::from_secret([42u8; 32]), bob_tmp.path()).unwrap();
+        let (charlie, _c) = make_engine();
+        let bob_kps = bob.generate_key_packages(1).unwrap();
+        let (channel_id, welcome) = alice.create_group(&bob_kps).unwrap();
+        let _ = bob.join_from_welcome(welcome).unwrap();
+        let (epoch, secret) = alice.export_room_post_secret(&channel_id).unwrap();
+        let blob_key = bob.export_blob_key(&channel_id).unwrap();
+
+        // Bob's device A folds Alice's commit: the epoch it leaves is kept.
+        let charlie_kps = charlie.generate_key_packages(1).unwrap();
+        let (commit, _welcome) = alice.add_member(&channel_id, &charlie_kps[0]).unwrap();
+        bob.process_commit(&channel_id, &commit).unwrap();
+        let snapshot = bob.export_provider_storage();
+        let listing = bob.list_groups_with_raw_ids();
+        for prefix in [ROOM_POST_EPOCH_SECRET_PREFIX, BLOB_EPOCH_KEY_PREFIX] {
+            let key = kept_epoch_secret_key(prefix, &channel_id, epoch);
+            assert!(
+                snapshot.contains_key(&key),
+                "the kept secret is a snapshot entry"
+            );
+            assert!(
+                is_fauna_channel_key(&key, &channel_id),
+                "a per-channel marker the launch swap carries"
+            );
+        }
+
+        // Bob's device B — the same identity, a fresh engine that never
+        // processed the commit — restores the snapshot and holds the epoch.
+        let device_b = MlsEngine::new_in_memory(ActorKeypair::from_secret([42u8; 32])).unwrap();
+        device_b
+            .restore_from_provider_storage(snapshot, &listing)
+            .unwrap();
+        assert_eq!(
+            device_b.room_post_secret_at(&channel_id, epoch).unwrap(),
+            secret,
+            "a device restored from the replica opens what the account held"
+        );
+        assert_eq!(
+            device_b.blob_key_for_epoch(&channel_id, epoch).unwrap(),
+            blob_key,
+            "the blob grace key shares the mechanism"
+        );
+        assert_eq!(device_b.current_epoch(&channel_id).unwrap(), epoch + 1);
+    }
+
+    /// A database written before the kept secrets moved into the provider KV
+    /// (2026-10-24) is lifted on open: the legacy `room_post_epoch_key` /
+    /// `blob_epoch_key` rows become KV entries, saved with the snapshot, and
+    /// the rows are gone — expand, migrate, contract in one pass, so no
+    /// member's earlier posts lock on an upgrade.
+    #[test]
+    fn legacy_sqlite_kept_secrets_are_lifted_into_the_provider_kv_on_open() {
+        let tmp = NamedTempFile::new().unwrap();
+        let identity = || ActorKeypair::from_secret([43u8; 32]);
+        let channel = ChannelId([7u8; 32]);
+        let room_secret = [1u8; 32];
+        let blob_secret = [2u8; 32];
+        {
+            let engine = MlsEngine::new(identity(), tmp.path()).unwrap();
+            let mut composite = channel.0.to_vec();
+            composite.extend_from_slice(&3u64.to_be_bytes());
+            engine
+                .storage
+                .put("room_post_epoch_key", &composite, &room_secret)
+                .unwrap();
+            engine
+                .storage
+                .put("blob_epoch_key", &composite, &blob_secret)
+                .unwrap();
+            engine.retire();
+        }
+        let reopened = MlsEngine::new(identity(), tmp.path()).unwrap();
+        assert_eq!(
+            reopened.room_post_secret_at(&channel, 3).unwrap(),
+            room_secret,
+            "the lifted room-post secret answers"
+        );
+        assert_eq!(
+            reopened.blob_key_for_epoch(&channel, 3).unwrap(),
+            blob_secret,
+            "the lifted blob key answers"
+        );
+        assert!(
+            reopened
+                .storage
+                .list_keys("room_post_epoch_key")
+                .unwrap()
+                .is_empty()
+                && reopened
+                    .storage
+                    .list_keys("blob_epoch_key")
+                    .unwrap()
+                    .is_empty(),
+            "the legacy rows are contracted away"
+        );
+        // The saved snapshot carries them: a third open, with nothing left
+        // to lift, still answers.
+        reopened.retire();
+        let third = MlsEngine::new(identity(), tmp.path()).unwrap();
+        assert_eq!(third.room_post_secret_at(&channel, 3).unwrap(), room_secret);
     }
 
     #[test]

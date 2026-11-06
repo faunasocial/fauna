@@ -63,6 +63,18 @@ internal sealed class DevicesCustodyFacet
     public bool IsKeyless(string? principal)
         => principal is not null && _keyless.TryGetValue(principal, out var keyless) && keyless;
 
+    /// <summary><c>custody-held-restore-address</c> for one held card
+    /// (ui/devices.md § Custody facet, the one addition): the address the
+    /// owner's cold device restores from, inside the copy telling the host to pass
+    /// it on out of band — or <c>null</c> (the element is absent) for a
+    /// device-form hold, which a device custodian is dialed through the peer
+    /// plane, never by address. The accept's <c>custodian_nest_url</c> verbatim:
+    /// a prettified address would be the wrong fact.</summary>
+    public static string? HeldRestoreAddressText(CustodyHeldRowView held)
+        => held.@custodianNestUrl is { Length: > 0 } url
+            ? Strings.Format("devices/custody_held_restore_address", url)
+            : null;
+
     /// <summary>The page's load edge: one ceremony drive pass (fire-and-forget,
     /// skipped without a session — its own try, since a drive miss only delays
     /// freshness), then the fold. Never throws.</summary>

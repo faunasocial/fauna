@@ -73,7 +73,6 @@ def _wait_count(driver, element_id, want, timeout=20.0):
     return n
 
 
-@pytest.mark.tui
 @pytest.mark.feature("reactions-and-message-delete")
 def test_tombstone_and_reaction_pill_survive_restart(
     logged_in_app, nest_instance, test_user

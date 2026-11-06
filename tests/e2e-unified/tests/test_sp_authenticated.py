@@ -98,16 +98,23 @@ def test_create_post(app):
 
 
 def test_create_multiple_posts(app):
-    """Create two posts and verify count increases."""
+    """Create two posts and verify both are on the feed.
+
+    Asserted on the test's OWN posts, never on the count — the same shape as
+    `test_feed.py::test_create_multiple_posts`: every app caps the feed at its
+    first page (50 cards), so on the run-scoped `test_user` late in a long run
+    the feed is already full, two new posts displace two old ones and the
+    count never moves (`initial=50 now=50`)."""
     app.driver.set_state({"nav": {"stack": [{"view": "feed"}]}})
     app.driver.wait_for("feed-view", timeout=10)
-    initial = app.feed.post_count()
-    app.feed.create_post(text=_unique("sp-multi-1"))
-    app.feed.create_post(text=_unique("sp-multi-2"))
-    assert app.feed.post_count() >= initial + 2, (
-        f"post count should grow by ≥2 after two creates; initial={initial} "
-        f"now={app.feed.post_count()}: error={app.error_text()!r}"
-    )
+    first, second = _unique("sp-multi-1"), _unique("sp-multi-2")
+    app.feed.create_post(text=first)
+    app.feed.create_post(text=second)
+    for text in (first, second):
+        assert app.feed.wait_for_post_text(text), (
+            f"post {text!r} should be on the feed after two creates; "
+            f"post_count={app.feed.post_count()} error={app.error_text()!r}"
+        )
 
 
 def test_post_ordering_newest_first(app):

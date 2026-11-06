@@ -1,5 +1,5 @@
 // Deno test for `resolveComposed` — how web resolves a shared-Rust
-// `ComposedText` (`fauna_client_connected_apps::compose`) through its string
+// `ComposedText` (`fauna_core::localized::ComposedText`) through its string
 // table. The composition itself (order, keys, args) is pinned in Rust; this pins
 // only the JS half, with hand-built values. Run via:
 //

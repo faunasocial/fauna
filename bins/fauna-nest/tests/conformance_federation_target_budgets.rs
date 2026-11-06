@@ -358,16 +358,12 @@ async fn an_authors_pending_remote_requests_are_capped() {
     // Seed the queue to the cap, as weeks of slow arrivals would.
     let (h_state, conn) = stranger(&f_url, &f_state).await;
     let home = h_state.nest_identity.public_key_bytes();
+    let first = ActorKeypair::generate();
     call(
         &conn,
         "fauna.federation.follow.subscribe",
         key(0, 0),
-        &intent_request(
-            &ActorKeypair::generate(),
-            author,
-            home,
-            FollowIntentKind::Subscribe,
-        ),
+        &intent_request(&first, author, home, FollowIntentKind::Subscribe),
     )
     .await
     .expect("the first remote follow is queued");
@@ -399,6 +395,18 @@ async fn an_authors_pending_remote_requests_are_capped() {
     .await
     .expect_err("a new remote subscriber past the cap is refused");
     assert!(is_rate_limited(&err), "{err:?}");
+    assert_eq!(pending_requests(&f_state, &author).await, cap);
+
+    // A subscriber already holding a pending row is free of the cap: its
+    // re-sent subscribe is answered idempotently and adds nothing.
+    call(
+        &conn,
+        "fauna.federation.follow.subscribe",
+        key(0, 2),
+        &intent_request(&first, author, home, FollowIntentKind::Subscribe),
+    )
+    .await
+    .expect("a subscriber holding a pending row re-subscribes at the cap");
     assert_eq!(pending_requests(&f_state, &author).await, cap);
 }
 

@@ -29,18 +29,18 @@ Stamped 2026-09-19 at f62a5e4e1c.
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ✅ full | 0.1.5-dev+110d1248 standalone |
-| linux | ✅ full | 0.1.4-dev+ea391d07 standalone |
+| web | ✅ full | 0.1.5-dev+3b591c2e standalone |
+| linux | ✅ full | 0.1.5-dev+3b591c2e standalone |
 | windows | ✅ full | 0.1.2-dev+920556fa standalone |
-| macos | ✅ full | 0.1.2-dev+83158a20 standalone |
-| ios | ✅ full | 0.1.2-dev+83158a20 standalone |
+| macos | ✅ full | 0.1.5-dev+3f9f2b95 standalone |
+| ios | ✅ full | 0.1.5-dev+3b591c2e standalone |
 | android |  no run recorded | |
-| tui | ✅ full | 0.1.2-dev+831d48ef live |
+| tui | ✅ full | 0.1.5-dev+3b591c2e standalone |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
 | 1 | app | `tests/e2e-unified/tests/test_export_my_data_journey.py::test_export_button_delivers_a_wellformed_archive` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 2 | app | `tests/e2e-unified/tests/test_export_my_data_journey.py::test_export_archive_carries_the_body_the_user_wrote` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 3 | nest | `tests/e2e-unified/tests/api/test_export_coverage.py::test_archive_declares_what_it_withholds_by_name_and_reason` | nest (linux): passed |
-| 4 | nest | `tests/e2e-unified/tests/api/test_export_coverage.py::test_archive_never_carries_key_or_escrow_material` | nest (linux): passed |
+| 3 | nest | `tests/e2e-unified/tests/api/test_export_coverage.py::test_archive_declares_what_it_withholds_by_name_and_reason` | nest (linux): passed, nest (macos): passed |
+| 4 | nest | `tests/e2e-unified/tests/api/test_export_coverage.py::test_archive_never_carries_key_or_escrow_material` | nest (linux): passed, nest (macos): passed |
 <!-- features-render:end -->

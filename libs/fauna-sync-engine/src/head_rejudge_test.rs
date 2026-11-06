@@ -1279,3 +1279,55 @@ async fn a_cut_reaching_the_binding_owes_one_head_rejudge_pass() {
     engine.pull_remote_changes().await.expect("pull");
     assert_eq!(nest.passes(), 2, "a nonce gained: one pass");
 }
+
+// ─────────────────────────────────────────────────────────────────────
+// Paging — the nest cuts each `changes.list` reply at the WS frame budget
+// ─────────────────────────────────────────────────────────────────────
+
+/// One pull walks the set's log page by page until an empty page, so a log
+/// the nest serves in several frame-budgeted replies (`transport.md` § Max
+/// frame — close early, never skip) lands whole in one pass, never one page
+/// per tick.
+#[tokio::test]
+async fn one_pull_walks_every_page_of_a_paged_log() {
+    let server = MockServer::start().await;
+    let store = MockNest::new().mount(&server).await;
+    let paths = ["a.bin", "b.bin", "c.bin", "d.bin", "e.bin"];
+    let log: Vec<SyncChange> = paths
+        .iter()
+        .enumerate()
+        .map(|(i, path)| {
+            let manifest = stored(&store, i as u8 + 1, &owner_key());
+            owners_row(10 * (i as i64 + 1), path, Some(manifest))
+        })
+        .collect();
+    let nest = NestDouble::serving(log);
+    *nest.page.lock().unwrap() = 2;
+    let watch = tempfile::tempdir().unwrap();
+    let engine = engine_on(
+        &nest,
+        &server.uri(),
+        watch.path(),
+        SyncDb::open_in_memory().unwrap(),
+        &[],
+    );
+
+    engine.pull_remote_changes().await.expect("pull");
+    assert_eq!(
+        engine.db().get_anchor().unwrap(),
+        50,
+        "the cursor reached the tip"
+    );
+    for (i, path) in paths.iter().enumerate() {
+        assert_eq!(
+            std::fs::read(watch.path().join(path)).unwrap(),
+            body(i as u8 + 1),
+            "{path} landed"
+        );
+    }
+    assert_eq!(
+        *nest.list_since.lock().unwrap(),
+        vec![0, 20, 40, 50],
+        "three pages of rows, then the empty page that ends the walk"
+    );
+}

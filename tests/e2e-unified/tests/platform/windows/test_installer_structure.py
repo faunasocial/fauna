@@ -257,6 +257,12 @@ class TestComponentMappings:
         assert "DataDirRegistry" in fc["Sync"]
         assert "DataDirRegistry" in fc["Nest"]
 
+    def test_terminal_app_has_tui_and_cli(self, msi_db):
+        """TerminalApp ships the terminal app and the cli app's device shell and
+        nothing else (TerminalApp.wxs; installers/tui.md § Decisions, decision 4)."""
+        fc = self._feature_components(msi_db)
+        assert fc["TerminalApp"] == {"FaunaTuiExe", "FaunaCliExe"}
+
     def test_bridge_has_bridge_exe(self, msi_db):
         fc = self._feature_components(msi_db)
         assert "FaunaBridgeSvcExe" in fc["Bridge"]
@@ -342,6 +348,27 @@ class TestFileTable:
             "fauna-cli.exe must be its own component (TerminalApp.wxs), never "
             "folded into fauna-tui.exe's"
         )
+
+    def test_terminal_binaries_beside_the_agent(self, msi_db):
+        """Both land in INSTALLFOLDER, the agent's own directory: the terminal app
+        resolves its agent as a sibling, and the one PATH entry for that
+        directory covers both (TerminalApp.wxs)."""
+        dirs = dict(msi_db.query("SELECT Component, Directory_ FROM Component"))
+        for comp in ("FaunaTuiExe", "FaunaCliExe", "FaunaSyncAgentExe"):
+            assert dirs[comp] == "INSTALLFOLDER", f"{comp} installs to {dirs[comp]}"
+
+    def test_one_machine_path_entry(self, msi_db):
+        """The package's only Environment row: the machine PATH, appended with
+        INSTALLFOLDER, carried by fauna-tui.exe's component and removed with it
+        (TerminalApp.wxs; installers/windows.md § Feature Tree). The Name prefix
+        is MSI's: `=` set on install, `-` remove on uninstall, `*` system."""
+        rows = msi_db.query("SELECT Name, Value, Component_ FROM Environment")
+        assert len(rows) == 1, f"expected one Environment row, found {rows}"
+        name, value, component = rows[0]
+        assert component == "FaunaTuiExe", rows
+        assert name.lstrip("=+!-*").upper() == "PATH", rows
+        assert set(name[:-len("PATH")]) == {"=", "-", "*"}, rows
+        assert value == "[~];[INSTALLFOLDER]", rows  # Part="last": appended
 
     def test_nest_exe_present(self, msi_db):
         assert "fauna-nest-svc.exe" in self._files(msi_db)

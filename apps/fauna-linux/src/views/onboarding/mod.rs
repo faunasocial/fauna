@@ -304,20 +304,6 @@ fn spawn_recheck_manual_dns(m: Arc<OnboardingMachine>) {
     );
 }
 
-/// Await the registry probe behind `vps_config`'s default channel and row
-/// descriptions off the GTK thread. The machine starts the probe itself only
-/// when a tokio runtime is current on the caller's thread, which GTK's is not;
-/// the probe is idempotent (once per wizard) and notifies the observer when it
-/// lands, so nothing here touches a widget.
-fn spawn_channel_probe(m: Arc<OnboardingMachine>) {
-    crate::async_helper::run_on_tokio(
-        async move {
-            m.probe_channel_availability().await;
-        },
-        |()| {},
-    );
-}
-
 /// Persist the deferred-DNS resume record into the per-actor registry slot.
 ///
 /// Deliberately writes **no `nest_url`** on the identity: the nest is not
@@ -408,7 +394,9 @@ pub(super) fn commit_confirmed_identity(
         Ok(_) => true,
         Err(e) => {
             tracing::error!("[onboarding] committing the confirmed identity failed: {e:#}");
-            m.identity_commit_failed(add_refusal_line(&e, session_error::persist_successor));
+            m.identity_commit_failed(add_refusal_line(&e, |_| {
+                session_error::PERSIST_IDENTITY.to_string()
+            }));
             false
         }
     }
@@ -1123,9 +1111,6 @@ fn handle_change(
                 // same-session submit transitions into it with the page already
                 // entered). The timer itself guards on the state.
                 start_pending_invite_poll(m);
-            }
-            if entered && name == STEP_VPS_CONFIG {
-                spawn_channel_probe(m.clone());
             }
             if entered && name == STEP_NEST_RECOVERY {
                 fetch_recovery_boxes(m);

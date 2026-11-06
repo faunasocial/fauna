@@ -10,16 +10,17 @@
 use zeroize::Zeroizing;
 
 use super::{
-    MAIL_EPOCH_PUBLISH_HORIZON, MLKEM768_DECAPS_KEY_LEN, MailRecordEnvelope, UnwrapError,
-    derive_recipient_mail_epoch_capability_secret_from_root, mail_sealing_epoch_of,
-    unseal_mail_record, unseal_mail_record_hybrid,
+    MAIL_EPOCH_PUBLISH_HORIZON, MLKEM768_DECAPS_KEY_LEN, MailRecordEnvelope, RecordKind,
+    UnwrapError, derive_recipient_mail_epoch_capability_secret_from_root, mail_sealing_epoch_of,
+    unseal_record, unseal_record_hybrid,
 };
 
 /// Open an already-decoded sealed [`MailRecordEnvelope`] with a
 /// `content.read{mail}` derived key — 32 B classical (X25519 secret) or one
 /// or more concatenated `32 + MLKEM768_DECAPS_KEY_LEN` hybrid secrets
 /// (X25519 secret ∥ ML-KEM-768 decapsulation key, `k × 2432` bytes) —
-/// dispatching on the key length. This is the ONE place the length dispatch
+/// dispatching on the key length. The mail arm of
+/// [`unseal_record_with_derived_key`], the ONE place the length dispatch
 /// lives: the FFI grant-key open (`open_mail_record_with_key`) and the epoch
 /// trial chain below both call it, and a windowed grant's per-epoch payload
 /// ([`derive_recipient_mail_epoch_capability_secret_from_root`]) is exactly
@@ -37,12 +38,32 @@ pub fn unseal_mail_record_with_derived_key(
     envelope: &MailRecordEnvelope,
     key: &[u8],
 ) -> Result<Vec<u8>, UnwrapError> {
+    unseal_record_with_derived_key(RecordKind::Mail, envelope, key)
+}
+
+/// [`unseal_mail_record_with_derived_key`] for a record of any `kind` — the
+/// derived-key open a `content.read{calendar}` payload
+/// ([`derive_recipient_calendar_capability_secret`](super::derive_recipient_calendar_capability_secret))
+/// rides, in the same byte contract (`owner-key-material.md` § Path B-sibling-5
+/// → *Capability payload*). The kind check runs first ([`unseal_record`]), so
+/// a key handed the wrong kind is refused before any trial; a payload of the
+/// right kind but another kind's KEY fails the AEAD — the per-kind key split is
+/// what keeps a calendar grant from opening mail, never the kind check alone.
+///
+/// # Errors
+///
+/// As [`unseal_mail_record_with_derived_key`], plus the kind mismatch.
+pub fn unseal_record_with_derived_key(
+    kind: RecordKind,
+    envelope: &MailRecordEnvelope,
+    key: &[u8],
+) -> Result<Vec<u8>, UnwrapError> {
     const HYBRID_LEN: usize = 32 + MLKEM768_DECAPS_KEY_LEN;
     match key.len() {
         32 => {
             let mut secret = Zeroizing::new([0u8; 32]);
             secret.copy_from_slice(key);
-            unseal_mail_record(envelope, &secret)
+            unseal_record(kind, envelope, &secret)
         }
         len if len != 0 && len % HYBRID_LEN == 0 => {
             let mut last_err = None;
@@ -54,7 +75,7 @@ pub fn unseal_mail_record_with_derived_key(
                 secret.copy_from_slice(&chunk[..32]);
                 let mut dk = Zeroizing::new([0u8; MLKEM768_DECAPS_KEY_LEN]);
                 dk.copy_from_slice(&chunk[32..]);
-                match unseal_mail_record_hybrid(envelope, &secret, &dk) {
+                match unseal_record_hybrid(kind, envelope, &secret, &dk) {
                     Ok(pt) => return Ok(pt),
                     Err(e) => last_err = Some(e),
                 }
@@ -161,7 +182,7 @@ mod tests {
         MAIL_SEALING_EPOCH_SECS, derive_mail_epoch_root,
         derive_recipient_epoch_hpke_keypair_from_root,
         derive_recipient_epoch_xwing_keypair_from_root, derive_recipient_hpke_keypair,
-        seal_to_recipient, seal_to_recipient_xwing,
+        seal_to_recipient, seal_to_recipient_xwing, unseal_mail_record,
     };
 
     /// A unix instant landing squarely inside epoch `e`.
@@ -388,6 +409,59 @@ mod tests {
             let opened = open_mail_epoch_chain(&env, &refs, instants, sealed_at, |_| None)
                 .expect("the oldest generation's root opens it");
             assert_eq!(opened.as_slice(), body);
+        }
+    }
+
+    /// § Path B-sibling-5 → *Capability payload*: the `content.read{calendar}`
+    /// payload opens a calendar record sealed to the registered calendar key
+    /// (either suite) and fails the AEAD on a mail record sealed to the mail
+    /// key, each open made under the record's OWN kind — so the refusal is the
+    /// key split, not the kind check; the mail payload opens no calendar record.
+    #[test]
+    fn a_calendar_payload_opens_calendar_records_and_never_mail() {
+        use crate::wrapped_blob::{
+            DavKind, derive_dav_root, derive_recipient_calendar_capability_secret,
+            derive_recipient_dav_xwing_keypair, derive_recipient_mail_capability_secret,
+            derive_recipient_xwing_keypair, seal_record_to_recipient,
+            seal_record_to_recipient_xwing,
+        };
+        let msek = [7u8; 32];
+        let calendar = derive_recipient_dav_xwing_keypair(
+            DavKind::Calendar,
+            &derive_dav_root(DavKind::Calendar, &msek),
+        );
+        let mail = derive_recipient_xwing_keypair(&msek);
+        let body = b"BEGIN:VCALENDAR";
+        let calendar_records = [
+            seal_record_to_recipient(RecordKind::Calendar, body, calendar.public.x25519_public())
+                .unwrap(),
+            seal_record_to_recipient_xwing(RecordKind::Calendar, body, &calendar.public).unwrap(),
+        ];
+        let mail_records = [
+            seal_record_to_recipient(RecordKind::Mail, body, mail.public.x25519_public()).unwrap(),
+            seal_record_to_recipient_xwing(RecordKind::Mail, body, &mail.public).unwrap(),
+        ];
+        let calendar_payload = derive_recipient_calendar_capability_secret(&msek);
+        let mail_payload = derive_recipient_mail_capability_secret(&msek);
+        for env in &calendar_records {
+            let opened =
+                unseal_record_with_derived_key(RecordKind::Calendar, env, &calendar_payload)
+                    .expect("the calendar payload opens a calendar record");
+            assert_eq!(opened.as_slice(), body);
+            assert!(matches!(
+                unseal_record_with_derived_key(RecordKind::Calendar, env, &mail_payload),
+                Err(UnwrapError::HpkeFailed)
+            ));
+        }
+        for env in &mail_records {
+            assert!(matches!(
+                unseal_record_with_derived_key(RecordKind::Mail, env, &calendar_payload),
+                Err(UnwrapError::HpkeFailed)
+            ));
+            assert_eq!(
+                unseal_mail_record_with_derived_key(env, &mail_payload).unwrap(),
+                body
+            );
         }
     }
 }

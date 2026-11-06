@@ -76,6 +76,22 @@ use crate::rpc_router::{RpcHandler, RpcKindMeta, RpcRouterBuilder};
 /// than querying with a malformed key.
 const ACTOR_ID_LEN: usize = 32;
 
+/// **The non-resident answer floor of `escrow.fetch`** (`identity-succession.md`
+/// § Seed escrow → *The custodian copy*, ruling 3, its timing half): every
+/// answer the door gives for an actor that is not resident here — refused or
+/// served, custodied or not — is held until this long after the request
+/// arrived. Without it the custodied arm's pair-store open (a directory probe,
+/// a SQLite and `AccountStore` open on the blocking pool, a chain verify) took
+/// ~5 ms against an uncustodied actor's single index probe at ~0.3 ms, measured
+/// over one anonymous connection, which told anyone with a junk signature
+/// whether this nest custodies an account. A floor rather than doing the
+/// custodied work for every actor: it costs a parked timer, not a store open
+/// per anonymous request, and a restore is one human ceremony, once, so a
+/// quarter second is invisible. It dominates the measured arm by fifty times;
+/// a pair-store open that runs past it on a stalled box stays observable in
+/// that tail, stated in the ruling.
+pub const ESCROW_NON_RESIDENT_FLOOR: Duration = Duration::from_millis(250);
+
 fn registration_submit_handler() -> RpcHandler {
     Box::new(|state, actor_id, payload| {
         Box::pin(async move {
@@ -291,6 +307,9 @@ fn escrow_challenge_handler() -> RpcHandler {
 fn escrow_fetch_handler() -> RpcHandler {
     Box::new(|state, _actor_id, payload| {
         Box::pin(async move {
+            // The floor's clock starts at arrival, so everything before the
+            // resident lookup (uniform for every actor) sits inside it too.
+            let arrived = tokio::time::Instant::now();
             let req: EscrowFetchRequest = decode(&payload).map_err(malformed)?;
             let actor = actor_id_from(&req.actor_id)?;
             let nonce: [u8; 32] = crate::rpc_errors::require_bytes32("nonce", req.nonce.as_ref())
@@ -330,8 +349,13 @@ fn escrow_fetch_handler() -> RpcHandler {
                 .await
                 .map_err(internal)?
             else {
-                let blob =
-                    custodied_escrow_fetch(&state, actor, nonce, req.signature.as_ref()).await?;
+                // Both arms — not custodied, custodied — answer no sooner than
+                // the floor, served or refused alike, so the time to the
+                // answer carries no more than its code does.
+                let outcome =
+                    custodied_escrow_fetch(&state, actor, nonce, req.signature.as_ref()).await;
+                tokio::time::sleep_until(arrived + ESCROW_NON_RESIDENT_FLOOR).await;
+                let blob = outcome?;
                 tracing::info!(
                     target: "recovery",
                     "custodied seed escrow served to a recovery-key holder"

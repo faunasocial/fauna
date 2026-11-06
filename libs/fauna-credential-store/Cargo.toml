@@ -10,6 +10,9 @@ license.workspace = true
 # an unlocked GUI-session keychain is absent on CI runners and SSH sessions —
 # the same shape as fauna-linux's `live-secret-service`.
 live-keychain = ["allow-live-keyring"]
+# The Windows Credential Manager counterpart: the opt-in live resolution test
+# (`windows_credman_fresh_dir_resolves_to_keyring`) over the real credman arm.
+live-credman = ["allow-live-keyring"]
 # Escape hatch keeping the FAUNA_E2E_CREDENTIAL_DIR /
 # FAUNA_E2E_FORCE_HEADLESS_STORE store redirects (`cred_file_dir`,
 # `force_headless_store`) and the FAUNA_E2E_FORCE_LOCKED_KEYRING probe seam
@@ -34,7 +37,7 @@ no-live-keyring = []
 allow-live-keyring = []
 
 [lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("e2e-agent", "live-keychain", "no-live-keyring", "allow-live-keyring"))'] }
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("e2e-agent", "live-keychain", "live-credman", "no-live-keyring", "allow-live-keyring"))'] }
 
 [dependencies]
 anyhow = { workspace = true }
@@ -55,7 +58,7 @@ zeroize = { workspace = true }
 # stopped compiling. Targets with no arm of their own land on `no_keyring`
 # (src/no_keyring.rs), which explains the whole shape.
 [target.'cfg(target_os = "linux")'.dependencies]
-secret-service = { version = "4", features = ["rt-tokio-crypto-rust"] }
+secret-service = { version = "5", features = ["rt-tokio-crypto-rust"] }
 tokio = { workspace = true }
 
 # The Windows Credential Manager arm (module `win_credman`) — the native store

@@ -328,6 +328,41 @@ def test_build_launch_env_localappdata_follows_a_pinned_xdg_base(tmp_path):
     assert owned["LOCALAPPDATA"] == str(tmp_path / "chosen")
 
 
+def test_build_launch_env_windows_agent_data_dir_follows_a_pinned_xdg_base(tmp_path):
+    """The agent's `--data-dir` is derived from `xdg_base`, so a relaunch that
+    `preserve_state_across_relaunch()` pinned brings the SAME agent state back.
+
+    On windows the agent keeps its binding, `sync.db` and anchor under the
+    explicit data dir, not under the XDG world (`sync_agent_state_base`). Rooted
+    in the per-launch `mkdtemp` instead, every relaunch handed the agent an empty
+    dir: a "restarted" tui seat on windows came back with no binding at all
+    (`folders=0`, `data.sync.running` never true), so every stop-and-restart
+    journey on two tui seats there failed before it reached what it tests. Unpinned,
+    `xdg_base` IS the per-launch dir, so a fresh launch keeps a fresh agent; a
+    caller-passed value still wins outright.
+    """
+    pinned = tmp_path / "pinned-xdg"
+    env = build_launch_env(
+        {"app_path": str(tmp_path / "fauna-tui.exe"), "xdg_base": str(pinned)},
+        4321,
+        str(tmp_path / "per-launch"),
+        sys_platform="win32",
+    )
+    assert env["FAUNA_E2E_SYNC_AGENT_DATA_DIR"] == str(pinned / "sync-agent")
+
+    owned = build_launch_env(
+        {
+            "app_path": str(tmp_path / "fauna-tui.exe"),
+            "xdg_base": str(pinned),
+            "environment": {"FAUNA_E2E_SYNC_AGENT_DATA_DIR": str(tmp_path / "chosen")},
+        },
+        4321,
+        str(tmp_path / "per-launch"),
+        sys_platform="win32",
+    )
+    assert owned["FAUNA_E2E_SYNC_AGENT_DATA_DIR"] == str(tmp_path / "chosen")
+
+
 def test_build_launch_env_leaves_localappdata_alone_off_windows(tmp_path):
     """Unix derives the store root from XDG, so there is nothing to relocate —
     and assigning a bogus `%LOCALAPPDATA%` on a box that has none would be noise
@@ -389,3 +424,25 @@ def test_build_launch_env_probed_store_refuses_the_ambient_bus(tmp_path):
     resolve the developer's own keyring."""
     with pytest.raises(RuntimeError, match="caller-owned DBUS_SESSION_BUS_ADDRESS"):
         build_launch_env({"probed_store": True}, 12, str(tmp_path), sys_platform="linux")
+
+
+@pytest.mark.parametrize("keyring_app", [None, "fauna-tui", "fauna-e2e-stable"])
+def test_build_launch_env_probed_store_on_windows_refuses_a_shared_namespace(tmp_path, keyring_app):
+    """On win32 the probe answers yes on every box, so a ``probed_store`` launch
+    always lands on the real Credential Manager, one store per user with no
+    private instance: the namespace is the only thing keeping it off real rows.
+    The default per-port name is refused too, because it is nobody's to sweep."""
+    with pytest.raises(RuntimeError, match="keyring_app of its own"):
+        build_launch_env(
+            {"probed_store": True, "keyring_app": keyring_app}, 13, str(tmp_path),
+            sys_platform="win32",
+        )
+
+
+def test_build_launch_env_probed_store_on_windows_takes_a_unique_namespace(tmp_path):
+    env = build_launch_env(
+        {"probed_store": True, "keyring_app": "fauna-e2e-stays-0a1b2c3d"}, 14, str(tmp_path),
+        sys_platform="win32",
+    )
+    assert env["FAUNA_E2E_CREDENTIAL_DIR"] == ""
+    assert env["FAUNA_KEYRING_APP"] == "fauna-e2e-stays-0a1b2c3d"

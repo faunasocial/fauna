@@ -118,23 +118,6 @@ def _wait(pred, timeout: float) -> bool:
     return bool(pred())
 
 
-def _approve_until(app, done, timeout: float = AUTHOR_GRANT_BUDGET_S) -> bool:
-    """Drive the author's §2 until ``done()`` — approving every row that is
-    pending when observed. The connect-time drain may win some rows first
-    (`test_sell_post`'s buyer-leg note); a manual approve is the fallback, not
-    the mechanism under test."""
-    subs = app.subscriptions
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if done():
-            return True
-        subs.refresh()
-        if subs.pending_request_count() >= 1:
-            subs.approve_first_request()
-        time.sleep(1)  # sleep-ok: poll interval of a deadline loop
-    return bool(done())
-
-
 def _can_read_tier(api: ApiActor, author_id: bytes, tier: str) -> bool:
     """Whether ``api``'s actor holds a delivered wrap for ``tier`` — the
     subscriber-gated `key_blob.get` answers only a current subscriber of a
@@ -344,7 +327,9 @@ def test_a_higher_tier_opens_every_lower_tiers_posts(app, request, tiers_nest):
     # drains the follow (auto_approve) and holds the tier's period key.
     follow_api = _api(tiers_nest, follower)
     follow_api.subscribe(author_id, FOLLOWERS_TIER)
-    assert _approve_until(app, lambda: _can_read_tier(follow_api, author_id, FOLLOWERS_TIER)), (
+    assert app.subscriptions.approve_until(
+        lambda: _can_read_tier(follow_api, author_id, FOLLOWERS_TIER),
+    ), (
         "precondition: a third actor's follow should be granted so the followers "
         f"tier exists with a key; error={app.subscriptions.error_text()!r}"
     )
@@ -363,8 +348,7 @@ def test_a_higher_tier_opens_every_lower_tiers_posts(app, request, tiers_nest):
     # ── The subscriber subscribes to GOLD only, and the author approves it. ──
     sub_api = _api(tiers_nest, subscriber)
     assert sub_api.subscribe(author_id, gold).get("outcome") == "queued"
-    assert _approve_until(
-        app,
+    assert app.subscriptions.approve_until(
         lambda: all(_can_read_tier(sub_api, author_id, t) for t in (gold, silver, FOLLOWERS_TIER)),
     ), (
         "a gold grant should cascade into silver and followers (the fan-out rows "

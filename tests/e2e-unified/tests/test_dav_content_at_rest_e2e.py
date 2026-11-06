@@ -337,6 +337,35 @@ def test_every_dav_record_at_rest_is_a_sealed_envelope_across_many_records(
         [b"BEGIN:VCARD", _CARD_SECRET.encode()],
     )
 
+    # Each kind seals to its own key: every envelope at rest names its kind
+    # (`owner-key-material.md` § Path B-sibling-5 / -6 — the envelope's `kind`
+    # is a plaintext CBOR text string, so the segment bytes show it), and no
+    # DAV body rests as a `mail-record` or as the other DAV kind.
+    for kind, want in (("calendar", n_events), ("card", n_cards)):
+        own = _cbor_text(f"{kind}-record")
+        foreign = [
+            _cbor_text(k)
+            for k in ("mail-record", "calendar-record", "card-record")
+            if k != f"{kind}-record"
+        ]
+        blobs = bodies_at_rest(nest, kind, actor_bytes)
+        seen = sum(blob.count(own) for blob in blobs)
+        assert seen >= want, (
+            f"expected at least {want} {kind}-record envelopes at rest, saw {seen}"
+        )
+        for tag in foreign:
+            assert not any(tag in blob for blob in blobs), (
+                f"a {kind} body rests as {tag[1:]!r} — sealed to another kind's key"
+            )
+
+
+def _cbor_text(text: str) -> bytes:
+    """The canonical CBOR encoding of a short text string (major type 3,
+    length under 24) — how an envelope's `kind` value rests on disk."""
+    raw = text.encode()
+    assert len(raw) < 24
+    return bytes([0x60 | len(raw)]) + raw
+
 
 # ── 4: snapshot create → restore, through the real binary ────────────────────
 

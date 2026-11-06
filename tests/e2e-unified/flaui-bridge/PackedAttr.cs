@@ -12,8 +12,8 @@ namespace FauiBridge;
 ///
 /// <para>The app-side writer is <c>FaunaApp.Core.Helpers.AutomationAttributePack.Pack</c>
 /// — mirrored here, not shared: the bridge is a harness binary that links no app code. Its
-/// grammar, which this reader holds exactly: two or more pairs; each key lowercase kebab
-/// (<c>[a-z][a-z0-9-]*</c>); a value runs from its key's first <c>=</c> to the next
+/// grammar, which this reader holds exactly: two or more pairs; each key lowercase kebab or
+/// snake (<c>[a-z][a-z0-9_-]*</c>); a value runs from its key's first <c>=</c> to the next
 /// <c>;</c>, with <c>%</c> written <c>%25</c> and <c>;</c> written <c>%3B</c>; no trailing
 /// <c>;</c>.</para>
 ///
@@ -55,7 +55,7 @@ internal static class PackedAttr
         if (key.Length == 0 || key[0] is < 'a' or > 'z') return false;
         foreach (var c in key)
         {
-            if (c is not ((>= 'a' and <= 'z') or (>= '0' and <= '9') or '-')) return false;
+            if (c is not ((>= 'a' and <= 'z') or (>= '0' and <= '9') or '-' or '_')) return false;
         }
         return true;
     }

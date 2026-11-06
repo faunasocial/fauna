@@ -27,7 +27,7 @@ use fauna_account_store::sqlite::SqliteBackend;
 use fauna_account_store::store::AccountStore;
 use fauna_account_store::types::WriterId;
 use fauna_core::crypto::{AccountStateKeySchedule, BackupKey};
-use fauna_core::data::{Capability, DeviceAuthorization, ModerationConfig, Timestamp};
+use fauna_core::data::{Capability, DeviceAuthorization, SyncPrefsConfig, Timestamp};
 use fauna_core::encoding::{EmbedAsBytes, sign_envelope};
 use fauna_core::identity::ActorKeypair;
 use fauna_iroh::{DEFAULT_ALPN, IrohTransport};
@@ -38,7 +38,7 @@ use fauna_peer_sync::server::{
 };
 use fauna_peer_sync::{PeerRequester, admit_over};
 use fauna_protocol::account_state::ACCOUNT_STATE_SCOPE;
-use fauna_protocol::merge_policy::{KIND_MODERATION, LwwStamp, MODERATION_KEY};
+use fauna_protocol::merge_policy::{KIND_SYNC_PREFS, LwwStamp, PREFERENCE_KEY};
 use fauna_protocol::{decode_strict, encode_canonical};
 use fauna_sync_engine::account_state_plane::{AccountStatePlane, ItemId};
 use fauna_transport::{EndpointKey, PathKind};
@@ -115,9 +115,8 @@ async fn a_replica_walks_its_sibling_over_real_quic() {
         }
     }
     let server_sk = signing_key(SERVER_DEVICE);
-    let value = encode_canonical(&ModerationConfig {
-        muted_keywords: vec!["over-quic".into()],
-        ..Default::default()
+    let value = encode_canonical(&SyncPrefsConfig {
+        default_conflict_policy: Some("over-quic".into()),
     })
     .unwrap()
     .to_vec();
@@ -135,8 +134,8 @@ async fn a_replica_walks_its_sibling_over_real_quic() {
         plane
             .put(
                 &ItemId {
-                    kind: KIND_MODERATION.into(),
-                    key: MODERATION_KEY.into(),
+                    kind: KIND_SYNC_PREFS.into(),
+                    key: PREFERENCE_KEY.into(),
                 },
                 value.clone(),
                 Some(
@@ -193,6 +192,9 @@ async fn a_replica_walks_its_sibling_over_real_quic() {
     let server_addrs: Vec<SocketAddr> = transport
         .bound_addrs()
         .into_iter()
+        // Only an IPv4 socket's port pairs with 127.0.0.1: the `[::]` socket is
+        // v6-only on Windows (`fauna_core::device_endpoints`).
+        .filter(SocketAddr::is_ipv4)
         .map(|a| SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), a.port()))
         .collect();
     let _node = start_peer_sync_node(transport.clone(), server, &["peer-sync".to_string()])
@@ -265,13 +267,13 @@ async fn a_replica_walks_its_sibling_over_real_quic() {
     assert_eq!(report.applied, 1, "one sibling row adopted: {report:?}");
 
     let got = client_store
-        .state(KIND_MODERATION, MODERATION_KEY)
+        .state(KIND_SYNC_PREFS, PREFERENCE_KEY)
         .await
         .unwrap()
         .expect("the sibling's entry landed");
-    let decoded: ModerationConfig = decode_strict(&got.value).unwrap();
+    let decoded: SyncPrefsConfig = decode_strict(&got.value).unwrap();
     assert_eq!(
-        decoded.muted_keywords,
-        vec![fauna_core::data::MutedKeyword::from("over-quic")]
+        decoded.default_conflict_policy.as_deref(),
+        Some("over-quic")
     );
 }

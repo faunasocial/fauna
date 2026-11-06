@@ -8,8 +8,10 @@ guide: docs/guides/admin-tour.md § Logs
 
 ## What a user gets
 
-The nest's recent activity, newest first, filterable by severity, with copy.
-The nest's helpers report their events into the same log.
+The nest's recent activity, newest first, filterable by severity, with copy. The
+nest's helpers report their events into the same log. Below it, the record of
+admin actions — who did what, newest first — and whether the entries shown check
+out.
 
 ## Coverage contract
 
@@ -51,20 +53,20 @@ Stamped 2026-10-21 at 77c610862e.
 15. [nest] An admin action is recorded as the newest entry of a linked record, under the admin who took it — `docs/goal/behavior/admin.md` § The admin audit log on `admin-logs`
     - `tests/e2e-unified/tests/api/test_admin_audit_wire.py::test_an_audited_action_is_the_newest_linked_entry_and_the_head`
 16. [app] Older entries of the record of admin actions can be paged in from the Logs page — `docs/goal/behavior/admin.md` § The admin audit log on `admin-logs`
-    - (none)
+    - `tests/e2e-unified/tests/test_admin_audit_log.py::test_older_audit_entries_page_in_from_the_more_button`
 
 ## Status
 
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ⚠ partial | 0.1.2-dev+b3cb40c5 docker |
-| linux | ⚠ partial | 0.1.2-dev+b3cb40c5 docker |
+| web | ✅ full | 0.1.5-dev+99dc4c58 standalone |
+| linux | ✅ full | 0.1.5-dev+99dc4c58 standalone |
 | windows | ⚠ partial | 0.1.2-dev+ab96a0f8.dirty standalone |
-| macos | ⚠ partial | 0.1.2-dev+8b423269 standalone |
-| ios | ⚠ partial | 0.1.2-dev+c438a386 standalone |
+| macos | ✅ full | 0.1.5-dev+3f9f2b95 standalone |
+| ios | ✅ full | 0.1.5-dev+ede1a6ab standalone |
 | android |  no run recorded | |
-| tui | ⚠ partial | 0.1.2-dev+b3cb40c5 docker |
+| tui | ✅ full | 0.1.5-dev+99dc4c58 standalone |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
@@ -73,20 +75,20 @@ Stamped 2026-10-21 at 77c610862e.
 | 1 | app | `tests/e2e-unified/tests/test_admin_logs.py::test_admin_logs_copy_present` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 2 | nest | `tests/e2e-unified/tests/platform/docker/test_sidecar_log_plane_docker.py::test_bridge_ready_event_reaches_admin_logs` | nest (linux): passed |
 | 2 | nest | `tests/e2e-unified/tests/platform/docker/test_sidecar_log_plane_docker.py::test_atproto_bridge_ready_event_reaches_admin_logs` | nest (linux): passed |
-| 2 | nest | `tests/e2e-unified/tests/api/test_update_channel.py::test_a_planted_report_lands_as_updater_entries_and_again_after_a_restart` | nest (linux): passed |
+| 2 | nest | `tests/e2e-unified/tests/api/test_update_channel.py::test_a_planted_report_lands_as_updater_entries_and_again_after_a_restart` | nest (linux): passed, nest (macos): passed |
 | 2 | nest | `tests/e2e-unified/tests/platform/docker/test_sidecar_log_plane_docker.py::test_router_events_reach_admin_logs` | nest (linux): passed |
-| 3 | app | `tests/e2e-unified/tests/test_admin_logs.py::test_admin_logs_lists_the_newest_activity_first` | web (linux): passed, linux (linux): passed, tui (linux): passed |
-| 4 | app | `tests/e2e-unified/tests/test_admin_logs.py::test_admin_logs_shows_a_helpers_event_among_the_nests_own_lines` | web (linux): passed, linux (linux): passed, tui (linux): passed |
-| 5 | nest | `tests/e2e-unified/tests/api/test_sidecar_log_admission.py::test_a_flooding_helper_never_pushes_the_nests_own_history_out` | nest (linux): passed |
-| 6 | nest | `tests/e2e-unified/tests/api/test_sidecar_log_admission.py::test_a_flood_is_dropped_and_announced_once_a_minute_naming_the_count` | nest (linux): passed |
-| 7 | nest | `tests/e2e-unified/tests/api/test_sidecar_log_admission.py::test_a_helpers_line_arrives_stripped_bounded_and_at_an_admitted_level` | nest (linux): passed |
-| 8 | nest | `tests/e2e-unified/tests/api/test_admin_log_redaction.py::test_the_nests_log_never_carries_message_text_keys_tokens_or_claim_codes` | nest (linux): passed |
-| 9 | nest | `tests/e2e-unified/tests/api/test_web_restore_retry_log.py::test_a_failing_restore_retry_leaves_a_warning_in_the_nests_log` | nest (linux): passed |
-| 10 | app | `tests/e2e-unified/tests/test_admin_logs.py::test_admin_logs_severity_filter_shows_only_that_severity` | web (linux): passed, linux (linux): passed, tui (linux): passed |
-| 11 | app | `tests/e2e-unified/tests/test_admin_logs.py::test_admin_logs_copy_puts_the_shown_lines_on_the_clipboard` | web (linux): passed, linux (linux): passed, tui (linux): passed |
-| 12 | nest | `tests/e2e-unified/tests/api/test_sidecar_log_attribution.py::test_a_helper_cannot_make_its_events_appear_under_another_name` | nest (linux): passed |
-| 13 | app | `tests/e2e-unified/tests/test_admin_audit_log.py::test_an_admin_action_is_listed_newest_and_the_record_checks_out` | web (linux): passed |
-| 14 | app | `tests/e2e-unified/tests/test_admin_audit_log.py::test_an_admin_action_is_listed_newest_and_the_record_checks_out` | web (linux): passed |
-| 15 | nest | `tests/e2e-unified/tests/api/test_admin_audit_wire.py::test_an_audited_action_is_the_newest_linked_entry_and_the_head` | nest (linux): passed |
-| 16 | app | (none) | — |
+| 3 | app | `tests/e2e-unified/tests/test_admin_logs.py::test_admin_logs_lists_the_newest_activity_first` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 4 | app | `tests/e2e-unified/tests/test_admin_logs.py::test_admin_logs_shows_a_helpers_event_among_the_nests_own_lines` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 5 | nest | `tests/e2e-unified/tests/api/test_sidecar_log_admission.py::test_a_flooding_helper_never_pushes_the_nests_own_history_out` | nest (linux): passed, nest (macos): passed |
+| 6 | nest | `tests/e2e-unified/tests/api/test_sidecar_log_admission.py::test_a_flood_is_dropped_and_announced_once_a_minute_naming_the_count` | nest (linux): passed, nest (macos): passed |
+| 7 | nest | `tests/e2e-unified/tests/api/test_sidecar_log_admission.py::test_a_helpers_line_arrives_stripped_bounded_and_at_an_admitted_level` | nest (linux): passed, nest (macos): passed |
+| 8 | nest | `tests/e2e-unified/tests/api/test_admin_log_redaction.py::test_the_nests_log_never_carries_message_text_keys_tokens_or_claim_codes` | nest (linux): passed, nest (macos): passed |
+| 9 | nest | `tests/e2e-unified/tests/api/test_web_restore_retry_log.py::test_a_failing_restore_retry_leaves_a_warning_in_the_nests_log` | nest (linux): passed, nest (macos): passed |
+| 10 | app | `tests/e2e-unified/tests/test_admin_logs.py::test_admin_logs_severity_filter_shows_only_that_severity` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 11 | app | `tests/e2e-unified/tests/test_admin_logs.py::test_admin_logs_copy_puts_the_shown_lines_on_the_clipboard` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 12 | nest | `tests/e2e-unified/tests/api/test_sidecar_log_attribution.py::test_a_helper_cannot_make_its_events_appear_under_another_name` | nest (linux): passed, nest (macos): passed |
+| 13 | app | `tests/e2e-unified/tests/test_admin_audit_log.py::test_an_admin_action_is_listed_newest_and_the_record_checks_out` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 14 | app | `tests/e2e-unified/tests/test_admin_audit_log.py::test_an_admin_action_is_listed_newest_and_the_record_checks_out` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 15 | nest | `tests/e2e-unified/tests/api/test_admin_audit_wire.py::test_an_audited_action_is_the_newest_linked_entry_and_the_head` | nest (linux): passed, nest (macos): passed |
+| 16 | app | `tests/e2e-unified/tests/test_admin_audit_log.py::test_older_audit_entries_page_in_from_the_more_button` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 <!-- features-render:end -->

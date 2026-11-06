@@ -19,6 +19,23 @@ class RenderNotReady(RuntimeError):
     """
 
 
+class AppArtifactMissing(RuntimeError):
+    """The app's built artifact is gone when a driver goes to launch it.
+
+    Raised by the apple drivers' ``launch()`` when the bundle (ios) or the
+    executable (macos) the session setup built is not on disk. Once that setup
+    succeeded, this means the leg died MID-RUN — a reclaimed build dir, a
+    deleted bundle — and every later app test of the run errors or skips. The
+    e2e conftest records the first one per app into the run's ``app_legs``
+    (``_record_lost_app_leg``), so the apple baseline script refuses to write a
+    baseline from the dead leg (apple-e2e-automation.md § Baseline discipline).
+    """
+
+    def __init__(self, app: str, message: str):
+        super().__init__(message)
+        self.app = app
+
+
 class InProcessAgentDriver(HttpBridgeDriver):
     """Shared skeleton for the apple in-process automation drivers (macOS + iOS).
 
@@ -60,6 +77,21 @@ class InProcessAgentDriver(HttpBridgeDriver):
     #: reuses it instead of minting a fresh one, so the relaunched app reads back
     #: the previous process's keychain.
     _preserved_cred_dir: str | None = None
+
+    def _relaunch_pinned(self) -> bool:
+        """The apple drivers' pin is `_preserved_cred_dir` (see the base)."""
+        return self._preserved_cred_dir is not None
+
+    def on_device_log_text(self) -> str:
+        """The app's own on-device rolling log file(s) — `fauna.log.<date>` under
+        `<Application Support>/logs/`, written by `installLogging(dataDir:)`'s
+        `fauna_log::init` (`FaunaMacApp` / `FaunaApp` pass the user-domain
+        Application Support) — or "". Same contract as linux's: the file, not the
+        captured `app.err` stream (`observability.md` § 2. Persistence & privacy).
+        The subclass's `app_support_dir()` is this launch's relocated store."""
+        from .base import rolling_log_text
+
+        return rolling_log_text(self.app_support_dir())
 
     def _resolve_credential_store(self, config: dict, tmp: str) -> str:
         """The store half of `launch()`, identical on macOS and iOS: resolve this
@@ -295,11 +327,19 @@ class InProcessAgentDriver(HttpBridgeDriver):
         config = getattr(self, "_launch_config", None)
         if config is None:
             return False
+        # The app it is about to close may already be dead of a crash — the `app`
+        # fixture reaches here when a reset was never acknowledged. The relaunch
+        # goes ahead either way; the death is recorded for the phase (convention
+        # 6's close rider, each driver's `_read_exit_before_close`).
+        self._read_exit_before_close("the relaunch in recover()")
         self._stop_app()
         try:
             self.launch(config)
             return True
-        except Exception:
+        except Exception as exc:
+            # The rider says a launch timeout is raised or printed, never
+            # swallowed: the launch-timeout report names the suspect.
+            print(f"[recover] relaunch failed: {exc}", flush=True)
             return False
 
     # hard_reload is inherited from HttpBridgeDriver (native relaunch via the

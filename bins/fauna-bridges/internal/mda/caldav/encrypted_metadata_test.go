@@ -34,7 +34,7 @@ func TestSealCollectionMetadataIsCanonicalDagCbor(t *testing.T) {
 		Displayname: "Personal",
 		Color:       "#3273dc",
 		Description: "",
-	}, fx.leaf.Pubkey, nil) // nil ek = classical seal
+	}, fixtureCalendarPubkey(), nil) // nil ek = classical seal
 	if err != nil {
 		t.Fatalf("SealCollectionMetadata: %v", err)
 	}
@@ -74,7 +74,7 @@ func fixtureRecordOpener(t *testing.T, fx reportFixture) *mailfauna.MailRecordOp
 	if err != nil {
 		t.Fatalf("cap.Decrypt: %v", err)
 	}
-	opener, err := mailfauna.NewMailRecordOpener(snapshotPlaintext)
+	opener, err := mailfauna.NewRecordOpener(cap, snapshotPlaintext)
 	if err != nil {
 		t.Fatalf("NewMailRecordOpener: %v", err)
 	}
@@ -94,7 +94,7 @@ func TestSealUnsealCollectionMetadataRoundTrip(t *testing.T) {
 		Color:       "#ff5733",
 		Description: "colleagues",
 	}
-	sealed, err := SealCollectionMetadata(want, fx.leaf.Pubkey, nil)
+	sealed, err := SealCollectionMetadata(want, fixtureCalendarPubkey(), nil)
 	if err != nil {
 		t.Fatalf("SealCollectionMetadata: %v", err)
 	}
@@ -120,8 +120,7 @@ func TestSealUnsealCollectionMetadataRoundTrip(t *testing.T) {
 // empty success, so ListCalendars can log + skip the calendar. Twin of the
 // CardDAV terminator's TestUnsealCollectionMetadataNilSnapshotErrors.
 func TestUnsealCollectionMetadataNilSnapshotErrors(t *testing.T) {
-	fx := newReportFixture(t)
-	sealed, err := SealCollectionMetadata(EncryptedCollectionMetadata{Displayname: "X"}, fx.leaf.Pubkey, nil)
+	sealed, err := SealCollectionMetadata(EncryptedCollectionMetadata{Displayname: "X"}, fixtureCalendarPubkey(), nil)
 	if err != nil {
 		t.Fatalf("SealCollectionMetadata: %v", err)
 	}

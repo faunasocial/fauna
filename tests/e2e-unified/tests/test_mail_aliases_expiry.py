@@ -26,7 +26,16 @@ from i18n.strings import S
 
 # tui leads (the lead app); the other six apps join by adding their marker once
 # their run is green.
-pytestmark = [pytest.mark.tier_3, pytest.mark.tui, pytest.mark.linux, pytest.mark.web]
+pytestmark = [
+    pytest.mark.tier_3,
+    pytest.mark.tui,
+    pytest.mark.linux,
+    pytest.mark.web,
+    pytest.mark.macos,
+    pytest.mark.windows,
+    pytest.mark.android,
+    pytest.mark.ios,
+]
 
 SEED_DOMAIN = "aliases-expiry-e2e.test"
 ROW_EXPIRES = "mail-aliases-list-item-expires-at"

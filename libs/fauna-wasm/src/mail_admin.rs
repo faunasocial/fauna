@@ -120,6 +120,14 @@ pub fn record_recheck_secs() -> u32 {
     u32::try_from(fauna_client_dns::record_recheck_secs()).unwrap_or(u32::MAX)
 }
 
+/// `fauna_client_dns::auto_renew_poll_secs` — the certificate auto-renew tick's
+/// shared cadence (`tls-certificates.md` § C.3), which the SPA's loop
+/// (`#lib/cert-auto-renew`) reads rather than re-spells.
+#[wasm_bindgen(js_name = autoRenewPollSecs)]
+pub fn auto_renew_poll_secs() -> f64 {
+    fauna_client_dns::auto_renew_poll_secs() as f64
+}
+
 /// `fauna_client_mail_settings::local_domains::role_address_options` → the four
 /// overridable RFC 2142 role addresses in render order, each entry carrying both
 /// its `role_address_overrides` storage key (the `<key>@` caption and the
@@ -224,14 +232,40 @@ impl WasmDnsManagementMachine {
             .try_into()
             .map_err(|_| JsValue::from_str("secret must be 32 bytes"))?;
         let keypair = ActorKeypair::from_secret(arr);
+        let machine = build_dns_management_machine_with_credentials(
+            client,
+            keypair,
+            std::sync::Arc::new(crate::account_runtime::handle),
+        );
+        #[cfg(feature = "test-helpers")]
+        let machine = match e2e_acme_directory_seed()
+            .and_then(|url| fauna_client_dns::e2e_acme_seam::web_seam_from_directory(&url))
+        {
+            Some(seam) => machine.with_acme_order_test_seam(seam),
+            None => machine,
+        };
         Ok(Self {
-            inner: Rc::new(build_dns_management_machine_with_credentials(
-                client,
-                keypair,
-                std::sync::Arc::new(crate::account_runtime::handle),
-            )),
+            inner: Rc::new(machine),
         })
     }
+}
+
+/// The e2e ACME directory seed's web reading (`e2e-gated-seeds.md` § The ACME
+/// directory seed → *The web order*): the harness's web launch writes the
+/// pebble directory into this origin's `localStorage` under the native
+/// variable's own name, as it writes the e2e trust seed
+/// (`account_runtime::e2e_seeded_identity`). The credentialed constructor
+/// above — the one caller of the wasm builder — installs it, so both order
+/// arms replace the directory and otherwise take the production path.
+#[cfg(feature = "test-helpers")]
+fn e2e_acme_directory_seed() -> Option<String> {
+    web_sys::window()?
+        .local_storage()
+        .ok()
+        .flatten()?
+        .get_item(fauna_client_dns::e2e_acme_seam::E2E_ACME_DIRECTORY_ENV)
+        .ok()
+        .flatten()
 }
 
 #[wasm_bindgen]
@@ -258,6 +292,50 @@ impl WasmDnsManagementMachine {
         let m = self.inner.clone();
         future_to_promise(async move {
             m.background_recheck().await;
+            Ok(JsValue::UNDEFINED)
+        })
+    }
+
+    /// Phase 1 of one certificate auto-renew tick
+    /// ([`fauna_client_dns::DnsManagementMachine::auto_renew_scan`],
+    /// `tls-certificates.md` § C.3): refresh the matrix and the served-cert
+    /// health, then the domains due now — a `string[]`, empty when nothing is
+    /// due (and then the caller resolves no nest id and issues nothing). A thin
+    /// binding: the decision is the shared crate's.
+    #[wasm_bindgen(js_name = autoRenewScan)]
+    pub fn auto_renew_scan(&self) -> js_sys::Promise {
+        let m = self.inner.clone();
+        future_to_promise(async move { crate::rpc::to_js(&m.auto_renew_scan().await) })
+    }
+
+    /// Phase 2 of one certificate auto-renew tick
+    /// ([`fauna_client_dns::DnsManagementMachine::auto_renew_issue`]): issue each
+    /// domain `autoRenewScan` returned to `targetNestId` (the connection-bound
+    /// nest, `LinkedNestsMachine::bound_nest_id`), each failure non-fatal, then
+    /// re-read cert status. Resolves the pass as `{ issued: string[], failed:
+    /// { domain, error }[] }`; the pass writes `AUTO_RENEW_PASS_LOG_LINE`.
+    #[wasm_bindgen(js_name = autoRenewIssue)]
+    pub fn auto_renew_issue(
+        &self,
+        domains: Vec<String>,
+        target_nest_id: Vec<u8>,
+    ) -> js_sys::Promise {
+        let m = self.inner.clone();
+        future_to_promise(async move {
+            crate::rpc::to_js(&m.auto_renew_issue(domains, target_nest_id).await)
+        })
+    }
+
+    /// Re-read the matrix and verify every domain
+    /// ([`fauna_client_dns::DnsManagementMachine::recheck_matrix`]) — what the
+    /// page runs after a local-domain action that moved the matrix
+    /// ([`local_domain_action_moves_record_matrix`]). Resolves `undefined`; a
+    /// failure lands on the snapshot's `error`.
+    #[wasm_bindgen(js_name = recheckMatrix)]
+    pub fn recheck_matrix(&self) -> js_sys::Promise {
+        let m = self.inner.clone();
+        future_to_promise(async move {
+            m.recheck_matrix().await;
             Ok(JsValue::UNDEFINED)
         })
     }
@@ -289,6 +367,16 @@ impl WasmLocalDomainMachine {
     pub fn cancel_remove_domain(&self) {
         self.inner.cancel_remove_domain();
     }
+}
+
+/// `fauna_client_mail_settings::local_domains::local_domain_action_moves_record_matrix`
+/// → whether a `LocalDomainAction` (the same JSON the machine's `dispatch`
+/// takes) moves the record matrix, so the page re-checks it before its next
+/// render (`mail-multidomain.md` § Wizard steps, step 8).
+#[wasm_bindgen(js_name = localDomainActionMovesRecordMatrix)]
+pub fn local_domain_action_moves_record_matrix(action: JsValue) -> Result<bool, JsValue> {
+    let action: LocalDomainAction = crate::rpc::from_js(action)?;
+    Ok(action.moves_record_matrix())
 }
 
 /// `fauna_client_mail_settings::local_domains::remove_confirm_title` → the
@@ -1123,22 +1211,21 @@ impl WasmMailSettingsMachine {
         })
     }
 
-    /// Auto-enable mail for a freshly-registered **non-admin** user at their first
-    /// authenticated client setup. The WASM twin of
-    /// `MailSettingsMachine::auto_enable_mail_for_new_user` — mints a mailbox with a
-    /// generated password **iff** the deployment has mail on
-    /// (`deployment_mail_enabled`), the auto-enable-for-new-users policy is on
-    /// (`auto_enable_policy` — both read from `fauna.setup.status`), and the actor
-    /// has no mailbox yet. Resolves to the generated password `string` (the one-time
-    /// reveal) on a mint, or `null` — **not** a reject — when a gate fails (policy
-    /// off, or a mailbox already exists), so the web first-setup glue can call it
-    /// unconditionally on the non-admin path. The web glue drops the password — it is
-    /// sealed into the credential and re-revealable via `revealCredentialSecret`.
-    /// `mail-credentials.md` § Auto-enable for new users.
+    /// Auto-provision a freshly-registered **non-admin** user's bridge credential
+    /// at their first authenticated client setup. The WASM twin of
+    /// `MailSettingsMachine::auto_enable_mail_for_new_user` — with the policy on
+    /// (`auto_enable_policy`) and no MSEK yet, mints the full mailbox when the
+    /// deployment has mail on (`deployment_mail_enabled`) or the read recipe when
+    /// it serves only CalDAV or CardDAV (`deployment_dav_enabled`) — all three read
+    /// from `fauna.setup.status`. Resolves to the generated password `string` (the
+    /// one-time reveal) on a mint, or `null` — **not** a reject — when a gate
+    /// fails, so the web first-setup glue can call it unconditionally on the
+    /// non-admin path. `mail-credentials.md` § Auto-enable for new users.
     #[wasm_bindgen(js_name = autoEnableMailForNewUser)]
     pub fn auto_enable_mail_for_new_user(
         &self,
         deployment_mail_enabled: bool,
+        deployment_dav_enabled: bool,
         auto_enable_policy: bool,
         display_name: String,
     ) -> js_sys::Promise {
@@ -1147,6 +1234,7 @@ impl WasmMailSettingsMachine {
             let password = m
                 .auto_enable_mail_for_new_user(
                     deployment_mail_enabled,
+                    deployment_dav_enabled,
                     auto_enable_policy,
                     display_name,
                 )
@@ -1159,98 +1247,41 @@ impl WasmMailSettingsMachine {
         })
     }
 
-    /// Enable a **CalDAV mailbox** for this actor with a **freshly generated**
-    /// strong password, resolving that password `string` **once** (one-time
-    /// reveal). The WASM twin of the
-    /// `MailSettingsMachine::enable_caldav_mailbox_with_generated_password` UniFFI
-    /// export — the calendar twin of `enableMailWithGeneratedPassword` the web
-    /// first-setup glue calls when the user enabled CalDAV but not email, so a
-    /// CalDAV-only user gets the shared MSEK their calendar store seals under with
-    /// no hand-entered password. It mints the read-only mailbox material (MSEK +
-    /// recipient pubkey + wrapped-MSEK + credential — **no** submission token,
-    /// **no** `set_mail_enabled` deployment flip), so the user stays genuinely
-    /// mailbox-less. Idempotent: a no-op resolving the existing-credential password
-    /// when the shared MSEK already exists (email or CalDAV already on), so the glue
-    /// can call it unconditionally on a CalDAV-enable. The web glue drops the
-    /// returned password — it is sealed into the credential and re-revealable via
-    /// `revealCredentialSecret` on the mail-settings page.
-    #[wasm_bindgen(js_name = enableCaldavMailboxWithGeneratedPassword)]
-    pub fn enable_caldav_mailbox_with_generated_password(
+    /// Mint the **calendar-only credential** — the shared MSEK + one read
+    /// credential, no submission token, no deployment flip — under a **freshly
+    /// generated** strong password, resolving that password `string` **once**
+    /// (one-time reveal). The WASM twin of
+    /// `MailSettingsMachine::enable_dav_mailbox_with_generated_password`.
+    /// Idempotent: a no-op once the account holds the MSEK and a live
+    /// credential.
+    #[wasm_bindgen(js_name = enableDavMailboxWithGeneratedPassword)]
+    pub fn enable_dav_mailbox_with_generated_password(
         &self,
         display_name: String,
     ) -> js_sys::Promise {
         let m = self.inner.clone();
         future_to_promise(async move {
             let password = m
-                .enable_caldav_mailbox_with_generated_password(display_name)
+                .enable_dav_mailbox_with_generated_password(display_name)
                 .await
                 .map_err(err_to_js)?;
             Ok(JsValue::from_str(password.as_str()))
         })
     }
 
-    /// Enable a **CalDAV mailbox** under a **caller-provided** PLAIN bridge
-    /// password — the password twin of `enableCaldavMailboxWithGeneratedPassword`,
-    /// the WASM twin of `MailSettingsMachine::enable_caldav_mailbox_with_password`.
-    /// Resolves `undefined` on success. The shape a future "choose your own CalDAV
-    /// password" web UI would call (and the e2e's known-password organizer mint).
-    /// Idempotent: a no-op once the shared MSEK exists.
-    #[wasm_bindgen(js_name = enableCaldavMailboxWithPassword)]
-    pub fn enable_caldav_mailbox_with_password(
-        &self,
-        display_name: String,
-        password: String,
-    ) -> js_sys::Promise {
-        let m = self.inner.clone();
-        future_to_promise(async move {
-            m.enable_caldav_mailbox_with_password(display_name, password)
-                .await
-                .map_err(err_to_js)?;
-            Ok(JsValue::UNDEFINED)
-        })
-    }
-
-    /// Enable a **CardDAV mailbox** for this actor with a **freshly generated**
-    /// strong password, resolving that password `string` **once** (one-time
-    /// reveal). The WASM twin of the
-    /// `MailSettingsMachine::enable_carddav_mailbox_with_generated_password`
-    /// UniFFI export — the contacts twin of
-    /// `enableCaldavMailboxWithGeneratedPassword`, called by the web first-setup
-    /// glue when the user enabled CardDAV but neither email nor CalDAV, so a
-    /// CardDAV-only user gets the shared MSEK their address-book store seals
-    /// under with no hand-entered password. Same read-only recipe (no submission
-    /// token, no deployment flip); idempotent — reduced to recording the
-    /// per-actor `carddav_enabled` flag when the shared MSEK already exists, so
-    /// the glue can call it unconditionally on a CardDAV-enable.
-    #[wasm_bindgen(js_name = enableCarddavMailboxWithGeneratedPassword)]
-    pub fn enable_carddav_mailbox_with_generated_password(
-        &self,
-        display_name: String,
-    ) -> js_sys::Promise {
-        let m = self.inner.clone();
-        future_to_promise(async move {
-            let password = m
-                .enable_carddav_mailbox_with_generated_password(display_name)
-                .await
-                .map_err(err_to_js)?;
-            Ok(JsValue::from_str(password.as_str()))
-        })
-    }
-
-    /// Enable a **CardDAV mailbox** under a **caller-provided** PLAIN bridge
-    /// password — the password twin of
-    /// `enableCarddavMailboxWithGeneratedPassword`, the WASM twin of
-    /// `MailSettingsMachine::enable_carddav_mailbox_with_password` (the e2e's
+    /// The calendar-only credential under a **caller-provided** PLAIN bridge
+    /// password — the WASM twin of
+    /// `MailSettingsMachine::enable_dav_mailbox_with_password` (the e2e's
     /// known-password mint). Resolves `undefined` on success. Idempotent.
-    #[wasm_bindgen(js_name = enableCarddavMailboxWithPassword)]
-    pub fn enable_carddav_mailbox_with_password(
+    #[wasm_bindgen(js_name = enableDavMailboxWithPassword)]
+    pub fn enable_dav_mailbox_with_password(
         &self,
         display_name: String,
         password: String,
     ) -> js_sys::Promise {
         let m = self.inner.clone();
         future_to_promise(async move {
-            m.enable_carddav_mailbox_with_password(display_name, password)
+            m.enable_dav_mailbox_with_password(display_name, password)
                 .await
                 .map_err(err_to_js)?;
             Ok(JsValue::UNDEFINED)

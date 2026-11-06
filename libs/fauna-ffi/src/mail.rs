@@ -75,11 +75,11 @@ use ed25519_dalek::VerifyingKey;
 use fauna_mls::wrapped_blob::{
     AEAD_NONCE_LEN, AadBinding, Argon2idParams, AtprotoIdentityBlob as InnerAtprotoIdentityBlob,
     AtprotoIdentityPublishedKeys as InnerAtprotoIdentityPublishedKeys,
-    AtprotoSessionSecretBlob as InnerAtprotoSessionSecretBlob, CredentialInput,
+    AtprotoSessionSecretBlob as InnerAtprotoSessionSecretBlob, CredentialInput, DavKind,
     GrantBlob as InnerGrantBlob, GrantWindow, HkdfSha256Params, KdfParams,
     LeafInitKeypair as InnerLeafInitKeypair, MLKEM768_DECAPS_KEY_LEN, MailRecordEnvelope,
-    MlsSnapshotBlob, MlsSnapshotPlaintext, ScopeTuple, ServedSetKeys,
-    SpamModelCopyBlob as InnerSpamModelCopyBlob, StandingMailKeypair,
+    MlsSnapshotBlob, MlsSnapshotPlaintext, RecordKind, ScopeTuple, ServedSetKeys,
+    SpamModelCopyBlob as InnerSpamModelCopyBlob, StandingDavRing, StandingMailKeypair,
     SubmissionToken as InnerSubmissionToken, TlsCertBlob as InnerTlsCertBlob,
     TlsCertBundle as InnerTlsCertBundle, WebdavKeysBlob, WebdavKeysPlaintext, WrappedMsekBlob,
     WrappedSubmissionTokenBlob, XWING_ENCAPS_KEY_LEN, XWingPublicKey, aead::aead_open,
@@ -885,7 +885,7 @@ pub fn open_mail_record_with_key(
 }
 
 /// Report whether `bytes` are a sealed `MailRecordEnvelope` (strict
-/// canonical DAG-CBOR, `kind == "mail-record"`, supported version) — as
+/// canonical DAG-CBOR, any of the three record kinds, supported version) — as
 /// opposed to raw plaintext (RFC 5322 / iCalendar / canonical index-hint
 /// token bytes).
 ///
@@ -954,6 +954,31 @@ pub struct MailRecordOpener {
     /// at rest*). Public timing metadata, not key material; empty (an older
     /// snapshot) walks the whole ring.
     generation_retired_at_unix: Vec<u64>,
+    /// The session's **calendar** and **card** rings — each the current
+    /// generation's keypair (derived from the capability's MSEK through the
+    /// kind's root) then one per prior generation from the snapshot's
+    /// `calendar_grace_roots` / `card_grace_roots` (`owner-key-material.md`
+    /// § Path B-sibling-5 → *Snapshot carriage*). Present only for an opener
+    /// built from an [`MlsCapability`] (the plain [`Self::new`] path holds no
+    /// MSEK, so it opens mail records only). [`Self::open`] dispatches a
+    /// `calendar-record` / `card-record` envelope here; zeroized alongside
+    /// `keypairs`.
+    dav_rings: Mutex<Option<DavRings>>,
+}
+
+/// The two per-kind DAV rings a session opener holds.
+struct DavRings {
+    calendar: StandingDavRing,
+    card: StandingDavRing,
+}
+
+impl DavRings {
+    fn ring(&self, kind: DavKind) -> &StandingDavRing {
+        match kind {
+            DavKind::Calendar => &self.calendar,
+            DavKind::Card => &self.card,
+        }
+    }
 }
 
 impl std::fmt::Debug for MailRecordOpener {
@@ -1032,6 +1057,7 @@ impl MailRecordOpener {
     fn new_with_msek(
         snapshot_plaintext_bytes: &[u8],
         msek: Zeroizing<[u8; 32]>,
+        with_epoch_roots: bool,
     ) -> Result<std::sync::Arc<Self>, FfiError> {
         let (keypairs, generation_retired_at_unix) = parse_leaf_keypairs(snapshot_plaintext_bytes)?;
         // Re-parse for the grace roots; parse_leaf_keypairs already proved
@@ -1053,10 +1079,26 @@ impl MailRecordOpener {
             r.copy_from_slice(root);
             epoch_roots.push(r);
         }
+        // The calendar and card rings: the current generation from the
+        // session MSEK, then the snapshot's grace roots of each kind — the MDA
+        // half of the per-kind ring the apps derive from their MSEK history.
+        let dav_rings = DavRings {
+            calendar: StandingDavRing::from_msek_and_grace_roots(
+                DavKind::Calendar,
+                &msek,
+                &snapshot.dav_grace_roots(DavKind::Calendar),
+            ),
+            card: StandingDavRing::from_msek_and_grace_roots(
+                DavKind::Card,
+                &msek,
+                &snapshot.dav_grace_roots(DavKind::Card),
+            ),
+        };
         Ok(std::sync::Arc::new(Self {
             keypairs: Mutex::new(Some(keypairs)),
-            epoch_roots: Mutex::new(Some(epoch_roots)),
+            epoch_roots: Mutex::new(with_epoch_roots.then_some(epoch_roots)),
             generation_retired_at_unix,
+            dav_rings: Mutex::new(Some(dav_rings)),
         }))
     }
 }
@@ -1080,15 +1122,18 @@ impl MailRecordOpener {
             keypairs: Mutex::new(Some(keypairs)),
             epoch_roots: Mutex::new(None),
             generation_retired_at_unix,
+            dav_rings: Mutex::new(None),
         }))
     }
 
     /// Open a sealed `MailRecordEnvelope` (either suite — classical
     /// X25519, or hybrid X-Wing when the snapshot entry carries the
-    /// MSEK-derived ML-KEM decapsulation key). Each leaf keypair is
-    /// tried newest first (current, then every prior generation — no seal
-    /// basis is known here), exactly the `MlsCapability::open_mail_record`
-    /// semantics.
+    /// MSEK-derived ML-KEM decapsulation key), **dispatching on its kind**: a
+    /// `mail-record` tries each leaf keypair newest first (current, then every
+    /// prior generation — no seal basis is known here), exactly the
+    /// `MlsCapability::open_mail_record` semantics; a `calendar-record` or
+    /// `card-record` tries that kind's ring (`owner-key-material.md` § Path
+    /// B-sibling-5 / -6). A record never meets another kind's key.
     ///
     /// # Errors
     ///
@@ -1097,7 +1142,11 @@ impl MailRecordOpener {
     /// - `"decode mail-record envelope: ..."` for a non-envelope input
     ///   (an unsealed payload — refused, never passed through);
     /// - `"HPKE open failed: no matching leaf keypair in snapshot"` when
-    ///   every keypair fails (wrong recipient or tampered envelope).
+    ///   every keypair fails (wrong recipient or tampered envelope);
+    /// - `"no <kind> ring: ..."` for a DAV record on an opener built without
+    ///   the session MSEK ([`Self::new`]);
+    /// - `"HPKE open failed: no <kind> key in the ring opens it"` when every
+    ///   generation of the kind's ring fails.
     pub fn open(&self, envelope_bytes: Vec<u8>) -> Result<Vec<u8>, FfiError> {
         let guard = self.keypairs.lock().map_err(|e| FfiError::General {
             msg: format!("mail-record opener lock poisoned: {e}"),
@@ -1110,9 +1159,33 @@ impl MailRecordOpener {
                 msg: format!("decode mail-record envelope: {e}"),
             }
         })?;
-        open_mail_record_standing(&envelope, keypairs, &[], None).ok_or_else(|| FfiError::General {
-            msg: "HPKE open failed: no matching leaf keypair in snapshot".into(),
-        })
+        let dav_kind = match envelope.record_kind() {
+            Some(RecordKind::Calendar) => DavKind::Calendar,
+            Some(RecordKind::Card) => DavKind::Card,
+            _ => {
+                return open_mail_record_standing(&envelope, keypairs, &[], None).ok_or_else(
+                    || FfiError::General {
+                        msg: "HPKE open failed: no matching leaf keypair in snapshot".into(),
+                    },
+                );
+            }
+        };
+        let rings_guard = self.dav_rings.lock().map_err(|e| FfiError::General {
+            msg: format!("mail-record opener lock poisoned: {e}"),
+        })?;
+        let kind_name = dav_kind.record_kind().as_str();
+        let rings = rings_guard.as_ref().ok_or_else(|| FfiError::General {
+            msg: format!(
+                "no {kind_name} ring: this opener holds no session MSEK \
+                 (build it with MlsCapability::new_record_opener)"
+            ),
+        })?;
+        rings
+            .ring(dav_kind)
+            .open(&envelope)
+            .map_err(|_| FfiError::General {
+                msg: format!("HPKE open failed: no {kind_name} key in the ring opens it"),
+            })
     }
 
     /// Open a sealed `MailRecordEnvelope` known to be a genuine mail-new-
@@ -1202,6 +1275,9 @@ impl MailRecordOpener {
             guard.take(); // Drop runs on the Zeroizing wrappers → zeroes bytes
         }
         if let Ok(mut guard) = self.epoch_roots.lock() {
+            guard.take();
+        }
+        if let Ok(mut guard) = self.dav_rings.lock() {
             guard.take();
         }
     }
@@ -1407,7 +1483,41 @@ impl MlsCapability {
         })?;
         let mut msek = Zeroizing::new([0u8; 32]);
         msek.copy_from_slice(inner.msek.as_slice());
-        MailRecordOpener::new_with_msek(&snapshot_plaintext_bytes, msek)
+        MailRecordOpener::new_with_msek(&snapshot_plaintext_bytes, msek, true)
+    }
+
+    /// Construct a session record opener that opens **every** record kind
+    /// the MSEK reaches — mail through the snapshot's leaf keypairs, calendar
+    /// and card through their per-kind rings (the current generation from
+    /// this capability's MSEK, the grace generations from the snapshot's
+    /// `calendar_grace_roots` / `card_grace_roots`) — without the mail-epoch
+    /// chain: the opener a CalDAV / CardDAV session builds at AUTH
+    /// (`owner-key-material.md` § Path B-sibling-5 → *Snapshot carriage*).
+    /// The MSEK never crosses the boundary; the opener keeps only derived
+    /// keypairs.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::new_epoch_aware_mail_record_opener`].
+    pub fn new_record_opener(
+        &self,
+        snapshot_plaintext_bytes: Vec<u8>,
+    ) -> Result<std::sync::Arc<MailRecordOpener>, FfiError> {
+        MailRecordOpener::new_with_msek(&snapshot_plaintext_bytes, self.msek_copy()?, false)
+    }
+
+    /// The public halves of the calendar and card keypairs this capability's
+    /// MSEK derives — the keys a CalDAV / CardDAV session seals its writes to
+    /// (`owner-key-material.md` § Path B-sibling-5 → *Derivation*: the MDA
+    /// derives them from the session MSEK at MUA-AUTH), so every record the
+    /// session seals is one its [`Self::new_record_opener`] ring opens. The
+    /// session compares them with the registered pairs and logs a mismatch.
+    ///
+    /// # Errors
+    ///
+    /// `FfiError::General` if this capability is zeroized.
+    pub fn dav_seal_pubkeys(&self) -> Result<DavSealPubkeys, FfiError> {
+        Ok(dav_seal_pubkeys_of(&*self.msek_copy()?))
     }
 
     /// Drop the inner MSEK now, zeroizing the key memory. After
@@ -2251,12 +2361,16 @@ pub fn webdav_seal_file(
 ) -> Result<FfiSealedFile, FfiError> {
     let version = keys.current.version;
     let root = current_content_root(&keys, "webdav seal file")?;
-    let sealed =
-        fauna_sync_engine::seal::seal_blob(&data, Some((root, Some(version)))).map_err(|e| {
-            FfiError::General {
-                msg: format!("webdav seal file: {e:#}"),
-            }
-        })?;
+    let sealed = fauna_sync_engine::seal::seal_blob(
+        &data,
+        Some((
+            root,
+            Some(fauna_core::blob_seal::SealStamp::Version(version)),
+        )),
+    )
+    .map_err(|e| FfiError::General {
+        msg: format!("webdav seal file: {e:#}"),
+    })?;
     Ok(FfiSealedFile {
         manifest_bytes: sealed.manifest_bytes,
         manifest_hash: sealed.manifest_hash.digest().to_vec(),
@@ -2371,7 +2485,9 @@ pub fn webdav_open_file(
         &fetcher,
         &custody,
         manifest_hash,
-        Some(content_key_version),
+        Some(fauna_core::blob_seal::SealStamp::Version(
+            content_key_version,
+        )),
         &relative_path,
     ))
     .map_err(|e| FfiError::General {
@@ -2476,8 +2592,14 @@ mod webdav_keys_tests {
         data.extend(multi_chunk_body());
         let sealed = webdav_seal_file(keys.clone(), data.clone()).unwrap();
 
-        let engine =
-            fauna_sync_engine::seal::seal_blob(&data, Some(([0xC1; 32], Some(3)))).unwrap();
+        let engine = fauna_sync_engine::seal::seal_blob(
+            &data,
+            Some((
+                [0xC1; 32],
+                Some(fauna_core::blob_seal::SealStamp::Version(3)),
+            )),
+        )
+        .unwrap();
         assert_eq!(sealed.manifest_bytes, engine.manifest_bytes);
         assert_eq!(sealed.manifest_hash, engine.manifest_hash.digest().to_vec());
         assert_eq!(sealed.content_key_version, 3);
@@ -2531,8 +2653,14 @@ mod webdav_keys_tests {
         assert_eq!(got, data);
 
         // An app's engine wrote this one under the PRIOR generation.
-        let engine =
-            fauna_sync_engine::seal::seal_blob(&data, Some(([0xB2; 32], Some(2)))).unwrap();
+        let engine = fauna_sync_engine::seal::seal_blob(
+            &data,
+            Some((
+                [0xB2; 32],
+                Some(fauna_core::blob_seal::SealStamp::Version(2)),
+            )),
+        )
+        .unwrap();
         let got = webdav_open_file(
             keys,
             2,
@@ -2551,8 +2679,14 @@ mod webdav_keys_tests {
     #[test]
     fn webdav_open_file_selects_by_generation_and_fails_closed() {
         let data = file_body();
-        let engine =
-            fauna_sync_engine::seal::seal_blob(&data, Some(([0xCC; 32], Some(2)))).unwrap();
+        let engine = fauna_sync_engine::seal::seal_blob(
+            &data,
+            Some((
+                [0xCC; 32],
+                Some(fauna_core::blob_seal::SealStamp::Version(2)),
+            )),
+        )
+        .unwrap();
         let bodies: Vec<Vec<u8>> = engine.chunks.iter().map(|(_, b)| b.clone()).collect();
 
         // Sealed under the SHADOWED generation-2 key: opens because both
@@ -2979,6 +3113,197 @@ pub fn seal_to_recipient_xwing(
         })
 }
 
+/// The kind of owner record a sealed envelope carries — the FFI mirror of
+/// `fauna_mls::wrapped_blob::RecordKind`. Selects the envelope `kind` and its
+/// AAD together, so a Go seal site names the kind once and can never pair one
+/// kind's tag with another's binding (`owner-key-material.md` § Path
+/// B-sibling-5 → *AEAD and envelope*).
+#[derive(uniffi::Enum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FfiRecordKind {
+    /// Inbound mail and its index hints (`mail-record`).
+    Mail,
+    /// CalDAV bodies, sidecars, calendar metadata, placed invitations
+    /// (`calendar-record`).
+    Calendar,
+    /// CardDAV bodies, sidecars, address-book metadata (`card-record`).
+    Card,
+}
+
+impl From<FfiRecordKind> for RecordKind {
+    fn from(kind: FfiRecordKind) -> Self {
+        match kind {
+            FfiRecordKind::Mail => Self::Mail,
+            FfiRecordKind::Calendar => Self::Calendar,
+            FfiRecordKind::Card => Self::Card,
+        }
+    }
+}
+
+/// [`seal_to_recipient`] for a record of any `kind` — the calendar and card
+/// seal sites hand the recipient's calendar / card X25519 pubkey (from
+/// `fetch_recipient_mls_pubkey`'s `calendar_key` / `card_key`) and the matching
+/// kind.
+///
+/// # Errors
+///
+/// As [`seal_to_recipient`].
+#[uniffi::export]
+pub fn seal_record_to_recipient(
+    kind: FfiRecordKind,
+    plaintext: Vec<u8>,
+    recipient_x25519_pubkey: Vec<u8>,
+) -> Result<Vec<u8>, FfiError> {
+    let pubkey = bytes32(&recipient_x25519_pubkey, "recipient_x25519_pubkey")?;
+    let kind = RecordKind::from(kind);
+    let envelope = fauna_mls::wrapped_blob::seal_record_to_recipient(kind, &plaintext, &pubkey)
+        .map_err(|e| FfiError::General {
+            msg: format!("seal {}: {e}", kind.as_str()),
+        })?;
+    envelope
+        .to_canonical_bytes()
+        .map_err(|e| FfiError::General {
+            msg: format!("encode {}: {e}", kind.as_str()),
+        })
+}
+
+/// [`seal_to_recipient_xwing`] for a record of any `kind` — the hybrid twin of
+/// [`seal_record_to_recipient`].
+///
+/// # Errors
+///
+/// As [`seal_to_recipient_xwing`].
+#[uniffi::export]
+pub fn seal_record_to_recipient_xwing(
+    kind: FfiRecordKind,
+    plaintext: Vec<u8>,
+    recipient_xwing_pubkey: Vec<u8>,
+) -> Result<Vec<u8>, FfiError> {
+    let pubkey_bytes: &[u8; XWING_ENCAPS_KEY_LEN] = recipient_xwing_pubkey
+        .as_slice()
+        .try_into()
+        .map_err(|_| FfiError::General {
+            msg: format!(
+                "recipient_xwing_pubkey must be {XWING_ENCAPS_KEY_LEN} bytes, got {}",
+                recipient_xwing_pubkey.len()
+            ),
+        })?;
+    let pubkey = XWingPublicKey::from_bytes(pubkey_bytes);
+    let kind = RecordKind::from(kind);
+    let envelope =
+        fauna_mls::wrapped_blob::seal_record_to_recipient_xwing(kind, &plaintext, &pubkey)
+            .map_err(|e| FfiError::General {
+                msg: format!("seal {} (x-wing): {e}", kind.as_str()),
+            })?;
+    envelope
+        .to_canonical_bytes()
+        .map_err(|e| FfiError::General {
+            msg: format!("encode {} (x-wing): {e}", kind.as_str()),
+        })
+}
+
+/// [`open_mail_record_with_key`] for a record of any `kind` — opens a sealed
+/// envelope with a grant's derived per-kind key (a `content.read{calendar}`
+/// payload is the calendar's own secret, in the mail payload's 32-vs-2432 byte
+/// contract; `owner-key-material.md` § Path B-sibling-5 → *Capability
+/// payload*). The envelope must declare `kind`; a key of another kind fails the
+/// open, never mis-decrypts.
+///
+/// # Errors
+///
+/// `FfiError::General` for a malformed envelope, a kind mismatch, a key of
+/// neither length, or the failed open (wrong key, tampered ciphertext).
+#[uniffi::export]
+pub fn open_record_with_key(
+    kind: FfiRecordKind,
+    envelope_bytes: Vec<u8>,
+    key: Vec<u8>,
+) -> Result<Vec<u8>, FfiError> {
+    let kind = RecordKind::from(kind);
+    let envelope = MailRecordEnvelope::from_canonical_bytes(&envelope_bytes).map_err(|e| {
+        FfiError::General {
+            msg: format!("decode {} envelope: {e}", kind.as_str()),
+        }
+    })?;
+    fauna_mls::wrapped_blob::unseal_record_with_derived_key(kind, &envelope, &key).map_err(|e| {
+        FfiError::General {
+            msg: format!("open {} with grant key: {e}", kind.as_str()),
+        }
+    })
+}
+
+/// The public halves of an owner's calendar and card recipient keypairs, plus
+/// the `content.read{calendar}` payload — all derived from one MSEK
+/// ([`derive_recipient_dav_material`]).
+///
+/// The `calendar_capability_secret` is secret material; UniFFI hands the caller
+/// a copy (not zeroized across the boundary), so callers keep its lifetime
+/// short.
+#[derive(uniffi::Record)]
+pub struct RecipientDavMaterial {
+    /// 32-byte X25519 public half of the recipient-calendar keypair.
+    pub calendar_pubkey: Vec<u8>,
+    /// 1184-byte ML-KEM-768 encapsulation key of the recipient-calendar keypair.
+    pub calendar_mlkem_ek: Vec<u8>,
+    /// 32-byte X25519 public half of the recipient-card keypair.
+    pub card_pubkey: Vec<u8>,
+    /// 1184-byte ML-KEM-768 encapsulation key of the recipient-card keypair.
+    pub card_mlkem_ek: Vec<u8>,
+    /// The `32 + 2400`-byte `content.read{calendar}` grant payload — the
+    /// calendar's own secret, byte-identical to what the client mint's
+    /// `derive_scope_payload` wraps.
+    pub calendar_capability_secret: Vec<u8>,
+}
+
+/// Derive an owner's calendar and card recipient material from its 32-byte
+/// MSEK (`owner-key-material.md` § Path B-sibling-5 / -6): the two public pairs
+/// `provision_recipient_mls_pubkey` registers beside the mail pair, and the
+/// calendar grant payload. Deterministic in `msek`.
+///
+/// Test-only surface: production clients derive these inside shared Rust
+/// (`fauna_client_mail_settings::DavSealPubkeys`, `derive_scope_payload`). The
+/// `cmd/seal-helper-testonly` modes use this so tier_3 harnesses can register
+/// all three pairs and mint a calendar grant without the client UI.
+///
+/// `msek` must be exactly 32 bytes; otherwise `FfiError::General`.
+#[uniffi::export]
+pub fn derive_recipient_dav_material(msek: Vec<u8>) -> Result<RecipientDavMaterial, FfiError> {
+    use fauna_mls::wrapped_blob::derive_recipient_calendar_capability_secret;
+    let msek = bytes32(&msek, "msek")?;
+    let public = dav_seal_pubkeys_of(&msek);
+    Ok(RecipientDavMaterial {
+        calendar_pubkey: public.calendar_pubkey,
+        calendar_mlkem_ek: public.calendar_mlkem_ek,
+        card_pubkey: public.card_pubkey,
+        card_mlkem_ek: public.card_mlkem_ek,
+        calendar_capability_secret: derive_recipient_calendar_capability_secret(&msek),
+    })
+}
+
+/// The public halves of an owner's calendar and card recipient keypairs
+/// ([`MlsCapability::dav_seal_pubkeys`]) — public material only.
+#[derive(uniffi::Record, Debug, Clone, PartialEq, Eq)]
+pub struct DavSealPubkeys {
+    /// 32-byte X25519 public half of the recipient-calendar keypair.
+    pub calendar_pubkey: Vec<u8>,
+    /// 1184-byte ML-KEM-768 encapsulation key of the recipient-calendar keypair.
+    pub calendar_mlkem_ek: Vec<u8>,
+    /// 32-byte X25519 public half of the recipient-card keypair.
+    pub card_pubkey: Vec<u8>,
+    /// 1184-byte ML-KEM-768 encapsulation key of the recipient-card keypair.
+    pub card_mlkem_ek: Vec<u8>,
+}
+
+/// The one derivation of [`DavSealPubkeys`] from an MSEK.
+fn dav_seal_pubkeys_of(msek: &[u8; 32]) -> DavSealPubkeys {
+    let shared = fauna_mls::wrapped_blob::DavSealPubkeys::derive(msek);
+    DavSealPubkeys {
+        calendar_pubkey: shared.calendar_pubkey.to_vec(),
+        calendar_mlkem_ek: shared.calendar_mlkem_ek,
+        card_pubkey: shared.card_pubkey.to_vec(),
+        card_mlkem_ek: shared.card_mlkem_ek,
+    }
+}
+
 /// 32-byte X25519 keypair, used as the leaf-node HPKE init key inside
 /// an MLS group. The user's primary client generates one at MLS
 /// state-advance time and stores `secret` in the `MlsSnapshotPlaintext`
@@ -3062,7 +3387,7 @@ pub fn derive_recipient_epoch_hpke_keypair(
 /// The post-quantum halves of an owner's standing recipient-mail X-Wing identity,
 /// both derived from one 32-byte MSEK (`derive_recipient_mail_xwing_material`):
 /// the public `mlkem_ek` the client publishes to enable hybrid inbound mail, and
-/// the `capability_secret` a `content.read{mail|calendar}` grant wraps to a holder.
+/// the `capability_secret` a `content.read{mail}` grant wraps to a holder.
 ///
 /// The `capability_secret` is secret material; UniFFI hands the caller a copy (not
 /// zeroized across the boundary), so callers keep its lifetime short.
@@ -3073,8 +3398,9 @@ pub struct RecipientMailXwingMaterial {
     /// (`mlkem_ek` field, S3c), so the MTA seals inbound mail to it under the X-Wing
     /// suite.
     pub mlkem_ek: Vec<u8>,
-    /// The `32 + 2400`-byte `content.read{mail|calendar}` grant payload
-    /// (`x25519_secret ∥ mlkem_decaps_key`) — byte-identical to what the client
+    /// The `32 + 2400`-byte `content.read{mail}` grant payload
+    /// (`x25519_secret ∥ mlkem_decaps_key`; the calendar grant carries the
+    /// calendar's own secret, [`derive_recipient_dav_material`]) — byte-identical to what the client
     /// mint's `derive_scope_payload` wraps (both call the shared
     /// `fauna_mls::wrapped_blob::derive_recipient_mail_capability_secret`). A holder
     /// opens BOTH classical and X-Wing-sealed mail records with it (the 32-vs-2432
@@ -3779,7 +4105,7 @@ mod open_with_key_tests {
 /// crypto is 10–100× slower (no SIMD AEAD, overflow checks) and would badly
 /// mislead the gate (a debug run reads ~20 ms per 200 KiB open; release is
 /// sub-millisecond). Run explicitly:
-///   `cargo test -p fauna-ffi --release --lib mail_seal_open_microbench -- --ignored --nocapture`
+///   `cargo test -p fauna-ffi-core --release --lib mail_seal_open_microbench -- --ignored --nocapture`
 #[cfg(test)]
 mod perf_bench {
     use std::time::Instant;

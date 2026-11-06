@@ -416,15 +416,14 @@ impl MediaMachine {
         })
     }
 
-    /// Fetch + decrypt the thumbnail blob at `thumbnailHash` (a
+    /// Fetch + open the thumbnail at `thumbnailHash` (a
     /// `MediaItem.thumbnail_hash`) into paint-ready image bytes (`Uint8Array`). The
-    /// shared-Rust render leg (priority #2): `GET /api/v1/blob/<hash>` direct-by-
-    /// hash (a public route, no bearer) → content-address verify → decrypt under
-    /// the owner `BackupKey` → decoded JPEG bytes the SPA wraps in a blob URL for
-    /// `<img>`. `secretHex` is the identity seed hex — the owner `BackupKey`
-    /// (Library audience) is derived from it here, mirroring `uploadSelected`
-    /// (`process_and_seal_library(data, secretHex)`), so the render decrypts under
-    /// exactly the key the page's library uploads sealed with and the raw key never
+    /// shared-Rust render leg (priority #2): the hash names a chunk manifest
+    /// sealed as its file is, opened through the file's own walk under the
+    /// naming row's custody (`media.md` § Encryption at rest → *A thumbnail rests
+    /// as its file rests*) → decoded JPEG bytes the SPA wraps in a blob URL for
+    /// `<img>`. `secretHex` is the identity seed hex — the owner `BackupKey` is
+    /// derived from it here, mirroring `uploadSelected`, so the raw key never
     /// crosses into JS. The promise rejects (with the error message) on failure — a
     /// per-item query, so the page error banner is untouched; the caller falls back
     /// to the placeholder.
@@ -758,6 +757,14 @@ fn derive_backup_key(secret_hex: &str) -> Result<Vec<u8>, String> {
 #[wasm_bindgen(start)]
 fn panic_hook_start() {
     fauna_wasm_panic_hook::install("fauna-wasm-media");
+}
+
+/// Hand this chunk's `tracing` to the SPA's `logMessage`, so a shared crate's
+/// log line running in this chunk reaches Settings → Logs (see
+/// [`fauna_wasm_panic_hook::forward_tracing`]; the SPA's `joinChunk` calls it).
+#[wasm_bindgen(js_name = setLogSink)]
+pub fn set_log_sink(sink: js_sys::Function) {
+    fauna_wasm_panic_hook::forward_tracing(sink);
 }
 
 /// Test-only: deliberately panics, so an e2e can assert the hook above really

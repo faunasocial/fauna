@@ -197,6 +197,46 @@ pub trait ArchiveNest: MaybeSendSync {
     /// Whether the actor's calendar can take events (CalDAV enabled, a calendar exists).
     async fn calendar_ready(&self) -> Result<bool, ArchiveNestError>;
     async fn put_event(&self, event: &ImportedEvent) -> Result<(), ArchiveNestError>;
+
+    // ── phase two (`archive-import.md` § Linking and merging (phase two)) ──
+
+    /// `fauna.contacts.status` — the roster status token toward `peer_hex`
+    /// (`accepted`, `confirmed`, `pending`, `blocked`, or a newer token), or
+    /// `None` for a stranger. Ruling 2's admission gate reads it per signal.
+    async fn contact_status(&self, peer_hex: &str) -> Result<Option<String>, ArchiveNestError>;
+    /// `fauna.contacts.list`, narrowed to the roster rows whose status is
+    /// `accepted` or `confirmed` — hex actor ids, the announce round's
+    /// recipients (§ Linking and merging, *Scope of matching*).
+    async fn accepted_contacts(&self) -> Result<Vec<String>, ArchiveNestError>;
+    /// The signed post bytes filed under `post_id_hex`: `fauna.posts.get` on
+    /// the owner's own nest, and on its `fauna.posts.not_found`
+    /// `fauna.posts.get_remote` to the home nest the roster records for
+    /// `sender_hex` (the claimant). `None` when neither holds the post, or
+    /// the claimant has no known home. What a received `Claimed` item is
+    /// verified against (ruling 9).
+    async fn fetch_post(
+        &self,
+        post_id_hex: &str,
+        sender_hex: &str,
+    ) -> Result<Option<Vec<u8>>, ArchiveNestError>;
+    /// Whether `peer_hex` is an approved subscriber of the owner's own
+    /// followers tier (`fauna.subscriptions.subscribers.list` on
+    /// `FOLLOWERS_TIER`) — the origin-index filter's and the claimed-reply
+    /// audience rule's one question (rulings 4 and 6).
+    async fn is_followers_subscriber(&self, peer_hex: &str) -> Result<bool, ArchiveNestError>;
+
+    // ── the Done step's profile prefill (§ What each category becomes) ──
+
+    /// `fauna.profile.get` on the owner's own identity — the base the prefill
+    /// re-signs, with the predecessors the public record proves for it
+    /// (`fauna_client_profile::fetch_own_profile_base`); a never-published
+    /// profile is `Ok` with no body.
+    async fn own_profile_base(
+        &self,
+        keypair: &fauna_core::identity::ActorKeypair,
+    ) -> Result<fauna_client_profile::OwnProfileBase, ArchiveNestError>;
+    /// `fauna.profile.set` — the signed profile the prefill built.
+    async fn set_profile(&self, signed: Vec<u8>) -> Result<(), ArchiveNestError>;
 }
 
 /// Turns the Archive step's path into a readable source — a file on native,
@@ -207,6 +247,42 @@ pub trait ArchiveOpener: MaybeSendSync {
     fn file_name(&self, path: &str) -> String;
 }
 
+/// An [`ArchiveOpener`] over a path → zip-bytes map held in memory — the web
+/// app's opener (the browser `File` is read whole and inserted under the path
+/// the page dispatches with `SetArchivePath`: a synchronous range read of a
+/// `File` is impossible on the browser's one thread), and the tests' too.
+#[derive(Default)]
+pub struct MemoryOpener {
+    files: std::sync::Mutex<std::collections::BTreeMap<String, Vec<u8>>>,
+}
+
+impl MemoryOpener {
+    /// Hold `zip_bytes` under `path`, replacing any archive held there.
+    pub fn insert(&self, path: &str, zip_bytes: Vec<u8>) {
+        self.files
+            .lock()
+            .expect("memory opener")
+            .insert(path.to_string(), zip_bytes);
+    }
+}
+
+impl ArchiveOpener for MemoryOpener {
+    fn open(&self, path: &str) -> Result<SharedSource, ArchiveNestError> {
+        let bytes = self
+            .files
+            .lock()
+            .expect("memory opener")
+            .get(path)
+            .cloned()
+            .ok_or_else(|| ArchiveNestError::NotFound(path.to_string()))?;
+        Ok(std::sync::Arc::new(fauna_archive::VecSource(bytes)))
+    }
+
+    fn file_name(&self, path: &str) -> String {
+        path.rsplit(['/', '\\']).next().unwrap_or(path).to_string()
+    }
+}
+
 #[cfg(any(test, feature = "test-helpers"))]
 pub mod fakes {
     //! In-memory doubles for both seams — the `MailImportMachine` `FakeNest`
@@ -215,14 +291,17 @@ pub mod fakes {
     //! here, so no consumer hand-rolls a second fake.
 
     use std::collections::BTreeMap;
-    use std::sync::{Arc, Mutex};
+    #[cfg(not(target_arch = "wasm32"))]
+    use std::sync::Arc;
+    use std::sync::Mutex;
 
-    use fauna_archive::VecSource;
     use fauna_core::subscription::{FOLLOWERS_TIER, OWNER_ONLY_TIER, OWNER_ONLY_TIER_RANK};
 
+    /// The tests' opener is the shared in-memory one.
+    pub use super::MemoryOpener;
     use super::{
-        ArchiveFolderRef, ArchiveNest, ArchiveNestError, ArchiveOpener, ImportedEvent, MediaSeal,
-        SharedSource, TierGate, UploadedMedia,
+        ArchiveFolderRef, ArchiveNest, ArchiveNestError, ImportedEvent, MediaSeal, SharedSource,
+        TierGate, UploadedMedia,
     };
     use crate::state::{ArchiveMarker, ImportState, MARKER_PATH, STATE_PATH};
 
@@ -248,6 +327,16 @@ pub mod fakes {
         /// A permanent refusal every `provision_followers_tier` answers —
         /// the lost-key / not-honored arm the real seam maps to `Rejected`.
         refuse_followers: Mutex<Option<ArchiveNestError>>,
+        /// Phase two: the roster (hex peer → status token).
+        contacts: Mutex<BTreeMap<String, String>>,
+        /// Phase two: the approved subscribers of the followers tier (hex).
+        followers_subscribers: Mutex<std::collections::BTreeSet<String>>,
+        /// Phase two: posts another account authored that this nest serves
+        /// through `fetch_post` (planted by a test), by wire post id.
+        foreign_posts: Mutex<BTreeMap<String, Vec<u8>>>,
+        /// The owner's stored profile bytes — `set_profile` replaces them,
+        /// `own_profile_base` serves them.
+        profile: Mutex<Option<Vec<u8>>>,
         #[cfg(not(target_arch = "wasm32"))]
         post_created: Arc<tokio::sync::Notify>,
     }
@@ -271,9 +360,73 @@ pub mod fakes {
                 owner_only_calls: Mutex::new(0),
                 followers_calls: Mutex::new(0),
                 refuse_followers: Mutex::new(None),
+                contacts: Mutex::new(BTreeMap::new()),
+                followers_subscribers: Mutex::new(std::collections::BTreeSet::new()),
+                foreign_posts: Mutex::new(BTreeMap::new()),
+                profile: Mutex::new(None),
                 #[cfg(not(target_arch = "wasm32"))]
                 post_created: Arc::new(tokio::sync::Notify::new()),
             }
+        }
+
+        /// The owner's stored profile bytes, as the last `set_profile` left
+        /// them (`None` = never published).
+        pub fn profile(&self) -> Option<Vec<u8>> {
+            self.profile.lock().expect("fake nest").clone()
+        }
+
+        /// Sets the roster row toward `peer_hex` (`accepted`, `confirmed`,
+        /// `pending`, `blocked`, …).
+        pub fn set_contact(&self, peer_hex: &str, status: &str) {
+            self.contacts
+                .lock()
+                .expect("fake nest")
+                .insert(peer_hex.to_string(), status.to_string());
+        }
+
+        /// Makes `peer_hex` an approved subscriber of the followers tier.
+        pub fn add_followers_subscriber(&self, peer_hex: &str) {
+            self.followers_subscribers
+                .lock()
+                .expect("fake nest")
+                .insert(peer_hex.to_string());
+        }
+
+        /// Serves another account's signed post through `fetch_post`, as a
+        /// nest holding a federated or local reply does; returns its id.
+        pub fn plant_post(&self, signed_bytes: Vec<u8>) -> String {
+            let id = blake3::hash(&signed_bytes).to_hex().to_string();
+            self.foreign_posts
+                .lock()
+                .expect("fake nest")
+                .insert(id.clone(), signed_bytes);
+            id
+        }
+
+        /// The signed bytes of every post `create_post` stored, in order.
+        pub fn post_bytes(&self) -> Vec<Vec<u8>> {
+            self.posts.lock().expect("fake nest").clone()
+        }
+
+        /// Writes `bytes` at `path` in an existing folder (a test seeding a
+        /// model file).
+        pub fn put_file(&self, folder: &str, path: &str, bytes: Vec<u8>) {
+            self.folders
+                .lock()
+                .expect("fake nest")
+                .get_mut(folder)
+                .unwrap_or_else(|| panic!("no folder {folder}"))
+                .insert(path.to_string(), bytes);
+        }
+
+        /// The bytes at `path` in `folder`, if any.
+        pub fn file(&self, folder: &str, path: &str) -> Option<Vec<u8>> {
+            self.folders
+                .lock()
+                .expect("fake nest")
+                .get(folder)
+                .and_then(|f| f.get(path))
+                .cloned()
         }
 
         /// Every `provision_followers_tier` from now on answers `error` — a
@@ -585,31 +738,70 @@ pub mod fakes {
             self.events.lock().expect("fake nest").push(event.clone());
             Ok(())
         }
-    }
 
-    /// An [`ArchiveOpener`] over a path → zip-bytes map.
-    #[derive(Default)]
-    pub struct VecOpener {
-        files: BTreeMap<String, Vec<u8>>,
-    }
-
-    impl VecOpener {
-        pub fn insert(&mut self, path: &str, zip_bytes: Vec<u8>) {
-            self.files.insert(path.to_string(), zip_bytes);
-        }
-    }
-
-    impl ArchiveOpener for VecOpener {
-        fn open(&self, path: &str) -> Result<SharedSource, ArchiveNestError> {
-            let bytes = self
-                .files
-                .get(path)
-                .ok_or_else(|| ArchiveNestError::NotFound(path.to_string()))?;
-            Ok(Arc::new(VecSource(bytes.clone())))
+        async fn contact_status(&self, peer_hex: &str) -> Result<Option<String>, ArchiveNestError> {
+            Ok(self
+                .contacts
+                .lock()
+                .expect("fake nest")
+                .get(peer_hex)
+                .cloned())
         }
 
-        fn file_name(&self, path: &str) -> String {
-            path.rsplit(['/', '\\']).next().unwrap_or(path).to_string()
+        async fn accepted_contacts(&self) -> Result<Vec<String>, ArchiveNestError> {
+            Ok(self
+                .contacts
+                .lock()
+                .expect("fake nest")
+                .iter()
+                .filter(|(_, status)| matches!(status.as_str(), "accepted" | "confirmed"))
+                .map(|(peer, _)| peer.clone())
+                .collect())
+        }
+
+        async fn fetch_post(
+            &self,
+            post_id_hex: &str,
+            _sender_hex: &str,
+        ) -> Result<Option<Vec<u8>>, ArchiveNestError> {
+            if let Some(bytes) = self
+                .foreign_posts
+                .lock()
+                .expect("fake nest")
+                .get(post_id_hex)
+            {
+                return Ok(Some(bytes.clone()));
+            }
+            Ok(self
+                .posts
+                .lock()
+                .expect("fake nest")
+                .iter()
+                .find(|bytes| blake3::hash(bytes).to_hex().as_str() == post_id_hex)
+                .cloned())
+        }
+
+        async fn is_followers_subscriber(&self, peer_hex: &str) -> Result<bool, ArchiveNestError> {
+            Ok(self
+                .followers_subscribers
+                .lock()
+                .expect("fake nest")
+                .contains(peer_hex))
+        }
+
+        async fn own_profile_base(
+            &self,
+            _keypair: &fauna_core::identity::ActorKeypair,
+        ) -> Result<fauna_client_profile::OwnProfileBase, ArchiveNestError> {
+            Ok(fauna_client_profile::OwnProfileBase {
+                body: self.profile.lock().expect("fake nest").clone(),
+                ..Default::default()
+            })
+        }
+
+        async fn set_profile(&self, signed: Vec<u8>) -> Result<(), ArchiveNestError> {
+            *self.profile.lock().expect("fake nest") = Some(signed);
+            Ok(())
         }
     }
 }

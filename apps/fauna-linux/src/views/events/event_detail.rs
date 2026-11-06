@@ -114,25 +114,20 @@ fn build_detail_content(
     crate::testid::set_test_id(&summary_label, ids::EVENT_DETAIL_SUMMARY);
     content.append(&summary_label);
 
-    // Time range — `event-detail-time` on the start label (Linux-only ID).
-    let start_label = gtk::Label::new(Some(&format!(
-        "{}: {}",
-        events_strings::START,
-        event.start_time
-    )));
-    start_label.set_halign(gtk::Align::Start);
-    start_label.add_css_class("dim-label");
-    crate::testid::set_test_id(&start_label, ids::EVENT_DETAIL_TIME);
-    content.append(&start_label);
-
-    if let Some(ref end) = event.end_time
-        && !end.is_empty()
-    {
-        let end_label = gtk::Label::new(Some(&format!("{}: {}", events_strings::END, end)));
-        end_label.set_halign(gtk::Align::Start);
-        end_label.add_css_class("dim-label");
-        content.append(&end_label);
-    }
+    // Time range — the whole range on the one `event-detail-time` label, the
+    // stored RFC-3339 halves verbatim, as tui and apple paint it (`start – end`;
+    // the start alone when the event has no end). linux used to split it into a
+    // "Start: …" label carrying the id and an untagged "End: …" label — the one
+    // app whose tagged text was not the range.
+    let range = match event.end_time.as_deref().filter(|end| !end.is_empty()) {
+        Some(end) => format!("{} – {}", event.start_time, end),
+        None => event.start_time.clone(),
+    };
+    let time_label = gtk::Label::new(Some(&range));
+    time_label.set_halign(gtk::Align::Start);
+    time_label.add_css_class("dim-label");
+    crate::testid::set_test_id(&time_label, ids::EVENT_DETAIL_TIME);
+    content.append(&time_label);
 
     // Location.
     if let Some(ref location) = event.location

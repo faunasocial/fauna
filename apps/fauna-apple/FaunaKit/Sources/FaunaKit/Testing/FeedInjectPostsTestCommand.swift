@@ -46,7 +46,7 @@ public enum FeedInjectPostsTestCommand {
             // `configure` is idempotent: reuses the view's manager if built, else
             // builds it now. A fresh `api.feedManager(secret:)` here would seed a
             // throwaway the view never observes.
-            await feedVM.configure(api: api, secretHex: secret)
+            await feedVM.configure(api: api, secretHex: secret, deviceIdHex: client?.deviceId ?? "")
             guard let mgr = feedVM.manager else {
                 logMessage(level: .debug, target: "fauna.testagent", message: "[TestAgent] feed_inject_posts: feedVM manager unavailable")
                 return

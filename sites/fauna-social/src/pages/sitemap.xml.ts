@@ -12,7 +12,7 @@ import { escapeXml } from '../lib/xml.ts';
 // Eager: false — only the keys (file paths) are used, never the modules.
 const PAGE_FILES = Object.keys(import.meta.glob('../pages/**/*.astro'));
 
-/** `organization/bylaws.astro` → `/organization/bylaws/`; index → `/`. */
+/** `organization/bylaws.astro` → `/organization/bylaws`; index → `/`. */
 function fileToRoute(file: string): string | null {
   // Vite does not promise one spelling for glob keys: it normalizes the
   // same-directory case to './404.astro' and may also hand back
@@ -36,7 +36,7 @@ function fileToRoute(file: string): string | null {
   if (path.includes('.')) {
     throw new Error(`sitemap: could not derive a route from page file "${file}"`);
   }
-  return path ? `/${path}/` : '/';
+  return path ? `/${path}` : '/';
 }
 
 export const GET: APIRoute = async ({ site }) => {

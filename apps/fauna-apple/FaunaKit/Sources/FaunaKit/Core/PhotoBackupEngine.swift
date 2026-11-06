@@ -1,3 +1,4 @@
+#if !FAUNA_KIDS
 import Foundation
 import Photos
 import SwiftData
@@ -508,3 +509,5 @@ class PhotoLibraryObserver: NSObject, PHPhotoLibraryChangeObserver {
         }
     }
 }
+
+#endif // !FAUNA_KIDS

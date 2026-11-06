@@ -5,10 +5,11 @@
 // `long-term-store.md` § Save-failure handling: a rejected registry write is
 // reported to the wizard machine (`identityCommitFailed`), which returns to the
 // confirm screen with the error; a successful write reports nothing.
-import { assert, assertEquals } from "jsr:@std/assert";
+import { assertEquals } from "jsr:@std/assert";
 import { commitConfirmedIdentity } from "./identity-commit.ts";
+import { t } from "../i18n/strings.ts";
 
-Deno.test("a rejected persist reports the wrapped error to the machine", async () => {
+Deno.test("a rejected persist reports the identity-not-saved line to the machine and logs the error", async () => {
   const reported: string[] = [];
   const logged: unknown[] = [];
   await commitConfirmedIdentity("ab".repeat(32), false, {
@@ -16,19 +17,20 @@ Deno.test("a rejected persist reports the wrapped error to the machine", async (
     commitFailed: (m) => reported.push(m),
     log: (e) => logged.push(e),
   });
-  assertEquals(reported, ["Couldn't save your new identity: storage is full"]);
+  assertEquals(reported, [
+    "Couldn't save your identity on this device — its secure storage may be locked or unavailable. Try again when it is.",
+  ]);
   assertEquals(logged.length, 1);
 });
 
-Deno.test("a shared refusal line is the message, wrapped", async () => {
+Deno.test("a shared refusal line is the message in place of the identity line", async () => {
   const reported: string[] = [];
   await commitConfirmedIdentity("ab".repeat(32), false, {
-    persist: () => Promise.reject("the account list is full"),
+    persist: () => Promise.reject({ key: "settings.account_list_full" }),
     commitFailed: (m) => reported.push(m),
     log: () => {},
   });
-  assertEquals(reported.length, 1);
-  assert(reported[0].includes("the account list is full"));
+  assertEquals(reported, [t.settings.account_list_full]);
 });
 
 Deno.test("a successful persist reports nothing and passes append through", async () => {

@@ -96,7 +96,7 @@ fi
 #
 # Split by member, so the `no-payments` mode can take the money half absent and
 # the sharing half present from the same lists the other two modes read.
-PAY_PATS=('subscription-provider-' 'subscription-claim-' 'post-tip-' 'nostr-zap-signer-' 'fauna\.payments\.' 'fauna\.nostr\.zap_signers\.' 'subscription-tier-form-price-hint' 'subscription-tier-form-asking-price' 'subscription-tier-form-payment-url' 'compose-sell-price' 'compose-sell-asking-price' 'compose-sell-subscribers-free' 'subscription-tier-price' 'subscription-offer-price' 'subscription-offer-payment-link' 'gated-post-price' 'gated-post-payment-link' 'gated-post-buy-button')
+PAY_PATS=('subscription-provider-' 'subscription-claim-' 'post-tip-' 'nostr-zap-signer-' 'fauna\.payments\.' 'fauna\.nostr\.zap_signers\.' 'subscription-tier-form-price-hint' 'subscription-tier-form-asking-price' 'subscription-tier-form-payment-url' 'compose-sell-price' 'compose-sell-asking-price' 'compose-sell-subscribers-free' 'subscription-tier-price' 'subscription-offer-price' 'subscription-offer-payment-link' 'gated-post-price' 'gated-post-payment-link' 'gated-post-buy-button' 'gated-post-purchase-pending')
 PAY_ABSENT_ONLY_PATS=('fauna\.tips\.')
 P2P_PATS=('offline-share-' 'offline-receive-')
 P2P_ABSENT_ONLY_PATS=('share-transfer-' 'share-serve-')

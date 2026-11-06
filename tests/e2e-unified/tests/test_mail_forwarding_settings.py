@@ -35,6 +35,7 @@ pytestmark = [
     pytest.mark.linux,
     pytest.mark.macos,
     pytest.mark.ios,
+    pytest.mark.android,
 ]
 
 # A domain this nest hosts, so the hosted-address refusal has one to refuse.

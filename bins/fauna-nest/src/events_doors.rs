@@ -51,11 +51,18 @@ use crate::rpc_router::{RpcHandler, RpcKindMeta, RpcRouterBuilder};
 
 /// The most scopes one poll names. A capped page loses nothing: the cursor
 /// stops at the last head returned, and every scope left out lies above it.
-const POLL_PAGE_SCOPES: u32 = 256;
+const POLL_PAGE_SCOPES: usize = 256;
 
 /// The longest the HTTP door holds a poll open — under the common 30 s idle
 /// timeout of the proxies a remote server's request crosses.
 pub const LONG_POLL_MAX_WAIT: Duration = Duration::from_secs(25);
+
+/// The most HTTP long-polls one principal holds open on one account at once;
+/// a further one is answered `429`. Every write on the account wakes every
+/// waiter and each wake re-reads the live reach and the heads, so the cap
+/// bounds what one principal's polls cost the account's writes — the
+/// principal session's own bound ([`crate::principal_session::MAX_PRINCIPAL_SESSIONS`]).
+pub const MAX_LONG_POLLS: usize = 4;
 
 /// A scope-tagged change landed on `account`'s scope `scope`: push the
 /// principal frame to every session whose live reach admits it, wake the
@@ -97,17 +104,23 @@ async fn poll(
     req: &EventsPollRequest,
 ) -> Result<EventsPollReply, RpcError> {
     let cursor = req.cursor.unwrap_or(0).max(0);
-    let heads = state
+    // Every head past the cursor, filtered BEFORE the page is cut: the
+    // cursor then moves only to the head of a scope the caller may list —
+    // a `seq` the record door already serves it — and never on another
+    // publisher's write. One grouped scan either way; the filter in SQL would
+    // need the scope grammar there.
+    let reachable: Vec<(String, i64)> = state
         .db
-        .event_scope_heads_since(&caller.account, cursor, POLL_PAGE_SCOPES)
+        .event_scope_heads_since(&caller.account, cursor, u32::MAX)
         .await
-        .map_err(internal)?;
-    // The page's coverage includes the scopes the filter drops: the cursor
-    // only says how far the nest log has been looked at.
-    let covered = heads.last().map_or(cursor, |(_, head)| *head);
-    let frames = heads
-        .iter()
+        .map_err(internal)?
+        .into_iter()
         .filter(|(scope, _)| fauna_scope::event_reaches(&caller.scopes, scope))
+        .take(POLL_PAGE_SCOPES)
+        .collect();
+    let covered = reachable.last().map_or(cursor, |(_, head)| *head);
+    let frames = reachable
+        .iter()
         .map(|(scope, _)| SyncChangedPayload::scope_nudge(scope))
         .collect();
     Ok(EventsPollReply {
@@ -197,6 +210,18 @@ pub async fn events_http_handler(
         Ok(admission) => admission,
         Err(response) => return response,
     };
+    // Held until the answer is rendered, however the poll ends.
+    let Some(_slot) = state.ws.event_poll_begin(
+        &admission.binding.account,
+        &admission.binding.principal_id,
+        MAX_LONG_POLLS,
+    ) else {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            "too many concurrent polls for this principal",
+        )
+            .into_response();
+    };
     let wait = query
         .wait
         .map_or(LONG_POLL_MAX_WAIT, Duration::from_secs)
@@ -215,14 +240,11 @@ pub async fn events_http_handler(
             Ok(reply) => reply,
             Err(err) => return crate::principal_session::rpc_error_response(&err),
         };
-        let advanced = reply.cursor > cursor;
+        // The cursor moves only with a frame, so an empty page means nothing
+        // reachable moved: wait for the next change on the account.
         cursor = reply.cursor;
         if !reply.frames.is_empty() {
             return render(&reply);
-        }
-        // A page the filter emptied still moved the cursor: read on at once.
-        if advanced {
-            continue;
         }
         if tokio::time::timeout_at(deadline, notified).await.is_err() {
             return render(&reply);

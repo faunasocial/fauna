@@ -39,7 +39,7 @@ fn no_production_caller_uses_the_single_shot_dav_unseal() {
         assert!(
             !SRC.contains(banned),
             "found `{banned}` in fauna-wasm's rpc.rs — a batch caller must derive \
-             DavRecipientKeys ONCE (`caldav::DavRecipientKeys::derive(&msek)`) and \
+             DavRecipientKeys ONCE (`caldav::DavRecipientKeys::derive(DavKind::Calendar, &msek)`) and \
              call `keys.unseal(...)` per entry instead of the single-shot \
              convenience wrapper, which re-derives on every call"
         );

@@ -13,6 +13,10 @@
 //! or, with nothing serving the door, `ConnectError::NoCustodian`'s one
 //! sentence the model can pass on ("open Fauna on this device …"). A reply is
 //! the door's own records as data, never anything the shell could open later.
+//!
+//! The module builds where the door does: `fauna_ipc::oracle` exists on unix
+//! (its socket) and windows (its pipe) only — every target the shell ships
+//! for — so there is no off-door arm and no refusal for a target with no door.
 
 use std::sync::Arc;
 
@@ -53,13 +57,11 @@ impl DoorIdentity {
 
 /// Lowercase or uppercase hex, even length.
 fn decode_hex(text: &str) -> Option<Vec<u8>> {
-    if text.is_empty() || !text.len().is_multiple_of(2) {
+    // Non-empty on top of the shared decoder: an empty id is never valid here.
+    if text.is_empty() {
         return None;
     }
-    (0..text.len())
-        .step_by(2)
-        .map(|i| u8::from_str_radix(text.get(i..i + 2)?, 16).ok())
-        .collect()
+    fauna_core::format::hex_decode(text)
 }
 
 /// The door's operation for a catalog one.
@@ -100,8 +102,10 @@ pub async fn perform(identity: DoorIdentity, op: ConversationOp) -> Result<Value
 }
 
 /// Perform `op` at `endpoint` — [`perform`]'s blocking body, its own function
-/// so a test can stand a door up at a path of its own.
-#[cfg(unix)]
+/// so a test can stand a door up at an endpoint of its own. On windows the
+/// connect refuses a door this user does not serve before its first frame
+/// ([`fauna_ipc::oracle::ConnectError::ServedByAnother`], relayed verbatim
+/// like every refusal).
 pub fn perform_at(
     endpoint: &fauna_ipc::oracle::OracleEndpoint,
     identity: &DoorIdentity,
@@ -129,21 +133,6 @@ pub fn perform_at(
         Ok(reply) => reply_json(reply),
         Err(refusal) => Err(ToolError::new(refusal.to_string())),
     }
-}
-
-/// The windows door's client is not built yet (`conversations-oracle.md`
-/// § Implementation status today).
-#[cfg(not(unix))]
-pub fn perform_at(
-    _endpoint: &fauna_ipc::oracle::OracleEndpoint,
-    _identity: &DoorIdentity,
-    _op: ConversationOp,
-) -> Result<Value, ToolError> {
-    // public-text: cli-answer-strings-public
-    Err(ToolError::new(
-        "Conversations cannot be reached on this operating system yet.",
-    ))
-    // public-text-end: cli-answer-strings-public
 }
 
 #[cfg(test)]

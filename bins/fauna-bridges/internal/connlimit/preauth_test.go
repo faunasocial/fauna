@@ -8,13 +8,14 @@ import (
 )
 
 // recordingConn is a fake inner net.Conn recording every deadline call; a
-// read returns a timeout error when readErr is set.
+// read (a write) returns a timeout error when readErr (writeErr) is set.
 type recordingConn struct {
 	net.Conn // nil: only the overridden methods are called
 	mu       sync.Mutex
 	read     []time.Time
 	write    []time.Time
 	readErr  error
+	writeErr error
 }
 
 func (c *recordingConn) SetReadDeadline(t time.Time) error {
@@ -32,6 +33,14 @@ func (c *recordingConn) SetWriteDeadline(t time.Time) error {
 }
 
 func (c *recordingConn) Read([]byte) (int, error) { return 0, c.readErr }
+
+func (c *recordingConn) Write([]byte) (int, error) { return 0, c.writeErr }
+
+func (c *recordingConn) lastWrite() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.write[len(c.write)-1]
+}
 
 func (c *recordingConn) lastRead() time.Time {
 	c.mu.Lock()
@@ -134,19 +143,82 @@ func TestPreAuthMarkRestoresANonZeroRequest(t *testing.T) {
 	}
 }
 
-// TestPreAuthSetDeadlineSplits: SetDeadline passes the write half untouched
-// and clamps the read half.
-func TestPreAuthSetDeadlineSplits(t *testing.T) {
+// TestPreAuthSetDeadlineClampsBothHalves: SetDeadline clamps the write half
+// exactly as the read half.
+func TestPreAuthSetDeadlineClampsBothHalves(t *testing.T) {
+	now := time.Date(2026, 10, 20, 12, 0, 0, 0, time.UTC)
+	bound := now.Add(PreAuthDeadline)
+	inner := &recordingConn{}
+	c, _ := acceptAt(t, now, inner, nil)
+	_ = c.SetDeadline(now.Add(time.Hour))
+	if got := inner.lastWrite(); !got.Equal(bound) {
+		t.Fatalf("write half = %v, want the bound %v", got, bound)
+	}
+	if got := inner.lastRead(); !got.Equal(bound) {
+		t.Fatalf("read half = %v, want the bound %v", got, bound)
+	}
+}
+
+// TestPreAuthAcceptSetsTheWriteBound: Accept sets the inner write deadline to
+// the bound too, so a pre-auth client that stops reading cannot hold the
+// server blocked in Write past it.
+func TestPreAuthAcceptSetsTheWriteBound(t *testing.T) {
+	now := time.Date(2026, 10, 20, 12, 0, 0, 0, time.UTC)
+	inner := &recordingConn{}
+	acceptAt(t, now, inner, nil)
+	if got, want := inner.lastWrite(), now.Add(PreAuthDeadline); !got.Equal(want) {
+		t.Fatalf("accept write deadline = %v, want %v", got, want)
+	}
+}
+
+// TestPreAuthClampsWritesUntilAuthenticated: pre-auth, a clear and a later
+// write deadline keep ours and an earlier one passes; MarkAuthenticated
+// restores the library's last-requested write deadline and later calls pass
+// through.
+func TestPreAuthClampsWritesUntilAuthenticated(t *testing.T) {
+	now := time.Date(2026, 10, 20, 12, 0, 0, 0, time.UTC)
+	bound := now.Add(PreAuthDeadline)
+	inner := &recordingConn{}
+	c, _ := acceptAt(t, now, inner, nil)
+
+	_ = c.SetWriteDeadline(time.Time{})
+	if got := inner.lastWrite(); !got.Equal(bound) {
+		t.Fatalf("pre-auth clear: inner = %v, want the bound %v", got, bound)
+	}
+	// Submission's WriteTimeout: five minutes out, past the bound.
+	_ = c.SetWriteDeadline(now.Add(5 * time.Minute))
+	if got := inner.lastWrite(); !got.Equal(bound) {
+		t.Fatalf("pre-auth later deadline: inner = %v, want the bound %v", got, bound)
+	}
+	poke := now.Add(time.Second)
+	_ = c.SetWriteDeadline(poke)
+	if got := inner.lastWrite(); !got.Equal(poke) {
+		t.Fatalf("pre-auth earlier poke: inner = %v, want it passed %v", got, poke)
+	}
+
+	requested := now.Add(5 * time.Minute)
+	_ = c.SetWriteDeadline(requested)
+	MarkAuthenticated(c)
+	if got := inner.lastWrite(); !got.Equal(requested) {
+		t.Fatalf("after MarkAuthenticated: inner = %v, want the remembered %v", got, requested)
+	}
+	later := now.Add(30 * time.Minute)
+	_ = c.SetWriteDeadline(later)
+	if got := inner.lastWrite(); !got.Equal(later) {
+		t.Fatalf("post-auth: inner = %v, want passed through %v", got, later)
+	}
+}
+
+// TestPreAuthMarkClearsAnUnrequestedWrite: a library that never asked for a
+// write deadline gets none after authentication — the accept's bound is not
+// left behind.
+func TestPreAuthMarkClearsAnUnrequestedWrite(t *testing.T) {
 	now := time.Date(2026, 10, 20, 12, 0, 0, 0, time.UTC)
 	inner := &recordingConn{}
 	c, _ := acceptAt(t, now, inner, nil)
-	far := now.Add(time.Hour)
-	_ = c.SetDeadline(far)
-	if len(inner.write) != 1 || !inner.write[0].Equal(far) {
-		t.Fatalf("write deadlines = %v, want [%v]", inner.write, far)
-	}
-	if got := inner.lastRead(); !got.Equal(now.Add(PreAuthDeadline)) {
-		t.Fatalf("read half = %v, want the bound", got)
+	MarkAuthenticated(c)
+	if got := inner.lastWrite(); !got.IsZero() {
+		t.Fatalf("after MarkAuthenticated: inner write = %v, want cleared", got)
 	}
 }
 
@@ -198,5 +270,39 @@ func TestPreAuthCountsOnlyOurTimeout(t *testing.T) {
 	_, _ = c2.Read(buf)
 	if fired != 0 {
 		t.Fatalf("a post-auth timeout counted: %d", fired)
+	}
+}
+
+// TestPreAuthCountsOurWriteTimeout: a write timeout past our bound while
+// unauthenticated fires onDeadline once — shared with the read count, so a
+// connection closed on our bound is counted once whichever half saw it; one
+// before the bound does not count, nor one after authentication.
+func TestPreAuthCountsOurWriteTimeout(t *testing.T) {
+	now := time.Date(2026, 10, 20, 12, 0, 0, 0, time.UTC)
+	inner := &recordingConn{readErr: timeoutErr{}, writeErr: timeoutErr{}}
+	fired := 0
+	c, clock := acceptAt(t, now, inner, func() { fired++ })
+	buf := []byte("* OK\r\n")
+
+	_, _ = c.Write(buf)
+	if fired != 0 {
+		t.Fatalf("a write timeout before the bound counted: %d", fired)
+	}
+	*clock = now.Add(PreAuthDeadline)
+	_, _ = c.Write(buf)
+	_, _ = c.Write(buf)
+	_, _ = c.Read(buf)
+	if fired != 1 {
+		t.Fatalf("our timeout counted %d times, want 1", fired)
+	}
+
+	inner2 := &recordingConn{writeErr: timeoutErr{}}
+	fired = 0
+	c2, clock2 := acceptAt(t, now, inner2, func() { fired++ })
+	MarkAuthenticated(c2)
+	*clock2 = now.Add(2 * PreAuthDeadline)
+	_, _ = c2.Write(buf)
+	if fired != 0 {
+		t.Fatalf("a post-auth write timeout counted: %d", fired)
 	}
 }

@@ -474,10 +474,18 @@ def test_parent_reaper_signals_nothing_after_a_clean_exit():
         from drivers import port_util
         # Deliberately NOT track_process()'d: the atexit sweep must not be what
         # makes this pass or fail — the question is only what the reaper does.
+        # The child ignores SIGTERM: on Linux `popen_group_kwargs` also arms
+        # PR_SET_PDEATHSIG (SIGTERM when this spawner exits), which would empty
+        # the group on a clean exit with no help from the reaper. Ignoring it
+        # leaves SIGKILL, which only the reaper's escalation would ever send.
         p = subprocess.Popen(
-            [sys.executable, '-c', 'import time; time.sleep(300)'],  # sleep-ok: toy child; the test kills it
+            [sys.executable, '-c',
+             'import signal, sys, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); '
+             'print("ready", flush=True); time.sleep(300)'],  # sleep-ok: toy child; the test kills it
+            stdout=subprocess.PIPE, text=True,
             **port_util.popen_group_kwargs(),
         )
+        p.stdout.readline()  # barrier: SIGTERM is ignored before we exit
         print(p.pid, port_util._reaper_proc.pid, flush=True)
         sys.exit(0)  # a CLEAN exit: atexit runs, so `BYE` is sent
     """)
@@ -854,6 +862,9 @@ def _macos_driver_with(proc):
 
     driver = MacosInProcessDriver()
     driver._app_proc = proc
+    # `start()` sets this; teardown reads it to decide the bundle/photo-library
+    # leftovers. "binary" is the config default and has none.
+    driver._launch_mode = "binary"
     return driver
 
 
@@ -1253,12 +1264,18 @@ def prebuild_memo_isolated():
     # full xcframework restore (`just apple-ffi-test`, with `macos` too), the iOS
     # app's `xcodebuild` and the simulator: measured 2026-10-21, the seat-pair
     # test's `[ios]` leg launched a real `just apple-ffi-test` beside a live one
-    # in the same checkout.
+    # in the same checkout. The windows FlaUI bridge's warm job (`just
+    # windows-flaui-bridge`, 2026-11-05) is the same class.
     stubbed = ("_ensure_fauna_ffi_loaded", "_ensure_fauna_ffi_built", "_ensure_sync_agent_built",
-               "_restore_full_apple_ffi", "_ensure_ios_app_built", "_get_ios_setup")
+               "_restore_full_apple_ffi", "_ensure_ios_app_built", "_get_ios_setup",
+               "_ensure_windows_flaui_bridge_built")
+    # A windows session also reaches the stall-capture helper's real cargo build
+    # (`_ensure_helper_bin_built`, a registry entry): cold in a fresh checkout it
+    # ran this file's windows test past its 60 s bound on Windows, 2026-11-05.
+    stubbed += ("_ensure_helper_bin_built",)
     saved_fns = {name: getattr(mod, name) for name in stubbed}
     for name in stubbed:
-        setattr(mod, name, lambda: None)
+        setattr(mod, name, lambda *args: None)
     try:
         yield mod
     finally:
@@ -1710,7 +1727,7 @@ def test_prebuild_hoists_apps_a_cross_app_fixture_launches(
 def test_prebuild_hoists_only_the_seat_of_the_phone_the_run_names(
     monkeypatch, prebuild_memo_isolated
 ):
-    """`alice_builder_seats` pairs iOS with macOS and android with tui: a run
+    """`alice_builder_seats` pairs iOS with macOS, android and web with tui: a run
     parametrized `[android]` hoists tui, not macOS, and `[ios]` the reverse —
     the dict value of `_CROSS_APP_FIXTURE_APPS` keys the seat on the phone."""
     mod = prebuild_memo_isolated
@@ -1718,9 +1735,9 @@ def test_prebuild_hoists_only_the_seat_of_the_phone_the_run_names(
     monkeypatch.setattr(
         mod, "_ensure_app_built", lambda name: built.append(f"app:{name}")
     )
-    monkeypatch.setattr(mod, "get_available_apps", lambda: ["android", "ios"])
+    monkeypatch.setattr(mod, "get_available_apps", lambda: ["android", "ios", "web"])
     monkeypatch.setattr(mod, "sweep_apps", lambda: ["ios", "macos", "tui", "android"])
-    for phone, seat in (("android", "tui"), ("ios", "macos")):
+    for phone, seat in (("android", "tui"), ("ios", "macos"), ("web", "tui")):
         built.clear()
         mod._prebuild_binaries(
             _fake_session(
@@ -1982,6 +1999,94 @@ def test_fixture_build_is_charged_to_collection_not_the_test(tmp_path):
     log = (tmp_path / "stub-just.log").read_text()
     seal_lines = [l for l in log.splitlines() if "seal-helper-build" in l]
     assert len(seal_lines) == 1, log
+
+
+#: A slow helper-binary build: log, sleep (standing in for slot queue +
+#: compile), then leave the exe where cargo would. Python, not bash: on the
+#: primary dev VM a bash child re-derives CARGO_TARGET_DIR from BASH_ENV, so the
+#: target dir rides in a variable of its own.
+_STUB_CARGO = """\
+#!{python}
+import os, sys, time
+from pathlib import Path
+
+args = sys.argv[1:]
+with open(os.environ["STUB_CARGO_LOG"], "a") as log:
+    log.write("stub-cargo " + " ".join(args) + "\\n")
+out = Path(os.environ["STUB_TARGET_DIR"]) / "debug"
+name = None
+for flag, value in zip(args, args[1:]):
+    if flag == "--bin":
+        name = value
+    elif flag == "--example":
+        name, out = value, out / "examples"
+if name is None:  # the slot wrapper's `cargo fetch` before the offline build
+    sys.exit(0)
+time.sleep(12)  # sleep-ok: the sleep IS the subject — a slow helper build the prebuild must charge to collection, not the test clock
+out.mkdir(parents=True, exist_ok=True)
+(out / name).write_text("stub")
+(out / name).chmod(0o755)
+"""
+
+_INNER_HELPER_TEST = """\
+import pytest
+
+from tests.api import conv_api
+
+pytestmark = pytest.mark.tier_3
+
+
+def test_helper_build_does_not_burn_the_test_clock():
+    assert conv_api._ensure_keypkg_bin().exists()
+"""
+
+
+@pytest.mark.timeout(300)
+@_posix_only
+def test_helper_build_is_charged_to_collection_not_the_test(tmp_path):
+    """The helper-binary twin of the pin above (e2e-conventions.md convention
+    9, the 2026-10-30 ruling). A test module that imports `conv_api` reaches
+    `mls-keypackage-gen` through the helper-binary registry, so its 12 s build
+    (a stub `cargo`, through the real slot wrapper and the real stamp gate)
+    runs at collection time and the test passes under a 6 s per-test timeout.
+    Revert the registry wiring in `_prebuild_binaries` and the accessor —
+    which never builds — fails the test naming the gap; restore the old
+    in-test build and the 12 s lands back inside the 6 s bound."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    stub = bin_dir / "cargo"
+    stub.write_text(_STUB_CARGO.format(python=sys.executable))
+    stub.chmod(0o755)
+    conftest_path = str(Path(_E2E_DIR) / "conftest.py")
+    (tmp_path / "conftest.py").write_text(
+        _INNER_CONFTEST.format(e2e_dir=_E2E_DIR, conftest_path=conftest_path)
+    )
+    test_file = tmp_path / "test_helper_probe.py"
+    test_file.write_text(_INNER_HELPER_TEST)
+    env = _inner_env(tmp_path, bin_dir)
+    env["STUB_CARGO_LOG"] = str(tmp_path / "stub-cargo.log")
+    # A target dir of its own: no stamp, so the gate must build.
+    env["CARGO_TARGET_DIR"] = str(tmp_path / "cargo-target")
+    env["STUB_TARGET_DIR"] = env["CARGO_TARGET_DIR"]
+
+    result = subprocess.run(
+        [sys.executable, "-m", "pytest", str(test_file),
+         "--timeout=6", "-p", "no:cacheprovider", "-q", "-s"],
+        capture_output=True, text=True, timeout=240,
+        cwd=tmp_path, env=env,
+    )
+    assert result.returncode == 0, (
+        f"child pytest failed — the helper build is charged to the test clock "
+        f"again, or the prebuild did not reach it?\n--- stdout ---\n"
+        f"{result.stdout[-4000:]}\n--- stderr ---\n{result.stderr[-4000:]}"
+    )
+    assert "1 passed" in result.stdout, result.stdout[-2000:]
+    assert "[prebuild] mls-keypackage-gen" in result.stdout, result.stdout[-4000:]
+
+    # Built once, at collection — the accessor replayed the memo.
+    log = (tmp_path / "stub-cargo.log").read_text()
+    keypkg = [l for l in log.splitlines() if "mls-keypackage-gen" in l]
+    assert len(keypkg) == 1, log
 
 
 @pytest.mark.timeout(300)

@@ -64,11 +64,21 @@ Exits 0 silently if up-to-date. Otherwise runs <cmd> and exits with its rc.
     the status line for either outcome (normal mode's -q only silences the
     up-to-date line, since the stale/missing lines there also announce that a
     build is about to run).
+
+Warmth (2026-11-01): when the gate runs <cmd> it hands the command its verdict
+    in FAUNA_BUILD_WARMTH — `cold` when a --target is missing (or, with no
+    --target, the stamp is), so the build starts from nothing; `warm` when
+    every target is there and only stale, so it builds incrementally. A
+    slot-wrapped command's build-slot.py copies it onto its grant line, which
+    is what `slot-waits.py --needs --json` splits the demand profile by
+    (delayed-testing.md § The verify queue → *The demand profile*). The gate is
+    read once: the verdict it already reached is the one handed on.
 """
 from __future__ import annotations
 import argparse
 import fnmatch
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -108,9 +118,33 @@ def _source_newest(path: Path, excludes: list[str]) -> float:
     raise SystemExit(f"build-if-stale: source not found: {path}")
 
 
+#: The gate's verdict handed to the command it runs (module docstring §
+#: Warmth); build-slot.py's `_log_grant` reads it onto the grant line.
+WARMTH_ENV = "FAUNA_BUILD_WARMTH"
+
+
 #: build-slot.py writes the instant it granted the slot into the file this
 #: variable names (build-slot.py's module docstring § Grant instant).
 GRANT_FILE_ENV = "FAUNA_SLOT_GRANT_FILE"
+
+
+def resolve_program(name: str, *, nt: bool = os.name == "nt", path: str | None = None,
+                    system_root: str | None = None, which=shutil.which) -> str:
+    """The program a build command's bare `bash` names, never Windows' WSL launcher.
+
+    On Windows a bare name goes through CreateProcess, which searches the system
+    directory BEFORE PATH, so `bash` reached C:\\Windows\\System32\\bash.exe — WSL,
+    with no distribution on GitHub's runners — whatever PATH said: the Store
+    workflow's recipe-calling runs died at their first `-- bash -c` command
+    (2026-11-06). Resolve it over PATH with the Windows directory left out (Git's
+    bash), and leave every other name, a path, and every other OS alone.
+    """
+    if not nt or os.path.dirname(name) or Path(name).stem.lower() != "bash":
+        return name
+    root = (system_root or os.environ.get("SystemRoot") or r"C:\Windows").rstrip("\\").lower()
+    dirs = [d for d in (os.environ.get("PATH", "") if path is None else path).split(";")
+            if d and d.rstrip("\\").lower() != root and not d.lower().startswith(root + "\\")]
+    return which(name, path=";".join(dirs)) or name
 
 
 def run_for_stamp(cmd: list[str], run=subprocess.call, **kwargs):
@@ -214,6 +248,8 @@ def main() -> int:
         sep = sys.argv.index("--")
         parser_args = sys.argv[1:sep]
         cmd = sys.argv[sep + 1:]
+        if cmd:
+            cmd[0] = resolve_program(cmd[0])
     else:
         parser_args = sys.argv[1:]
         cmd = []
@@ -255,13 +291,14 @@ def main() -> int:
     sources = [Path(s) for s in args.source]
     label = args.label or (args.target[0] if args.target else args.stamp)
 
-    def run_and_commit() -> int:
+    def run_and_commit(warmth: str) -> int:
+        env = {**os.environ, WARMTH_ENV: warmth}
         if args.stamp is None:
-            return subprocess.call(cmd)
+            return subprocess.call(cmd, env=env)
         # Taken BEFORE the run, like the stamp's instant: an edit or commit
         # landing while the build runs leaves a tree this key no longer names.
         key = content_key(sources) if args.content_key else None
-        rc, instant = run_for_stamp(cmd)
+        rc, instant = run_for_stamp(cmd, env=env)
         if rc == 0:
             text = "build-if-stale freshness stamp; mtime = build start (slot grant)\n"
             if key:
@@ -270,6 +307,9 @@ def main() -> int:
         return rc
 
     missing = [t for t in targets if not t.exists()]
+    # Cold when an artifact is absent (nothing to build on); a missing stamp
+    # beside present targets is a lost record, not a cold tree.
+    warmth = "cold" if missing or not targets else "warm"
     if args.stamp is not None and not Path(args.stamp).exists():
         missing.insert(0, Path(args.stamp))
     if missing:
@@ -278,7 +318,7 @@ def main() -> int:
                 print(f"[build-if-stale] {label}: missing {missing[0]} → stale", flush=True)
             return 1
         print(f"[build-if-stale] {label}: missing {missing[0]} → building", flush=True)
-        return run_and_commit()
+        return run_and_commit(warmth)
 
     if args.stamp is not None:
         # Stamp mode: the stamp alone carries freshness — an existing target
@@ -300,7 +340,7 @@ def main() -> int:
                 print(f"[build-if-stale] {label}: stale", flush=True)
             return 1
         print(f"[build-if-stale] {label}: stale → building", flush=True)
-        return run_and_commit()
+        return run_and_commit("warm")
 
     if not args.quiet:
         print(f"[build-if-stale] {label}: up-to-date", flush=True)

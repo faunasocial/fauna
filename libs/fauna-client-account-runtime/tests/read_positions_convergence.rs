@@ -158,6 +158,7 @@ fn params(base: &Path, device: &str, net: &Listeners) -> AccountRuntimeParams<Ne
         peer_transport: Some(mem_factory(net)),
         // The machine's named row — never read here (no nest answers enrollment).
         enrollment_target_device_id: "ab".repeat(32),
+        enrollment_device_label: None,
     }
 }
 

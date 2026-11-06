@@ -64,11 +64,42 @@ def _connect(relay_url: str):
     return websocket.create_connection(relay_url, timeout=RPC_ROUNDTRIP_S, **options)
 
 
-def publish(relay_url: str, event: dict) -> tuple[bool, str]:
-    """``EVENT`` ``event`` to the relay at ``relay_url`` as an anonymous client;
-    returns the relay's ``OK`` verdict as ``(accepted, message)``."""
+def _authenticate(ws, auth: tuple[str, Callable[[dict], dict]]) -> None:
+    """Answer the relay's NIP-42 ``AUTH`` challenge on ``ws`` as a Nostr app
+    holding a key does: a kind-22242 event naming ``relay_tag_url`` (the relay's
+    URL as the relay knows itself) and the challenge, signed by ``sign`` — a
+    callable taking the unsigned event and returning it signed."""
+    relay_tag_url, sign = auth
+    challenge = None
+    while challenge is None:
+        frame = json.loads(ws.recv())
+        if frame[0] == "AUTH":
+            challenge = frame[1]
+    event = sign({
+        "kind": 22242, "created_at": int(time.time()), "content": "",
+        "tags": [["relay", relay_tag_url], ["challenge", challenge]],
+    })
+    ws.send(json.dumps(["AUTH", event]))
+    while True:
+        frame = json.loads(ws.recv())
+        if frame[0] == "OK" and frame[1] == event["id"]:
+            assert frame[2] is True, f"the relay refused the AUTH: {frame!r}"
+            return
+
+
+def publish(
+    relay_url: str,
+    event: dict,
+    auth: Optional[tuple[str, Callable[[dict], dict]]] = None,
+) -> tuple[bool, str]:
+    """``EVENT`` ``event`` to the relay at ``relay_url``; returns the relay's
+    ``OK`` verdict as ``(accepted, message)``. Anonymous by default;
+    ``auth=(relay_tag_url, sign)`` authenticates first, as :func:`subscribe`'s
+    does."""
     ws = _connect(relay_url)
     try:
+        if auth is not None:
+            _authenticate(ws, auth)
         ws.send(json.dumps(["EVENT", event]))
         while True:
             frame = json.loads(ws.recv())
@@ -95,22 +126,7 @@ def subscribe(
     ws = _connect(relay_url)
     try:
         if auth is not None:
-            relay_tag_url, sign = auth
-            challenge = None
-            while challenge is None:
-                frame = json.loads(ws.recv())
-                if frame[0] == "AUTH":
-                    challenge = frame[1]
-            event = sign({
-                "kind": 22242, "created_at": int(time.time()), "content": "",
-                "tags": [["relay", relay_tag_url], ["challenge", challenge]],
-            })
-            ws.send(json.dumps(["AUTH", event]))
-            while True:
-                frame = json.loads(ws.recv())
-                if frame[0] == "OK" and frame[1] == event["id"]:
-                    assert frame[2] is True, f"the relay refused the AUTH: {frame!r}"
-                    break
+            _authenticate(ws, auth)
         ws.send(json.dumps(["REQ", "witness", *filters]))
         events = []
         while True:
@@ -178,7 +194,10 @@ class FakeRelay:
     nest PUBLISHED here. ``seed(event)`` stores an event the relay will serve
     (a far author's note or deletion), and pushes it at once to every open
     subscription it matches. ``requests`` records each ``REQ``'s filters, so a
-    test can see the nest subscribe.
+    test can see the nest subscribe. ``seed(event, regardless_of_filters=True)``
+    plays a relay that does not honour filters: it serves that event to every
+    subscription, asked for or not — a relay URL is partly external (it comes
+    in part from a follow's relay hints), so a filter is never a guarantee.
     """
 
     def __init__(self) -> None:
@@ -189,6 +208,7 @@ class FakeRelay:
         self.port = self._sock.getsockname()[1]
         self._lock = threading.Lock()
         self._stored: list[dict] = []
+        self._unfiltered: set[str] = set()
         self._subs: list[tuple[socket.socket, str, list[dict]]] = []
         self.received: list[dict] = []
         self.requests: list[list[dict]] = []
@@ -199,14 +219,20 @@ class FakeRelay:
     def url(self) -> str:
         return f"ws://127.0.0.1:{self.port}"
 
-    def seed(self, event: dict) -> None:
+    def seed(self, event: dict, *, regardless_of_filters: bool = False) -> None:
         """Store ``event`` for future ``REQ``s and push it live to every open
-        subscription whose filters it matches."""
+        subscription whose filters it matches — to every subscription at all
+        when ``regardless_of_filters``."""
         with self._lock:
             self._stored.append(event)
-            live = [(c, sid) for c, sid, flts in self._subs if any(_matches(event, f) for f in flts)]
+            if regardless_of_filters:
+                self._unfiltered.add(event["id"])
+            live = [(c, sid) for c, sid, flts in self._subs if self._serves(event, flts)]
         for conn, sid in live:
             self._send(conn, ["EVENT", sid, event])
+
+    def _serves(self, event: dict, filters: list[dict]) -> bool:
+        return event["id"] in self._unfiltered or any(_matches(event, f) for f in filters)
 
     def received_by(self, pubkey: str, kind: Optional[int] = None) -> list[dict]:
         """The events ``pubkey`` published here (of ``kind``, when given)."""
@@ -273,10 +299,9 @@ class FakeRelay:
                 self.requests.append(filters)
                 self._subs = [s for s in self._subs if not (s[0] is conn and s[1] == sid)]
                 self._subs.append((conn, sid, filters))
-                stored = list(self._stored)
-            for event in stored:
-                if any(_matches(event, f) for f in filters):
-                    self._send(conn, ["EVENT", sid, event])
+                served = [e for e in self._stored if self._serves(e, filters)]
+            for event in served:
+                self._send(conn, ["EVENT", sid, event])
             self._send(conn, ["EOSE", sid])
         elif verb == "CLOSE":
             with self._lock:

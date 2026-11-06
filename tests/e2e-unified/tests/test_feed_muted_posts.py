@@ -60,6 +60,7 @@ def _wait_muted_count(app, expected: int, timeout: float = 20.0) -> int:
 @pytest.mark.macos
 @pytest.mark.ios
 @pytest.mark.tui
+@pytest.mark.android  # FeedScreen paints feed-post-muted + its reveal button off vm.isMuted; the longer-word test below already runs on android
 # iOS enabled 2026-07-17. The old skip blamed the scroll-to-element gap,
 # but that was wrong: only 2 posts seed here, both on-screen, so nothing is
 # off-screen. The real, previously-untested bug was that iOS's feed never
@@ -140,8 +141,7 @@ def test_muted_post_collapses_behind_reveal(logged_in_app):
         # modules that run after this one.
         try:
             app.muted_words.navigate()
-            while app.muted_words.row_count() > 0:
-                app.muted_words.remove(0)
+            app.muted_words.remove_all()
         except Exception:  # noqa: BLE001 — best-effort cleanup
             pass
 
@@ -221,7 +221,6 @@ def test_a_word_inside_a_longer_word_collapses_and_removing_it_brings_the_post_b
     finally:
         try:
             app.muted_words.navigate()
-            while app.muted_words.row_count() > 0:
-                app.muted_words.remove(0)
+            app.muted_words.remove_all()
         except Exception:  # noqa: BLE001 — best-effort cleanup
             pass

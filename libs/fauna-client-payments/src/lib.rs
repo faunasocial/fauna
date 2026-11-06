@@ -83,6 +83,7 @@ impl<R: RpcRequester> PaymentsClient<R> {
                     kind: kind.into(),
                     webhook_secret: webhook_secret.into(),
                     tier: tier.into(),
+                    product_ref: None,
                     extra: Default::default(),
                 },
             )
@@ -287,6 +288,7 @@ mod tests {
                         created_at: Timestamp(1_700_000_000_000_000),
                         last_verified_at: None,
                         last_rejected_at: None,
+                        product_ref: None,
                         extra: Default::default(),
                     }],
                     extra: Default::default(),

@@ -12,15 +12,23 @@ struct MacSnapshotDetailView: View {
     var body: some View {
         TabView {
             Tab(L.common.files, systemImage: "doc.on.doc") {
-                MacSnapshotFileListView(snapshot: snapshot, vm: vm)
+                VStack(spacing: 0) {
+                    // The whole-snapshot restore into a folder sits beside
+                    // `snapshot-detail-files` (`backups.md` § Whole-snapshot
+                    // restore). It does not apply to a kind row: its snapshot
+                    // restores from the page's Restore section, which the file
+                    // list's notice line points at (§ Snapshot-list shape →
+                    // *Kind entries*).
+                    if !vm.detailIsKind {
+                        MacRestoreView(snapshotId: Int(snapshot.id))
+                        Divider()
+                    }
+                    MacSnapshotFileListView(snapshot: snapshot, vm: vm)
+                }
             }
 
             Tab(L.backups.diff.title, systemImage: "arrow.left.arrow.right") {
                 MacSnapshotDiffView(vm: vm, snapshotId: snapshot.id)
-            }
-
-            Tab(L.backups.restore, systemImage: "arrow.uturn.backward") {
-                MacRestoreView(snapshotId: Int(snapshot.id))
             }
 
             Tab(L.fileSync.info, systemImage: "info.circle") {

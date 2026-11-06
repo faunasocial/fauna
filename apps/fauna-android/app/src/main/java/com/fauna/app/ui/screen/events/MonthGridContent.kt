@@ -2,7 +2,8 @@ package com.fauna.app.ui.screen.events
 
 import com.fauna.ffi.FfiCalendarViewMode
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
@@ -23,12 +24,14 @@ import java.time.LocalDate
 import java.time.YearMonth
 import social.fauna.generated.Ids
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun MonthGridContent(
     date: LocalDate,
     events: List<EventSummary>,
     onDateChange: (LocalDate) -> Unit,
     onDayClick: (LocalDate) -> Unit,
+    onDayDoubleClick: (LocalDate) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val yearMonth = YearMonth.from(date)
@@ -79,8 +82,19 @@ fun MonthGridContent(
                     val isToday = day == LocalDate.now()
                     val dayEvents = eventsByDate[day.toString()] ?: emptyList()
 
+                    // `events-day-cell-{YYYY-MM-DD}`: single tap drills into Day view,
+                    // double tap on an EMPTY day starts a new event there (events.md
+                    // § Layout & flow). combinedClickable arbitrates the pair itself
+                    // (it holds the single tap until the double-tap window closes),
+                    // as SwiftUI does on apple.
                     Box(modifier = Modifier.weight(1f).aspectRatio(1f)
-                        .clickable { onDayClick(day) }.padding(2.dp),
+                        .testTag("${Ids.EVENTS_DAY_CELL}-$day")
+                        .combinedClickable(
+                            onClick = { onDayClick(day) },
+                            onDoubleClick = if (dayEvents.isEmpty()) {
+                                { onDayDoubleClick(day) }
+                            } else null)
+                        .padding(2.dp),
                         contentAlignment = Alignment.TopCenter) {
                         Column(horizontalAlignment = Alignment.CenterHorizontally) {
                             Box(modifier = if (isToday) Modifier.size(28.dp).clip(CircleShape)

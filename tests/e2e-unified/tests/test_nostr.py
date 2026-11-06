@@ -85,10 +85,10 @@ file. The first re-run attempt was blocked by an unrelated main-gate red
 left `apps/fauna-linux/src/app.rs`'s dispatch non-exhaustive; fixed
 forward by another session before this confirming run).
 `pytest.mark.linux` added. android is feature-complete too (2026-07-16)
-but was never added to `pytestmark` — still open, e2e blocked on the
-primary dev VM by the android-emulator host-machine setup gap (not by
-android readiness); a session with emulator access should verify
-`--client android` and add its marker.
+and carries its marker since 2026-10-31: `NostrScreen.kt` tags the link
+form, the content toggles, relays, follows and the zap-signer section with
+the same ids. NOT yet run on a device (the venue is the android emulator
+host); a first emulator run may still find a red.
 """
 import pytest
 
@@ -101,6 +101,7 @@ pytestmark = [
     pytest.mark.linux,
     pytest.mark.tui,
     pytest.mark.windows,
+    pytest.mark.android,
 ]
 
 # A follow target. `NostrProvider::add_follow` (bridge_provider.rs) accepts an

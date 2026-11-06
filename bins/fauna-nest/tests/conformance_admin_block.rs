@@ -642,3 +642,243 @@ async fn an_attested_conversation_record_blocks_onto_its_authors_queue() {
         "unblock keeps the queue row as history"
     );
 }
+
+/// (2026-11-03) One record cid can name copies in two channels — the channel is not
+/// in a conv record's hash (`message-segment-store.md` § Record identity per
+/// kind) — so a block keys on the channel the report names
+/// (`takedown-and-block.md` § Admin block → *Mechanism*): it lands on that
+/// copy alone, the other channel's copy keeps serving, its author's queue row
+/// is that copy's attested sender, and unblock lifts exactly that copy. A
+/// report that names no channel blocks every copy, the takedown's rule.
+#[tokio::test]
+async fn a_conversation_record_copied_into_a_second_channel_blocks_in_the_reported_channel() {
+    let (router, state) = router().await;
+    let reported = [0xC7u8; 32];
+    let elsewhere = [0xC8u8; 32];
+    let record_id = [0xC9u8; 32];
+    let content_id = hex::encode(record_id);
+    let record_cid = fauna_cbor::Cid::from_digest_dag_cbor(record_id);
+    state
+        .db
+        .segment_records_insert_conv(
+            &elsewhere,
+            0,
+            &record_cid,
+            "b",
+            1_000,
+            1,
+            &[],
+            Some(&STRANGER),
+        )
+        .await
+        .unwrap();
+    state
+        .db
+        .segment_records_insert_conv(&reported, 0, &record_cid, "b", 2_000, 1, &[], Some(&AUTHOR))
+        .await
+        .unwrap();
+    let report = file_report(
+        &state,
+        "message",
+        &content_id,
+        Some(hex::encode(reported)),
+        "harassment",
+    )
+    .await;
+
+    let reply = block(&router, &state, ADMIN, &report, false)
+        .await
+        .expect("a record with a copy in a second channel still blocks");
+    assert_eq!(reply.status, "blocked");
+    let withheld = |channel: [u8; 32]| {
+        let state = state.clone();
+        async move {
+            let rows = state
+                .db
+                .segment_records_list_conv_after_seq(&channel, 0, 100)
+                .await
+                .unwrap();
+            assert_eq!(rows.len(), 1);
+            rows[0].3.admin_block.clone()
+        }
+    };
+    assert_eq!(withheld(reported).await.as_deref(), Some("harassment"));
+    assert_eq!(
+        withheld(elsewhere).await,
+        None,
+        "the other copy keeps serving"
+    );
+    assert!(
+        queue_row(&router, &state, AUTHOR, &content_id)
+            .await
+            .is_some(),
+        "the reported copy's attested sender gets the queue row"
+    );
+    assert!(
+        queue_row(&router, &state, STRANGER, &content_id)
+            .await
+            .is_none()
+    );
+
+    let reply = block(&router, &state, ADMIN, &report, true)
+        .await
+        .expect("unblock lifts the reported copy");
+    assert_eq!(reply.status, "restored");
+    assert_eq!(withheld(reported).await, None);
+
+    // A report naming no channel: every copy, the takedown's rule.
+    let reporter_b = [0xCAu8; 32];
+    let report = match state
+        .db
+        .insert_abuse_report(
+            NewAbuseReport {
+                reporter_actor: reporter_b,
+                subject_kind: "message".into(),
+                subject_id: content_id.clone(),
+                subject_channel: None,
+                subject_actor: None,
+                reason: "spam".into(),
+                note: None,
+                excerpt: None,
+                block_author: false,
+            },
+            100,
+            Timestamp::now().as_i64(),
+        )
+        .await
+        .unwrap()
+    {
+        AbuseReportInsert::Inserted(row) => row.id,
+        other => panic!("report not inserted: {other:?}"),
+    };
+    let reply = block(&router, &state, ADMIN, &report, false)
+        .await
+        .expect("a channel-less report blocks every copy");
+    assert_eq!(reply.status, "blocked");
+    assert_eq!(withheld(reported).await.as_deref(), Some("spam"));
+    assert_eq!(withheld(elsewhere).await.as_deref(), Some("spam"));
+    let reply = block(&router, &state, ADMIN, &report, true).await.unwrap();
+    assert_eq!(reply.status, "restored");
+    assert_eq!(withheld(reported).await, None);
+    assert_eq!(withheld(elsewhere).await, None);
+}
+
+/// A channel-less block (every copy) overwritten on ONE copy by a later
+/// per-channel block stays liftable through the first report: the unblock asks
+/// whether ANY copy still carries that report, not what the first flagged
+/// copy says (`takedown-and-block.md` § Admin block → *Mechanism*).
+#[tokio::test]
+async fn a_channel_less_block_lifts_while_a_later_report_holds_another_copy() {
+    let (router, state) = router().await;
+    let copy_a = [0xD1u8; 32];
+    let copy_b = [0xD2u8; 32];
+    let record_id = [0xD3u8; 32];
+    let content_id = hex::encode(record_id);
+    let record_cid = fauna_cbor::Cid::from_digest_dag_cbor(record_id);
+    for channel in [&copy_a, &copy_b] {
+        state
+            .db
+            .segment_records_insert_conv(channel, 0, &record_cid, "b", 1_000, 1, &[], Some(&AUTHOR))
+            .await
+            .unwrap();
+    }
+    let file_as = |reporter: [u8; 32], channel: Option<String>| {
+        let state = state.clone();
+        let content_id = content_id.clone();
+        async move {
+            match state
+                .db
+                .insert_abuse_report(
+                    NewAbuseReport {
+                        reporter_actor: reporter,
+                        subject_kind: "message".into(),
+                        subject_id: content_id,
+                        subject_channel: channel,
+                        subject_actor: None,
+                        reason: "spam".into(),
+                        note: None,
+                        excerpt: None,
+                        block_author: false,
+                    },
+                    100,
+                    Timestamp::now().as_i64(),
+                )
+                .await
+                .unwrap()
+            {
+                AbuseReportInsert::Inserted(row) => row.id,
+                other => panic!("report not inserted: {other:?}"),
+            }
+        }
+    };
+    let flag = |channel: [u8; 32]| {
+        let state = state.clone();
+        async move {
+            let rows = state
+                .db
+                .segment_records_list_conv_after_seq(&channel, 0, 100)
+                .await
+                .unwrap();
+            rows[0].3.admin_block.clone()
+        }
+    };
+    // The channel-less report flags both copies; the later one names channel A and flips A.
+    let r2 = file_as([0xE2u8; 32], None).await;
+    let r3 = file_as([0xE3u8; 32], Some(hex::encode(copy_a))).await;
+    assert_eq!(
+        block(&router, &state, ADMIN, &r2, false)
+            .await
+            .unwrap()
+            .status,
+        "blocked"
+    );
+    assert_eq!(
+        block(&router, &state, ADMIN, &r3, false)
+            .await
+            .unwrap()
+            .status,
+        "blocked"
+    );
+
+    // The first report's unblock lifts copy B (still its own); copy A stays blocked under the later one.
+    let reply = block(&router, &state, ADMIN, &r2, true).await.unwrap();
+    assert_eq!(reply.status, "restored");
+    assert_eq!(flag(copy_b).await, None);
+    assert!(
+        flag(copy_a).await.is_some(),
+        "copy A stays blocked under the later report"
+    );
+}
+
+/// A report naming a channel that holds no copy of the record is `not_found`,
+/// never a block of some other channel's copy.
+#[tokio::test]
+async fn a_conversation_block_in_a_channel_without_the_record_is_not_found() {
+    let (router, state) = router().await;
+    let holder = [0xCBu8; 32];
+    let record_id = [0xCCu8; 32];
+    let record_cid = fauna_cbor::Cid::from_digest_dag_cbor(record_id);
+    state
+        .db
+        .segment_records_insert_conv(&holder, 0, &record_cid, "b", 1_000, 1, &[], None)
+        .await
+        .unwrap();
+    let report = file_report(
+        &state,
+        "message",
+        &hex::encode(record_id),
+        Some(hex::encode([0xCDu8; 32])),
+        "violence",
+    )
+    .await;
+    let err = block(&router, &state, ADMIN, &report, false)
+        .await
+        .expect_err("no copy in the reported channel");
+    assert_eq!(err.code, "fauna.moderation.not_found", "{err:?}");
+    let rows = state
+        .db
+        .segment_records_list_conv_after_seq(&holder, 0, 100)
+        .await
+        .unwrap();
+    assert!(!rows[0].3.is_withheld(), "the holder's copy is untouched");
+}

@@ -12,13 +12,12 @@ client's own `tracing` output, including the `install_logging` startup line).
 linux leads; the other five apps lift this shape (priority #1).
 """
 import re
-import time
 import uuid
 
 import pytest
 
 from helpers import budgets
-from helpers.app_surface import declared_absence, skip_unbuilt
+from helpers.app_surface import app_name, declared_absence, require_surface
 from helpers.waiting import wait_until
 from i18n.strings import S
 
@@ -46,7 +45,10 @@ def test_logs_page_heading_is_visible(logged_in_app):
     assert app.logs.is_page_visible(), (
         f"settings-logs page not reachable. error: {app.error_text()!r}"
     )
-    heading = app.driver.get_text("page-heading") if app.driver.is_visible("page-heading") else None
+    # A pushed page (ios) keeps the page below it in the registry, so
+    # `page-heading` can match twice (Feed under Logs): read every match.
+    headings = app.driver.get_texts("page-heading") if app.driver.is_visible("page-heading") else []
+    heading = S.logs.title if S.logs.title in headings else (headings[0] if headings else None)
     if not heading:
         heading = app.driver.get_text("settings-logs")
     assert heading == S.logs.title, (
@@ -167,45 +169,41 @@ def test_displayed_banner_reaches_ring(logged_in_app):
     """Category 1 (observability.md § What must be logged): a message *displayed*
     to the user — here an error banner — also lands in the durable `fauna_log`
     ring, visible on the Settings → Logs page. The visible banner covers the
-    active task; the ring is the durable record. On web the `MessageBanner`
-    display funnel logs at the producer (the prop change, not the paint) via the
-    wasm `logMessage`.
-
-    Web-scoped: the probe injects the banner through the state-protocol
-    `messages` field, which only web serializes today (see `test_messages.py`).
-    The other shells lift this assertion as they wire their own funnel + the
-    `messages` field per their NEXT hand-offs (observability.md § Comprehensive
-    capture — Shell surfaces).
+    active task; the ring is the durable record. Each shell logs at its own
+    display funnel, at the producer (the change, not the paint): web's
+    `MessageBanner` `$effect` via the wasm `logMessage`, tui's
+    `wizard::log_displayed_error`, linux's `app::log_displayed_error`, windows'
+    `ShellLog.Error`, apple's `AppMessages` `didSet`. The probe injects the
+    banner through the test agent's `messages` patch, and each shell's patch
+    hands the text to that same funnel — so this checks the real logging, not a
+    line only the hook writes.
     """
     app = logged_in_app
-    if not app.driver.is_web():
-        skip_unbuilt(
-            app.driver,
-            surface="the displayed-banner→ring probe's `messages` state field",
-            detail="wired on web today; other shells lift it alongside their "
-            "own display funnel",
-            tracked="observability.md § Comprehensive capture — Shell surfaces",
-        )
-
     sentinel = "fauna-log-banner-probe-7f3c"
 
-    # Land on a page that mounts MessageBanner (feed), then inject an error
-    # banner through the same window event the test agent uses
-    # (`fauna-message-update`) — that sets the bound `error` prop, firing the
-    # funnel's change-detecting `$effect`.
+    # Land on a page that shows the error banner (feed), then inject an error
+    # through the agent's `messages` patch, which feeds the shell's display
+    # funnel (on web the `fauna-message-update` event → `MessageBanner`).
     app.driver.set_state({"nav": {"stack": [{"view": "feed"}]}})
-    time.sleep(0.5)
     app.driver.set_state({"messages": {"error": sentinel}})
-    time.sleep(0.5)
+    wait_until(
+        lambda: sentinel in (app.error_text() or ""),
+        budgets.UI_SETTLE_S,
+        diagnose=lambda: f"the injected error banner never showed; error: "
+        f"{app.error_text()!r}",
+    )
 
-    # The ring is a wasm process global — it survives navigation to the Logs page.
+    # The ring is a process global — it survives navigation to the Logs page.
     app.logs.navigate()
     assert app.logs.is_page_visible(), (
         f"settings-logs page not reachable. error: {app.error_text()!r}"
     )
-    assert app.logs.any_entry_contains(sentinel), (
-        "a displayed error banner must also land in the fauna_log ring "
-        f"(observability.md category 1); ring rows: {app.logs.entry_texts()!r}"
+    wait_until(
+        lambda: app.logs.any_entry_contains(sentinel),
+        budgets.UI_SETTLE_S,
+        diagnose=lambda: "a displayed error banner must also land in the "
+        "fauna_log ring (observability.md category 1); ring rows: "
+        f"{app.logs.entry_texts()!r}",
     )
 
 
@@ -505,15 +503,8 @@ def test_a_relaunch_finds_the_previous_launchs_line_in_the_on_device_file(logged
             capability="an on-device log file (a browser tab keeps no file on the device)",
             doc="apps/observability.md § 2. Persistence & privacy",
         )
-    reader = getattr(app.driver, "on_device_log_text", None)
-    if reader is None:
-        skip_unbuilt(
-            app.driver,
-            surface="the driver's on-device log file reader (`on_device_log_text`)",
-            detail="tui and linux read the file from the host today; the other "
-            "native drivers lift a reader beside their `app_log_text`",
-            tracked="docs/features/app-log.md outcome 6",
-        )
+    require_surface(app.driver, "on-device-log-reader")
+    reader = app.driver.on_device_log_text
 
     app.linked_nests.navigate()
     assert app.linked_nests.is_page_visible()

@@ -102,6 +102,10 @@ def test_every_admit_control_is_reachable_on_the_hub(admin_app):
     for control_id in (
         "admin-users-admit-handle-input",
         "admin-users-admit-tier-select",
+        # Built on all 7 apps since 2026-11-04; the band select renders disabled
+        # until a guardian is picked, and reachable is all this asks.
+        "admin-users-admit-guardian-select",
+        "admin-users-admit-age-band-select",
         "admin-users-admit-button",
     ):
         try:
@@ -161,7 +165,6 @@ def test_admit_with_a_guardian_yields_a_supervised_ward(admin_app, nest_instance
     account); the admit itself goes through the UI."""
     from helpers.admin_wire import admit_adult
 
-    admin_app.admin.require_admit_guardian_supported()
     guardian_handle = f"admitguardian-{int(time.time() * 1000)}"
     guardian = admit_adult(nest_instance, guardian_handle)
     sk = SigningKey.generate()
@@ -214,8 +217,6 @@ def test_admit_with_a_guardian_and_band_records_the_band_on_the_ward(admin_app, 
     admit itself goes through the UI."""
     from helpers.admin_wire import admit_adult
 
-    admin_app.admin.require_admit_guardian_supported()
-    admin_app.admin.require_admit_age_band_supported()
     guardian_handle = f"bandguardian-{int(time.time() * 1000)}"
     admit_adult(nest_instance, guardian_handle)
     sk = SigningKey.generate()

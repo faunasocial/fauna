@@ -43,7 +43,7 @@ use std::sync::Arc;
 
 use fauna_client::NestClient;
 use fauna_client_caldav::bridge_routing::{
-    DeleteEventRequest, ListCalendarsRequest, ProvisionCalendarRequest, QueryEventsRequest,
+    DeleteEventRequest, ProvisionCalendarRequest, QueryEventsRequest,
 };
 use fauna_client_caldav::{
     AnonAttendeeDiscovery, CalDavClient, CalendarMetadata, DavRecipientKeys, DecodedEvent,
@@ -373,15 +373,21 @@ impl EventsState {
         }
     }
 
-    /// Apply a restored draft onto the compose buffers. Used on the launch-load
-    /// path, where the form is untouched — the restore never clobbers text the
-    /// user is already typing, because it lands before there is any.
-    pub(crate) fn apply_event_draft(&mut self, draft: fauna_client_caldav::drafts::EventDrafts) {
-        self.new_event_summary = draft.summary;
-        self.new_event_dtstart = draft.dtstart;
-        self.new_event_dtend = draft.dtend;
-        self.new_event_description = draft.description;
-        self.new_event_location = draft.location;
+    /// Fill a restored draft into the compose buffers — the launch-load path.
+    /// The shared FILL rule (`EventDrafts::fill`; `events.md` § Persistence):
+    /// the load retries a read lost to the transport for minutes, so it can land
+    /// after the user has started an event, and buffers holding user input keep
+    /// it, whole.
+    pub(crate) fn fill_event_draft(&mut self, draft: fauna_client_caldav::drafts::EventDrafts) {
+        let mut live = self.event_draft();
+        if !live.fill(draft) {
+            return;
+        }
+        self.new_event_summary = live.summary;
+        self.new_event_dtstart = live.dtstart;
+        self.new_event_dtend = live.dtend;
+        self.new_event_description = live.description;
+        self.new_event_location = live.location;
     }
 
     /// Clear the compose buffers **and** tick the rail, so a created or
@@ -1466,7 +1472,11 @@ impl Op {
                     .export_calendar_ics(
                         &actor_id,
                         &cal_id,
-                        &DavRecipientKeys::from_mseks(&msek, &prior_mseks),
+                        &DavRecipientKeys::from_mseks(
+                            fauna_client_caldav::DavKind::Calendar,
+                            &msek,
+                            &prior_mseks,
+                        ),
                     )
                     .await
                 {
@@ -1998,7 +2008,7 @@ pub fn apply_outcome(app: &mut App, outcome: Outcome) {
             session_generation,
         } => {
             if session_generation == app.session_generation {
-                app.events.apply_event_draft(*draft)
+                app.events.fill_event_draft(*draft)
             } else {
                 tracing::debug!(
                     "event drafts: dropping a restore from session generation {session_generation} \
@@ -2128,15 +2138,19 @@ async fn list_calendars_rows(
     prior_mseks: &[[u8; 32]],
 ) -> Result<Vec<CalendarRow>, String> {
     let client = CalDavClient::new(Arc::clone(nest));
+    // The shared load: a fresh or re-claimed actor with no calendars gets the
+    // lazy `Personal` first (caldav-server.md § Lazy "Personal" calendar).
     let reply = client
-        .list_calendars(ListCalendarsRequest {
-            actor_id: actor_id.to_vec(),
-        })
+        .list_calendars_with_personal(actor_id, msek)
         .await
         .map_err(|e| format!("list_calendars: {e}"))?;
+    if let Some(e) = &reply.personal_provision_error {
+        tracing::error!("events::list_calendars_rows: lazy Personal: {e}");
+    }
     // Derived once for the whole list — every row's metadata reuses it instead
     // of paying its own X-Wing keygen .
-    let keys = DavRecipientKeys::from_mseks(msek, prior_mseks);
+    let keys =
+        DavRecipientKeys::from_mseks(fauna_client_caldav::DavKind::Calendar, msek, prior_mseks);
     Ok(reply
         .calendars
         .iter()
@@ -2184,7 +2198,11 @@ async fn fetch_events_rows(
                 after_event_id: None,
                 limit: 0,
             },
-            &DavRecipientKeys::from_mseks(msek, prior_mseks),
+            &DavRecipientKeys::from_mseks(
+                fauna_client_caldav::DavKind::Calendar,
+                msek,
+                prior_mseks,
+            ),
         )
         .await
         .map_err(|e| format!("query_events: {e}"))?;
@@ -2220,7 +2238,11 @@ async fn fetch_decoded_event(
                 after_event_id: None,
                 limit: 0,
             },
-            &DavRecipientKeys::from_mseks(msek, prior_mseks),
+            &DavRecipientKeys::from_mseks(
+                fauna_client_caldav::DavKind::Calendar,
+                msek,
+                prior_mseks,
+            ),
         )
         .await
         .map_err(|e| format!("query_events: {e}"))?;
@@ -3542,6 +3564,35 @@ mod tests {
         assert_eq!(app.events.new_event_location, "the ice floe");
     }
 
+    /// A late restore FILLS: the user started an event while the launch load
+    /// was still retrying, and what they typed survives it, whole.
+    #[test]
+    fn a_late_restore_never_overwrites_a_typed_compose() {
+        let mut app = events_test_app();
+        app.events.new_event_location = "typed meanwhile".into();
+
+        let live = app.session_generation;
+        apply_outcome(
+            &mut app,
+            Outcome::DraftsLoaded {
+                draft: Box::new(fauna_client_caldav::drafts::EventDrafts {
+                    summary: "the older draft".into(),
+                    dtstart: "2026-09-01T09:00".into(),
+                    dtend: "2026-09-01T10:30".into(),
+                    description: "older notes".into(),
+                    location: "the ice floe".into(),
+                }),
+                session_generation: live,
+            },
+        );
+
+        assert_eq!(app.events.new_event_location, "typed meanwhile");
+        assert!(app.events.new_event_summary.is_empty());
+        assert!(app.events.new_event_description.is_empty());
+        assert!(app.events.new_event_dtstart.is_empty());
+        assert!(app.events.new_event_dtend.is_empty());
+    }
+
     /// The round trip that makes the rail cross-device: what the page holds
     /// serialises, and the bytes restore to the same compose state.
     #[test]
@@ -3555,7 +3606,7 @@ mod tests {
         let bytes = app.events.event_draft().snapshot_bytes();
 
         let mut other_device = events_test_app();
-        other_device.events.apply_event_draft(
+        other_device.events.fill_event_draft(
             fauna_client_caldav::drafts::EventDrafts::restore_from_bytes(&bytes).expect("restore"),
         );
 

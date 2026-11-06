@@ -1,0 +1,140 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Page
+    x:Class="FaunaApp.Views.SettingsSessionsPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:loc="using:FaunaApp.Markup"
+    xmlns:controls="using:FaunaApp.Controls"
+    Loaded="Page_Loaded"
+    xmlns:ids="using:FaunaApp.UiIds">
+
+    <!-- Settings → Sessions (docs/goal/ui/sessions.md; ui.yaml § sessions): where
+         the account is signed in right now, as one escalation ladder — the list,
+         sign out everywhere else, the 24-hour lock. Reached via {"view":"settings",
+         "id":"sessions"}. A thin render over Core.ViewModels.SessionsViewModel,
+         which paints the shared fold's page verbatim. -->
+
+    <ScrollViewer VerticalScrollBarVisibility="Auto">
+        <StackPanel Padding="16" Spacing="24" MaxWidth="900" HorizontalAlignment="Left">
+
+            <!-- error-message: the face's page error (a failed act or re-read, the
+                 wrong lock word), painted here AND through App.CurrentErrorMessage
+                 like every settings sub-page. -->
+            <controls:CopyableInfoBar
+                x:Name="ErrorBar"
+                Severity="Error"
+                IsOpen="False"
+                IsClosable="True" />
+
+            <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.PageHeading}"
+                       Style="{StaticResource TitleTextBlockStyle}"
+                       Text="{loc:Localize Key=sessions/title}" />
+
+            <!-- ══ 1. The list ══ One session-card per live session, in the shared
+                 fold's order (this app's own first). An ItemsControl
+                 (non-virtualizing) so every card and its controls realize a UIA
+                 peer. Literal ids — this DataTemplate has no x:DataType, so
+                 `{x:Bind ids:Ids.…}` would silently drop (DevicesPage.xaml). The
+                 card's Name is its kind, so WinUI keeps the Grid in the UIA content
+                 view; the texts inside carry AutomationId only, so get_text reads
+                 the live text. The badge and the revoke button are Collapsed where
+                 they do not apply, so is_absent sees exactly the rows that carry
+                 them. -->
+            <StackPanel Spacing="8">
+                <ItemsControl x:Name="CardsList">
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate>
+                            <Grid Padding="8" ColumnSpacing="12" RowSpacing="2"
+                                  AutomationProperties.AutomationId="session-card"
+                                  AutomationProperties.Name="{Binding Kind}">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="Auto" />
+                                </Grid.RowDefinitions>
+                                <StackPanel Grid.Row="0" Grid.Column="0" Orientation="Horizontal" Spacing="12">
+                                    <TextBlock AutomationProperties.AutomationId="session-kind"
+                                               Text="{Binding Kind}" FontWeight="SemiBold"
+                                               TextWrapping="Wrap" />
+                                    <TextBlock AutomationProperties.AutomationId="session-this-mark-badge"
+                                               Text="{Binding Mark}"
+                                               Visibility="{Binding MarkVisibility}"
+                                               Foreground="{ThemeResource SystemControlHighlightAccentBrush}" />
+                                </StackPanel>
+                                <TextBlock Grid.Row="1" Grid.Column="0"
+                                           AutomationProperties.AutomationId="session-detail"
+                                           Text="{Binding Detail}" TextWrapping="Wrap"
+                                           Opacity="0.7" FontSize="12" />
+                                <Button Grid.Row="0" Grid.RowSpan="2" Grid.Column="1"
+                                        AutomationProperties.AutomationId="session-revoke-button"
+                                        Content="{loc:Localize Key=sessions/revoke}"
+                                        Visibility="{Binding RevokeVisibility}"
+                                        VerticalAlignment="Center"
+                                        Tag="{Binding}" Click="Revoke_Click" />
+                            </Grid>
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
+                <TextBlock x:Name="EmptyText"
+                           AutomationProperties.AutomationId="{x:Bind ids:Ids.SessionsEmpty}"
+                           Text="{loc:Localize Key=sessions/empty}"
+                           Visibility="Collapsed" Opacity="0.7" />
+            </StackPanel>
+
+            <Border Height="1" Background="{ThemeResource DividerStrokeColorDefaultBrush}" />
+
+            <!-- ══ 2. Sign out everywhere else ══ The two-press INLINE confirm (no
+                 dialog, ui/sessions.md § The ruling, item 3): the first press reveals
+                 the confirm/cancel pair, Collapsed otherwise. The note beside it is
+                 REQUIRED copy — the honest bound of what revoking does. -->
+            <StackPanel Spacing="8">
+                <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.SessionsRevokeNote}"
+                           Text="{loc:Localize Key=sessions/revoke_note}"
+                           TextWrapping="Wrap" Opacity="0.8" />
+                <StackPanel Orientation="Horizontal" Spacing="8">
+                    <Button x:Name="RevokeOthersButton"
+                            AutomationProperties.AutomationId="{x:Bind ids:Ids.SessionsRevokeOthersButton}"
+                            Content="{loc:Localize Key=sessions/revoke_others}"
+                            Click="RevokeOthers_Click" />
+                    <StackPanel x:Name="RevokeOthersConfirmPair" Orientation="Horizontal" Spacing="8"
+                                Visibility="Collapsed">
+                        <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.SessionsRevokeOthersConfirmButton}"
+                                Content="{loc:Localize Key=sessions/revoke_others_confirm}"
+                                Style="{StaticResource AccentButtonStyle}"
+                                Click="RevokeOthersConfirm_Click" />
+                        <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.SessionsRevokeOthersCancelButton}"
+                                Content="{loc:Localize Key=sessions/revoke_others_cancel}"
+                                Click="RevokeOthersCancel_Click" />
+                    </StackPanel>
+                </StackPanel>
+            </StackPanel>
+
+            <Border Height="1" Background="{ThemeResource DividerStrokeColorDefaultBrush}" />
+
+            <!-- ══ 3. Lock this account for 24 hours ══ The warning is REQUIRED copy,
+                 always visible (never behind the confirm). Type-to-confirm with the
+                 literal LOCK, never localized; the button stays disabled until it
+                 reads exactly that, and the face re-checks it in the action arm. No
+                 duration control, anywhere (the window is a Rust constant). -->
+            <StackPanel Spacing="8">
+                <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.SessionsLockoutWarning}"
+                           Text="{loc:Localize Key=sessions/lockout_warning}"
+                           TextWrapping="Wrap"
+                           Foreground="{ThemeResource SystemFillColorCautionBrush}" />
+                <TextBox x:Name="LockWordBox"
+                         AutomationProperties.AutomationId="{x:Bind ids:Ids.SessionsLockoutConfirmField}"
+                         PlaceholderText="{loc:Localize Key=sessions/lockout_confirm_placeholder}"
+                         MaxWidth="320" HorizontalAlignment="Left"
+                         TextChanged="LockWordBox_TextChanged" />
+                <Button x:Name="LockButton"
+                        AutomationProperties.AutomationId="{x:Bind ids:Ids.SessionsLockoutButton}"
+                        Content="{loc:Localize Key=sessions/lockout_button}"
+                        IsEnabled="False"
+                        Click="Lock_Click" />
+            </StackPanel>
+        </StackPanel>
+    </ScrollViewer>
+</Page>

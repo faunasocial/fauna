@@ -138,8 +138,10 @@ order for § hybrid):
 3. **Audience-restricted posts** (subscription `KeyBlob`, per-subscriber ECDH).
    Medium-high. *Fauna-controlled* → hybrid (§ surface B).
 4. **TLS transport.** Medium — session-key HNDL exposes metadata,
-   the short-lived bearer, plaintext-mode content, and the pairing leg. TLS is
-   **upstream-blocked** (§ 7.3). Since the 2026-08-23 WireGuard deletion the P2P
+   the short-lived bearer, plaintext-mode content, and the pairing leg. The
+   rustls legs (nest serving, native apps, P2P) are **upstream-blocked** (§ 7.3);
+   the Go bridges' public listeners (SMTP, IMAP, CalDAV, the PDS) are not —
+   they negotiate the hybrid groups today (§ 7.3, the TLS-transport bullet). Since the 2026-08-23 WireGuard deletion the P2P
    transport is iroh-QUIC — TLS too — so § surface C is the same upstream
    question rather than a second, Fauna-controlled one.
 5. **TLS-cert bridge wrapped blobs.** Low — HNDL-vulnerable wraps, but the
@@ -208,7 +210,7 @@ inventing a parallel scheme:
 The hybrid primitive is **X-Wing** (`draft-connolly-cfrg-xwing-kem`): a single
 IND-CCA2 KEM that internally runs **ML-KEM-768** (NIST FIPS 203, NIST security level 3)
 and **X25519** and combines their shared secrets with a fixed hash. It is chosen
-because it **drops directly into an HPKE KEM slot** — Fauna's mail/DKIM/TLS blobs are
+because it **drops directly into an HPKE KEM slot** — Fauna's mail/TLS-cert blobs are
 HPKE, so X-Wing becomes "just another `KemSuite.kem` id," no envelope redesign. The
 combiner makes the result as strong as X25519 even if ML-KEM is broken (and vice
 versa), satisfying the hybrid goal.
@@ -320,7 +322,7 @@ no point-mapping trick. Two consequences, both additive:
   the author can no longer derive it from the public ActorId for free. The author wraps
   the period key to the published key.
 - **Capability-grant holders (surface A, derived):** a grant's **holder** is an enrolled
-  bridge service-user, not an actor, so — exactly like the DKIM/TLS wraps (§ exposed
+  bridge service-user, not an actor, so — exactly like the TLS-cert wraps (§ exposed
   surfaces #5) — it cannot reuse a recipient's MSEK-derived ek. The holder derives its
   **own** ML-KEM keypair from the **bridge's identity seed**
   (`derive_mlkem768_keypair_from_ikm(seed, <bridge-service-user context>)`,
@@ -329,7 +331,7 @@ no point-mapping trick. Two consequences, both additive:
   `bridge_service_users.mlkem_ek` column + a `register_service_user` field). The client
   mint wraps each grant's standing key to `XWingPublicKey::from_parts(holder_mlkem_ek,
   holder_x25519)` when the ek is present, degrading to classical otherwise. This is the
-  **same bridge-service-user ML-KEM infrastructure the DKIM/TLS hybrid needs** — built
+  **same bridge-service-user ML-KEM infrastructure the TLS-cert hybrid needs** — built
   once, shared. **Implementation status: the seal/open primitives (PQ-CAP-1), the holder ek
   publication + seed derivation (PQ-CAP-2), the client mint selector (PQ-CAP-3), AND the tier_3
   drain proof (PQ-CAP-4) are all built — capability-grant wraps are COMPLETE (§ Implementation status).**
@@ -431,6 +433,13 @@ they are tracked, not scheduled, and re-evaluated when the upstream lands.
   which already ships `X25519MLKEM768`, so web needs nothing). Note this couples to
   the channel-binding SPKI logic in [`../security.md`](../security.md) (provider swap
   must not change SPKI computation). Watch + scoped-migration item, owned here.
+  **Not blocked: the Go bridges' listeners.** Every TLS listener of the bridge
+  binaries (the MTA's 25/465/587, the MDA's IMAP + CalDAV, the PDS) is built by
+  `bridgetls.HardenedServerConfig` on Go's `crypto/tls`, which carries the hybrids
+  natively; its pinned curve list names `X25519MLKEM768`, `SecP256r1MLKEM768` and
+  `SecP384r1MLKEM1024` first, so those sessions are HNDL-protected now. The list
+  itself is owned by [`../../behavior/smtp-server.md`](../../behavior/smtp-server.md)
+  § TLS posture per port, which records why an explicit list must name the hybrids.
   **Also carries the P2P leg (Leg C) under iroh:** iroh is QUIC over TLS 1.3 (quinn + rustls), and
   **iroh is now the adopted P2P substrate** (2026-06-28, reversible second impl behind the
   `fauna-transport` seam — design ratified 2026-06-27; tracked internally),
@@ -444,7 +453,7 @@ they are tracked, not scheduled, and re-evaluated when the upstream lands.
 ## Signatures — deferred (not HNDL; revisit after confidentiality)
 
 Ed25519 underpins sign-over-CID authorship, the deployment identity, the channel
-binding, DKIM, and submission tokens. Because forgery is not harvestable (§ threat
+binding, DKIM (alongside RSA-2048; the nest holds both keys), and submission tokens. Because forgery is not harvestable (§ threat
 model), the PQ-signature migration (ML-DSA / SLH-DSA, almost certainly itself hybrid)
 is sequenced **after** the KEM work and after stable Rust MLS/identity PQ-signature
 support exists. The CID hash (BLAKE3-256) is already PQ-adequate, so the
@@ -474,7 +483,7 @@ android + web on a Linux dev machine, windows on Windows, linux the template, tu
 the same shared crate) — surface B COMPLETE; the P2P transport (surface C) has no
 fauna-authored PQ mechanism of its own any more and rides § 7.3's TLS provider migration
 (the WireGuard PSK it used to carry went with the stack 2026-08-23 — see the surface-C
-item below); DKIM/TLS-cert blobs (S6) remain step-1-only; and the **capability-grant wraps** (surface A,
+item below); TLS-cert blobs (S6) remain step-1-only; and the **capability-grant wraps** (surface A,
 derived) are COMPLETE — X-Wing seal/open primitives (PQ-CAP-1), holder ML-KEM publication +
 seed derivation (PQ-CAP-2), the client mint selector (PQ-CAP-3), AND the tier_3 drain proof
 (PQ-CAP-4).** This doc emits the backlog (tracked internally; implementation)
@@ -499,7 +508,7 @@ not drift to discover:
   (keyed on the recipient's published ek; the `pq-hybrid` gate they first shipped behind
   is retired).
 
-- **Mail/DKIM/TLS HPKE blobs (surface A) — agility DONE (S1); mail hybrid LIVE (S3); DKIM/TLS hybrid NOT (S6).** The
+- **Mail/TLS-cert HPKE blobs (surface A) — agility DONE (S1); mail hybrid LIVE (S3); TLS-cert hybrid NOT (S6); DKIM is no longer an HPKE blob (nest-held, deployment-seed-sealed).** The
   `wrapped_blob` HPKE shapes already serialize a per-blob `KemSuite`
   (`libs/fauna-mls/src/wrapped_blob/format.rs`); S1 added `KemSuite::is_standard()` + the
   Fauna-private `FAUNA_KEM_XWING` id and a single dispatch point `hpke_open_dispatch`
@@ -518,7 +527,7 @@ not drift to discover:
   blocker):** the first-party CalDAV *collection-metadata* seal (`seal_calendar_metadata`)
   stays classical — making it hybrid needs a cross-app provision-flow refactor; the
   MDA path already seals collection metadata hybrid (leg D2a) and every reader opens both.
-  DKIM/TLS HPKE blobs stay classical until S6. **PQ-6 (CLOSED — option (a)):** the
+  TLS-cert HPKE blobs stay classical until S6; DKIM keys are not HPKE blobs (the nest holds and signs with them under its own seed). **PQ-6 (CLOSED — option (a)):** the
   companion `encrypted_index_hint` now seals **X-Wing (hybrid)** alongside the body in
   every delivery path (a recipient's key always carries its ML-KEM ek) — the nest in-domain leg
   via the shared `seal_recipient_blob` selector (`bridge_routing_handlers.rs`) and the Go
@@ -544,13 +553,13 @@ not drift to discover:
   `GrantBlob.wrapped_keys[*].hpke` (`libs/fauna-mls/src/wrapped_blob/`). Because that payload
   is a standing key (not DKIM's short-lived one), a classical wrap is a **High-HNDL bypass**
   of the closed mail-at-rest seal (§ exposed surfaces → the derived-High note), so it joins
-  the X-Wing overlay. **PQ-CAP-1 (DONE, this pass):** `seal_capability_xwing` +
+  the X-Wing overlay. **PQ-CAP-1 (DONE):** `seal_capability_xwing` +
   `unseal_capability_hybrid` (`libs/fauna-mls/src/wrapped_blob/mod.rs`) mirror mail's
   `seal_to_recipient_xwing`/`unseal_mail_record_hybrid` — the wrap self-describes its suite
   (`FAUNA_KEM_XWING`, 1120-B `enc`), the holder opens with its X25519 secret + ML-KEM dk, and
   the shared `hpke_open_dispatch` already routes both suites; unit-proven (round-trip,
   canonical-wire round-trip, classical-superset-open, needs-hybrid-opener typed error,
-  AAD-bound holder/scope tamper). **PQ-CAP-2 (DONE, this pass):** the holder (bridge
+  AAD-bound holder/scope tamper). **PQ-CAP-2 (DONE):** the holder (bridge
   service-user) derives its **own** seed-derived ML-KEM keypair
   (`fauna_mls::wrapped_blob::derive_bridge_service_user_mlkem768` under
   `fauna.bridge.service-user-mlkem.v1`, surfaced by the `fauna-ffi`
@@ -560,11 +569,11 @@ not drift to discover:
   x25519 via `BridgeMlkemEkFrozen`). The Go bridge derives dk+ek from its keyfile Ed25519 seed each
   boot, publishes the ek at `register_service_user`, and threads its dk through
   `unseal_capability_grant` so the MDA capability holder opens **both** classical and hybrid wraps with
-  one path (the dk zeroized at holder Close) — the **identical infra the paused S6 DKIM/TLS hybrid
+  one path (the dk zeroized at holder Close) — the **identical infra the paused S6 TLS-cert hybrid
   needs**, built once, shared. Proven: fauna-ffi hybrid round-trip + classical-superset + wrong-length
   dk + deterministic-seed derivation; nest DB/handler set-once-freeze + wrong-length gate + additive
   reconcile no-data-loss; Go client mlkem_ek-in-request + cross-language fixture parity.
-  **PQ-CAP-3 (DONE, this pass):** the client-side mint selects the X-Wing wrap per
+  **PQ-CAP-3 (DONE):** the client-side mint selects the X-Wing wrap per
   key-bearing tuple. `build_grant_blob` + its FFI `build_capability_grant_blob` + the shared
   `mint_grant` (`libs/fauna-client-capabilities`) grew a `holder_mlkem_ek` param; the new
   `seal_capability_selecting` (`wrapped_blob/mod.rs`, mirroring the nest's `seal_recipient_blob`)
@@ -582,7 +591,7 @@ not drift to discover:
   (`fauna-ffi` + `cmd/seal-helper-testonly`). Unit-proven: X-Wing-when-ek + classical-when-none +
   malformed-ek-degrades (`fauna-mls`); the 2432-B superset + classical-superset-open
   (`fauna-client-capabilities`); FFI hybrid mint → holder-drains (`fauna-ffi`); the reply ek
-  round-trip (nest). **PQ-CAP-4 (DONE, this pass):** the tier_3 drain proof. The
+  round-trip (nest). **PQ-CAP-4 (DONE):** the tier_3 drain proof. The
   `cmd/seal-helper-testonly` `mint-grant` mode now mints an X-Wing-wrapped grant (holder ek)
   carrying the `32 + 2400` mail key — via the new shared
   `fauna_mls::wrapped_blob::derive_recipient_mail_capability_secret` (the single source of truth for
@@ -666,7 +675,7 @@ not drift to discover:
   ([`../../behavior/authorization-server.md`](../../behavior/authorization-server.md) § Scope
   grammar → *The sixth arm*); the first-party subscribe still sends its key in the request —
   reading the registry there is a later unification. **The session-start publish is wired on
-  tui, linux, web and android** (UniFFI `subscriptions_publish_encaps_key`, WASM `subscriptionsPublishEncapsKey`, each at the post-auth edge that refreshes the mail epoch schedule); macos, ios and windows are owed.
+  tui, linux, web, android, macos, ios and windows** (UniFFI `subscriptions_publish_encaps_key`, WASM `subscriptionsPublishEncapsKey`, each at the post-auth edge that refreshes the mail epoch schedule; macos and ios call it once from the shared `FaunaKit`, on every successful (re)connect; windows calls it from `App.StartMainAppAsync`'s post-auth hook through `SubscriberEncapsKeyPublish`).
 - **Reserved but HNDL-safe (no action):** `BackupKey` version byte
   (`libs/fauna-core/src/crypto.rs`).
 - **P2P transport PQ (surface C) — now wholly the § 7.3 `ring → aws-lc-rs` question.**
@@ -716,6 +725,11 @@ not drift to discover:
   `nest.info` no longer carries it (nor `mail-epoch-schedule`).
 - **Upstream-blocked:** MLS single-suite const, rustls-on-ring — **not started by
   design** (§ 7.3).
+- **Go bridge TLS listeners — hybrid LIVE.** `bridgetls.HardenedServerConfig` pins
+  `X25519MLKEM768, SecP256r1MLKEM768, SecP384r1MLKEM1024` ahead of the classical
+  curves (restored 2026-11-05 after the factory's first explicit list had dropped
+  them); pinned by `internal/tls/hardened_test.go`'s
+  `TestHardenedServerConfigNegotiatesPQHybrids` and `…KeepsEveryDefaultHybrid`.
 - **No app UI exists or is planned** — by the product invariant the suite is never a
   human knob; this is intentional, not a gap.
 

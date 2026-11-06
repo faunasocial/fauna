@@ -36,14 +36,21 @@ fn serve_rig(bytes: &[u8], retain_manifest: bool, seed_entry: bool) -> ServeRig 
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("holiday.mp4"), bytes).unwrap();
 
-    let sealed = crate::seal::seal_blob(bytes, Some((CONTENT_KEY, Some(1)))).unwrap();
+    let sealed = crate::seal::seal_blob(
+        bytes,
+        Some((
+            CONTENT_KEY,
+            Some(fauna_core::blob_seal::SealStamp::Version(1)),
+        )),
+    )
+    .unwrap();
     let db = SyncDb::open_in_memory().unwrap();
     if retain_manifest {
         db.retain_manifest(
             &hex::encode(sealed.manifest_hash.digest()),
             &sealed.manifest_bytes,
             "holiday.mp4",
-            Some(1),
+            Some(fauna_core::blob_seal::SealStamp::Version(1)),
         )
         .unwrap();
     }
@@ -58,7 +65,7 @@ fn serve_rig(bytes: &[u8], retain_manifest: bool, seed_entry: bool) -> ServeRig 
             0,
             bytes.len() as i64,
             1,
-            Some(1),
+            Some(fauna_core::blob_seal::SealStamp::Version(1)),
         )
         .unwrap();
     }
@@ -183,7 +190,14 @@ async fn the_resident_loop_ingests_a_spooled_share_page_and_advances_the_cursor(
     let spool = tempfile::tempdir().unwrap();
 
     let bytes: Vec<u8> = (0..60_000u32).map(|i| (i % 233) as u8).collect();
-    let sealed = crate::seal::seal_blob(&bytes, Some((CONTENT_KEY, Some(1)))).unwrap();
+    let sealed = crate::seal::seal_blob(
+        &bytes,
+        Some((
+            CONTENT_KEY,
+            Some(fauna_core::blob_seal::SealStamp::Version(1)),
+        )),
+    )
+    .unwrap();
     std::fs::create_dir_all(spool.path().join("manifests")).unwrap();
     std::fs::create_dir_all(spool.path().join("chunks")).unwrap();
     std::fs::write(

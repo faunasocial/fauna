@@ -1715,3 +1715,102 @@ fn list_kind_is_user_only() {
         assert!(!is_permitted(class, "fauna.posts.list"), "{class:?}");
     }
 }
+
+// ── fauna.posts.get carries the counts ─────────────────────────
+
+/// The single-post read carries the post's four counts and per-emoji reaction
+/// tally, projected for the caller — the counters the timeline card shows, so a
+/// post opened through the deep-link door shows them too (`feed.md` § Layout &
+/// flow → *Reaction posts count and paint*, ruling 5). A door like and a
+/// `React` post both land; only the reactor sees its own `viewer_react_id`.
+#[tokio::test]
+async fn get_carries_the_counts_and_the_reaction_tally_for_the_caller() {
+    let (router, state) = router_with_db_only().await;
+    let author_kp = fauna_core::identity::ActorKeypair::generate();
+    let fan_kp = fauna_core::identity::ActorKeypair::generate();
+    let fan = fan_kp.actor_id().0;
+    let target = create_post(
+        &router,
+        &state,
+        &author_kp,
+        signed_text_post(&author_kp, "get_carries_the_counts unique target body"),
+    )
+    .await;
+
+    dispatch(
+        &router,
+        state.clone(),
+        fan,
+        "fauna.posts.interact",
+        interact_payload(&target, "like", None),
+    )
+    .await
+    .expect("door like ok");
+    let react = {
+        let post = fauna_core::data::Post {
+            author: fan_kp.actor_id(),
+            created_at: fauna_core::data::Timestamp(1_700_000_123),
+            body: fauna_core::data::PostBody::Text {
+                content: String::new(),
+                facets: vec![],
+            },
+            references: vec![fauna_core::data::Reference::React {
+                post_id: fauna_core::data::PostId::from_digest_dag_cbor(
+                    fauna_core::hex32::decode(&target).unwrap(),
+                ),
+                emoji: "❤️".into(),
+            }],
+            expires_at: None,
+            gated: None,
+            content_warning: None,
+            origin: None,
+        };
+        let bytes = fauna_core::encoding::sign_and_pack(&fan_kp, &post).unwrap();
+        create_post(&router, &state, &fan_kp, bytes).await
+    };
+
+    let get = |actor: [u8; 32]| {
+        let router = &router;
+        let state = state.clone();
+        let target = target.clone();
+        async move {
+            let reply: PostGetReply = decode(
+                &dispatch(
+                    router,
+                    state,
+                    actor,
+                    "fauna.posts.get",
+                    get_payload(&target),
+                )
+                .await
+                .expect("get ok"),
+            )
+            .unwrap();
+            reply.counts.expect("a local row carries its counts")
+        }
+    };
+    let heart = |viewer_react_id: Option<String>| {
+        vec![fauna_protocol::feed::PostReactionGroup {
+            emoji: "❤️".into(),
+            count: 1,
+            viewer_react_id,
+            ..Default::default()
+        }]
+    };
+
+    let mine = get(fan).await;
+    assert_eq!(mine.like_count, 1, "the door like is counted");
+    assert_eq!(mine.reply_count, 0);
+    assert_eq!(
+        mine.reactions,
+        heart(Some(react)),
+        "the reactor's own React post is its delete argument"
+    );
+    let theirs = get(author_kp.actor_id().0).await;
+    assert_eq!(theirs.like_count, 1, "every caller sees the same count");
+    assert_eq!(
+        theirs.reactions,
+        heart(None),
+        "no viewer_react_id for another caller"
+    );
+}

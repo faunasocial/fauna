@@ -540,9 +540,10 @@ private fun ScopeStep(
     onPrev: () -> Unit,
 ) {
     var dateFrom by remember { mutableStateOf("") }
-    // MB — the field's unit; the action takes bytes. Pre-filled with the
-    // machine's own default so the value on screen is the value in force.
-    var maxSizeMb by remember { mutableStateOf(DEFAULT_MAX_SIZE_MB) }
+    // MB — the field's unit; the action takes bytes. Seeded from the machine
+    // snapshot's own value (the default on a fresh wizard, what Next last
+    // committed after a Back) so the value on screen is the value in force.
+    var maxSizeMb by remember { mutableStateOf((snapshot.maxSizeBytes / (1024uL * 1024uL)).toString()) }
 
     Text(stringResource(R.string.mail_import_scope_title), style = MaterialTheme.typography.titleMedium)
 
@@ -897,6 +898,3 @@ private fun DoneStep(
         }
     }
 }
-
-/** The machine's own default (§ Wizard steps step 3), in MB. */
-private const val DEFAULT_MAX_SIZE_MB = "50"

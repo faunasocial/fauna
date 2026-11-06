@@ -95,6 +95,13 @@ impl Roster {
         for repaint in self.on_changed.borrow().iter() {
             repaint(&reviews);
         }
+        // The kit-side ephemeral pass (below) lives on a page that has no handle
+        // on the window's roster, so it subscribes through this one slot.
+        EPHEMERAL_REPAINT.with(|slot| {
+            if let Some(repaint) = slot.borrow().as_ref() {
+                repaint(&reviews);
+            }
+        });
     }
 
     /// Call `repaint` with the new roster each time [`Roster::set`] lands one.
@@ -223,6 +230,137 @@ pub fn build_member_review_page(client: &Rc<FaunaClient>) -> (gtk::Box, impl Fn(
     let page_box = crate::testid::wrap_page_with_heading(page::TITLE, ids::PAGE_HEADING, &outer);
     let refresh_fn = move || refresh(&ctx);
     (page_box, refresh_fn)
+}
+
+thread_local! {
+    /// The most recently built ephemeral pass's repaint — one slot, replaced
+    /// by each page build, because only one Recovery Kit section is on screen
+    /// and a rebuilt page is the live one.
+    static EPHEMERAL_REPAINT: RefCell<Option<Repaint>> = RefCell::new(None);
+    /// `App::succession_review_deferred`'s twin (tui): *Review The Rest Later*
+    /// was pressed this run. Purely local — "later" writes no verdict.
+    static EPHEMERAL_DEFERRED: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Forget a deferral — called where the parked sweep is forgotten (sign-out,
+/// factory reset), so the next ceremony's pass is not born deferred.
+pub(crate) fn reset_ephemeral_deferral() {
+    EPHEMERAL_DEFERRED.with(|d| d.set(false));
+}
+
+/// Whether the ephemeral pass shows `reviews` right now: the ceremony ran this
+/// session (a parked sweep), it was not deferred, and something is open.
+///
+/// ⚠ **The sweep gate is the ruling, not a convenience** (tui's
+/// `recovery.rs::member_review_elements`): the pass is *shown once per
+/// recovery, in the ceremony flow that produced it*, and its absence on every
+/// other session is what makes the permanent page the one place a deferred
+/// backlog lives.
+fn ephemeral_visible(reviews: &[MemberReview]) -> bool {
+    super::recovery_kit::succession_sweep_parked()
+        && !EPHEMERAL_DEFERRED.with(Cell::get)
+        && !reviews.is_empty()
+}
+
+/// The **ephemeral** kit-side review pass (`identity-succession.md`
+/// § Propagation → *MLS groups*, ruling 1; tui's
+/// `settings/recovery.rs::member_review_elements`): an intro, one
+/// `member-review-row` per still-open person with Keep and Remove — the SAME
+/// row builder the permanent page uses, so one id family serves both surfaces —
+/// and `member-review-defer-button`. `error_label` is the Recovery Kit page's
+/// own `error-message`, where a partial Remove says how far it got.
+///
+/// Returns the section box (hidden until the gate opens) and a re-read closure
+/// the kit section's refresh calls.
+pub(crate) fn build_ephemeral_pass(error_label: &gtk::Label) -> (gtk::Box, Rc<dyn Fn()>) {
+    let root = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .spacing(6)
+        .margin_top(8)
+        .visible(false)
+        .build();
+    let Some(client) = crate::settings::get_client() else {
+        return (root, Rc::new(|| {}));
+    };
+
+    let intro = gtk::Label::new(Some(t::REVIEW_INTRO));
+    intro.set_halign(gtk::Align::Start);
+    intro.set_wrap(true);
+    intro.add_css_class("dim-label");
+    root.append(&intro);
+
+    let list = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .spacing(6)
+        .accessible_role(gtk::AccessibleRole::Group)
+        .build();
+    root.append(&list);
+
+    let defer = gtk::Button::builder()
+        .label(t::REVIEW_DEFER)
+        .halign(gtk::Align::Start)
+        .build();
+    set_test_id(&defer, ids::MEMBER_REVIEW_DEFER_BUTTON);
+    root.append(&defer);
+
+    let ctx = Rc::new(Ctx {
+        rt: client.runtime_handle(),
+        manager: crate::conversations::manager(),
+        refresh_roster: Box::new(move || client.fetch_member_reviews()),
+        w: Widgets {
+            error_label: error_label.clone(),
+            list,
+            // Never shown: the pass has no empty state (it simply is absent).
+            placeholder: gtk::Label::builder().visible(false).build(),
+            rows: RefCell::new(Vec::new()),
+            painted: RefCell::new(None),
+            read_error_shown: Cell::new(false),
+        },
+    });
+
+    let paint = {
+        let ctx = Rc::clone(&ctx);
+        let root = root.clone();
+        move |reviews: &[MemberReview]| {
+            let show = ephemeral_visible(reviews);
+            // Rows are removed, not merely hidden, when the gate closes: a
+            // driver counting `member-review-row` must read 0 after a defer.
+            render_rows(&ctx, if show { reviews } else { &[] });
+            ctx.w.list.set_visible(show);
+            root.set_visible(show);
+        }
+    };
+    let paint = Rc::new(paint);
+
+    {
+        let paint = Rc::clone(&paint);
+        defer.connect_clicked(move |_| {
+            EPHEMERAL_DEFERRED.with(|d| d.set(true));
+            paint(&[]);
+        });
+    }
+    EPHEMERAL_REPAINT.with(|slot| {
+        let paint = Rc::clone(&paint);
+        *slot.borrow_mut() = Some(Box::new(move |reviews| paint(reviews)));
+    });
+
+    let refresh: Rc<dyn Fn()> = {
+        let ctx = Rc::clone(&ctx);
+        Rc::new(move || {
+            let paint = Rc::clone(&paint);
+            spawn_with_snapshot(
+                &ctx.rt,
+                move || async move { hydrate_with_retry(load_reviews).await },
+                move |result| {
+                    if let Ok(reviews) = result {
+                        paint(&reviews);
+                    }
+                },
+            );
+        })
+    };
+    refresh();
+    (root, refresh)
 }
 
 /// Read the open review roster from the succession ledger via the shared

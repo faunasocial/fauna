@@ -240,7 +240,7 @@ class AppLaunchVM @Inject constructor(
      * dead-button trap every leg has had to avoid.
      */
     suspend fun performPostAuthSilentSignIn(): Boolean {
-        val nodeUrl = sessionAccount.nestUrl?.ifBlank { null } ?: return false
+        val nodeUrl = sessionAccount.nestUrl?.ifBlank { null }?.let { resolvedDialUrl(it) } ?: return false
         val secretHex = sessionAccount.secretHex?.ifBlank { null } ?: return false
         return try {
             val signedIn = com.fauna.ffi.silentChallenge(nodeUrl, HexUtil.hexToBytes(secretHex))

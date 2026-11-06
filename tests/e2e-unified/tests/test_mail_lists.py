@@ -48,7 +48,7 @@ already exercises. windows/apple/web remain, not yet reviewed.
 
 **The marker-vs-run gap above is now enforced in code, not just prose**
 : `_android_leg_is_a_static_review_not_a_run` below
-routes every android run of this file through `skip_unbuilt`, so it is tallied
+routes every android run of this file through `require_surface`, so it is tallied
 as declared debt (and fails under `--strict-app`) rather than silently
 "passing" the first time anyone actually runs `--app android` against a real
 device. Delete that fixture once this file has a real device pass to show for
@@ -72,7 +72,7 @@ import secrets
 import pytest
 
 from clients.ws_rpc_admin_client import WsRpcAdminClient
-from helpers.app_surface import skip_unbuilt
+from helpers.app_surface import require_surface
 
 pytestmark = [
     pytest.mark.tier_3,
@@ -99,14 +99,7 @@ def _android_leg_is_a_static_review_not_a_run(logged_in_app):
     the declared-debt tally instead of leaving the marker alone to claim
     execution: this self-clears the day someone runs this file `--app android`
     against a real device and deletes the call below."""
-    if logged_in_app.driver.is_android():
-        skip_unbuilt(
-            logged_in_app.driver,
-            surface="mail-lists / mail-list-members real-device e2e",
-            detail="132525318a's android leg was a code review only, not a "
-            "live run — no Robolectric or device execution backs it",
-            tracked="",
-        )
+    require_surface(logged_in_app.driver, "mail-lists")
 
 
 def _user_client(nest_instance, user):

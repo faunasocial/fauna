@@ -65,7 +65,9 @@ class MessageBannerObserverTest {
                 body = body,
                 bodyFormat = BodyFormat.MARKDOWN,
                 timestampMs = nextStampMs,
-                messageId = "msg-${java.util.UUID.randomUUID()}",
+                // A native message is unread by its nest-assigned `conv:<channel>:<seq>` id;
+                // the stamp rises strictly, so it doubles as the seq.
+                messageId = "conv:test-seam-channel:$nextStampMs",
                 inReplyTo = null,
                 attachments = emptyList(),
                 badges = MessageBadges(

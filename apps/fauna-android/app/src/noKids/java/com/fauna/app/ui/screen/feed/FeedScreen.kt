@@ -22,6 +22,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.asAndroidBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.nestedscroll.nestedScroll
@@ -76,6 +77,7 @@ import com.fauna.app.ui.util.resolveLocalized
 import com.fauna.app.ui.util.stringResourceFmt
 import com.fauna.app.ui.viewmodel.FeedVM
 import com.fauna.ffi.adminBlockNotice
+import com.fauna.ffi.classifySources
 import com.fauna.ffi.legalTakedownTombstone
 import com.fauna.ffi.shortId
 import com.fauna.ffi.urlHost
@@ -133,8 +135,8 @@ fun FeedScreen(navController: NavController, vm: FeedVM = hiltViewModel()) {
     val errorText = localized(snapshot?.error)
 
     // Guardian Notify (family-safety.md § Guardian Notify): count every
-    // currently-rendered post's guardian-floor enforcement. A no-op per post
-    // unless the ward's content_notify knob is on and the guardian floor bites;
+    // currently-rendered post's guardian-rule enforcement. A no-op per post
+    // unless the ward's content_notify knob is on and the guardian rules bite;
     // deduped per post per local day inside the store, so a re-render (e.g. a
     // fresh snapshot with the same posts) never re-counts. Mirrors web's
     // feed/+page.svelte effect over the whole posts list.
@@ -259,7 +261,8 @@ fun FeedScreen(navController: NavController, vm: FeedVM = hiltViewModel()) {
                             FilterChip(
                                 selected = selectedFeedId == null && !trendingSelected,
                                 onClick = { vm.selectFeed(null) },
-                                label = { Text(stringResource(R.string.conflicts_local)) }
+                                label = { Text(stringResource(R.string.feed_list_local)) },
+                                modifier = Modifier.testTag(Ids.FEED_LOCAL_ITEM)
                             )
                         }
                         items(feeds) { feed ->
@@ -322,6 +325,34 @@ fun FeedScreen(navController: NavController, vm: FeedVM = hiltViewModel()) {
                         modifier = Modifier.testTag(Ids.FEED_SEARCH_CLEAR)
                     ) {
                         Icon(Icons.Default.Close, stringResource(R.string.common_close))
+                    }
+                }
+
+                // The imported-posts selection's notice + clear (`feed.md` § State &
+                // data shape → *The imported-posts selection*): present only while
+                // the shared snapshot names a platform. The platform label is the
+                // shared `SourceKind` label for the token.
+                snapshot?.importedSelected?.let { token ->
+                    val platform = classifySources(token, emptyList()).firstOrNull()?.label ?: token
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            stringResource(R.string.feed_imported_notice).replace("{platform}", platform),
+                            style = MaterialTheme.typography.bodySmall,
+                            modifier = Modifier
+                                .weight(1f)
+                                .testTag(Ids.FEED_IMPORTED_NOTICE),
+                        )
+                        TextButton(
+                            onClick = { vm.clearImported() },
+                            modifier = Modifier.testTag(Ids.FEED_IMPORTED_CLEAR)
+                        ) {
+                            Text(stringResource(R.string.feed_imported_clear))
+                        }
                     }
                 }
 
@@ -893,7 +924,7 @@ internal fun PostCard(
     // picks a factor in the sheet.
     var pendingSheetVerb by remember { mutableStateOf<TrainVerb?>(null) }
     // The content-policy render verdict for this post (family-safety.md § Content
-    // policy) — the strictest-wins compose of the guardian floor + the viewer's
+    // policy) — the strictest-wins compose of the guardian rules + the viewer's
     // own thresholds, resolved entirely in shared Rust. Memoized on labels +
     // inputs so it re-resolves only when either changes.
     //
@@ -916,8 +947,8 @@ internal fun PostCard(
     val contentVerdict = decision.verdict
     RegionBlockWitness("feed:${post.postId}", decision.isRegionBlocked)
     NestBlockWitness("feed:${post.postId}", decision.isNestBlocked)
-    // A `collapse` floor hides the body behind a one-tap reveal, session-local
-    // (the floor persists) — mirrors linux `build_content_collapse`. A `block`
+    // A `collapse` verdict hides the body behind a one-tap reveal, session-local
+    // (the rule persists) — mirrors linux `build_content_collapse`. A `block`
     // is never revealable.
     var contentRevealed by remember(post.postId) { mutableStateOf(false) }
     // A REPOST ROW (feed.md § Interaction bar → Repost, ratified 2026-08-10):
@@ -939,7 +970,7 @@ internal fun PostCard(
     ) {
         // Content-policy render enforcement (family-safety.md § Content policy):
         // precedence is block → muted-keyword → content-collapse → normal (the
-        // linux ordering). A guardian `block` floor replaces the WHOLE card body
+        // linux ordering). A guardian `block` rule replaces the WHOLE card body
         // with a notice, checked FIRST so a block is never revealable — not even
         // past a muted reveal. A REGION verdict goes ahead of it: the region's own
         // placeholder (its authority, the reason verbatim); a revealed region
@@ -980,7 +1011,7 @@ internal fun PostCard(
                 }
             }
         } else if (contentVerdict == "collapse" && !contentRevealed) {
-            // A `collapse` floor (guardian OR the viewer's own spam/phishing
+            // A `collapse` verdict (guardian OR the viewer's own spam/phishing
             // threshold) sits AFTER the muted arm — both are revealable collapses.
             ContentPolicyCollapsedBody(
                 reason = decision.guardianReason,
@@ -1264,6 +1295,9 @@ internal fun PostCard(
                             count = post.quoteCount,
                         ) { vm.quote(post.postId, "") }
                     }
+                    // The per-emoji reaction pills under the bar (none on a repost
+                    // row — this arm — or a bluesky row).
+                    PostReactionPills(post, vm)
                 }
             }
         }
@@ -1301,7 +1335,7 @@ internal fun PostCard(
  * The content-policy BLOCK placeholder — a policy-naming notice in place of the
  * WHOLE post-card body, no reveal (family-safety.md § Content policy; the feed
  * twin of linux `build_content_block` / web's `contentBlocked` arm). A `block` is
- * always a guardian floor (a viewer's own threshold only ever collapses).
+ * always a guardian rule (a viewer's own threshold only ever collapses).
  * `content-policy-blocked-notice` is the pillar's notice (indexed, per
  * post-card); its `state` (`stateDescription`) tells it from the collapse arm's.
  */
@@ -1334,7 +1368,7 @@ private fun ContentPolicyBlockedBody(reported: Boolean = false, reason: String? 
 
 /**
  * The content-policy COLLAPSE placeholder + one-tap reveal (family-safety.md
- * § Content policy) — session-local reveal; the floor itself persists (the
+ * § Content policy) — session-local reveal; the rule itself persists (the
  * guardian relaxing it, or the viewer raising their own threshold, is what stops
  * future collapse). The block arm's `content-policy-blocked-notice` in
  * `state="collapsed"` beside `content-policy-collapsed-reveal-button` (ids
@@ -1417,6 +1451,72 @@ internal fun InteractionButton(
                 color = tint,
                 modifier = Modifier.clearAndSetSemantics {},
             )
+        }
+    }
+}
+
+/**
+ * The tally groups a post paints as `post-reaction-pill`s, in the shared
+ * snapshot's order (`feed.md` § Layout & flow → *Reaction posts count and
+ * paint*, ruling 4): the groups with a live count. A `bluesky` row paints none
+ * (ruling 5: its counters live at the origin) — classified by the shared
+ * `classifySources`, never a per-app string compare.
+ */
+internal fun reactionPillGroups(post: PostSummary): List<uniffi.fauna_feed.PostReactionGroup> =
+    if (classifySources(post.source, emptyList()).any { it.id == "bluesky" }) {
+        emptyList()
+    } else {
+        post.reactions.filter { it.count > 0L }
+    }
+
+/**
+ * The `post-reaction-pill` row under a post's interaction bar (and in the post
+ * detail): one tap-to-toggle pill per tally group — emoji + count, the viewer's
+ * own (`viewerReactId` present) highlighted and carrying the toggle `selected`
+ * state the like/repost buttons use; a tap is the shared `FeedManager::react`
+ * ([FeedVM.react]). The feed twin of the DM bubble's `dm-reaction-pill`.
+ */
+@Composable
+internal fun PostReactionPills(post: PostSummary, vm: FeedVM) {
+    ReactionPillRow(reactionPillGroups(post)) { emoji -> vm.react(post.postId, emoji) }
+}
+
+/** The pure Compose leaf of [PostReactionPills] — no FFI seam, so it runs on the host JVM. */
+@Composable
+internal fun ReactionPillRow(
+    groups: List<uniffi.fauna_feed.PostReactionGroup>,
+    onReact: (String) -> Unit,
+) {
+    if (groups.isEmpty()) return
+    Row(
+        modifier = Modifier.padding(top = 4.dp),
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+        groups.forEach { group ->
+            val mine = group.viewerReactId != null
+            Surface(
+                color = if (mine) {
+                    MaterialTheme.colorScheme.primaryContainer
+                } else {
+                    MaterialTheme.colorScheme.surfaceVariant
+                },
+                shape = MaterialTheme.shapes.small,
+                modifier = Modifier
+                    .testTag(Ids.POST_REACTION_PILL)
+                    // `state` on/off — the toggle read the cross-app tests use
+                    // (tui's attr, web's `data-state`); `selected` is the a11y twin.
+                    .semantics {
+                        selected = mine
+                        stateDescription = if (mine) "on" else "off"
+                    }
+                    .clickable { onReact(group.emoji) },
+            ) {
+                Text(
+                    "${group.emoji} ${group.count}",
+                    style = MaterialTheme.typography.labelMedium,
+                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
+                )
+            }
         }
     }
 }
@@ -1683,18 +1783,44 @@ fun FeedPostImage(document: RenderDocument, postId: String, mediaHash: String?, 
         }
         value = bytes?.let { BitmapFactory.decodeByteArray(it, 0, it.size)?.asImageBitmap() }
     }
-    val bmp = bitmap
+    PostImagePaint(bitmap, proxiedPath)
+}
+
+/** `post-image`'s `state` tokens (its `stateDescription`) — the contract
+ *  `FeedActions._post_image_painted_in` reads on every app. */
+internal const val POST_IMAGE_PAINTED = "painted"
+internal const val POST_IMAGE_PLACEHOLDER = "placeholder"
+
+/** The `post-image` element itself: the picture once [bmp] decoded (`painted`), an
+ *  empty box otherwise (`placeholder`) — never absent, so the test element is stable. */
+@Composable
+internal fun PostImagePaint(bmp: ImageBitmap?, proxiedPath: String?) {
     if (bmp != null) {
+        // Tapping the painted picture opens it full screen (`image-lightbox`, feed.md § Layout & flow).
+        var lightbox by remember { mutableStateOf(false) }
+        if (lightbox) {
+            com.fauna.app.ui.components.ImageLightbox(
+                model = bmp.asAndroidBitmap(),
+                onDismiss = { lightbox = false },
+            )
+        }
         Image(
             bitmap = bmp,
             contentDescription = null,
             modifier = Modifier
                 .fillMaxWidth()
                 .heightIn(max = 300.dp)
-                .testTag(Ids.POST_IMAGE),
+                .clickable { lightbox = true }
+                .testTag(Ids.POST_IMAGE)
+                .semantics { stateDescription = POST_IMAGE_PAINTED },
         )
     } else {
-        Box(modifier = Modifier.fillMaxWidth().testTag(Ids.POST_IMAGE)) {
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .testTag(Ids.POST_IMAGE)
+                .semantics { stateDescription = POST_IMAGE_PLACEHOLDER },
+        ) {
             if (proxiedPath != null) Text(proxiedPath, style = MaterialTheme.typography.labelSmall)
         }
     }

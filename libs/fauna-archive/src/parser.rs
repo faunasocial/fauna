@@ -55,7 +55,10 @@ pub trait ArchiveParser {
 
 /// Every parser this build carries, in detection order.
 pub fn parsers() -> Vec<Box<dyn ArchiveParser>> {
-    vec![Box::new(crate::facebook::FacebookParser)]
+    vec![
+        Box::new(crate::facebook::FacebookParser),
+        Box::new(crate::instagram::InstagramParser),
+    ]
 }
 
 /// The first parser that recognises the directory, with what it detected.

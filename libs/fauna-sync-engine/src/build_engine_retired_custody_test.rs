@@ -353,7 +353,9 @@ async fn retired_generation_reaches_the_reseal(credential: fn([u8; 32]) -> Engin
             1,
             original.len() as i64,
             1,
-            Some(served_generation.current_version()),
+            Some(fauna_core::blob_seal::SealStamp::Version(
+                served_generation.current_version(),
+            )),
         )
         .unwrap();
     }

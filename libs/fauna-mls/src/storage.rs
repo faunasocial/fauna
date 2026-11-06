@@ -552,79 +552,11 @@ impl SqliteStorage {
         Ok(())
     }
 
-    /// Store a blob epoch key for a channel at a given epoch.
-    ///
-    /// Uses the generic `put` method with store_type `"blob_epoch_key"` and
-    /// a composite key of `channel_id ++ epoch.to_be_bytes()`.
-    pub fn put_blob_epoch_key(
-        &self,
-        channel_id: &[u8; 32],
-        epoch: u64,
-        key: &[u8; 32],
-    ) -> Result<()> {
-        let mut composite_key = Vec::with_capacity(40);
-        composite_key.extend_from_slice(channel_id);
-        composite_key.extend_from_slice(&epoch.to_be_bytes());
-        self.put("blob_epoch_key", &composite_key, key)
-    }
-
-    /// Retrieve the blob epoch key for a channel at a given epoch.
-    ///
-    /// Returns `Some([u8; 32])` if found and exactly 32 bytes, `None` otherwise.
-    pub fn get_blob_epoch_key(
-        &self,
-        channel_id: &[u8; 32],
-        epoch: u64,
-    ) -> Result<Option<[u8; 32]>> {
-        let mut composite_key = Vec::with_capacity(40);
-        composite_key.extend_from_slice(channel_id);
-        composite_key.extend_from_slice(&epoch.to_be_bytes());
-        match self.get("blob_epoch_key", &composite_key)? {
-            Some(v) if v.len() == 32 => {
-                let mut key = [0u8; 32];
-                key.copy_from_slice(&v);
-                Ok(Some(key))
-            }
-            _ => Ok(None),
-        }
-    }
-
-    /// Store a group's **room-post** secret at a given epoch — the
-    /// [`crate::MlsEngine::export_room_post_secret`] value, kept when the group
-    /// advances past `epoch` so a room-restricted post sealed there still
-    /// opens for a member who held it (`ui/feed.md` § Encryption at rest →
-    /// *Room-restricted — the ruling*, ruling 6). The
-    /// [`Self::put_blob_epoch_key`] shape under its own `store_type`.
-    pub fn put_room_post_epoch_key(
-        &self,
-        channel_id: &[u8; 32],
-        epoch: u64,
-        key: &[u8; 32],
-    ) -> Result<()> {
-        let mut composite_key = Vec::with_capacity(40);
-        composite_key.extend_from_slice(channel_id);
-        composite_key.extend_from_slice(&epoch.to_be_bytes());
-        self.put("room_post_epoch_key", &composite_key, key)
-    }
-
-    /// Retrieve a room-post secret [`Self::put_room_post_epoch_key`] kept.
-    pub fn get_room_post_epoch_key(
-        &self,
-        channel_id: &[u8; 32],
-        epoch: u64,
-    ) -> Result<Option<[u8; 32]>> {
-        let mut composite_key = Vec::with_capacity(40);
-        composite_key.extend_from_slice(channel_id);
-        composite_key.extend_from_slice(&epoch.to_be_bytes());
-        match self.get("room_post_epoch_key", &composite_key)? {
-            Some(v) if v.len() == 32 => {
-                let mut key = [0u8; 32];
-                key.copy_from_slice(&v);
-                Ok(Some(key))
-            }
-            _ => Ok(None),
-        }
-    }
+    // The kept per-epoch secrets (`blob_epoch_key`, `room_post_epoch_key`)
+    // left this table on 2026-10-24 for the provider KV, where the replica
+    // carries them (`engine.rs`, `ROOM_POST_EPOCH_SECRET_PREFIX`); the engine's
+    // open lifts any rows a previous binary wrote through `list_keys`/`get`/
+    // `delete` below, so no typed accessor remains.
 
     /// List all keys stored under a given `store_type`.
     pub fn list_keys(&self, store_type: &str) -> Result<Vec<Vec<u8>>> {

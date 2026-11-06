@@ -642,14 +642,19 @@ fn wrapped(text: &str) -> gtk::Label {
 /// A surface's own error line. The share errors land in the page's
 /// `error-message` (the machine's contract), but that label sits behind these
 /// modal windows where it cannot be read — the delete confirm's reasoning — so
-/// each surface repeats ITS errors here, untagged (the id stays the page's).
+/// each surface repeats ITS errors here, and carries the `error-message` id
+/// (e2e Rule 2): while the modal is up this is the page error the user reads,
+/// and the active modal is the only window the automation searches
+/// (`automation::find::search_roots`), so the label behind it never doubles it.
 fn status_label() -> gtk::Label {
-    gtk::Label::builder()
+    let label = gtk::Label::builder()
         .halign(gtk::Align::Start)
         .wrap(true)
         .visible(false)
         .css_classes(["error"])
-        .build()
+        .build();
+    set_test_id(&label, ids::ERROR_MESSAGE);
+    label
 }
 
 fn paint_status(label: &gtk::Label, text: Option<String>) {

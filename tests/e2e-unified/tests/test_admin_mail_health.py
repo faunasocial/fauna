@@ -26,7 +26,6 @@ import pytest
 
 from clients.ws_rpc_admin_client import WsRpcAdminClient
 from helpers import budgets
-from helpers.app_surface import app_name, skip_unbuilt
 from helpers.mail_wire import _poke_outbound_bridge, submit_one_message
 from helpers.mail_health_seeds import (
     PAST_THE_LIMIT,
@@ -85,23 +84,6 @@ DIAGNOSTICS_DOMAIN = "deliverability-e2e.test"
 
 RESET_LABEL = "Restart warm-up"
 
-#: The apps whose `admin-dashboard` does not yet render the shared card set
-#: (`fauna_client_admin::admin_dashboard_cards`, whose fold already carries the
-#: Mail card — admin.md § 1 Dashboard). tui, web, linux, windows and android
-#: render that fold; these two follow in their card-set lift rows, not in this
-#: readout's trickle-down.
-DASHBOARD_CARD_PENDING = {"macos", "ios"}
-
-
-def _skip_if_dashboard_card_unbuilt(admin_app) -> None:
-    if app_name(admin_app.driver) in DASHBOARD_CARD_PENDING:
-        skip_unbuilt(
-            admin_app.driver,
-            surface="the admin-dashboard Mail stat card",
-            detail="the app has not lifted the shared dashboard card set yet",
-            tracked="the per-app lift of the shared admin dashboard card set",
-        )
-
 
 def _admin_client(nest_instance):
     admin = nest_instance["admin"]
@@ -126,16 +108,10 @@ def _wait(predicate, budget_s: float = budgets.RPC_ROUNDTRIP_S) -> bool:
         return bool(predicate())
 
 
-#: The apps that paint the sender-dashboard note (outcome 34). tui leads;
-#: web and linux followed; android is painted but not yet run on its emulator;
-#: macos, ios and windows follow on their own machines.
-SENDER_DASHBOARD_NOTE_BUILT = {"tui", "web", "linux"}
-
 SENDER_DASHBOARDS_NOTE = (
-    "Gmail Postmaster Tools and Outlook SNDS are externally managed dashboards "
-    "on the receiver's website. Sign up at postmaster.google.com and "
-    "sendersms.outlook.com if you want their per-receiver-side view; Fauna "
-    "doesn't integrate with these APIs (none exist)."
+    "Gmail Postmaster Tools and Outlook SNDS are dashboards that Google and "
+    "Microsoft run themselves. If you want their view of how your mail is "
+    "received, sign up with each through its link. Fauna doesn't connect to them."
 )
 
 SENDER_DASHBOARD_URLS = [
@@ -280,13 +256,6 @@ def test_the_sender_dashboard_note_points_to_gmail_and_outlook(admin_app):
     """Outcome 34: under the readout, plain help text names the two receivers'
     own sender dashboards, with one link per receiver (Gmail, then Outlook)
     leading to its hard-coded sign-up page. Static: no nest state decides it."""
-    if app_name(admin_app.driver) not in SENDER_DASHBOARD_NOTE_BUILT:
-        skip_unbuilt(
-            admin_app.driver,
-            surface="admin-mail-health-sender-dashboards-note",
-            detail="tui leads; the other apps follow in their trickle-down",
-            tracked="the per-app trickle-down of the sender-dashboard note",
-        )
     _open_readout(admin_app)
     assert _wait(lambda: admin_app.admin.mail_health_sender_dashboards_note() != ""), (
         "admin-mail-health-sender-dashboards-note never rendered. "
@@ -336,7 +305,6 @@ def test_dashboard_mail_card_shows_the_state(admin_app, nest_instance):
     """The dashboard carries one more stat card, "Mail", whose value is the
     same shared label of the nest's state — a broken state is visible on the
     admin shell's landing page."""
-    _skip_if_dashboard_card_unbuilt(admin_app)
     admin_app.admin.navigate_dashboard()
     state = _nest(nest_instance, "fauna.bridges.mail_health")["state"]
     assert _wait(
@@ -373,7 +341,6 @@ def test_mail_on_with_no_helper_connected_reads_not_connected(
         f"{expected!r}"
     )
 
-    _skip_if_dashboard_card_unbuilt(admin_app)
     admin_app.admin.navigate_dashboard()
     assert _wait(lambda: admin_app.admin.dashboard_card_value("Mail") == expected), (
         f"dashboard Mail card reads {admin_app.admin.dashboard_card_value('Mail')!r}, "
@@ -640,7 +607,6 @@ def test_a_state_newer_than_the_app_reads_needs_attention(admin_app, nest_instan
         )
         assert not admin_app.error_text(), admin_app.error_text()
 
-        _skip_if_dashboard_card_unbuilt(admin_app)
         admin_app.admin.navigate_dashboard()
         assert _wait(lambda: admin_app.admin.dashboard_card_value("Mail") == expected), (
             f"dashboard Mail card reads {admin_app.admin.dashboard_card_value('Mail')!r}, "

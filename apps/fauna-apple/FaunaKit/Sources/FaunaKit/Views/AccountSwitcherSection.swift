@@ -151,7 +151,7 @@ public struct AccountSwitcherSection: View {
                     .automationValue(Ids.accountItemActiveIndicator, text: { L.common.active })
             } else {
                 Button {
-                    vm.remove(actorId: entry.actorId)
+                    Task { await vm.remove(actorId: entry.actorId) }
                 } label: {
                     Image(systemName: "trash")
                 }
@@ -159,7 +159,9 @@ public struct AccountSwitcherSection: View {
                 .help(L.common.remove)
                 .accessibilityLabel(L.common.remove)
                 .accessibilityIdentifier(Ids.accountRemoveButton)
-                .automationActivate(Ids.accountRemoveButton) { vm.remove(actorId: entry.actorId) }
+                .automationActivate(Ids.accountRemoveButton) {
+                    Task { await vm.remove(actorId: entry.actorId) }
+                }
             }
 
             // Concurrent instances: open this account in a NEW app instance,

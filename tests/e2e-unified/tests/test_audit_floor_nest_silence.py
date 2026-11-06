@@ -101,7 +101,8 @@ def _withhold_identity(nest: dict, actor_id_hex: str, withhold: bool) -> None:
 def test_the_audit_floor_outlives_the_nests_silence(
     floor_app, request, nest_binary, atproto_bridge_e2e_binary, tmp_path_factory
 ):
-    from common.auth import open_registration, register_handled_actor
+    from common.auth import open_registration
+    from helpers.admin_wire import admit_adult
     from conftest import _make_nest
     from drivers.port_util import untrack_process
 
@@ -114,9 +115,7 @@ def test_the_audit_floor_outlives_the_nests_silence(
     driver = None
     spa_proxy_server = None
     try:
-        alice = register_handled_actor(
-            nest["port"], handle="alice", domain=HANDLE_DOMAIN, base_url=nest["url"]
-        )
+        alice = admit_adult(nest, "alice", domain=HANDLE_DOMAIN, token=True)
         alice_hex = alice["actor_id_bytes"].hex()
         driver, spa_proxy_server = launch_app_with_directory(floor_app, request, nest, directory)
         session = {

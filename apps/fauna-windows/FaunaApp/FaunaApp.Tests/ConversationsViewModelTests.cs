@@ -37,6 +37,9 @@ public class ConversationsViewModelTests
             // retirement leg (2026-08-24) — verbatim from en.yaml.
             ["conversations/errors/served_elsewhere"] =
                 "Conversations are open in another instance of this app. Use them there — everything else works here.",
+            // The sixth truth (conversations.md § Errors & edge cases) — verbatim from en.yaml.
+            ["conversations/errors/state_needs_newer_app"] =
+                "This version of the app is too old to open the conversations it saved here. They are intact — update the app to see them again.",
             // The fourth truth (conversations.md § Errors & edge cases,
             // 2026-09-13) — verbatim from en.yaml.
             ["conversations/errors/receive_stopped"] =
@@ -46,7 +49,7 @@ public class ConversationsViewModelTests
             // entry Strings.Format falls back to the raw key and a "count
             // substituted" assertion would prove nothing.
             ["conversations/errors/mail_unopenable"] =
-                "{count} received messages could not be opened on this device. They were sealed to mail keys this account no longer holds, and were skipped.",
+                "{count} received messages could not be opened on this device, so they were skipped. Newer mail keeps arriving.",
         };
         public string Get(string key) => Map.TryGetValue(key, out var v) ? v : key;
     }
@@ -73,6 +76,34 @@ public class ConversationsViewModelTests
         var m = new ConversationsManager();
         m.InstallMockBackendsForTest();
         return m;
+    }
+
+    /// <summary><c>recipient-picker-chip[i]</c>'s × (conversations.md § User actions):
+    /// the shared <c>remove_recipient_chip(i)</c> drops exactly that chip from the active
+    /// picker — the add-participant overlay here — and the snapshot shows the rest.</summary>
+    [Fact]
+    public void RemoveRecipientChip_drops_that_chip_from_the_active_picker()
+    {
+        var m = NewManager();
+        var threadId = m.CreateMlsGroup(new TypedAddress[]
+        {
+            new TypedAddress.Email(@emailAddress: "bob@self-nest.test"),
+        });
+        var vm = new ConversationsViewModel(m, new SyncObserver());
+        vm.OpenAddParticipant(threadId);
+        vm.AcceptAddParticipantChip(new TypedAddress.Email(@emailAddress: "carol@self-nest.test"));
+        vm.AcceptAddParticipantChip(new TypedAddress.Email(@emailAddress: "dave@self-nest.test"));
+        Assert.Equal(2, vm.AddParticipant!.picker.chips.Length);
+
+        vm.RemoveRecipientChip(0);
+
+        var chips = vm.AddParticipant!.picker.chips;
+        Assert.Single(chips);
+        Assert.Equal(new TypedAddress.Email(@emailAddress: "dave@self-nest.test"), chips[0]);
+
+        // An index past the chips is a no-op.
+        vm.RemoveRecipientChip(5);
+        Assert.Single(vm.AddParticipant!.picker.chips);
     }
 
     [Fact]
@@ -197,6 +228,39 @@ public class ConversationsViewModelTests
     }
 
     /// <summary>
+    /// The sixth truth (<c>conversations.md</c> § Errors &amp; edge cases): a newer
+    /// build's conversation state outranks a standing page error and a dead rail but
+    /// not the role-lock refusal. Mirrors linux's <c>page_error_text</c>.
+    /// </summary>
+    [Fact]
+    public void ActiveSendErrorReason_state_needs_newer_app_outranks_page_error_and_receive_stopped_but_not_served_elsewhere()
+    {
+        var m = NewManager();
+        var vm = new ConversationsViewModel(m, new SyncObserver());
+
+        Assert.False(vm.EngineStateNeedsNewerApp);
+        Assert.Null(vm.ActiveSendErrorReason);
+
+        const string pageReasonDetail = "cross-nest roster unreadable";
+        m.InjectPageErrorForTest(new LocalizedText(
+            "conversations.unified.error_add_participant",
+            new() { ["message"] = pageReasonDetail }));
+        m.MarkReceiveStoppedForTest();
+
+        m.SetEngineStateNeedsNewerApp(true);
+
+        Assert.True(vm.EngineStateNeedsNewerApp);
+        var shown = vm.ActiveSendErrorReason ?? "";
+        Assert.Contains("too old to open the conversations", shown);
+        Assert.DoesNotContain(pageReasonDetail, shown);
+        Assert.DoesNotContain("conversations/errors", shown);
+
+        m.SetEngineServedElsewhere(true);
+        Assert.Contains("another instance of this app", vm.ActiveSendErrorReason ?? "");
+        m.SetEngineServedElsewhere(false);
+    }
+
+    /// <summary>
     /// The fourth truth (<c>conversations.md</c> § Errors &amp; edge cases,
     /// 2026-09-13): a dead receive rail is standing like the served-elsewhere
     /// refusal, so it must outrank the snapshot error / send-state truths below
@@ -237,6 +301,27 @@ public class ConversationsViewModelTests
     /// must leave the dead-rail notice standing. Mirrors apple's
     /// <c>pageErrorReceiveStoppedIsNotClearedByASuccess</c>.
     /// </summary>
+    [Fact]
+    public void ReceiveLoopBegunForTest_is_false_until_a_loop_claims_a_generation_and_a_death_marked_after_it_stands()
+    {
+        // The e2e seam's "pending" half (conversations_mark_receive_stopped): a
+        // fresh manager has no receive loop yet, so the exported twin reads false;
+        // once a loop claims its generation it reads true.
+        var m = NewManager();
+        var vm = new ConversationsViewModel(m, new SyncObserver());
+
+        Assert.False(m.ReceiveLoopBegunForTest());
+
+        m.BeginReceiveLoopForTest();
+        Assert.True(m.ReceiveLoopBegunForTest());
+
+        m.MarkReceiveStoppedForTest();
+        Assert.True(vm.ReceiveStopped);
+
+        m.BeginReceiveLoopForTest();
+        Assert.False(vm.ReceiveStopped);
+    }
+
     [Fact]
     public void ActiveSendErrorReason_receive_stopped_is_not_cleared_by_an_unrelated_success()
     {

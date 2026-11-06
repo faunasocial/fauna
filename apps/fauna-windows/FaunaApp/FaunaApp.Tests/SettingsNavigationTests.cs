@@ -26,6 +26,7 @@ public class SettingsNavigationTests
     [InlineData("web", "web")]
     [InlineData("subscription-settings", "subscription-settings")]
     [InlineData("devices", "devices")]
+    [InlineData("sessions", "sessions")]
     [InlineData("folders", "folders")]
     [InlineData("nostr", "nostr")]
     [InlineData("mail-settings", "mail-settings")]
@@ -121,6 +122,17 @@ public class SettingsNavigationTests
     {
         // The state-protocol id the e2e navigates ({view:"settings", id:"connected-apps"}).
         Assert.Equal(SettingsNavigation.ConnectedApps, SettingsNavigation.SubPageTag("connected-apps"));
+    }
+
+    [Fact]
+    public void SubPages_SessionsImmediatelyFollowsDevices()
+    {
+        // ui/sessions.md § The ruling, item 1 (2026-09-25): Sessions is placed
+        // directly after Devices — "machines enrolled" beside "sign-ins live now".
+        var tags = SettingsNavigation.SubPages.ToList();
+        var devicesIndex = tags.IndexOf(SettingsNavigation.Devices);
+        Assert.Equal(SettingsNavigation.Sessions, tags[devicesIndex + 1]);
+        Assert.Equal("sessions", SettingsNavigation.Sessions);
     }
 
     [Fact]

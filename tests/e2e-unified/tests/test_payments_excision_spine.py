@@ -234,7 +234,7 @@ def _recipe_body(name: str) -> str:
     body = m.group(1)
     lines = [line for line in body.splitlines() if line.strip()]
     if lines:
-        delegate = re.match(r"^\s*(?:\{\{slot_build\}\}|\{\{slot_e2e\}\})?\s*just\s+(_\S+)\s*$", lines[-1])
+        delegate = re.match(r"^\s*(?:\{\{slot_build(?:_ffi|_swift|_crate)?\}\}|\{\{slot_e2e\}\})?\s*just\s+(_\S+)\s*$", lines[-1])
         if delegate:
             prefix = "\n".join(lines[:-1])
             return (prefix + "\n" if prefix else "") + _recipe_body(delegate.group(1))
@@ -1239,6 +1239,7 @@ _PRICE_ROUTE_CLASS_IDS = (
     "gated-post-price",
     "gated-post-payment-link",
     "gated-post-buy-button",
+    "gated-post-purchase-pending",
 )
 
 #: The rendered payments surface, as element-id PREFIXES (prefixes, so a new §4/§5
@@ -1866,13 +1867,25 @@ def test_every_apple_store_safe_swift_build_passes_the_p2p_share_condition():
     condition would fail to compile the share plane's leg, and would compile and
     ship the ceremony's. Read off the whole justfile rather than a named recipe
     list, so a new store-safe Swift recipe is covered on the day it is added.
+
+    The one exemption is the store-no-payments column of `apple-store-safe-check`
+    (`_apple_store_no_payments_column`): that flavor KEEPS `p2p-share`, so its
+    builds pass the payments condition alone, and
+    `test_the_apple_witness_has_a_store_no_payments_column` pins them the other
+    way round. The exemption is the column's exact lines, never a pattern, so a
+    new invocation anywhere else still needs both conditions.
     """
     spellings = (f"-Xswiftc -D{_APPLE_CONDITION}", f"-D {_APPLE_CONDITION}")
+    no_payments = _apple_swift_invocations(_apple_store_no_payments_column())
+    assert no_payments, "the store-no-payments column builds no Swift artifact"
     invocations = [
         line.strip()
         for line in _JUSTFILE.read_text(encoding="utf-8").splitlines()
         if not line.lstrip().startswith("#") and any(s in line for s in spellings)
     ]
+    # Each column line is exempted ONCE: an identical line elsewhere is still held.
+    for line in no_payments:
+        invocations.remove(line)
     assert len(invocations) >= 4, (
         "found fewer than the four store-safe Swift invocations this pin was written "
         "against (`mac-store-safe`, both builds in `_apple-store-safe-check-impl`, and "
@@ -1891,10 +1904,12 @@ def test_the_apple_witness_watches_the_p2p_share_prefixes_in_both_columns():
     """Both columns watch the member's ids: the store-safe one for absence, and
     the default one so the absence cannot be a pattern matching nothing."""
     body = _recipe_body("apple-store-safe-check")
-    pattern_lines = [line for line in body.splitlines() if line.strip().startswith("for pat in ")]
+    # The literal lists; the store-no-payments column loops over its own named
+    # lists, pinned by test_the_apple_witness_has_a_store_no_payments_column.
+    pattern_lines = [line for line in body.splitlines() if line.strip().startswith("for pat in '")]
     assert len(pattern_lines) == 2, (
-        "apple-store-safe-check no longer has exactly the two `for pat in` columns "
-        f"this pin reads: {pattern_lines!r}"
+        "apple-store-safe-check no longer has exactly the two literal `for pat in` "
+        f"columns (store-safe, default) this pin reads: {pattern_lines!r}"
     )
     for line in pattern_lines:
         for prefix in _APPLE_P2P_ID_PREFIXES:
@@ -2464,7 +2479,9 @@ def test_the_android_witness_is_reachable_even_though_it_is_not_gated_yet():
     deliberate, recorded exemption, settled 2026-08-18 with the measured number
     the 2026-08-16 note asked for (~10 min of warm build work out of a 2-slot
     pool, on a scope that must include `^libs/` and so fires on nearly every
-    pass) — the same reason apple's column stays out of the mac check. The
+    pass) — the same reason the windows column's witness stays out of the win
+    check (apple's column was exempt too until 2026-08-25, when its flavor flip
+    measured cheap and it became the mac check's gate 2). The
     witness has run green by hand twice (2026-08-16 pre-id-table, 2026-08-18
     post-adoption). This pin is what stops the exemption decaying into an
     oversight: the script must keep SAYING so, so a later reader finds a
@@ -3076,7 +3093,17 @@ def test_the_web_witness_is_registered_in_the_merge_gate_check():
 
 _WINDOWS_APP = _REPO / "apps/fauna-windows/FaunaApp"
 _WINDOWS_CONDITION = "PAYMENTS"
+# The store-safe flavor's spelling: it sets every member's property below.
 _WINDOWS_FLAVOR_PROPERTY = "FaunaStoreSafe"
+# One MSBuild property per registry member, the flavor choosing which are set
+# (`dynamic-features.md` § The App-Store escape hatch → *The store flavors*):
+# `store-no-payments` sets the payments one alone.
+_WINDOWS_PAYMENTS_PROPERTY = "FaunaExcisePayments"
+_WINDOWS_P2P_PROPERTY = "FaunaExciseP2pShare"
+_WINDOWS_CSPROJS = (
+    "FaunaApp/FaunaApp.csproj", "FaunaApp.Core/FaunaApp.Core.csproj",
+    "FaunaApp.Tests/FaunaApp.Tests.csproj",
+)
 _UI_IDS_CSHARP = _WINDOWS_APP / "FaunaApp/Generated/UiIds.cs"
 # The one directory the csproj removes; every payments render must live here.
 _WINDOWS_PAYMENTS_DIR = _WINDOWS_APP / "FaunaApp/Views/Payments"
@@ -3134,6 +3161,43 @@ def _strip_regions(text: str, condition: str) -> str:
 def _strip_payments_regions(text: str) -> str:
     """`text` with every `#if PAYMENTS … #endif` region removed."""
     return _strip_regions(text, _WINDOWS_CONDITION)
+
+
+def _excised(prop: str) -> str:
+    return f"'$({prop})'=='true'"
+
+
+def _kept(prop: str) -> str:
+    return f"'$({prop})'!='true'"
+
+
+def _windows_csproj(name: str):
+    import xml.etree.ElementTree as ET
+
+    return ET.fromstring((_WINDOWS_APP / name).read_text(encoding="utf-8"))
+
+
+def _windows_define_guards(root) -> dict[str, list[str]]:
+    """define -> the Condition of every PropertyGroup that appends it."""
+    out: dict[str, list[str]] = {}
+    for group in root.iter("PropertyGroup"):
+        for constants in group.iter("DefineConstants"):
+            for define in (constants.text or "").split(";"):
+                define = define.strip()
+                if define and not define.startswith("$("):
+                    out.setdefault(define, []).append(group.get("Condition", ""))
+    return out
+
+
+def _windows_removal_guards(root) -> dict[str, set[tuple[str, str]]]:
+    """removed directory (`Views\\Payments`) -> {(item kind, ItemGroup Condition)}."""
+    out: dict[str, set[tuple[str, str]]] = {}
+    for group in root.iter("ItemGroup"):
+        for item in group:
+            m = re.match(r"(Views\\[^\\]+)\\", item.get("Remove") or "")
+            if m:
+                out.setdefault(m.group(1), set()).add((item.tag, group.get("Condition", "")))
+    return out
 
 
 def test_the_windows_ffi_has_a_store_safe_flavor():
@@ -3229,16 +3293,42 @@ def test_the_windows_shell_declares_its_compile_condition_positively():
     All three projects must carry it: MSBuild does not propagate a DefineConstants
     across a ProjectReference, so a define set only in FaunaApp would leave
     FaunaApp.Core compiling its whole payments glue in the excised flavor.
+
+    The guard is the MEMBER's own property, never the flavor's: a define keyed on
+    `FaunaStoreSafe` is the one switch that made "payments off, sharing on"
+    unbuildable (`dynamic-features.md` § The App-Store escape hatch → *The store
+    flavors*).
     """
-    for name in ("FaunaApp/FaunaApp.csproj", "FaunaApp.Core/FaunaApp.Core.csproj",
-                 "FaunaApp.Tests/FaunaApp.Tests.csproj"):
-        text = (_WINDOWS_APP / name).read_text(encoding="utf-8")
-        assert f"'$({_WINDOWS_FLAVOR_PROPERTY})'!='true'" in text, (
-            f"{name} no longer guards the payments define on {_WINDOWS_FLAVOR_PROPERTY}, "
-            "so its half of the shell cannot be excised"
+    for name in _WINDOWS_CSPROJS:
+        guards = _windows_define_guards(_windows_csproj(name))
+        assert guards.get(_WINDOWS_CONDITION) == [_kept(_WINDOWS_PAYMENTS_PROPERTY)], (
+            f"{name} must append {_WINDOWS_CONDITION} exactly once, guarded on "
+            f"{_WINDOWS_PAYMENTS_PROPERTY} alone; found the guards {guards.get(_WINDOWS_CONDITION)!r}"
         )
-        assert f"$(DefineConstants);{_WINDOWS_CONDITION}" in text, (
-            f"{name} no longer appends the {_WINDOWS_CONDITION} define"
+
+
+def test_the_windows_store_safe_property_excises_every_member():
+    """`/p:FaunaStoreSafe=true` stays the store-safe spelling — every existing
+    caller, the public Store workflow's older recorded commits included, keeps
+    working — and it is nothing but both member properties set at once. It must
+    come before the groups that read them: MSBuild evaluates properties in
+    document order, so a mapping placed after the defines would set the members
+    too late and the store-safe build would keep both planes."""
+    for name in _WINDOWS_CSPROJS:
+        groups = list(_windows_csproj(name).iter("PropertyGroup"))
+        mapping = [g for g in groups if g.get("Condition") == _excised(_WINDOWS_FLAVOR_PROPERTY)]
+        assert len(mapping) == 1, f"{name} has no single {_WINDOWS_FLAVOR_PROPERTY} mapping group"
+        sets = {child.tag: (child.text or "").strip() for child in mapping[0]}
+        assert sets == {_WINDOWS_PAYMENTS_PROPERTY: "true", _WINDOWS_P2P_PROPERTY: "true"}, (
+            f"{name}: {_WINDOWS_FLAVOR_PROPERTY} must set exactly the two member "
+            f"properties, found {sets!r}"
+        )
+        readers = [
+            g for g in groups
+            if any(c.tag == "DefineConstants" for c in g) and g.get("Condition", "").startswith("'$(FaunaExcise")
+        ]
+        assert readers and all(groups.index(mapping[0]) < groups.index(g) for g in readers), (
+            f"{name}: the {_WINDOWS_FLAVOR_PROPERTY} mapping must precede every define it feeds"
         )
 
 
@@ -3251,16 +3341,14 @@ def test_the_windows_payments_markup_is_confined_to_one_removable_item():
     referencing a removed page's generated partial does not compile, so dropping it
     would turn the excised flavor un-buildable rather than clean.
     """
-    text = (_WINDOWS_APP / "FaunaApp/FaunaApp.csproj").read_text(encoding="utf-8")
-    assert f"'$({_WINDOWS_FLAVOR_PROPERTY})'=='true'" in text, (
-        "FaunaApp.csproj has no store-safe ItemGroup at all, so the payments markup "
-        "ships in every flavor however the define is set"
+    got = _windows_removal_guards(_windows_csproj("FaunaApp/FaunaApp.csproj")).get("Views\\Payments")
+    want = {(item, _excised(_WINDOWS_PAYMENTS_PROPERTY)) for item in ("Page", "Compile")}
+    assert got == want, (
+        "FaunaApp.csproj must remove Views\\Payments\\** from both Page and Compile "
+        f"when {_WINDOWS_PAYMENTS_PROPERTY} is set, and on nothing else. Without it the "
+        "excised build still carries every element id the §4/§5 renders paint; keyed "
+        f"on another property it also drops (or keeps) the wrong member's markup: {got!r}"
     )
-    for item in ("Page Remove", "Compile Remove"):
-        assert item in text and "Views\\Payments" in text, (
-            f"FaunaApp.csproj no longer removes Views\\Payments\\** via <{item}>. Without "
-            "it the excised build still carries every element id the §4/§5 renders paint"
-        )
 
 
 def test_no_shared_windows_source_paints_a_payments_element_id():
@@ -3415,24 +3503,26 @@ _WINDOWS_P2P_FACES = (
 def test_the_windows_shell_declares_its_p2p_share_condition_positively():
     """All three projects, for the payments define's reason: MSBuild does not
     propagate DefineConstants across a ProjectReference, and Core carries the
-    ceremony doors while Tests carries the mock's ceremony arm."""
-    for name in ("FaunaApp/FaunaApp.csproj", "FaunaApp.Core/FaunaApp.Core.csproj",
-                 "FaunaApp.Tests/FaunaApp.Tests.csproj"):
-        text = (_WINDOWS_APP / name).read_text(encoding="utf-8")
-        assert f"$(DefineConstants);{_WINDOWS_P2P_CONDITION}" in text, (
-            f"{name} no longer appends the {_WINDOWS_P2P_CONDITION} define"
+    ceremony doors while Tests carries the mock's ceremony arm. Guarded on the
+    member's own property, so `store-no-payments` keeps it."""
+    for name in _WINDOWS_CSPROJS:
+        guards = _windows_define_guards(_windows_csproj(name))
+        assert guards.get(_WINDOWS_P2P_CONDITION) == [_kept(_WINDOWS_P2P_PROPERTY)], (
+            f"{name} must append {_WINDOWS_P2P_CONDITION} exactly once, guarded on "
+            f"{_WINDOWS_P2P_PROPERTY} alone; found the guards {guards.get(_WINDOWS_P2P_CONDITION)!r}"
         )
 
 
 def test_the_windows_p2p_share_markup_is_confined_to_one_removable_item():
-    """The half a define cannot do: XAML has no preprocessor, so the store-safe
-    ItemGroup must remove Views\\P2pShare\\ from both Page and Compile."""
-    text = (_WINDOWS_APP / "FaunaApp/FaunaApp.csproj").read_text(encoding="utf-8")
-    for item in ("Page Remove", "Compile Remove"):
-        assert re.search(rf'<{item}="Views\\P2pShare\\\*\*', text), (
-            f"FaunaApp.csproj no longer removes Views\\P2pShare\\** via <{item}>, so the "
-            "excised build still carries every ceremony element id"
-        )
+    """The half a define cannot do: XAML has no preprocessor, so the member's own
+    ItemGroup must remove Views\\P2pShare\\ from both Page and Compile — and only
+    when its own property is set, or `store-no-payments` loses the ceremony."""
+    got = _windows_removal_guards(_windows_csproj("FaunaApp/FaunaApp.csproj")).get("Views\\P2pShare")
+    want = {(item, _excised(_WINDOWS_P2P_PROPERTY)) for item in ("Page", "Compile")}
+    assert got == want, (
+        "FaunaApp.csproj must remove Views\\P2pShare\\** from both Page and Compile "
+        f"when {_WINDOWS_P2P_PROPERTY} is set, and on nothing else: {got!r}"
+    )
 
 
 def test_no_shared_windows_source_paints_a_p2p_share_element_id():
@@ -3701,6 +3791,173 @@ def test_every_app_shell_witness_has_a_store_no_payments_column(app, binary):
         f"catalog prefix present: watched={sorted(present_pats)!r}"
     )
     assert not absent_pats & present_pats
+
+
+def _apple_store_no_payments_column() -> str:
+    """`apple-store-safe-check`'s store-no-payments column: from its FFI step to
+    the default column's."""
+    body = _recipe_body("apple-store-safe-check")
+    start = "just apple-ffi-host-store-no-payments release"
+    assert start in body, "apple-store-safe-check no longer builds the store-no-payments FFI"
+    column = body.split(start, 1)[1]
+    end = "just apple-ffi-host release"
+    assert end in column, (
+        "apple-store-safe-check's default column no longer follows its store-no-payments one"
+    )
+    return column.split(end, 1)[0]
+
+
+def _apple_swift_invocations(text: str) -> list[str]:
+    return [
+        line.strip()
+        for line in text.splitlines()
+        if not line.lstrip().startswith("#") and "swift build" in line
+    ]
+
+
+def test_the_apple_xcframework_has_a_store_no_payments_flavor():
+    """Both apple FFI impls take `store-safe,<member>` as the complement plus the
+    kept member — and match it ABOVE the generic `elif [ -n "$FEATURES" ]`, which
+    would build `store-safe,p2p-share` with defaults on and excise nothing."""
+    assert '_apple-ffi-flavor "store-safe,p2p-share"' in _recipe_body("apple-ffi-store-no-payments")
+    assert '_apple-ffi-host-flavor "{{config}}" "store-safe,p2p-share"' in _recipe_body(
+        "apple-ffi-host-store-no-payments"
+    )
+    for impl in ("_apple-ffi-flavor", "_apple-ffi-host-flavor"):
+        body = _recipe_body(impl)
+        arm = 'elif [ "${FEATURES#store-safe,}" != "$FEATURES" ]; then'
+        assert arm in body, f"{impl} lost its `store-safe,<member>` arm"
+        assert body.index(arm) < body.index('elif [ -n "$FEATURES" ]; then'), (
+            f"{impl}'s `store-safe,<member>` arm sits below the generic arm, so "
+            "store-no-payments builds with defaults on"
+        )
+        after = body.split(arm, 1)[1].split("\n    elif ", 1)[0]
+        assert '--no-default-features --features "$FEATURES,file-provider-host"' in after, (
+            f"{impl}'s `store-safe,<member>` arm no longer builds the complement "
+            "plus the kept member"
+        )
+
+
+def test_the_apple_witness_has_a_store_no_payments_column():
+    """The FFI is `store-safe,p2p-share`; the shell passes the payments condition
+    and NOT the p2p-share one (one condition per member); the money plane is
+    absent and every p2p-share prefix present — both directions."""
+    column = _apple_store_no_payments_column()
+    builds = _apple_swift_invocations(column)
+    assert any("--product FaunaMacOS" in b for b in builds), (
+        "the store-no-payments column no longer builds the macOS artifact it greps"
+    )
+    for build in builds:
+        assert f"-Xswiftc -D{_APPLE_CONDITION}" in build, (
+            f"a store-no-payments Swift build no longer passes {_APPLE_CONDITION}: {build!r}"
+        )
+        assert _APPLE_P2P_CONDITION not in build, (
+            f"a store-no-payments Swift build passes {_APPLE_P2P_CONDITION}, so it "
+            f"excises the sharing plane this flavor keeps: {build!r}"
+        )
+        assert "-c release" in build, f"a store-no-payments Swift build is not RELEASE: {build!r}"
+    assert "NO_PAYMENTS_ABSENT[@]" in column and "NO_PAYMENTS_PRESENT[@]" in column
+    body = _recipe_body("apple-store-safe-check")
+    absent = re.search(r"^\s*NO_PAYMENTS_ABSENT=\(([^)]*)\)", body, re.MULTILINE)
+    present = re.search(r"^\s*NO_PAYMENTS_PRESENT=\(([^)]*)\)", body, re.MULTILINE)
+    assert absent and present, "apple-store-safe-check lost its store-no-payments lists"
+    absent_pats = set(re.findall(r"'([^']+)'", absent.group(1)))
+    present_pats = set(re.findall(r"'([^']+)'", present.group(1)))
+    assert {"subscription-provider-", "subscription-claim-", "fauna\\.payments\\."} <= absent_pats
+    assert set(_APPLE_P2P_ID_PREFIXES) <= present_pats
+    assert set(_gated_catalog()["p2p-share"]["id_prefixes"]) <= present_pats, (
+        "apple-store-safe-check's store-no-payments column must require every p2p-share "
+        f"catalog prefix present: watched={sorted(present_pats)!r}"
+    )
+    assert not absent_pats & present_pats
+
+
+def test_the_windows_ffi_has_a_store_no_payments_flavor():
+    """The complement plus the kept member, through the shared impl's
+    `store-safe,<member>` arm — which must sit ABOVE the generic `--features` arm,
+    or `store-safe,p2p-share` builds with defaults on and excises nothing. The
+    `.ffi-flavor` marker and the private slot both key on the feature string, so
+    this flavor's dll is never served to a store-safe build, nor the reverse
+    (pinned by `test_the_windows_flavor_marker_covers_the_feature_set`)."""
+    assert '_windows-ffi-flavor "{{profile}}" "store-safe,p2p-share" "{{target}}"' in _recipe_body(
+        "windows-ffi-store-no-payments"
+    ), "windows-ffi-store-no-payments no longer asks _windows-ffi-flavor for the complement plus p2p-share"
+    body = _recipe_body("_windows-ffi-flavor")
+    arm = 'elif [ "${FEATURES#store-safe,}" != "$FEATURES" ]; then'
+    assert arm in body, "_windows-ffi-flavor lost its `store-safe,<member>` arm"
+    assert body.index(arm) < body.index('elif [ -n "$FEATURES" ]; then'), (
+        "_windows-ffi-flavor's `store-safe,<member>` arm sits below the generic arm"
+    )
+    after = body.split(arm, 1)[1].split("\n    elif ", 1)[0]
+    assert 'FEATURE_ARGS="--no-default-features --features $FEATURES"' in after
+    assert 'FFI_DIR="target/$PROFILE_DIR/windows-ffi/$RID/${FEATURES:-production}"' in body, (
+        "the flavor-private FFI slot no longer keys on the feature string, so the "
+        "store-safe and store-no-payments dlls share one path"
+    )
+
+
+def test_the_windows_store_no_payments_app_recipe_excises_payments_alone():
+    """The shell half: the payments member's own property and NOT the p2p-share
+    one (one condition per member), over the store-no-payments FFI, Release,
+    never build-if-stale gated — `windows-store-safe`'s reasons, one flavor over."""
+    body = _recipe_body("windows-store-no-payments")
+    assert f"p:{_WINDOWS_PAYMENTS_PROPERTY}=true" in body, (
+        "windows-store-no-payments no longer excises the payments member"
+    )
+    for other in (_WINDOWS_P2P_PROPERTY, _WINDOWS_FLAVOR_PROPERTY):
+        assert other not in body, (
+            f"windows-store-no-payments passes {other}, so it excises the sharing plane "
+            "this flavor keeps"
+        )
+    assert "Configuration=Release" in body
+    assert "build-if-stale" not in body and "windows-release.stamp" not in body
+    assert "windows-ffi-store-no-payments" in _recipe_header("windows-store-no-payments"), (
+        "windows-store-no-payments no longer takes the store-no-payments FFI as a prerequisite"
+    )
+
+
+def _windows_store_no_payments_column() -> str:
+    """`windows-store-safe-check`'s store-no-payments column: from its build to the
+    default column's."""
+    body = _recipe_body("_windows-store-safe-check-impl")
+    start = "just windows-store-no-payments\n"
+    assert start in body, "windows-store-safe-check no longer builds the store-no-payments shell"
+    before, column = body.split(start, 1)
+    assert before.rstrip().endswith("wipe"), (
+        "the store-no-payments column no longer wipes bin/ + obj/ first, so it can "
+        "scan the store-safe column's assembly"
+    )
+    assert "just windows-store-safe\n" in before, (
+        "the store-no-payments column no longer follows the store-safe one"
+    )
+    end = "just windows-release\n"
+    assert end in column, "the default column no longer follows the store-no-payments one"
+    return column.split(end, 1)[0]
+
+
+def test_the_windows_witness_has_a_store_no_payments_column():
+    """Both directions on all three artifacts — the money plane's ids, faces and
+    kinds absent, the sharing plane's present — or the column cannot tell this
+    flavor from a build that fell back to store-safe."""
+    column = _windows_store_no_payments_column()
+    lines = [ln.strip() for ln in column.splitlines() if not ln.strip().startswith("#")]
+    absent = " ".join(ln for ln in lines if 'absent "store-no-payments"' in ln)
+    present = " ".join(ln for ln in lines if 'present "store-no-payments"' in ln)
+    for lst in ("PAY_ID_PATS", "PAY_FACE_PATS", "PAY_KIND_PATS"):
+        assert f"${{{lst}[@]}}" in absent, f"the store-no-payments column no longer asserts {lst} absent"
+    for lst in ("P2P_ID_PATS", "P2P_FACE_PATS", "P2P_NATIVE_PATS"):
+        assert f"${{{lst}[@]}}" in present, f"the store-no-payments column no longer asserts {lst} present"
+    assert "P2P_" not in absent and "PAY_" not in present, (
+        "the store-no-payments column asserts a member in the wrong direction"
+    )
+    for artifact in ('"${ID_FILES[@]}"', '"$OUT/FaunaApp.Core.dll"', '"$OUT/fauna_ffi.dll"'):
+        assert artifact in column, f"the store-no-payments column no longer scans {artifact}"
+    assert '"$OUT"/Views/Payments/*.xbf' in column, (
+        "the store-no-payments column no longer checks the payments renders' .xbf are gone"
+    )
+    assert "Views/P2pShare/OfflineShareSection.xbf" in column, (
+        "the store-no-payments column no longer checks the ceremony render's .xbf is present"
+    )
 
 
 def test_the_android_store_no_payments_build_type():

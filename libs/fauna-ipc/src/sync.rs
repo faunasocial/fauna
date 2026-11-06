@@ -95,6 +95,36 @@ pub const NO_CAPABILITY_ERROR_PREFIX: &str = "no capability provisioned";
 /// the producer and every prefix-matcher share one source of truth.
 pub const NO_CAPABILITY_ERROR_MESSAGE: &str = "no capability provisioned; cannot refresh bearer";
 
+// ── UnprovisionCapability still-mounted contract (cross-process) ──
+
+/// The exact error-message **prefix** the agent's `UnprovisionCapability` reply
+/// opens with when it cleared the capability but its own mount of the account
+/// store had not come down within its budget — the one refusal of that verb
+/// another ask can cure, since the verb is idempotent and the teardown is still
+/// running. The shared provisioner's teardown push (`fauna-client-sync`'s
+/// `unprovision`) matches on it to ask again before the app erases that store
+/// (`sync-agent.md` § Control plane split → *The `UnprovisionCapability` reply
+/// is a receipt*).
+///
+/// A **cross-process contract** like [`NO_CAPABILITY_ERROR_PREFIX`]: the agent
+/// writes it, every desktop app's provisioner matches it, and the two can be
+/// different releases, so it is pinned by a test and must never change.
+pub const UNPROVISION_STILL_MOUNTED_PREFIX: &str =
+    "capability un-provisioned, but the account store was still mounted";
+
+/// The exact error-message **prefix** the agent answers a binding write with
+/// (`AddLocation`, `SetLocationFolder`, `SetLocationSyncMode`,
+/// `RemoveLocation`) while it serves no account — before its first provision,
+/// and after an un-provision. The binding store is an account's
+/// (`sync-agent.md` § Control plane split, *the binding store is an
+/// account's*): a write with no account to land in is refused, never kept
+/// where the next provision would abandon it. Every app's binding model reads
+/// the refusal as an ordinary failed push — the row stays pending and the
+/// reconcile on the agent-reachable edge, which follows the provision, pushes
+/// it — so no app matches the text today; it is pinned so one that wants to
+/// say *still connecting* rather than *failed* can.
+pub const BINDINGS_NEED_AN_ACCOUNT_PREFIX: &str = "no account is provisioned on this agent";
+
 /// The agent's answer to a request whose method it cannot decode — a verb a
 /// newer app names and this agent predates. The refusal is per request: the
 /// connection stays up (`frame_io::handle_conn`; `transport.md` § Rule 3 in
@@ -407,6 +437,28 @@ pub enum RequestMethod {
         spool_dir: String,
     },
 
+    /// A group set's review list, read from the set's own state DB
+    /// (`group-set.md` § Build design — the group set, decision 9): a group
+    /// set has no nest row, so `fauna.sync.conflicts.list` never reaches its
+    /// rows. Addressed by the set's `FolderRef` wire form; a set this device
+    /// has no state for answers an empty list. Replies
+    /// [`ResponsePayload::SetConflicts`]. Additive variant (2026-10-31).
+    ListSetConflicts {
+        folder_id: String,
+    },
+
+    /// The review list's *use the other version* on the group set's row
+    /// `conflict_id`: the resident engine serving `folder_id` writes the
+    /// retained bytes back as a local edit and resolves the row
+    /// (`SyncEngine::restore_retained_version`). Errors, with the row kept and
+    /// nothing written, when the bytes are gone or the file carries an edit not
+    /// yet shared, and when no resident engine serves the set. Replies
+    /// [`ResponsePayload::Empty`]. Additive variant (2026-10-31).
+    RestoreRetainedVersion {
+        folder_id: String,
+        conflict_id: i64,
+    },
+
     /// What this device's sealed **custodian store** occupies on disk right now
     /// (`docs/goal/ui/backups.md` § Manage backup destinations → *Reclaim this
     /// device's copy*). Replies [`ResponsePayload::CustodianStore`].
@@ -589,6 +641,49 @@ pub enum RequestMethod {
     /// (convention 15); a release agent refuses the name.
     #[cfg(any(test, debug_assertions, feature = "test-helpers"))]
     GetPushArmTally,
+
+    /// **Test-only.** Where this agent's same-account peer leg listens: its
+    /// node id and LAN dial candidates, read from the leg it bound. Replies
+    /// [`ResponsePayload::PeerLegDialTarget`]; refused while the leg is not
+    /// bound here.
+    ///
+    /// The witness of *"only your own devices fetch from your device"*
+    /// (`p2p.md` § Wormability posture, rule 1) needs a device of ANOTHER
+    /// account to dial this one, and that device can never learn the address:
+    /// a fleet's candidates travel only over the fleet-only `device-endpoints`
+    /// kind. The harness hands them over instead. Compiled out of release
+    /// artifacts as [`Self::GetPushArmTally`] is (convention 15).
+    #[cfg(any(test, debug_assertions, feature = "test-helpers"))]
+    GetPeerLegDialTarget,
+
+    /// **Test-only.** Dial another device's peer leg from this agent's own
+    /// bound leg and identity, and report what came back rather than act on
+    /// it — the request a hostile device would send. Replies
+    /// [`ResponsePayload::PeerLegProbe`].
+    ///
+    /// No app gesture makes a device of another account dial your device:
+    /// the dial pass dials only this account's own fleet. So the stranger's
+    /// side of the witness is this probe, and the same probe run from a
+    /// device of the account is its control (`PeerLegProbeReport`'s docs).
+    /// Compiled out of release artifacts as [`Self::GetPushArmTally`] is.
+    #[cfg(any(test, debug_assertions, feature = "test-helpers"))]
+    ProbePeerLeg(PeerLegProbeRequest),
+
+    /// **Test-only.** Arm this agent's same-account serve door to forge the
+    /// next `bodies` distinct chunk bodies it serves a sibling, one byte
+    /// flipped in each (`fauna-sync-agent`'s `peer_files::ServeFault`).
+    /// Replies [`ResponsePayload::Empty`].
+    ///
+    /// The witness of *"a tampered piece from a sibling is refused, and the
+    /// file still lands byte-exact from the nest"* (`p2p.md` § Wormability
+    /// posture, rule 4) needs a sibling that serves a forgery, which no real
+    /// device does. Compiled out of release artifacts as
+    /// [`Self::GetPushArmTally`] is (convention 15).
+    #[cfg(any(test, debug_assertions, feature = "test-helpers"))]
+    ArmPeerServeFault {
+        /// How many distinct bodies to forge.
+        bodies: u32,
+    },
 }
 
 impl RequestMethod {
@@ -634,6 +729,8 @@ impl RequestMethod {
             Self::AttachApp { .. } => "AttachApp",
             Self::PullFolderNow { .. } => "PullFolderNow",
             Self::ApplyHeldDeletes { .. } => "ApplyHeldDeletes",
+            Self::ListSetConflicts { .. } => "ListSetConflicts",
+            Self::RestoreRetainedVersion { .. } => "RestoreRetainedVersion",
             Self::GetShareServeInfo => "GetShareServeInfo",
             Self::ReconcileAccountRuntime => "ReconcileAccountRuntime",
             Self::WalkFleetNow => "WalkFleetNow",
@@ -649,6 +746,12 @@ impl RequestMethod {
             Self::CustodianRunPassNow { .. } => "CustodianRunPassNow",
             #[cfg(any(test, debug_assertions, feature = "test-helpers"))]
             Self::GetPushArmTally => "GetPushArmTally",
+            #[cfg(any(test, debug_assertions, feature = "test-helpers"))]
+            Self::GetPeerLegDialTarget => "GetPeerLegDialTarget",
+            #[cfg(any(test, debug_assertions, feature = "test-helpers"))]
+            Self::ProbePeerLeg(_) => "ProbePeerLeg",
+            #[cfg(any(test, debug_assertions, feature = "test-helpers"))]
+            Self::ArmPeerServeFault { .. } => "ArmPeerServeFault",
         }
     }
 }
@@ -824,6 +927,20 @@ pub struct SyncCapability {
     /// it `0` until [`Self::with_provisioned_at_ms`] stamps it; `0` reads as
     /// **older than any marker** — the fail-safe direction.
     pub provisioned_at_ms: u64,
+    /// The account's **reach hint**: the IPv4 address its box answers on while
+    /// its domain does not resolve yet (`onboarding-provisioning.md` § Reach
+    /// hint → *The session connector's half*; `sync-agent-credentials.md`
+    /// § Credential model owns the field). Read off the registry's per-actor
+    /// slot on every push, so the push after the app spends the slot carries
+    /// `None`, which clears the agent's own entry.
+    ///
+    /// The agent installs it in its process reach table and never persists a
+    /// verdict about it: the slot stays the app's, and the hint moves the
+    /// socket alone, so SNI, `Host` and the pin stay the domain's. Public
+    /// routing info; not a secret. Absent = the ordinary case, every account
+    /// that did not provision its own box.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reach_ipv4: Option<String>,
 }
 
 impl SyncCapability {
@@ -844,7 +961,15 @@ impl SyncCapability {
             predecessor_actor_ids: Vec::new(),
             predecessor_keys_by_actor: Vec::new(),
             provisioned_at_ms: 0,
+            reach_ipv4: None,
         }
+    }
+
+    /// Attach the account's reach hint (builder-style); `None` provisions
+    /// without one. See the field.
+    pub fn with_reach_ipv4(mut self, reach_ipv4: Option<String>) -> Self {
+        self.reach_ipv4 = reach_ipv4;
+        self
     }
 
     /// Stamp the provision time (builder-style). The app calls this on every
@@ -993,6 +1118,7 @@ impl std::fmt::Debug for SyncCapability {
                 "predecessor_keys_by_actor",
                 &format_args!("<{} bytes redacted>", self.predecessor_keys_by_actor.len()),
             )
+            .field("reach_ipv4", &self.reach_ipv4)
             .finish()
     }
 }
@@ -1205,6 +1331,8 @@ pub enum ResponsePayload {
     BackupStatus(Vec<BackupDestinationStatus>),
     /// Reply to [`RequestMethod::ApplyHeldDeletes`].
     HeldDeletesApplied(HeldDeletesAppliedInfo),
+    /// Reply to [`RequestMethod::ListSetConflicts`].
+    SetConflicts(Vec<fauna_core::sync::RetainedConflict>),
     /// Reply to [`RequestMethod::GetShareServeInfo`] — one row per bound
     /// folder with a state DB on disk.
     ShareServeInfo(Vec<ShareServeFolderInfo>),
@@ -1230,6 +1358,100 @@ pub enum ResponsePayload {
     /// **Test-only.** Reply to [`RequestMethod::GetPushArmTally`].
     #[cfg(any(test, debug_assertions, feature = "test-helpers"))]
     PushArmTally(PushArmTally),
+    /// **Test-only.** Reply to [`RequestMethod::GetPeerLegDialTarget`].
+    #[cfg(any(test, debug_assertions, feature = "test-helpers"))]
+    PeerLegDialTarget(PeerLegDialTarget),
+    /// **Test-only.** Reply to [`RequestMethod::ProbePeerLeg`].
+    #[cfg(any(test, debug_assertions, feature = "test-helpers"))]
+    PeerLegProbe(PeerLegProbeReport),
+}
+
+/// Where a device's same-account peer leg listens — the reply to
+/// [`RequestMethod::GetPeerLegDialTarget`], and the target half of
+/// [`PeerLegProbeRequest`]. **Test-only** (convention 15).
+#[cfg(any(test, debug_assertions, feature = "test-helpers"))]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PeerLegDialTarget {
+    /// The device principal's key, hex — the node id the transport proves.
+    pub node_id: String,
+    /// LAN dial candidates, `ip:port`.
+    pub lan_endpoints: Vec<String>,
+}
+
+/// What [`RequestMethod::ProbePeerLeg`] asks for. **Test-only.**
+#[cfg(any(test, debug_assertions, feature = "test-helpers"))]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PeerLegProbeRequest {
+    /// The device to dial.
+    pub target: PeerLegDialTarget,
+    /// The folder to pull from, as its `FolderRef` wire string (the
+    /// `folder_id` [`RequestMethod::GetShareServeInfo`] answers).
+    pub folder: String,
+    /// A file of `folder` whose chunk keys this agent's own engine holds, to
+    /// ask for besides `store_keys` — how the control learns the keys it then
+    /// hands the stranger. `None` asks for `store_keys` alone.
+    #[serde(default)]
+    pub relative_path: Option<String>,
+    /// Chunk store keys (hex) to ask for.
+    #[serde(default)]
+    pub store_keys: Vec<String>,
+}
+
+/// What one peer-leg probe got back — the reply to
+/// [`RequestMethod::ProbePeerLeg`]. **Test-only** (convention 15).
+///
+/// The probe dials, runs the admission exchange with this device's own
+/// enrollment witness, and then asks for the chunk bodies **whatever the
+/// admission said** — a probe that stopped at a refusal would prove only that
+/// the asking client is polite, never that the serving device holds the door.
+/// It also sends one deliberately malformed chunk request, whose answer says
+/// which ran first on the serving side: the admission check or the parser
+/// (`p2p.md` § Wormability posture, rule 1).
+///
+/// Run from a device of the target's own account, the same probe must come
+/// back admitted and served: only the identity differs between the two runs,
+/// so a stranger's empty report cannot be a probe that never worked.
+#[cfg(any(test, debug_assertions, feature = "test-helpers"))]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PeerLegProbeReport {
+    /// The dial reached the target's listener. `false` means nothing below
+    /// ran, and the report proves nothing about the serve door.
+    pub dialed: bool,
+    pub dial_error: Option<String>,
+    /// The key the transport's handshake proved the far end holds, hex — the
+    /// target's node id when the channel is the authenticated one it dialed.
+    pub peer_identity: Option<String>,
+    /// The path the channel runs on (`direct`, `relayed`, …).
+    pub path: Option<String>,
+    /// The target answered the admission exchange with its own witness —
+    /// it admitted this device.
+    pub admitted: bool,
+    /// The target's refusal of the admission exchange: its wire error code.
+    pub admit_error: Option<String>,
+    /// The store keys the probe asked for (hex): every one it was handed
+    /// plus every one `relative_path` named.
+    pub store_keys: Vec<String>,
+    /// The bodies the target served, each whole and checked against its key.
+    pub bodies: Vec<PeerLegProbeBody>,
+    /// Keys the target answered it holds no body for.
+    pub missing: Vec<String>,
+    /// Why the chunk pull failed, when it did — the wire error code when the
+    /// target refused it.
+    pub pull_error: Option<String>,
+    /// The target's answer to a malformed chunk request: its wire error
+    /// code. An admitted device meets the parser's refusal; a device the
+    /// target does not admit must meet the admission refusal instead.
+    pub malformed_error: Option<String>,
+}
+
+/// One body a peer-leg probe was served. **Test-only.**
+#[cfg(any(test, debug_assertions, feature = "test-helpers"))]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PeerLegProbeBody {
+    /// The chunk's store key, hex.
+    pub store_key: String,
+    /// The body exactly as it crossed the wire, hex.
+    pub bytes: String,
 }
 
 /// The `ws-device` push arm's decisions so far — the reply to
@@ -1937,6 +2159,11 @@ pub struct PeerFilesInfo {
     pub bytes: u64,
     /// Chunks wanted from a sibling and left to the nest instead.
     pub to_nest: u64,
+    /// Chunk bodies a sibling served that failed their content-address check
+    /// and were refused, never written (`p2p.md` § Wormability posture, rule
+    /// 4). Additive: a reply from an agent without it decodes as `0`.
+    #[serde(default)]
+    pub refused: u64,
 }
 
 /// [`ServiceStatusInfo::on_demand_unavailable_reason`]: `/dev/fuse` cannot be
@@ -2489,6 +2716,13 @@ mod tests {
                 path: "p".into(),
                 version_num: 1,
             },
+            RequestMethod::ListSetConflicts {
+                folder_id: "group:00".into(),
+            },
+            RequestMethod::RestoreRetainedVersion {
+                folder_id: "group:00".into(),
+                conflict_id: 1,
+            },
             RequestMethod::ListEngines,
             RequestMethod::GetBackupStatus,
             RequestMethod::Pause,
@@ -2708,7 +2942,7 @@ mod tests {
 
     /// The peer data plane's reading crosses the pipe whole, and a reply
     /// without it decodes as "cannot tell" — the e2e witnesses of
-    /// `device-to-device-file-transfer` read exactly these four numbers.
+    /// `device-to-device-file-transfer` read exactly these five numbers.
     #[test]
     fn the_peer_files_reading_round_trips_and_is_optional() {
         let reading = PeerFilesInfo {
@@ -2716,6 +2950,7 @@ mod tests {
             chunks: 3,
             bytes: 4096,
             to_nest: 2,
+            refused: 1,
         };
         let status_of = |info: ServiceStatusInfo| -> ServiceStatusInfo {
             let frame = encode_frame(&Response {
@@ -2966,6 +3201,43 @@ mod tests {
         "predecessor_backup_keys",
         "provisioned_at_ms",
     ];
+
+    /// The reach hint survives the pipe, and a hint-less capability puts no
+    /// new key on the wire: the common account's capability is byte-for-byte
+    /// what it was, as `a_provisioned_capability_carries_exactly_its_pinned_fields`
+    /// pins, and it decodes back to no hint.
+    #[test]
+    fn capability_round_trips_the_reach_hint() {
+        let cap = SyncCapability::new(
+            vec![0xABu8; 32],
+            vec![0xCDu8; 32],
+            "https://dark.example".into(),
+            "dev-123".into(),
+            BearerToken::new("tok".into(), 1),
+        )
+        .with_reach_ipv4(Some("203.0.113.9".into()));
+        let frame = encode_frame(&Request {
+            id: 7,
+            method: RequestMethod::ProvisionCapability(cap),
+        })
+        .unwrap();
+        let decoded: Request = decode_payload(&frame[4..]).unwrap();
+        let RequestMethod::ProvisionCapability(back) = decoded.method else {
+            panic!("wrong variant")
+        };
+        assert_eq!(back.reach_ipv4.as_deref(), Some("203.0.113.9"));
+
+        let bare = SyncCapability::new(
+            vec![0xABu8; 32],
+            vec![0xCDu8; 32],
+            "https://dark.example".into(),
+            "dev-123".into(),
+            BearerToken::new("tok".into(), 1),
+        );
+        let back: SyncCapability =
+            fauna_cbor::decode_strict(&fauna_cbor::encode_canonical(&bare).unwrap()).unwrap();
+        assert_eq!(back.reach_ipv4, None);
+    }
 
     /// The retired owner keys survive an IPC round trip un-mangled, and the
     /// un-flattening is order-preserving — the walk is *nearest hop first*, and
@@ -3322,6 +3594,16 @@ mod tests {
     fn no_capability_message_begins_with_prefix() {
         assert!(NO_CAPABILITY_ERROR_MESSAGE.starts_with(NO_CAPABILITY_ERROR_PREFIX));
         assert_eq!(NO_CAPABILITY_ERROR_PREFIX, "no capability provisioned");
+    }
+
+    /// Pinned for the same reason: the provisioner's re-ask keys on this
+    /// prefix, and an agent of another release writes it.
+    #[test]
+    fn unprovision_still_mounted_prefix_is_pinned() {
+        assert_eq!(
+            UNPROVISION_STILL_MOUNTED_PREFIX,
+            "capability un-provisioned, but the account store was still mounted"
+        );
     }
 
     #[test]

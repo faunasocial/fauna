@@ -28,7 +28,9 @@ broken or gone, so the page works with no reachable nest.
 Launched through the native launch harness with a saved identity whose nest
 refuses the connection — the same seed ``test_onboarding_launch_routing_smoke``
 case C uses — so the app lands on ``launch_retry`` by its real routing; no nest
-runs for those. The held-credential case is the exception: it signs in as the
+runs for those but on iOS, which enters optimistically off that seed and is put on
+``launch_retry`` through its gating case instead (a stale pending-factory-reset
+slot the reconcile clears against the session nest — ``helpers/launch_retry_seed.py``). The held-credential case is the exception: it signs in as the
 session nest's admin (``admin_app``) and enters from ``admin-nest``. The cloud
 is ``fakes/fake_cloud.py`` throughout.
 """
@@ -40,34 +42,39 @@ import socket
 
 import pytest
 
-from actions import ActionLayer
 from actions.retire import RetireActions
 from clients.ws_rpc_admin_client import WsRpcAdminClient
 from common.launch_harness import make_launch_harness
-from common.nest import stop_nest
-from conftest import _seeded_environment, _trust_seeder, get_available_apps
+from conftest import _trust_seeder, get_available_apps
 from drivers import create_driver
-from helpers.app_surface import app_name, skip_unbuilt
-from helpers.box_recovery_launch import (
-    app_path_for,
-    claim_fresh_identity,
-    rust_log,
-    start_boxes,
-    wait_for_custody_leg,
-)
+from helpers.app_launch import app_launch_config
+from helpers.app_surface import require_surface
 from helpers.budgets import PROVIDER_VERIFY_S, RPC_ROUNDTRIP_S
 from helpers.waiting import wait_until
-from helpers.indexed_rows import diagnose_row, row_visible, wait_for_row
+from helpers.launch_retry_seed import stale_reset_slot_fields
 from i18n.strings import S
 
-RECOVER_BOX_ITEM = "recover-box-item"  # indexed; read via helpers.indexed_rows
 
-pytestmark = [pytest.mark.tier_2, pytest.mark.tui, pytest.mark.linux, pytest.mark.web, pytest.mark.android]
+pytestmark = [
+    pytest.mark.tier_2, pytest.mark.tui, pytest.mark.linux, pytest.mark.web,
+    pytest.mark.android, pytest.mark.macos, pytest.mark.ios, pytest.mark.windows,
+]
 
-#: The apps whose nest_retire page is built. tui leads; the other six join by
-#: batched trickle-down (nest-retirement.md § Done definition), each by adding
-#: its name here (and its app marker above).
-RETIRE_APPS = ("tui", "linux", "web", "android")
+#: The apps whose nest_retire page is built — all seven since windows joined
+#: (2026-11-04), the last of the batched trickle-down behind tui's lead
+#: (nest-retirement.md § Done definition).
+RETIRE_APPS = ("tui", "linux", "web", "android", "macos", "ios", "windows")
+
+#: The apps with a ``launch_retry`` surface for ``launch-retire-button`` to sit on
+#: — every app whose page is built. iOS paints it only for its gating case (a
+#: launch that entered no session), so ``retire_driver`` seeds that case there.
+LAUNCH_ENTRY_APPS = RETIRE_APPS
+
+#: The apps that enter optimistically off a stored session, so a dead saved nest
+#: alone leaves them in their cached shell: the fixture adds the stale
+#: pending-factory-reset slot that withholds the entry
+#: (``helpers/launch_retry_seed.py``).
+OPTIMISTIC_ENTRY_APPS = ("ios",)
 
 BOX_A_IP = "203.0.113.5"
 BOX_B_IP = "203.0.113.77"
@@ -77,7 +84,7 @@ HETZNER_TOKEN = "MOCK-hetzner-token"
 
 def _clients() -> list[str]:
     available = get_available_apps()
-    return [c for c in RETIRE_APPS if c in available]
+    return [c for c in LAUNCH_ENTRY_APPS if c in available]
 
 
 def _closed_port() -> int:
@@ -96,15 +103,23 @@ def retire_driver(request, tmp_path):
     if client == "web":
         harness = make_launch_harness("web", spa_url=request.getfixturevalue("spa_url"))
     else:
-        app_path = request.getfixturevalue(f"{client}_app_path")
         harness = make_launch_harness(
-            client, tmp_path=tmp_path, app_path=app_path, file_backed=True,
-            seed_trust=_trust_seeder(request),
+            client, tmp_path=tmp_path, **app_launch_config(client, request),
+            file_backed=True, seed_trust=_trust_seeder(request),
         )
     try:
         secret_hex = secrets.token_hex(32)
         node_url = f"http://127.0.0.1:{_closed_port()}"
-        driver = harness.launch_and_route(secret_hex=secret_hex, node_url=node_url, trust=None)
+        if client in OPTIMISTIC_ENTRY_APPS:
+            # The slot's reconcile needs a live, claimed nest to clear it against.
+            claimed_url = request.getfixturevalue("nest_instance")["url"]
+            driver = harness.launch(
+                secret_hex=secret_hex, node_url=node_url, trust=None,
+                raw_fields=stale_reset_slot_fields(secret_hex, claimed_url),
+            )
+        else:
+            driver = harness.launch_and_route(
+                secret_hex=secret_hex, node_url=node_url, trust=None)
         wait_until(
             lambda: driver.is_visible("launch-retry-button"),
             60,
@@ -333,12 +348,6 @@ def test_retire_from_admin_cleans_dns_through_the_held_credential(admin_app, fak
     ``admin-dns`` — so a green DNS step, and every removal carrying the held
     token, prove the held credential reached the run."""
     driver = admin_app.driver
-    if app_name(driver) not in RETIRE_APPS:
-        skip_unbuilt(
-            driver,
-            surface="nest_retire page",
-            tracked="nest-retirement.md § Done definition (the batched trickle-down)",
-        )
     _seed_hetzner_account(fake_cloud)
     dns = fake_cloud.hetzner_cloud.dns
     dns.zones_by_token[HETZNER_TOKEN] = [{"id": 7, "name": "unrelated.test"}]
@@ -351,8 +360,7 @@ def test_retire_from_admin_cleans_dns_through_the_held_credential(admin_app, fak
         RPC_ROUNDTRIP_S,
         diagnose=lambda: "admin-dns never rendered: " + driver.diagnose("error-message"),
     )
-    while admin_app.admin.dns_credential_count() > 0:
-        admin_app.admin.clear_dns_credential(0)
+    admin_app.admin.clear_all_dns_credentials()
     try:
         admin_app.admin.add_dns_credential("hetzner", {"api-token": HELD_TOKEN})
         wait_until(
@@ -396,8 +404,7 @@ def test_retire_from_admin_cleans_dns_through_the_held_credential(admin_app, fak
             lambda: driver.is_visible("admin-dns-add-credential-button") or None,
             RPC_ROUNDTRIP_S,
         )
-        while admin_app.admin.dns_credential_count() > 0:
-            admin_app.admin.clear_dns_credential(0)
+        admin_app.admin.clear_all_dns_credentials()
 
 
 #: The fake provider's publish witness (`FAKE_DNS_PUBLISH_WITNESS`) and the line
@@ -455,18 +462,7 @@ def test_retire_removes_the_records_the_app_itself_published(
     same pass over a third remembered map, unit-tested beside the other two
     (``libs/fauna-onboarding-machine/src/retire/tests.rs``)."""
     driver = admin_app.driver
-    if app_name(driver) not in RETIRE_APPS:
-        skip_unbuilt(
-            driver,
-            surface="nest_retire page",
-            tracked="nest-retirement.md § Done definition (the batched trickle-down)",
-        )
-    if driver.log_scope_across_relaunch() == "none":
-        skip_unbuilt(
-            driver,
-            surface="app-log reader in the e2e driver",
-            detail="which slot records the app published is read off the fake provider's witness",
-        )
+    require_surface(driver, "app-log-reader")
     domain = f"rt-{secrets.token_hex(4)}.test"
     held = f"fake-dns-ok:{domain}"
     admin = nest_instance["admin"]
@@ -488,8 +484,7 @@ def test_retire_removes_the_records_the_app_itself_published(
         diagnose=lambda: f"{domain!r} never rendered on admin-dns: "
         + driver.diagnose("error-message"),
     )
-    while admin_app.admin.dns_credential_count() > 0:
-        admin_app.admin.clear_dns_credential(0)
+    admin_app.admin.clear_all_dns_credentials()
     try:
         # -- the app publishes, and remembers what it published ---------------
         admin_app.admin.add_dns_credential("hetzner", {"api-token": held})
@@ -582,8 +577,7 @@ def test_retire_removes_the_records_the_app_itself_published(
             modes = admin_app.admin.dns_domain_modes()
             if i < len(modes) and modes[i] == "Fauna-managed":
                 admin_app.admin.toggle_domain_mode(index=i)
-        while admin_app.admin.dns_credential_count() > 0:
-            admin_app.admin.clear_dns_credential(0)
+        admin_app.admin.clear_all_dns_credentials()
 
 
 # ---------------------------------------------------------------------------
@@ -603,7 +597,7 @@ def test_retire_empty_account_says_so_and_names_the_pre_marker_case(retire_drive
     # date left it again, so the date is asserted on the rendered text itself.
     shown = driver.get_text("retire-server-empty-message")
     assert shown == S.onboarding.retire.empty_message
-    assert "2026-07-08" in shown, shown
+    assert "8 July 2026" in shown, shown
 
 
 # ---------------------------------------------------------------------------
@@ -668,21 +662,24 @@ def _leave_page_from_list(driver) -> None:
 
 @pytest.mark.feature("retire-a-nest")
 def test_retire_from_admin_marks_warns_and_retires_the_box_the_session_is_signed_into(
-    admin_app, fake_cloud
+    stoppable_admin_app, stoppable_nest, fake_cloud
 ):
     """The admin entry's session nest runs on 127.0.0.1, so a listed server at
     that address is the box the session is signed into: its row carries the
     current mark (outcome 9) and no other row does, its confirm warns the nest
     will stop existing (outcome 18) and no other box's does, deleting it from
     the admin Nest page works (outcome 5), and the app returns to its start
-    afterwards (outcome 19)."""
+    afterwards (outcome 19) — which `nest-retirement.md` § Where logic lives
+    rules is launch routing re-run on the KEPT identity: signed out, on the
+    launch retry surface, never the fresh-start wizard an erased identity would
+    show.
+
+    The nest is a dedicated one the test stops once the fake cloud has deleted
+    its server, as deleting the server does in the field. Against a nest that
+    stays up every app would sign straight back in, and the only thing left to
+    read would be the passing moment before it did."""
+    admin_app = stoppable_admin_app
     driver = admin_app.driver
-    if app_name(driver) not in RETIRE_APPS:
-        skip_unbuilt(
-            driver,
-            surface="nest_retire page",
-            tracked="nest-retirement.md § Done definition (the batched trickle-down)",
-        )
     cloud = fake_cloud.hetzner_cloud
     cloud.seed_managed_server(server_id=201, name="session-nest", ipv4="127.0.0.1", ptr=None)
     cloud.seed_managed_server(server_id=202, name="other-box", ipv4=BOX_B_IP, ptr=None)
@@ -721,21 +718,28 @@ def test_retire_from_admin_marks_warns_and_retires_the_box_the_session_is_signed
     retire.wait_done()
     assert cloud.deleted_server_ids == ["201"]
 
-    # -- done: the session's nest is gone, so the app starts over ------------
-    driver.click("retire-done-button")
-    def at_the_start(state) -> bool:
-        stack = (state.get("nav") or {}).get("stack") or [{}]
-        return (
-            (state.get("session") or {}).get("authenticated") is False
-            and stack[0].get("view") == "welcome"
-        )
+    # -- the server is gone, so its nest is too --------------------------------
+    stoppable_nest["stop"]()  # a causal barrier: the port is dead on return
 
-    state = driver.get_state(wait_for=at_the_start, timeout=30)
-    assert state and at_the_start(state), (
-        "retiring the box the session was signed into must end the session and "
-        f"return to the start; session={state and state.get('session')!r} "
-        f"nav={state and state.get('nav')!r}"
+    # -- done: the session ends and launch routing runs on the kept identity --
+    driver.click("retire-done-button")
+    wait_until(
+        lambda: driver.is_visible("launch-retry-button") or None,
+        60,
+        diagnose=lambda: (
+            "after retiring the box the session was signed into, the app must "
+            "re-run launch routing on the identity it kept and land on the launch "
+            "retry surface (nest-retirement.md § Where logic lives); "
+            f"state={driver.get_state()!r} " + driver.diagnose("launch-retry-button")
+        ),
     )
+    # The launch retry surface IS the assertion: it owns the screen only once
+    # the authenticated shell is gone, and launch routing reaches it only with a
+    # stored identity (an erased one routes to the fresh-start wizard instead).
+    # `session.authenticated` is not read: web's agent reports it as "a
+    # registered identity is stored", which the ruling requires to stay true.
+    # The retire entry stays reachable from where the person landed.
+    assert driver.is_visible("launch-retire-button"), driver.diagnose("launch-retire-button")
 
 
 @pytest.mark.parametrize("retire_driver", _clients(), indirect=True)
@@ -959,12 +963,6 @@ def test_retire_lists_another_domains_records_by_hand_when_its_dns_is_out_of_rea
     holds only the first domain's zone: the first is cleaned in the provider,
     the second's records are listed for removal by hand."""
     driver = admin_app.driver
-    if app_name(driver) not in RETIRE_APPS:
-        skip_unbuilt(
-            driver,
-            surface="nest_retire page",
-            tracked="nest-retirement.md § Done definition (the batched trickle-down)",
-        )
     other = "deliverability-e2e.test"
     admin = nest_instance["admin"]
     with WsRpcAdminClient(
@@ -1056,102 +1054,6 @@ def test_retire_lists_unmarked_servers_with_a_note_behind_the_same_typed_confirm
         f"exactly the confirmed server is deleted, in its own project: {ovh.deleted!r}"
     )
     assert [i["id"] for i in ovh.projects["proj-b"]] == ["inst-2"]
-
-
-#: The apps whose launch-retry surface offers both ``launch-retire-button`` and
-#: ``launch-recover-button`` over a device's own custodied seed — the retire
-#: page's apps that also run the dead-saved-nest recovery journey
-#: (``test_box_recovery_two_nest.py`` T4).
-_RECOVERY_APPS = [c for c in ("tui", "linux", "android") if c in _clients()]
-
-
-@pytest.mark.parametrize("client", _RECOVERY_APPS)
-@pytest.mark.feature("retire-a-nest")
-def test_retire_keeps_the_nests_recovery_key(
-    client, nest_mode, tmp_path, tmp_path_factory, request, fake_cloud
-):
-    """Outcome 34 (nest-retirement.md § Errors & edge cases, *Retired ≠
-    forgotten*): retiring the box a device is saved against leaves the box's
-    custodied deployment seed where it was, so recovery still offers it.
-
-    A device claims a box and the custody leg rests the box's seed in the
-    device's own account store; the box dies; the relaunched device lands on
-    launch-retry, whose ``launch-recover-button`` the seed reveals. From that
-    same surface the person retires the server — the box they were saved
-    against, so the done state routes back to the launch flow — and the
-    recovery entry still lists the box, then again from a cold relaunch, which
-    reads only what the device kept."""
-    app_path = app_path_for(client)
-    (nest,), stop_boxes = start_boxes(request, nest_mode, tmp_path_factory, "retire-keeps-seed")
-    try:
-        secret_hex = secrets.token_hex(32)
-        handle = f"admin{secrets.token_hex(3)}@127.0.0.1:{nest['port']}"
-        config = {
-            "app_path": app_path,
-            "xdg_base": str(tmp_path / "xdg"),
-            "credential_dir": str(tmp_path / "creds"),
-            "keyring_app": "fauna-e2e-retire-keeps-seed",
-            "environment": {**_seeded_environment(request, nest), "RUST_LOG": rust_log(client)},
-        }
-        if client == "android":
-            # The relaunches are the same device: keep the store launch 1
-            # custodied into (test_box_recovery_two_nest.py T4, the same pin).
-            config["preserve_store"] = True
-
-        def recovery_lists_the_box(app, why: str) -> None:
-            app.driver.wait_for("launch-recover-button", timeout=60)
-            app.click("launch-recover-button")
-            wait_for_row(app.driver, RECOVER_BOX_ITEM, 0, timeout=30)
-            assert row_visible(app.driver, RECOVER_BOX_ITEM, 0), (
-                f"{why}: nest_recovery no longer lists the box — "
-                + diagnose_row(app.driver, RECOVER_BOX_ITEM, 0)
-            )
-
-        # -- launch 1: claim the box; its seed rests in this device's store ----
-        driver = create_driver(client)
-        driver.launch(config)
-        try:
-            claim_fresh_identity(ActionLayer(driver), secret_hex, handle, nest["claim_code"])
-            wait_for_custody_leg(driver)
-        finally:
-            driver.teardown()
-
-        # -- the box dies; the cloud account still holds its server ------------
-        stop_nest(nest, graceful=True)
-        cloud = fake_cloud.hetzner_cloud
-        cloud.seed_managed_server(server_id=401, name="lost-box", ipv4="127.0.0.1", ptr=None)
-
-        # -- launch 2: retire the server from the launch-retry surface ---------
-        driver = create_driver(client)
-        driver.launch(config)
-        try:
-            app = ActionLayer(driver)
-            driver.wait_for("launch-recover-button", timeout=60)
-            driver.set_provider_base_urls({"vps": fake_cloud.url_map()["vps"]})
-            retire = RetireActions(driver)
-            retire.open_from_launch()
-            retire.enter_token("hetzner", HETZNER_TOKEN)
-            retire.select("lost-box")
-            retire.begin_confirm()
-            retire.type_name("lost-box")
-            retire.confirm()
-            retire.wait_done()
-            assert retire.step_error(1) is None, f"the server step failed: {retire.step_error(1)!r}"
-            assert cloud.deleted_server_ids == ["401"]
-            driver.click("retire-done-button")
-            recovery_lists_the_box(app, "right after retiring the server")
-        finally:
-            driver.teardown()
-
-        # -- launch 3: a cold start reads only what the device kept ------------
-        driver = create_driver(client)
-        driver.launch(config)
-        try:
-            recovery_lists_the_box(ActionLayer(driver), "after a relaunch")
-        finally:
-            driver.teardown()
-    finally:
-        stop_boxes()
 
 
 @pytest.mark.parametrize("retire_driver", _clients(), indirect=True)

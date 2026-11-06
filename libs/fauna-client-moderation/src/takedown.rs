@@ -37,6 +37,22 @@ pub enum TakedownContentType {
 }
 
 impl TakedownContentType {
+    /// The kind for the faces' `conversation: bool` flag (`true` = the MLS
+    /// relay-withhold kind, else a post) — one mapping for the UniFFI and
+    /// wasm faces.
+    pub fn from_conversation(conversation: bool) -> Self {
+        if conversation {
+            TakedownContentType::Conversation
+        } else {
+            TakedownContentType::Post
+        }
+    }
+
+    /// The inverse of [`Self::from_conversation`].
+    pub fn is_conversation(self) -> bool {
+        self == TakedownContentType::Conversation
+    }
+
     /// The `fauna.moderation.legal_takedown` `content_type` string.
     pub fn wire(self) -> &'static str {
         match self {
@@ -145,6 +161,19 @@ pub fn takedown_verdict(restore: bool, error: Option<String>) -> LocalizedText {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn conversation_flag_round_trips() {
+        for conversation in [false, true] {
+            let kind = TakedownContentType::from_conversation(conversation);
+            assert_eq!(kind.is_conversation(), conversation);
+        }
+        assert_eq!(
+            TakedownContentType::from_conversation(true).wire(),
+            "conversation"
+        );
+        assert_eq!(TakedownContentType::from_conversation(false).wire(), "post");
+    }
 
     fn form(content_id: &str, reference: &str, restore: bool) -> TakedownForm {
         TakedownForm {

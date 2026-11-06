@@ -4,7 +4,16 @@
   import { identity, reconnectTick, onActorChange } from '#lib/store';
   import { registerActorScopedReset } from '#lib/actorScope';
   import { get } from 'svelte/store';
-  import { getFeedManager, feedSnapshot, refreshFeed, scheduleDraftSave } from '#lib/feed';
+  import { goto } from '$app/navigation';
+  import { profileHref } from '#lib/profile-nav';
+  import {
+    getFeedManager,
+    refreshArchiveCommentsIfReady,
+    feedSnapshot,
+    onFeedDraftRestored,
+    refreshFeed,
+    scheduleDraftSave,
+  } from '#lib/feed';
   import { CueCapture, hydrateCuesOnce } from '#lib/feed-cues';
   import { clearSent } from '#lib/compose-sent';
   import { hydrateContentPolicy } from '#lib/contentPolicy.svelte';
@@ -34,6 +43,7 @@
   import ReportHost from '#lib/components/ReportHost.svelte';
   import { type ReportTarget } from '#lib/wasm';
   import ProxiedImage from '#lib/components/ProxiedImage.svelte';
+  import ReactionPills from '#lib/components/ReactionPills.svelte';
   import QuotedPost from '#lib/components/QuotedPost.svelte';
   import TipSurface from '#lib/components/payments/TipSurface.svelte';
   import { contactsRevision } from '#lib/conversations';
@@ -118,6 +128,12 @@
   // The report sheet's own failure line (a failed send, or a block/hide that
   // did not land beside a landed report) paints on the same `error-message`.
   let reportError = $state('');
+  // Saved activity data (the sealed `cues:v1` rollup) that would not open
+  // (`engagement-cues.md` § At rest: a surfaced error, never a silent fresh
+  // start). Its own slot, because the hydrate runs beside `loadAll`, whose
+  // opening `loadError = ''` would otherwise wipe the report it lands first;
+  // a later mount's successful hydrate clears it.
+  let cueHydrateError = $state('');
   // The Bluesky thread page (ui.yaml `feed.sub_pages.thread`, `bridges.md`
   // § Bluesky-native thread view) — the shared `FeedSnapshot::thread`, open
   // over the post detail it was opened from; `null` when no page is open.
@@ -125,7 +141,11 @@
   // While the thread page is open its own fetch error leads on `error-message`
   // (tui's `page_error`), ahead of the feed's.
   let pageError = $derived(
-    resolveLocalized(threadPage?.error) || resolveLocalized(snap?.error) || loadError || reportError,
+    resolveLocalized(threadPage?.error) ||
+      resolveLocalized(snap?.error) ||
+      loadError ||
+      cueHydrateError ||
+      reportError,
   );
 
   // The shared report sheet (`report-sheet`), opened by `feed-post-report-button`.
@@ -634,8 +654,9 @@
     stopCueCapture();
     try {
       await hydrateCuesOnce(m);
+      cueHydrateError = '';
     } catch (e) {
-      loadError = String(e);
+      cueHydrateError = String(e);
       logMessage('warn', 'fauna_web::feed', `cue rollup hydrate failed: ${e}`);
       return;
     }
@@ -657,6 +678,46 @@
   let unsubReconnect: (() => void) | null = null;
   let unsubIdentity: (() => void) | null = null;
   let unsubActorReset: (() => void) | null = null;
+  let unsubDraftRestored: (() => void) | null = null;
+
+  /** Paint the manager's compose into the page-local fields — the read-back
+   *  `composeBody`/`composeTags` and the audience controls need, since they are
+   *  plain page state, never snapshot-derived (feed.md § Persistence).
+   *  `snapshot()` can throw (see `refreshFeed`'s own guard); failure here just
+   *  leaves the fields as they are. */
+  function paintCompose(m: NonNullable<typeof manager>) {
+    try {
+      const restoredCompose = m.snapshot().compose;
+      composeBody = restoredCompose.text;
+      composeTags = restoredCompose.tags;
+      const restoredSell = restoredCompose.sell ?? null;
+      sellSelected = restoredSell !== null;
+      sellPrice = restoredSell?.price ?? '';
+      sellAskingPrice = restoredSell?.asking_price ?? '';
+      sellSubscribersFree = restoredSell?.subscribers_get_it_free ?? true;
+      gateRoom = restoredCompose.gate_room ?? '';
+      gateTier = restoredCompose.gate_tier ?? '';
+      gatePreview = restoredCompose.gate_preview ?? '';
+    } catch (e) {
+      logMessage('warn', 'fauna_web::feed', `read restored compose failed: ${e}`);
+    }
+  }
+
+  /** A launch restore that lands after the read-back is painted only into a
+   *  composer the user has not authored into — the page-local half of the
+   *  FILL rule the manager's restore applies (feed.md § Persistence, *A
+   *  restore FILLS*). Whitespace alone is not authorship. */
+  function paintLateRestore() {
+    if (!manager) return; // manager-gate-ok: restore-landed listener, not a user action
+    const untouched =
+      !composeBody.trim() &&
+      !composeTags.trim() &&
+      !gateTier &&
+      !gateRoom &&
+      !gatePreview.trim() &&
+      !sellSelected;
+    if (untouched) paintCompose(manager);
+  }
 
   // ── Per-post lazy augmentation (mirrors linux post_list.rs's render-time
   //    resolve): decode fauna/nostr bodies for rich rendering, resolve the media
@@ -707,6 +768,22 @@
       await manager.setSearchQuery(value.trim() ? value : null);
       refreshFeed();
     }, 250);
+  }
+
+  // ── Imported-posts selection (`feed.md` § State & data shape) ─────────────────
+
+  /** `snapshot().imported_selected` — the archive platform token the archive
+   *  import's View imported selected, or `null`. */
+  let importedToken = $derived<string | null>(snap?.imported_selected ?? null);
+  /** The notice's platform label — the shared `SourceKind` label for the token. */
+  let importedLabel = $derived<string>(
+    importedToken ? (classifySources(importedToken, [])[0]?.label ?? importedToken) : ''
+  );
+
+  async function clearImported(): Promise<void> {
+    if (!manager) { loadError = t.common.still_loading; return; }
+    await manager.clearImported();
+    refreshFeed();
   }
 
   async function clearSearch(): Promise<void> {
@@ -1288,6 +1365,7 @@
     // corollary): `resetActorScopedAugmentation` is registered as a drop, so it
     // runs — with every other surface's drop — before any rebuild handler.
     unsubActorReset = registerActorScopedReset(resetActorScopedAugmentation);
+    unsubDraftRestored = onFeedDraftRestored(paintLateRestore);
     unsubIdentity = onActorChange(async (id) => {
       // GUARDED, because `store.ts` VOIDS this promise — its own `onActorChange`
       // doc says so: "Its promise is not awaited — guard each step that can
@@ -1314,36 +1392,17 @@
       }
       feedReady = true;
       void startCueCapture(manager);
+      // The folded archive comments, re-read on every visit (`#lib/feed`).
+      refreshArchiveCommentsIfReady();
       // Draft-persistence v2, posts rail (feed.md § Persistence): `composeBody`
       // / `composeTags` are plain page-local state (never snapshot-derived, the
-      // way the conversations page's composer is), so the restore that
-      // `getFeedManager()` already ran on this manager needs an explicit
-      // read-back here or the textarea stays empty despite the manager holding
-      // the restored draft. `getFeedManager()`'s promise only resolves after
-      // its own restore attempt (success or swallowed failure) completes, so
-      // this snapshot is always the final restored (or empty, on a fresh
-      // manager / first run) state — never a mid-restore read. Runs on every
-      // actor change so a switch shows THAT actor's own draft, never a leaked
-      // previous one. `snapshot()` can throw (see `refreshFeed`'s own guard);
-      // failure here just leaves an empty composer, matching the swallowed
-      // restore failure above it.
-      try {
-        const restoredCompose = manager.snapshot().compose;
-        composeBody = restoredCompose.text;
-        composeTags = restoredCompose.tags;
-        // The restored audience, painted into the page-local controls the
-        // way the text and tags are (feed.md § Persistence).
-        const restoredSell = restoredCompose.sell ?? null;
-        sellSelected = restoredSell !== null;
-        sellPrice = restoredSell?.price ?? '';
-        sellAskingPrice = restoredSell?.asking_price ?? '';
-        sellSubscribersFree = restoredSell?.subscribers_get_it_free ?? true;
-        gateRoom = restoredCompose.gate_room ?? '';
-        gateTier = restoredCompose.gate_tier ?? '';
-        gatePreview = restoredCompose.gate_preview ?? '';
-      } catch (e) {
-        logMessage('warn', 'fauna_web::feed', `read restored compose failed: ${e}`);
-      }
+      // way the conversations page's composer is), so the manager's compose
+      // needs an explicit read-back here. Runs on every actor change so a
+      // switch shows THAT actor's own draft, never a leaked previous one. The
+      // launch restore is not awaited by `getFeedManager()` (its load retries a
+      // lost read for minutes), so it may land after this read: the
+      // `onFeedDraftRestored` door paints it then, into an untouched composer.
+      paintCompose(manager);
       // Hydrate the content-policy render state (guardian floor + own spam
       // thresholds) BEFORE the first feed load, so posts render with the right
       // verdict on their first paint (family-safety.md § Content policy).
@@ -1413,6 +1472,7 @@
     unsubStoreChange();
     unsubIdentity?.();
     unsubActorReset?.();
+    unsubDraftRestored?.();
     clearTimeout(searchTimer);
     // Opened post media (the conversations-attachment rule): a reactive re-render
     // must not leak a fresh blob URL each tick, and these hold decrypted bytes.
@@ -1532,13 +1592,15 @@
       📈 {t.feed.list.trending}
     </button>
 
-    <!-- Local built-in -->
+    <!-- Built-in Local entry (feed-local-item, feed.md § Layout & flow region 1):
+         directly below Trending, above the user's own feeds; select_feed(None). -->
     <button
+      data-testid={IDS.FEED_LOCAL_ITEM}
       class="feed-entry"
       class:active={selectedFeed === null && !trendingSelected}
       onclick={() => selectFeed(null)}
     >
-      🌿 Local
+      🌿 {t.feed.list.local}
     </button>
 
     {#each feeds as feed}
@@ -1659,6 +1721,17 @@
         >✕</button>
       {/if}
     </div>
+
+    {#if importedToken}
+      <div class="feed-imported-bar">
+        <span class="muted small" data-testid={IDS.FEED_IMPORTED_NOTICE}>{t.feed.imported_notice({ platform: importedLabel })}</span>
+        <button
+          data-testid={IDS.FEED_IMPORTED_CLEAR}
+          class="btn-secondary small"
+          onclick={clearImported}
+        >{t.feed.imported_clear}</button>
+      </div>
+    {/if}
 
     {#if status === 'Loading' && posts.length === 0}
       <p class="muted">{t.common.loading}</p>
@@ -1833,7 +1906,18 @@
       {:else}
       <div class="compose-dialog-header">
         {#if !detailPost.legal_takedown_ref}
-          <span class="post-detail-author" data-testid={IDS.FEED_POST_DETAIL_AUTHOR}>{detailAuthor}</span>
+          {#if /^[0-9a-f]{64}$/i.test(detailPost.author ?? '')}
+            <!-- `click feed-post-detail-author → profile` (feed.md § User
+                 actions): the author's Profile with the post's home carried. -->
+            <button
+              type="button"
+              class="post-detail-author post-detail-author-link"
+              data-testid={IDS.FEED_POST_DETAIL_AUTHOR}
+              onclick={() => void goto(profileHref(detailPost.author, detailPost.home_nest_url))}
+            >{detailAuthor}</button>
+          {:else}
+            <span class="post-detail-author" data-testid={IDS.FEED_POST_DETAIL_AUTHOR}>{detailAuthor}</span>
+          {/if}
         {/if}
         <button class="icon-btn" aria-label={t.common.close} onclick={closeDetail}>&times;</button>
       </div>
@@ -1975,6 +2059,14 @@
           {/key}
         {/if}
       {/if}
+      <!-- The post detail's reaction pills (`feed.md` § Reaction posts count and
+           paint): the same shared tally, unscoped, tap → the manager's `react`. -->
+      <ReactionPills
+        post_id={detailPost.post_id}
+        source={detailPost.source ?? ''}
+        reactions={detailPost.reactions ?? []}
+        onreact={(id, emoji) => host.handleInteract(id, 'react', emoji)}
+      />
       {#if detailOffersThread && !detailPost.legal_takedown_ref}
         <!-- *View Thread* — a Bluesky post has a conversation to open
              (`bridges.md` § Bluesky-native thread view). -->
@@ -2173,6 +2265,12 @@
     align-items: center;
   }
   .feed-search-bar .text-input { flex: 1; }
+  .feed-imported-bar {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin-bottom: 0.5rem;
+  }
 
   /* Shared utilities */
   .text-input {
@@ -2310,6 +2408,16 @@
     line-height: 1.5;
   }
   .post-detail-author { font-weight: 600; }
+  .post-detail-author-link {
+    background: none;
+    border: 0;
+    padding: 0;
+    font: inherit;
+    font-weight: 600;
+    color: inherit;
+    cursor: pointer;
+  }
+  .post-detail-author-link:hover { text-decoration: underline; }
   .post-detail-actions { display: flex; gap: 0.5rem; margin-top: 0.75rem; }
   /* The Bluesky thread page — the opened post marked. */
   .thread-page { display: flex; flex-direction: column; gap: 0.5rem; padding: 0.5rem 0; }

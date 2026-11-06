@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="utf-8"?>
+<UserControl
+    x:Class="FaunaApp.Controls.RuleEditorPanel"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:loc="using:FaunaApp.Markup"
+    xmlns:ids="using:FaunaApp.UiIds">
+
+    <!--
+      The shared `rule-editor` component (nest-rules.md § The shared rule editor →
+      Three mountings, one shape) — ONE paint for every mounting: the admin Nest
+      page hosts it in admin-nest-rules-section, the Family page in
+      family-policy-rules-section for the selected ward. The twin of tui's
+      rule_editor.rs, android's RuleEditor.kt and apple's RuleEditorPanel.swift.
+      The rows are built in code-behind from the shared editor's view (one
+      rule-editor-item per rule, in a plain non-virtualizing StackPanel so every
+      row realizes); the frame below is static so a host can gate the save button
+      once, at construction.
+    -->
+    <StackPanel Spacing="8">
+        <TextBlock x:Name="NewerVersionText"
+                   Visibility="Collapsed"
+                   Opacity="0.7" FontSize="12" TextWrapping="Wrap"
+                   Text="{loc:Localize Key=rule_editor/newer_version}" />
+        <TextBlock x:Name="NoRulesText"
+                   Visibility="Collapsed"
+                   Opacity="0.7" TextWrapping="Wrap"
+                   Text="{loc:Localize Key=rule_editor/no_rules}" />
+
+        <StackPanel x:Name="RowsHost" Spacing="12" />
+
+        <!-- Absent (Collapsed) until the host's read lands: the add button's
+             appearance is what the e2e wait_loaded waits on. -->
+        <StackPanel x:Name="ActionsRow" Orientation="Horizontal" Spacing="8" Visibility="Collapsed">
+            <Button x:Name="AddButton"
+                    AutomationProperties.AutomationId="{x:Bind ids:Ids.RuleEditorAddButton}"
+                    Content="{loc:Localize Key=rule_editor/add_button}"
+                    Click="AddButton_Click" />
+            <Button x:Name="SaveButton"
+                    AutomationProperties.AutomationId="{x:Bind ids:Ids.RuleEditorSaveButton}"
+                    Style="{StaticResource AccentButtonStyle}"
+                    IsEnabled="False"
+                    Content="{loc:Localize Key=rule_editor/save_button}"
+                    Click="SaveButton_Click" />
+        </StackPanel>
+
+        <!-- AutomationId only, never a static AutomationProperties.Name: get_text
+             reads the TextBlock's own text. Collapsed (absent) while empty. -->
+        <TextBlock x:Name="StatusText"
+                   AutomationProperties.AutomationId="{x:Bind ids:Ids.RuleEditorStatus}"
+                   Visibility="Collapsed"
+                   Opacity="0.7" FontSize="12" TextWrapping="Wrap" />
+    </StackPanel>
+</UserControl>

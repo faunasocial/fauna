@@ -190,9 +190,7 @@ async fn start() -> Harness {
             ..Default::default()
         },
         backup_service: Some(backup_svc),
-        sync: fauna_nest::state::SyncState {
-            chunk_resolver: resolver,
-        },
+        sync: fauna_nest::state::SyncState::with_resolver(resolver),
         ..base
     });
 

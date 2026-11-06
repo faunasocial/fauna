@@ -265,7 +265,7 @@ func (b *Backend) lazyProvisionPersonal(ctx context.Context, sess *davauth.Sessi
 		Displayname: defaultDisplayname,
 		Color:       defaultColor,
 	}
-	sealed, err := SealCollectionMetadata(metadata, sess.MLSPubkey(), sess.MlkemEk())
+	sealed, err := SealCollectionMetadata(metadata, sess.CalendarPubkey(), sess.CalendarMlkemEk())
 	if err != nil {
 		return nil, fmt.Errorf("caldav: seal personal metadata: %w", err)
 	}
@@ -360,7 +360,7 @@ func (b *Backend) CreateCalendar(ctx context.Context, cal *caldav.Calendar) erro
 		Color:       defaultColor,
 		Description: cal.Description,
 	}
-	sealed, err := SealCollectionMetadata(metadata, sess.MLSPubkey(), sess.MlkemEk())
+	sealed, err := SealCollectionMetadata(metadata, sess.CalendarPubkey(), sess.CalendarMlkemEk())
 	if err != nil {
 		return fmt.Errorf("caldav: seal new calendar metadata: %w", err)
 	}

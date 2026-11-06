@@ -31,6 +31,9 @@ pytestmark = [
     pytest.mark.linux,
     pytest.mark.web,
     pytest.mark.android,
+    pytest.mark.macos,
+    pytest.mark.ios,
+    pytest.mark.windows,
 ]
 
 SIGNER = "cd" * 32

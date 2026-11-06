@@ -87,7 +87,7 @@ fn pending_section(snapshot: &UsersSnapshot) -> Vec<Element> {
     let rows: Vec<_> = snapshot
         .pending_actions
         .iter()
-        .filter(|a| a.status == "pending")
+        .filter(|a| a.is_pending())
         .collect();
     let mut els = vec![Element::label(
         ids::ADMIN_USERS_PENDING_SECTION,

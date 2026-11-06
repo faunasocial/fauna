@@ -178,6 +178,13 @@ pub struct TestPostSpec {
     /// renderable amount.
     #[serde(default)]
     pub tips: Option<TipView>,
+    /// The post's per-emoji reaction tally (`feed.md` § Layout & flow →
+    /// *Reaction posts count and paint*), projected onto
+    /// [`PostSummary::reactions`] as the nest's read would fold it. Default
+    /// empty paints no `post-reaction-pill`; set `viewer_react_id` on a group
+    /// to inject the viewer's own reaction.
+    #[serde(default)]
+    pub reactions: Vec<crate::PostReactionGroup>,
 }
 
 /// A pre-resolved link preview to project onto a [`TestPostSpec`]'s document
@@ -312,6 +319,7 @@ impl TestPostSpec {
             labels: self.labels,
             unlock_offer: self.unlock_offer,
             tips: self.tips,
+            reactions: self.reactions,
             unlock_purchase_pending: self.unlock_purchase_pending,
             // No spec field: a taken-down post has no body/author/tags to
             // specify, so a test wanting one mints it with the single-purpose

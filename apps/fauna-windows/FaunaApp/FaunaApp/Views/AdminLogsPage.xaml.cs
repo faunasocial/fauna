@@ -19,6 +19,11 @@ namespace FaunaApp.Views;
 /// in memory (no refetch). NO clear — there is no admin RPC to wipe the nest ring.
 /// admin-nav-back is the shared shell PaneHeader button. Page-level failures route to
 /// <c>error-message</c>. Mirrors linux <c>views/admin.rs build_admin_logs_page</c>.
+///
+/// <para>Below the lines, the admin audit log section (<c>admin.md</c> § The admin
+/// audit log on <c>admin-logs</c>), re-read on every entry to the page (linux's
+/// shape) and paged by <c>admin-audit-more-button</c>; a failed read lands on
+/// <c>error-message</c> and keeps the rows shown.</para>
 /// </summary>
 public sealed partial class AdminLogsPage : Page
 {
@@ -48,6 +53,9 @@ public sealed partial class AdminLogsPage : Page
         try
         {
             await _vm.LoadAsync();
+            AuditList.ItemsSource = _vm.AuditRows;
+            await _vm.LoadAuditAsync();
+            RenderAudit();
             RenderError(_vm.Error);
         }
         catch (Exception ex)
@@ -74,6 +82,24 @@ public sealed partial class AdminLogsPage : Page
     {
         if (_vm is null) return;
         ClipboardHelper.CopyText(_vm.CopyText());
+    }
+
+    private async void AuditMoreButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (_vm is null) return;
+        AuditMoreButton.IsEnabled = false;
+        await _vm.MoreAuditAsync();
+        RenderAudit();
+        RenderError(_vm.Error);
+    }
+
+    /// <summary>The integrity line and the more button from the VM's view (the rows
+    /// are the bound <see cref="AdminLogsViewModel.AuditRows"/>).</summary>
+    private void RenderAudit()
+    {
+        if (_vm is null) return;
+        AuditIntegrityText.Text = _vm.AuditIntegrityText;
+        AuditMoreButton.IsEnabled = _vm.AuditMoreEnabled;
     }
 
     private void UpdateEmpty()

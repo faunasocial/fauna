@@ -1,5 +1,6 @@
 import type { SharedRpcPort } from '../../static/fauna_wasm_backups.js';
 import { asset } from '$app/paths';
+import { joinChunk } from './chunk-join';
 import { sharedAccountPort } from './account-runtime';
 import type { BackupsMachine } from '../../static/fauna_wasm_backups.js';
 import type { LocalizedText } from '#lib/i18n/localized';
@@ -32,6 +33,8 @@ export function ensureBackupsWasm(): Promise<void> {
     wasmInit = (async () => {
       const mod = await import('../../static/fauna_wasm_backups.js');
       await mod.default(asset('fauna_wasm_backups_bg.wasm'));
+      // Its tracing to the ring, its identity-store doors (chunk-join.ts).
+      joinChunk(mod);
       wasmModule = mod;
     })().catch((e) => {
       wasmInit = null;

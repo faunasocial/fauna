@@ -149,6 +149,67 @@ async fn a_record_failure_leaves_the_row_at_the_pre_upload_merge_base() {
     );
 }
 
+/// An edit whose bytes uploaded but whose change record FAILED must stay
+/// pending, so the next converge pass re-drives it until the nest records it.
+/// Left `Synced` (the upload path flips the row before recording), nothing
+/// would ever retry it: reconcile's fast path reads a `Synced` row with
+/// unchanged mtime + size as unchanged without hashing, and `upload_pending`
+/// lists only `LocallyModified` — so the edit would never be recorded and
+/// *Free up space* would keep the file for good (files-on-demand outcome 5,
+/// the linux leg's `signature_invalid` record, 2026-10-29).
+#[tokio::test]
+async fn a_record_failed_edit_is_re_driven_by_the_next_pass() {
+    let server = MockServer::start().await;
+    let store = MockNest::new().mount(&server).await;
+
+    let dir = tempfile::tempdir().unwrap();
+    let rel = "notes.txt";
+    std::fs::write(dir.path().join(rel), b"fresh local edit").unwrap();
+
+    let engine = test_engine(&server.uri(), dir.path().to_path_buf());
+    seed_merge_base(&engine, rel, ContentHash::from_digest_raw([0xAB; 32]));
+    engine
+        .db()
+        .update_state(rel, SyncState::LocallyModified)
+        .unwrap();
+
+    let (recorded, _) = engine.upload_pending(1).await.unwrap();
+    assert!(
+        recorded.is_empty(),
+        "the record must have failed for this test"
+    );
+    assert!(
+        !store.posted_manifests.lock().unwrap().is_empty(),
+        "the bytes did upload"
+    );
+
+    let entry = engine.db().get_entry(rel).unwrap().unwrap();
+    assert_eq!(
+        entry.state,
+        SyncState::LocallyModified,
+        "an edit whose record failed stays pending for the next pass"
+    );
+
+    // Reconcile (mtime + size unchanged) must not settle it either.
+    engine.reconcile().await.unwrap();
+    let pending = engine
+        .db()
+        .list_by_state(SyncState::LocallyModified)
+        .unwrap();
+    assert!(
+        pending.iter().any(|e| e.path == rel),
+        "the next converge pass lists the unrecorded edit again: {pending:?}"
+    );
+
+    // And that pass re-drives it: the record is attempted again.
+    let posts_before = store.posted_manifests.lock().unwrap().len();
+    engine.upload_pending(1).await.unwrap();
+    assert!(
+        store.posted_manifests.lock().unwrap().len() > posts_before,
+        "the second pass re-drove the upload + record"
+    );
+}
+
 // ─────────────────────────────────────────────────────────────────────
 // The dehydration gate must be record-blind-SAFE: a failed record leaves a
 // `Synced` row whose `local_hash` matches disk but whose recorded head
@@ -184,10 +245,11 @@ async fn a_record_failed_edit_is_not_dehydration_safe() {
         "the record must have failed for this test"
     );
 
-    // Sanity: the row IS `Synced` with disk == local_hash — the exact shape that
-    // fooled the record-blind gate (so the assertion below is not vacuous).
+    // Sanity: disk == local_hash — the shape that fooled the record-blind gate
+    // (so the assertion below is not vacuous). The row is back to pending for
+    // the record's retry (`a_record_failed_edit_is_re_driven_by_the_next_pass`).
     let entry = engine.db().get_entry(rel).unwrap().unwrap();
-    assert_eq!(entry.state, SyncState::Synced);
+    assert_eq!(entry.state, SyncState::LocallyModified);
     assert_eq!(
         entry.local_hash,
         Some(fauna_core::data::ContentHash::of_raw(b"fresh local edit")),

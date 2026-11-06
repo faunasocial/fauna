@@ -170,6 +170,31 @@ impl BridgePushRegistry {
         dropped
     }
 
+    /// Drop every subscription held for `served_user_actor_id`, across all
+    /// its mailboxes and every MDA; returns how many rows were dropped.
+    ///
+    /// The mail-off teardown: a subscription is checked against the served
+    /// user's serving gate once, at `subscribe_mailbox_state`, and `emit`
+    /// re-checks nothing, so when the user turns their mail off (or stops
+    /// serving it here) the flag setter calls this — an IDLE / NOTIFY session
+    /// opened before the flip then receives no further UIDs, flags or
+    /// expunges, and re-subscribing meets the gate again
+    /// (`mail-credentials.md` § Trigger taxonomy, the Disable-mail row).
+    /// Idempotent; a no-op for an actor with no entries.
+    pub fn remove_served_user(&self, served_user_actor_id: &[u8]) -> usize {
+        let mut subs = self.subs.lock().unwrap();
+        let mut dropped = 0;
+        subs.retain(|(served, _), entries| {
+            if served.as_slice() == served_user_actor_id {
+                dropped += entries.len();
+                false
+            } else {
+                true
+            }
+        });
+        dropped
+    }
+
     /// Returns the number of distinct `(served_user, mailbox)` keys
     /// currently registered. Exposed for tests + observability.
     pub fn key_count(&self) -> usize {
@@ -372,6 +397,33 @@ mod tests {
         assert_eq!(r.remove_mda(&[7u8; 32]), 1);
         assert_eq!(r.remove_mda(&[7u8; 32]), 0, "second call: idempotent");
         assert_eq!(r.subscription_count(), 0);
+    }
+
+    #[test]
+    fn remove_served_user_drops_that_users_entries_across_mailboxes_and_mdas() {
+        let ws = WsState::new();
+        let r = BridgePushRegistry::new();
+        let off = [1u8; 32];
+        let other = [2u8; 32];
+        let mda = [7u8; 32];
+        let (_conn, mut rx) = ws.subscribe(mda);
+        r.register(&off, "INBOX", mda);
+        r.register(&off, "Sent", [8u8; 32]);
+        r.register(&other, "INBOX", mda);
+
+        assert_eq!(r.remove_served_user(&off), 2);
+        assert_eq!(r.remove_served_user(&off), 0, "idempotent");
+        assert_eq!(r.subscription_count(), 1);
+
+        let ev = MailboxStateEvent::Append {
+            uid: 1,
+            flags: vec![],
+            modseq: 1,
+        };
+        r.emit(&ws, &off, "INBOX", &ev);
+        assert!(rx.try_recv().is_err(), "the mail-off user's stream is cut");
+        r.emit(&ws, &other, "INBOX", &ev);
+        assert!(rx.try_recv().is_ok(), "another user's stream is untouched");
     }
 
     #[test]

@@ -241,7 +241,7 @@ impl CacheDb {
                 || fauna_protocol::bridge_search_policy::is_bridge_content_type(t)
         };
         let search_public =
-            content_type_filter.is_none() || content_type_filter.is_some_and(&is_public_type);
+            content_type_filter.is_none() || content_type_filter.is_some_and(is_public_type);
         if search_public {
             let type_filter = if content_type_filter.is_some() {
                 content_type_filter

@@ -41,7 +41,6 @@ from pathlib import Path
 
 import pytest
 
-from helpers.app_surface import skip_unbuilt
 from helpers.waiting import wait_until
 
 _tests_dir = str(Path(__file__).resolve().parent.parent.parent)  # tests/
@@ -71,38 +70,11 @@ HANDOFF_REGISTRATION_S = 90.0
 
 
 def _wait_for_kit_screen_or_skip(app) -> None:
-    """Wait for the onboarding kit screen, or skip declaring the class if it
-    never renders.
-
-    Does the wait itself, on purpose — same shape as
-    ``SettingsActions.open_recovery_kit_or_skip``: a caller that waited first
-    and gate-checked second (the shape this replaced, found 2026-08-22) would
-    hard-fail with a ``TimeoutError`` on an app lacking the screen instead of
-    skipping. A bare ``recovery_kit_showing()`` check with no wait would race
-    a genuinely-present but still-rendering screen on a slower app, which is
-    why this wraps the real wait rather than swapping the two calls' order.
-
-    Not a declared absence — every app owes this screen. ``skip_unbuilt``
-    fails under ``--strict-app`` and is tallied every run, so the gap stays
-    visible instead of reading as a pass.
-    """
-    try:
-        app.driver.wait_for("recovery-kit-secret-display", timeout=KIT_SCREEN_RENDER_S)
-        return
-    except Exception:
-        pass
-    skip_unbuilt(
-        app.driver,
-        surface="onboarding-recovery-kit-screen",
-        detail=(
-            "onboarding.md § 1 Identity; tui leads and the other six follow "
-            "in batched trickle-down"
-        ),
-        tracked=(
-            "docs/goal/behavior/identity-succession.md "
-            "§ Implementation status today"
-        ),
-    )
+    """Wait for the onboarding kit screen. Every app paints it (all seven
+    ui-actual files list `recovery-kit-secret-display` on their recovery-kit
+    onboarding page), so a screen that never renders is a red from the wait
+    itself, not a skip. The name is the gate's history."""
+    app.driver.wait_for("recovery-kit-secret-display", timeout=KIT_SCREEN_RENDER_S)
 
 
 def _sign_in_as(app, nest, handle: str) -> None:
@@ -155,7 +127,7 @@ def _open_recovery_section(app) -> str:
     genuinely wrong, and it should say so on the first pass.
     """
     app.settings.navigate()
-    app.settings.open_recovery_kit_or_skip()
+    app.settings.open_recovery_kit()
     return app.settings.recovery_kit_status()
 
 
@@ -176,7 +148,14 @@ def _finish_wizard_to_logged_in(app, timeout: float = WIZARD_TO_AUTHED_S) -> Non
         (convention 14) — `wait_until` owns the interval."""
         if any(app.driver.is_visible(m) for m in markers):
             return True
-        for btn in ("nat-mode-confirm-button", "launch-retry-button"):
+        # `trust-box-skip-button` answers § 3b-ter's trust prompt, which every
+        # app now renders after the handle step; declining leaves everything as
+        # it was, and this journey is about the kit, not the grant set.
+        for btn in (
+            "nat-mode-confirm-button",
+            "trust-box-skip-button",
+            "launch-retry-button",
+        ):
             try:
                 if app.driver.is_visible(btn):
                     app.driver.click(btn)
@@ -189,9 +168,29 @@ def _finish_wizard_to_logged_in(app, timeout: float = WIZARD_TO_AUTHED_S) -> Non
         timeout,
         diagnose=lambda: (
             "the wizard never reached the authenticated app after the "
-            f"create-path onboarding; error surface: {app.error_text()!r}"
+            f"create-path onboarding; error surface: {app.error_text()!r}; "
+            f"nav: {_safe_state(app, 'nav')!r}; "
+            f"connection: {_safe_state(app, 'connection')!r}; "
+            f"handle message area: {_safe_text(app, 'handle-message-area')!r}"
+            f"; trust prompt showing: {app.onboarding.trust_prompt_showing()!r}"
         ),
     )
+
+
+def _safe_state(app, key: str):
+    """A diagnose-time state read that cannot itself raise (convention 6)."""
+    try:
+        return app.driver.get_state(key)
+    except Exception as exc:  # noqa: BLE001 — a diagnosis never masks the red
+        return f"<unreadable: {exc}>"
+
+
+def _safe_text(app, element_id: str):
+    """A diagnose-time text read that cannot itself raise (convention 6)."""
+    try:
+        return app.driver.get_text(element_id)
+    except Exception as exc:  # noqa: BLE001 — a diagnosis never masks the red
+        return f"<unreadable: {exc}>"
 
 
 @pytest.mark.feature("recovery-kit-at-sign-up")

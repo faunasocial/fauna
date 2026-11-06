@@ -612,6 +612,7 @@ mod tests {
             &scope,
             &bob().actor_id(),
             now,
+            None,
         )
         .expect("alice builds the deliver");
         peer.ingest_frame(&alice().actor_id(), &delivered.frame)

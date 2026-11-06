@@ -246,6 +246,70 @@ def test_delivered_message_confirms_an_accepted_contact_with_no_confirm_call(two
     )
 
 
+@pytest.mark.feature("contacts")
+def test_accepting_a_knock_makes_the_requester_a_contact_too(two_nodes):
+    """Accepting a stored knock writes BOTH edges — the requester's too.
+
+    ``docs/goal/ui/contacts.md`` § Persistence → *The accept makes the edge
+    mutual*: a contact request is the requester's standing consent to hear
+    from the person they asked, so ``fauna.knocks.accept`` also writes the
+    requester's ``(requester, acceptor) accepted`` edge when a knock from the
+    requester is on file and the requester is local. Without it the acceptor
+    is a stranger to the requester and cannot open the conversation.
+
+    The knock is a real one: Alice writes to Bob, a stranger whose inbox is on
+    the default ``allow_knock``, so the nest holds it as a knock
+    (``inbox_id`` is ``None``) instead of delivering it.
+    """
+    port = two_nodes["port_a"]
+    admin_sk = two_nodes["admin_sk_a"]
+    node_url = port_base_url(port)
+
+    alice = create_actor_and_register(port, admin_signing_key=admin_sk)
+    bob = create_actor_and_register(port, admin_signing_key=admin_sk)
+    alice_id = alice["actor_id_hex"]
+    bob_id = bob["actor_id_hex"]
+
+    payload, _post_id = build_email_inbox_payload(
+        alice["signing_key"],
+        bob_id,
+        "Hello",
+        "May we be in touch?",
+        node_url=node_url,
+    )
+    with _ws_client(port, alice) as c:
+        reply = c.call(
+            "fauna.inbox.send",
+            {
+                "recipient_actor_id": bob_id,
+                "recipient_nest_url": None,
+                "payload_bytes": payload,
+            },
+        )
+    assert reply.get("inbox_id") is None, (
+        f"a stranger's message under `allow_knock` must be held as a knock, got {reply!r}"
+    )
+
+    with _ws_client(port, bob) as c:
+        knocks = c.call("fauna.knocks.list", {}).get("knocks", [])
+        assert any(k.get("sender") == alice_id for k in knocks), (
+            f"Bob must hold Alice's knock before accepting it: {knocks!r}"
+        )
+        c.call("fauna.knocks.accept", {"peer_id": alice_id})
+        bob_rows = {r["peer_id"]: r["status"] for r in c.call("fauna.contacts.list", {})["contacts"]}
+    assert bob_rows.get(alice_id) == "accepted", f"Bob's edge for Alice: {bob_rows!r}"
+
+    with _ws_client(port, alice) as c:
+        alice_rows = {
+            r["peer_id"]: r["status"] for r in c.call("fauna.contacts.list", {})["contacts"]
+        }
+    assert alice_rows.get(bob_id) == "accepted", (
+        f"accepting Alice's knock must write Alice's edge for Bob too "
+        f"(contacts.md § Persistence → The accept makes the edge mutual); "
+        f"Alice's contacts read {alice_rows!r}"
+    )
+
+
 @pytest.mark.feature("mail-filter-rules")
 def test_email_filter_api(two_nodes):
     """Create, list, and delete email filters via the ``fauna.email.filters.*`` kinds.

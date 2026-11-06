@@ -58,6 +58,10 @@ public sealed partial class VpsConfigView : UserControl
     /// </summary>
     private bool _syncingMailMode;
 
+    /// <summary>The same guard for <c>SshDoorCheck</c> and
+    /// <see cref="SyncSshDoorCheck"/>.</summary>
+    private bool _syncingSshDoor;
+
     public VpsConfigView()
     {
         InitializeComponent();
@@ -80,6 +84,7 @@ public sealed partial class VpsConfigView : UserControl
             Bindings.Update();
             UpdateProviderSectionContent();
             SyncMailModeCheck();
+            SyncSshDoorCheck();
             SyncUpdateChannelRadios();
             // hosted-auth field button's label/pressability (onboarding.md
             // § 4) — CredsForm owns no tick of its own, matches DnsConfigView.
@@ -88,6 +93,7 @@ public sealed partial class VpsConfigView : UserControl
 
         UpdateProviderSectionContent();
         SyncMailModeCheck();
+        SyncSshDoorCheck();
         SyncUpdateChannelRadios();
     }
 
@@ -234,6 +240,31 @@ public sealed partial class VpsConfigView : UserControl
     }
 
     /// <summary>
+    /// Re-sync the SSH-door CheckBox from the shared getter (default OFF), guarded
+    /// so the programmatic update does not re-fire <c>SetProvisionSshDoor</c>. The
+    /// warning's visibility follows through its OneWay x:Bind on
+    /// <c>ViewModel.SshDoorWarningVisible</c>. onboarding-provisioning.md § 5.
+    /// </summary>
+    private void SyncSshDoorCheck()
+    {
+        _syncingSshDoor = true;
+        try
+        {
+            if (SshDoorCheck.IsChecked != ViewModel.ProvisionSshDoorEnabled)
+                SshDoorCheck.IsChecked = ViewModel.ProvisionSshDoorEnabled;
+        }
+        finally { _syncingSshDoor = false; }
+    }
+
+    /// <summary>CheckBox toggle → the door choice in the shared machine, which
+    /// carries it into the box's cloud-init and mints the key at the run.</summary>
+    private void SshDoorCheck_Toggled(object sender, RoutedEventArgs e)
+    {
+        if (_syncingSshDoor) return;
+        ViewModel.SetProvisionSshDoor(SshDoorCheck.IsChecked == true);
+    }
+
+    /// <summary>
     /// The update channels in the shared <c>UpdateChannel::ALL</c> order, with
     /// the id each radio is keyed by and the resw key of its label.
     /// </summary>
@@ -244,7 +275,7 @@ public sealed partial class VpsConfigView : UserControl
         (UpdateChannel.Dev,    "dev",    "onboarding/vps_config/update_channel_dev_label"),
     };
 
-    private readonly List<(UpdateChannel Channel, RadioButton Radio)> _updateChannelRadios = new();
+    private readonly List<(UpdateChannel Channel, RadioButton Radio, TextBlock Description)> _updateChannelRadios = new();
 
     /// <summary>
     /// Suppresses <c>OnUpdateChannelChecked</c> while
@@ -256,9 +287,12 @@ public sealed partial class VpsConfigView : UserControl
     /// <summary>
     /// Populate <c>UpdateChannelRow</c> with one RadioButton per channel,
     /// <c>vps-config-update-channel-row[&lt;id&gt;]</c>, each showing its label
-    /// and one-line description. The description is looked up by the key the
-    /// shared <c>UpdateChannelDescriptionKey</c> hands back (the compat-line
-    /// wording while the product major is 0) — never a per-channel constant.
+    /// and one-line description. The description's text is painted by
+    /// <see cref="SyncUpdateChannelRadios"/> from the key the machine's
+    /// <c>UpdateChannelDescriptionKeyForRow</c> hands back — the no-build
+    /// wording when the registry has no build on the channel, else the
+    /// compat-line wording — never a per-channel constant, and re-read every
+    /// tick because the registry reading lands after the rows are built.
     /// Mirrors <c>apps/fauna-linux/src/views/onboarding/vps_config.rs</c>.
     /// </summary>
     private void BuildUpdateChannelRows()
@@ -266,20 +300,16 @@ public sealed partial class VpsConfigView : UserControl
         foreach (var (channel, id, labelKey) in UpdateChannels)
         {
             var label = S.Get(labelKey);
-            var descDotted = OnboardingViewModel.UpdateChannelDescriptionKey(channel);
-            var descSlashed = descDotted.Replace('.', '/');
-            var descResolved = S.Get(descSlashed);
-            var desc = descResolved == descSlashed ? descDotted : descResolved;
 
-            var content = new StackPanel { Spacing = 2 };
-            content.Children.Add(new TextBlock { Text = label });
-            content.Children.Add(new TextBlock
+            var description = new TextBlock
             {
-                Text = desc,
                 TextWrapping = TextWrapping.Wrap,
                 Opacity = 0.7,
                 FontSize = 12,
-            });
+            };
+            var content = new StackPanel { Spacing = 2 };
+            content.Children.Add(new TextBlock { Text = label });
+            content.Children.Add(description);
 
             var radio = new RadioButton { Content = content, GroupName = "VpsUpdateChannel" };
             radio.SetValue(AutomationProperties.AutomationIdProperty, $"vps-config-update-channel-row[{id}]");
@@ -287,8 +317,19 @@ public sealed partial class VpsConfigView : UserControl
             var c = channel;
             radio.Checked += (_, _) => OnUpdateChannelChecked(c);
             UpdateChannelRow.Children.Add(radio);
-            _updateChannelRadios.Add((channel, radio));
+            _updateChannelRadios.Add((channel, radio, description));
         }
+    }
+
+    /// <summary>A channel row's description, resolved from the key the shared
+    /// row getter picks; falls back to the raw dotted key on a localizer miss
+    /// (matches <see cref="BuildVpsProviderRow"/>).</summary>
+    private string ChannelRowDescription(UpdateChannel channel)
+    {
+        var dotted = ViewModel.UpdateChannelDescriptionKeyForRow(channel);
+        var slashed = dotted.Replace('.', '/');
+        var resolved = S.Get(slashed);
+        return resolved == slashed ? dotted : resolved;
     }
 
     /// <summary>Radio selection → the shared setter (guarded against the tick re-sync).</summary>
@@ -299,9 +340,11 @@ public sealed partial class VpsConfigView : UserControl
     }
 
     /// <summary>
-    /// Repaint the radios from the shared getter (the only source; nothing is
-    /// cached here) and publish each row's on/off word in HelpText, which the
-    /// e2e bridge reads as the <c>state</c> attribute.
+    /// Repaint the radios from the shared getters (the only source; nothing is
+    /// cached here) — each row's selection and its description, which follows
+    /// the registry reading the machine rests after the page is built — and
+    /// publish each row's on/off word in HelpText, which the e2e bridge reads
+    /// as the <c>state</c> attribute.
     /// </summary>
     private void SyncUpdateChannelRadios()
     {
@@ -309,8 +352,10 @@ public sealed partial class VpsConfigView : UserControl
         _syncingUpdateChannel = true;
         try
         {
-            foreach (var (channel, radio) in _updateChannelRadios)
+            foreach (var (channel, radio, description) in _updateChannelRadios)
             {
+                var desc = ChannelRowDescription(channel);
+                if (description.Text != desc) description.Text = desc;
                 var on = channel == selected;
                 if (radio.IsChecked != on) radio.IsChecked = on;
                 radio.SetValue(AutomationProperties.HelpTextProperty, on ? "on" : "off");

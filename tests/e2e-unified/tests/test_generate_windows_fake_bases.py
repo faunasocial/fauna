@@ -407,6 +407,7 @@ _EXTERNAL_INTERFACES = frozenset(
     {
         "IDisposable",  # BCL — fixtures, and `Disposable*` doubles that also inherit a base
         "INotifyPropertyChanged",  # BCL — observer test doubles
+        "IEqualityComparer",  # BCL (System.Collections) — a comparer a test hands to a collection assertion
     }
 )
 

@@ -41,8 +41,9 @@ import pytest
 from nacl.signing import SigningKey
 
 from actions.api_actor import ApiActor
+from clients._ws_rpc_core import RpcCallError
 from common.auth import create_actor_and_register
-from helpers.app_surface import skip_unbuilt
+from helpers.app_surface import require_surface
 from helpers.e2e_session import login_as
 from helpers.waiting import wait_until
 from i18n.strings import S
@@ -50,6 +51,8 @@ from i18n.strings import S
 pytestmark = [pytest.mark.tier_3]
 
 FAKE_SECRET = "whsec_e2e_ui_fake_provider"
+# Convention-14 named budget for an author-side grant (`test_subscriptions.py`).
+AUTHOR_GRANT_BUDGET_S = 90
 
 
 def _unique(prefix: str) -> str:
@@ -109,36 +112,6 @@ def _login_as(app, nest, user, *, handle: str) -> None:
     login_as(app, nest, user, handle=handle, device_id="test-device-payments")
 
 
-def _gate(app) -> None:
-    """The profile Tiers-tab §4 **provider section** landed on linux (lead,
-    2026-07-13) + web + android (same day) + apple (2026-07-13, macOS lead,
-    iOS shares the same FaunaKit view) + windows (2026-07-16) + tui
-    (the tui Tiers author track); widen as the remaining lifts land (priority #1 —
-    same ui.yaml IDs everywhere). NOTE: android is CODE-wired +
-    compile-verified + Robolectric-tested, but its e2e is host-emulator-gated
-    fleet-wide (deselected off the emulator host), so this assertion has not yet been
-    observed green for android — it runs once the emulator is stood up.
-
-    ⚠ This gate covers ONLY the §4 provider surface on the profile page. The
-    claim-**redeem** input lives on the separate consumer `subscription-settings`
-    page — gate that with the action layer's
-    `require_consumer_subscriptions_page`. The two were one predicate until
-    2026-08-01; splitting them is what let tui run the three provider/mint tests
-    it genuinely built while its consumer page was still owed (that page landed
-    2026-08-02, so both predicates now pass on all 7 apps — the split stands on
-    its own terms, not on tui's gap)."""
-    if not (app.driver.is_linux() or app.driver.is_web() or app.driver.is_android()
-            or app.driver.is_macos() or app.driver.is_ios() or app.driver.is_windows()
-            or app.driver.is_tui()):
-        skip_unbuilt(
-            app.driver,
-            surface="Pillar-3 provider UI (profile Tiers tab §4 "
-            "subscription-provider-*)",
-            detail="landed on all 7 apps",
-            tracked="monetization.md",
-        )
-
-
 def _has_new_ids(app) -> bool:
     """Whether this client has lifted the three ID sets added 2026-07-13
     (`subscription-provider-form-webhook-url` + copy button, the §2
@@ -151,13 +124,8 @@ def _has_new_ids(app) -> bool:
     110-114` for the redeem input) so far — all 7 apps now covered (priority
     #1 — the same ui.yaml IDs everywhere).
 
-    Separate from `_gate` on purpose: `_gate` covers the §4 provider section,
-    which apple + web + android + windows already ship. Gating both on one
-    predicate would skip the whole test on those clients and throw away
-    coverage they genuinely have.
-
-    NOTE: android is CODE-wired + compile-verified + Robolectric-tested (same
-    as `_gate`'s android note), but its e2e is host-emulator-gated fleet-wide,
+    NOTE: android is CODE-wired + compile-verified + Robolectric-tested, but
+    its e2e is host-emulator-gated fleet-wide,
     so this predicate has not yet been observed green for android — it runs
     once the emulator is stood up on the emulator host."""
     return (app.driver.is_linux() or app.driver.is_web() or app.driver.is_android()
@@ -181,7 +149,6 @@ def test_provider_config_add_and_remove(app, payments_nest):
     """Author journey: add a provider through the §4 form; the row renders
     kind + status without the secret; a signed webhook verifies against the
     form-entered secret (the save round-trip proof); remove deregisters."""
-    _gate(app)
     admin_sk = _as_signing_key(payments_nest["admin"]["signing_key"])
     author = create_actor_and_register(
         payments_nest["port"], base_url=payments_nest["url"], admin_signing_key=admin_sk,
@@ -222,12 +189,34 @@ def test_provider_config_add_and_remove(app, payments_nest):
     assert status == 200 and reply.get("queued") is True, (
         f"a webhook signed with the form-entered secret must verify: {status} {reply!r}"
     )
-    subs.refresh()
-    assert subs.wait_for_pending_request(1), (
-        f"the payment-entitled request should surface in §2; error={subs.error_text()!r}"
+    # The author's drain grants a payment-entitled row with no judgment, and its
+    # poll races this read (30 s native, 2 s on web under the e2e agent): the row
+    # standing in §2 is not latency-independent (convention 14). So the wait ends
+    # on the row OR on the grant it turns into; only a row that stands has a badge
+    # to read, and one that left while being read is not a missing badge.
+    buyer_api = ApiActor(
+        payments_nest["url"], buyer["token"], buyer["actor_id_hex"],
+        bytes(buyer["signing_key"]),
     )
-    if _has_new_ids(app):
-        assert subs.request_paid(0), (
+
+    def buyer_granted() -> bool:
+        try:
+            return buyer_api.subscription_key_blob(
+                bytes.fromhex(author["actor_id_hex"]), tier,
+            )["version"] >= 1
+        except RpcCallError:
+            return False
+
+    def row_or_grant() -> bool:
+        subs.refresh()
+        return subs.pending_request_count() >= 1 or buyer_granted()
+
+    wait_until(
+        row_or_grant, AUTHOR_GRANT_BUDGET_S, interval=1,
+        diagnose=lambda: f"no §2 row and no grant; error={subs.error_text()!r}",
+    )
+    if subs.pending_request_count() >= 1 and _has_new_ids(app):
+        assert subs.request_paid(0) or subs.pending_request_count() == 0, (
             "a payment-entitled request should show the paid badge "
             "(PendingRequest.payment_entitled)"
         )
@@ -258,7 +247,6 @@ def test_provider_webhook_url_preview(app, payments_nest):
     URL + author actor_id + the selected kind, so it is visible as soon as the
     form opens, before the provider is even saved (no nest round-trip), and
     the creator never hand-assembles it."""
-    _gate(app)
     _gate_new_ids(app)
     admin_sk = _as_signing_key(payments_nest["admin"]["signing_key"])
     author = create_actor_and_register(
@@ -291,7 +279,6 @@ def test_provider_return_url_display(web_hosting_app, web_hosting_nest):
     selected provider's own placeholder (`{CHECKOUT_SESSION_ID}` for stripe,
     `{REF}` otherwise). Compared as the full string per kind."""
     app = web_hosting_app
-    _gate(app)
     from conftest import WEB_HOSTING_DOMAIN
 
     web = app.web_settings
@@ -329,11 +316,6 @@ def test_claim_redeem_via_ui(app, payments_nest):
     `subscription-settings` page → the queued entitlement renders exactly
     like a queued subscribe (a "pending" My Subscriptions row); a bogus code
     surfaces the typed error via `error-message`."""
-    _gate(app)
-    # This is the only test in the file that drives the CONSUMER page rather
-    # than the author's profile Tiers tab (convention 7: the platform check
-    # lives in the action layer).
-    app.subscriptions.require_consumer_subscriptions_page()
     admin_sk = _as_signing_key(payments_nest["admin"]["signing_key"])
     creator = create_actor_and_register(
         payments_nest["port"], base_url=payments_nest["url"], admin_signing_key=admin_sk,
@@ -482,13 +464,7 @@ def test_manual_claim_void(app, payments_nest):
     from clients.ws_rpc_admin_client import RpcCallError
 
     _gate_new_ids(app)
-    if not (app.driver.is_tui() or app.driver.is_web() or app.driver.is_linux()):
-        skip_unbuilt(
-            app.driver,
-            surface="§5 claim Void verb (subscription-claim-void-button)",
-            detail="built on tui, web, linux; android landed unverified, macos, ios and windows follow",
-            tracked="monetization.md",
-        )
+    require_surface(app.driver, "subscription-claim-void-button")
     admin_sk = _as_signing_key(payments_nest["admin"]["signing_key"])
     author = create_actor_and_register(
         payments_nest["port"], base_url=payments_nest["url"], admin_signing_key=admin_sk,

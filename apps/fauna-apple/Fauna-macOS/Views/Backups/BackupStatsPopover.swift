@@ -20,8 +20,8 @@ struct BackupStatsPopover: View {
 
                     Section(L.backups.repoStats.encryption) {
                         LabeledContent(L.settings.encryptionPage.title, value: L.backups.repoStats.encryptionAlgo)
-                        LabeledContent(L.backups.repoStats.compression, value: L.backups.repoStats.compression)
-                        LabeledContent(L.backups.repoStats.chunkSizes, value: L.backups.repoStats.chunkSizes)
+                        LabeledContent(L.backups.repoStats.compressionLabel, value: L.backups.repoStats.compression)
+                        LabeledContent(L.backups.repoStats.chunkSizesLabel, value: L.backups.repoStats.chunkSizes)
                     }
                 }
                 .formStyle(.grouped)

@@ -243,6 +243,7 @@ async fn successor_runtime(
         owed_nests: Some(native_owed_nest_deliverer(seeds)),
         peer_transport: None,
         enrollment_target_device_id: format!("{:0<64}", hex::encode(name.as_bytes())),
+        enrollment_device_label: None,
     })
     .await
     .expect("the successor's runtime assembles")
@@ -265,10 +266,11 @@ fn delivered_at(report: &PumpReport, keeper: Option<[u8; 32]>) -> Vec<(Vec<u8>, 
 }
 
 /// The refusal a sign-in as `keypair` at `nest` meets, or `None` when it
-/// signs in.
+/// signs in — read off the mint itself: `connect()` returns `Ok` over a
+/// non-terminal first-mint refusal, its supervisor retrying it.
 async fn sign_in_refusal(nest: &Nest, keypair: ActorKeypair) -> Option<String> {
     let client = NestClient::new(nest.base.clone(), keypair);
-    match client.connect().await {
+    match client.authenticate().await {
         Ok(()) => None,
         Err(e) => Some(
             client

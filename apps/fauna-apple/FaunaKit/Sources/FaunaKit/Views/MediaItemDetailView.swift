@@ -53,6 +53,9 @@ struct MediaItemDetailView: View {
     /// surface: the page banner sits behind the modal, where the user who asked
     /// could not read it (linux `detail.rs::download_to`'s reasoning).
     @State private var downloadError: String?
+    /// Bumped after a depositor-roster read so the author lines repaint (the
+    /// shared machine's roster is not an observed property).
+    @State private var rosterTick = 0
 
     /// The newest version row — rows are oldest→newest, so the last is the
     /// current file, and its manifest is what the download walk is keyed by.
@@ -179,7 +182,8 @@ struct MediaItemDetailView: View {
     }
 
     private func versionRow(_ version: FileVersionSummary) -> some View {
-        HStack {
+        let _ = rosterTick  // read, so a roster read repaints the author line
+        return HStack {
             automationText(Ids.fileVersionTimestamp, Self.formatMillis(version.createdAt))
                 .font(.caption)
             Spacer(minLength: 8)
@@ -188,7 +192,7 @@ struct MediaItemDetailView: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
             Spacer(minLength: 8)
-            automationText(Ids.fileVersionAuthor, L.media.versionAuthor(author: version.authorDisplay))
+            automationText(Ids.fileVersionAuthor, vm.versionAuthorText(version))
                 .font(.caption)
                 .foregroundStyle(.secondary)
             // A soft-pruned row (only an includePruned listing carries one)
@@ -306,11 +310,17 @@ struct MediaItemDetailView: View {
         loadError = nil
         do {
             versions = try await vm.fileVersions(
-                folder: item.folder, path: item.path, includePruned: showPruned)
+                folder: item.filterValue, path: item.path, includePruned: showPruned)
         } catch {
             loadError = DisplayError.message(error).map { L.media.versionsError(message: $0) }
         }
         loading = false
+        // A list naming depositors: ask the shared machine whether a roster
+        // read is wanted (once per key) and repaint when it ran, so the author
+        // line names the app (`folder-deposit.md` ruling 3).
+        if await vm.readDepositorRoster(for: versions) {
+            rosterTick &+= 1
+        }
     }
 
     /// `media-item-detail-download-button`: run the shared download query, then
@@ -372,7 +382,7 @@ struct MediaItemDetailView: View {
     /// `open_delete_confirm` closes its detail window on the same edge).
     private func confirmDelete() async {
         deleteArmed = false
-        await vm.deleteItem(folder: item.folder, path: item.path)
+        await vm.deleteItem(folder: item.filterValue, path: item.path)
         onClose()
     }
 

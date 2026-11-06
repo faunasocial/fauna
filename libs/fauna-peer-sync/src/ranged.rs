@@ -40,6 +40,32 @@ pub const MAX_BODY_BYTES_PER_REPLY: usize = 700 * 1024;
 /// `more` is a fact. A Rust constant — never a knob.
 pub const MAX_ROWS_PER_PAGE: u32 = 64;
 
+/// The rule-4 refusal: a body a peer served whole hashes to something other
+/// than the store key it was served under. Its own type, not prose, so a
+/// caller can count what it refused apart from a channel that merely failed
+/// (`fauna_sync_engine::sibling_chunks::SiblingTally::refused`); it reaches
+/// the caller inside the pull's `anyhow::Error` (`downcast_ref`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForgedBody {
+    /// The key the body was served under.
+    pub served_under: ContentHash,
+    /// What the assembled bytes hash to.
+    pub hashes_to: ContentHash,
+}
+
+impl std::fmt::Display for ForgedBody {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "peer-served chunk hash mismatch: served under {}, assembled bytes hash to {}",
+            hex::encode(self.served_under.digest()),
+            hex::encode(self.hashes_to.digest())
+        )
+    }
+}
+
+impl std::error::Error for ForgedBody {}
+
 /// What a key the peer reports missing does to the pull.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Missing {
@@ -260,12 +286,11 @@ where
             .bytes;
         let actual = ContentHash::of_raw(&body);
         if actual != key {
-            bail!(
-                "peer-served chunk hash mismatch in {relative_path}: served under {}, \
-                 assembled bytes hash to {}",
-                hex::encode(key.digest()),
-                hex::encode(actual.digest())
-            );
+            return Err(anyhow::Error::new(ForgedBody {
+                served_under: key,
+                hashes_to: actual,
+            })
+            .context(format!("refused a peer-served chunk of {relative_path}")));
         }
         out.bodies.insert(key, body);
     }
@@ -392,7 +417,9 @@ mod tests {
         })
         .await
         .unwrap_err();
-        assert!(err.to_string().contains("hash mismatch"), "{err:#}");
+        assert!(format!("{err:#}").contains("hash mismatch"), "{err:#}");
+        let forged = err.downcast_ref::<ForgedBody>().expect("typed refusal");
+        assert_eq!(forged.served_under, key);
         assert_eq!(arrived, 4_000, "the forged bytes still crossed the wire");
     }
 

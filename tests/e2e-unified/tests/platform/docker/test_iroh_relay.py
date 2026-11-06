@@ -540,21 +540,12 @@ def _host_cmd(binary: str, *args: str) -> list[str]:
 
 
 def _build_probe() -> Path:
-    """`just nat-probe` (the build goes through `just`, as every fixture build
-    does) and the binary it names on its last line."""
-    out = subprocess.run(
-        ["just", "nat-probe"], cwd=get_repo_root(),
-        capture_output=True, text=True, timeout=3600,
-    )
-    assert out.returncode == 0, (
-        f"just nat-probe failed:\n{out.stdout[-3000:]}\n{out.stderr[-3000:]}"
-    )
-    line = next((ln for ln in reversed(out.stdout.splitlines())
-                 if ln.startswith("NAT_PROBE ")), None)
-    assert line, f"just nat-probe named no binary:\n{out.stdout[-2000:]}"
-    probe = Path(line.split(" ", 1)[1].strip())
-    assert probe.is_file(), f"just nat-probe named {probe}, which does not exist"
-    return probe
+    """The NAT-probe binary — a replay of the collection-time prebuild
+    (`helpers/helper_bins.py` REGISTRY["nat_probe"], reached by this module),
+    never a build inside the test's clock."""
+    from helpers.helper_bins import helper_bin
+
+    return helper_bin("nat_probe")
 
 
 def _served_relay_cert(router_port: int) -> bytes:

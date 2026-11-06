@@ -910,6 +910,47 @@ pub fn ingest_receipt_from_nest(
     ingest_receipt_carried(cfg, ReceiptCarriage::NestDoor, bytes)
 }
 
+/// Fetch the receipts custodian NESTS deposited at this account's own nest
+/// (stage (c)'s owner-side leg) and fold each through the same
+/// verify-against-the-recorded-accept path the channel-carried receipts use
+/// ([`ingest_receipt_from_nest`]). Every facet refresh runs this, native
+/// (`fauna-client-custody`) and web (`custodyFacetLoad`, over the account port)
+/// alike, so the Nests page's three-state freshness never waits on a ceremony
+/// edge: a seat that fetches nothing would read a live custodian as stale.
+///
+/// Best-effort, the reconcile sweep's posture: a failed fetch degrades the leg
+/// to a no-op, and a refused receipt is a verification verdict, never retried.
+/// Answers one line per thing skipped, for the host's own log.
+pub async fn ingest_nest_receipts<R: fauna_protocol::RpcRequester>(
+    nest: R,
+    records: &impl CeremonyRecords,
+) -> Vec<String> {
+    let reply = match crate::custody_hosting::CustodyReceiptsClient::new(nest)
+        .list()
+        .await
+    {
+        Ok(reply) => reply,
+        Err(e) => return vec![format!("custody receipt fetch skipped: {e}")],
+    };
+    let mut skipped = Vec::new();
+    for row in reply.rows {
+        let bytes = row.receipt.to_vec();
+        match records
+            .update(|cfg| ingest_receipt_from_nest(cfg, &bytes))
+            .await
+        {
+            Ok(Ok(_outcome)) => {}
+            Ok(Err(refused)) => {
+                skipped.push(format!("nest-door custody receipt refused: {refused}"));
+            }
+            Err(e) => {
+                skipped.push(format!("nest-door custody receipt capture failed: {e}"));
+            }
+        }
+    }
+    skipped
+}
+
 /// How a receipt reached this fleet — each carriage carries its own
 /// ceremony-binding rule, and everything else is shared.
 enum ReceiptCarriage<'a> {
@@ -3285,6 +3326,60 @@ mod tests {
             "an older staged fetch never displaces"
         );
         assert_eq!(cfg.granted[0].latest_receipt_at, Timestamp(2_000_000));
+    }
+
+    /// The facet refresh's leg, the one every app runs: a staged receipt is
+    /// fetched and recorded, and a refused row costs only itself.
+    #[test]
+    fn staged_receipts_are_fetched_and_a_refused_one_costs_only_itself() {
+        use fauna_protocol::ByteBuf;
+        use fauna_protocol::custody::{RECEIPT_LIST_KIND, ReceiptItem, ReceiptListReply};
+
+        let (cfg, o_kp, nest_kp) = nest_form_owner_side();
+        let records = MemConfig::new(o_kp.actor_id());
+        records.raw(|c| *c = cfg);
+        let forged = ActorKeypair::from_secret([0xEE; 32]);
+        let row = |bytes: Vec<u8>| ReceiptItem {
+            receipt: ByteBuf::from(bytes),
+            ..Default::default()
+        };
+        let reply = ReceiptListReply {
+            rows: vec![
+                row(signed_receipt(&forged, &o_kp, 9_000_000, 1)),
+                row(signed_receipt(&nest_kp, &o_kp, 2_000_000, 4096)),
+            ],
+            ..Default::default()
+        };
+        let nest = std::sync::Arc::new(fauna_client_testkit::ScriptedRequester::new([
+            fauna_protocol::encode_canonical(&reply).unwrap().to_vec(),
+        ]));
+
+        let skipped = block_on(ingest_nest_receipts(nest.clone(), &records));
+
+        assert_eq!(nest.kinds(), vec![RECEIPT_LIST_KIND]);
+        assert_eq!(skipped.len(), 1, "the forged row is reported: {skipped:?}");
+        assert!(skipped[0].contains("refused"), "{skipped:?}");
+        assert_eq!(
+            records.raw(|c| c.granted[0].latest_receipt_at),
+            Timestamp(2_000_000),
+            "the nest-signed row behind the refused one still lands"
+        );
+    }
+
+    /// A failed fetch is a no-op, reported, never a state change.
+    #[test]
+    fn a_failed_receipt_fetch_changes_nothing() {
+        let (cfg, o_kp, _nest_kp) = nest_form_owner_side();
+        let records = MemConfig::new(o_kp.actor_id());
+        records.raw(|c| *c = cfg.clone());
+
+        let skipped = block_on(ingest_nest_receipts(
+            fauna_client_testkit::FailingRequester::new("the nest took too long to respond"),
+            &records,
+        ));
+
+        assert!(skipped[0].contains("took too long"), "{skipped:?}");
+        assert_eq!(records.raw(|c| c.clone()), cfg);
     }
 
     /// The carriage rule's other half: a DEVICE-form ceremony's receipts

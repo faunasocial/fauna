@@ -360,6 +360,13 @@ class AccountStores @Inject constructor(
     fun syncStateDir(): String = File(filesScope(), SYNC_DIR).also { it.mkdirs() }.absolutePath
 
     /**
+     * [actorIdHex]'s sync state dir **without creating anything** — what the
+     * on-demand toggle's succession carry probes a predecessor's scope with
+     * (`FfiOnDemandSource.prefsStore`); the active actor's is [syncStateDir].
+     */
+    fun syncStateDirFor(actorIdHex: String): File = File(scopeFor(filesRoot, actorIdHex), SYNC_DIR)
+
+    /**
      * The Room database file. Room resolves a bare name under `databases/`; an
      * absolute name is used verbatim (with its parent created), which is how the
      * account's subdir is reached without a second Room configuration surface.
@@ -550,7 +557,7 @@ class AccountStores @Inject constructor(
      * `SupervisedIndicatorVM` each blank their state unconditionally and only
      * re-seed it when the active actor actually changed
      * (family-client-enforcement.md:98-99), so running them for a non-active
-     * removal blanked the ACTIVE ward's guardian floor, bedtime lock and
+     * removal blanked the ACTIVE ward's guardian rules, bedtime lock and
      * indicator.
      */
     suspend fun removeAccount(actorIdHex: String): com.fauna.ffi.FfiEraseRemoveBlocked? =

@@ -26,7 +26,7 @@ use std::sync::Arc;
 use fauna_client::NestClient;
 use fauna_client_notifications::{
     NotificationDestination, NotificationText, NotificationsClient, notification_destination,
-    notification_muted, notification_text,
+    notification_muted, notification_text_naming,
     notifications::{NotifItem, NotifType, is_security_notice_retained},
 };
 use fauna_i18n::strings::common as t;
@@ -47,6 +47,13 @@ pub struct NotificationsState {
     /// session-local, the mute stays (`behavior/notifications.md` § Muted words
     /// rule 3; the `crate::conversations` `revealed_muted` shape).
     pub revealed_muted: std::collections::HashSet<i64>,
+    /// The newest read's generation, claimed at dispatch by every [`Op`] (each
+    /// one ends in a refetch) and checked at commit, so a superseded read
+    /// landing late is dropped instead of overwriting newer rows — the login
+    /// hydration and a push resync are spawned while the nav-to-tab read is
+    /// awaited, so both landing orders are reachable. The
+    /// `ContactsState::roster_gen` shape.
+    pub read_gen: std::cell::Cell<u64>,
 }
 
 /// Build the page state at the post-auth hook and start the initial fetch
@@ -72,7 +79,16 @@ pub fn init(
 pub fn nav_enter_op(state: &NotificationsState) -> Option<Op> {
     Some(Op::Refresh {
         nest: state.nest.clone()?,
+        query_gen: claim_read_gen(state),
     })
+}
+
+/// Claim the next [`NotificationsState::read_gen`] for a read about to be
+/// dispatched.
+fn claim_read_gen(state: &NotificationsState) -> u64 {
+    let query_gen = state.read_gen.get() + 1;
+    state.read_gen.set(query_gen);
+    query_gen
 }
 
 /// Fire-and-forget the refetch — the **post-auth** path only (no driver ack to
@@ -128,14 +144,17 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
     match action {
         Action::MarkAllRead => Some(Op::MarkAllRead {
             nest: st.nest.clone()?,
+            query_gen: claim_read_gen(st),
         }),
         Action::Dismiss(id) => Some(Op::Dismiss {
             nest: st.nest.clone()?,
             id,
+            query_gen: claim_read_gen(st),
         }),
         Action::ClearAll => Some(Op::Clear {
             nest: st.nest.clone()?,
             up_to: clear_up_to(&st.items)?,
+            query_gen: claim_read_gen(st),
         }),
         Action::RevealMuted(_) => None,
     }
@@ -153,27 +172,51 @@ fn clear_up_to(items: &[NotifItem]) -> Option<i64> {
 
 /// The network half. Every variant refetches after its mutation — the reply is
 /// a bare count echo, so the fresh list + count ARE the observable effect
-/// (the contacts refetch-after-mutate convention).
+/// (the contacts refetch-after-mutate convention). `query_gen` is the
+/// [`NotificationsState::read_gen`] claimed at dispatch.
 pub enum Op {
-    Refresh { nest: Arc<NestClient> },
-    MarkAllRead { nest: Arc<NestClient> },
-    Dismiss { nest: Arc<NestClient>, id: i64 },
-    Clear { nest: Arc<NestClient>, up_to: i64 },
+    Refresh {
+        nest: Arc<NestClient>,
+        query_gen: u64,
+    },
+    MarkAllRead {
+        nest: Arc<NestClient>,
+        query_gen: u64,
+    },
+    Dismiss {
+        nest: Arc<NestClient>,
+        id: i64,
+        query_gen: u64,
+    },
+    Clear {
+        nest: Arc<NestClient>,
+        up_to: i64,
+        query_gen: u64,
+    },
 }
 
 /// What an [`Op`] resolved to; folded back into the page by [`apply_outcome`].
 pub enum Outcome {
-    Loaded { items: Vec<NotifItem>, unread: i64 },
+    Loaded {
+        items: Vec<NotifItem>,
+        unread: i64,
+        query_gen: u64,
+    },
     Failed(String),
 }
 
 impl std::fmt::Debug for Outcome {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Outcome::Loaded { items, unread } => f
+            Outcome::Loaded {
+                items,
+                unread,
+                query_gen,
+            } => f
                 .debug_struct("Loaded")
                 .field("items", &items.len())
                 .field("unread", unread)
+                .field("query_gen", query_gen)
                 .finish(),
             Outcome::Failed(e) => f.debug_tuple("Failed").field(e).finish(),
         }
@@ -183,37 +226,45 @@ impl std::fmt::Debug for Outcome {
 impl Op {
     pub async fn run(self) -> Outcome {
         match self {
-            Op::Refresh { nest } => fetch(nest).await,
-            Op::MarkAllRead { nest } => {
+            Op::Refresh { nest, query_gen } => fetch(nest, query_gen).await,
+            Op::MarkAllRead { nest, query_gen } => {
                 let client = NotificationsClient::new(Arc::clone(&nest));
                 if let Err(e) = client.notifications_mark_read(None).await {
                     return Outcome::Failed(format!("mark read: {e}"));
                 }
-                fetch(nest).await
+                fetch(nest, query_gen).await
             }
             // A `fauna.notifications.retained` refusal (a security notice the
             // greyed button let through at the window's edge) is an error like
             // any other here: it lands on `error-message`, never a silent no-op.
-            Op::Dismiss { nest, id } => {
+            Op::Dismiss {
+                nest,
+                id,
+                query_gen,
+            } => {
                 let client = NotificationsClient::new(Arc::clone(&nest));
                 if let Err(e) = client.notifications_dismiss(id).await {
                     return Outcome::Failed(format!("dismiss: {e}"));
                 }
-                fetch(nest).await
+                fetch(nest, query_gen).await
             }
-            Op::Clear { nest, up_to } => {
+            Op::Clear {
+                nest,
+                up_to,
+                query_gen,
+            } => {
                 let client = NotificationsClient::new(Arc::clone(&nest));
                 if let Err(e) = client.notifications_clear(Some(up_to)).await {
                     return Outcome::Failed(format!("clear: {e}"));
                 }
-                fetch(nest).await
+                fetch(nest, query_gen).await
             }
         }
     }
 }
 
 /// One page of rows (nest default limit) + the authoritative unread count.
-async fn fetch(nest: Arc<NestClient>) -> Outcome {
+async fn fetch(nest: Arc<NestClient>, query_gen: u64) -> Outcome {
     let client = NotificationsClient::new(nest);
     let list = match client.notifications_list(None, None).await {
         Ok(r) => r,
@@ -226,6 +277,7 @@ async fn fetch(nest: Arc<NestClient>) -> Outcome {
     Outcome::Loaded {
         items: list.notifications,
         unread: count.count,
+        query_gen,
     }
 }
 
@@ -233,7 +285,16 @@ async fn fetch(nest: Arc<NestClient>) -> Outcome {
 /// canonical `error-message`; a load clears it (the page shows fresh truth).
 pub fn apply_outcome(app: &mut App, outcome: Outcome) {
     match outcome {
-        Outcome::Loaded { items, unread } => {
+        Outcome::Loaded {
+            items,
+            unread,
+            query_gen,
+        } => {
+            // A newer read has been dispatched since this one: its reply is
+            // the one to paint (`NotificationsState::read_gen`).
+            if query_gen != app.notifications.read_gen.get() {
+                return;
+            }
             app.notifications.items = items;
             app.notifications.unread = unread;
             app.errors.remove(&Page::Notifications);
@@ -382,8 +443,13 @@ pub fn elements(app: &App) -> Vec<Element> {
         ));
         // Which text — the localized body, the English summary, or the default
         // — is the shared decision (`behavior/notifications.md` § Localized
-        // body); resolving the key is this app's half.
-        let summary = match notification_text(item) {
+        // body); resolving the key is this app's half. A fauna-native row's
+        // sender is named as the viewer calls them (§ Localized body → *the
+        // sender arg*), through the overlay projection the roster row reads.
+        let overlays = crate::contacts::overlay_projection(app);
+        let summary = match notification_text_naming(item, |id| {
+            overlays.as_ref().and_then(|p| p.known_peer_label(id))
+        }) {
             NotificationText::Localized(text) => text.resolve(fauna_i18n::strings::lookup),
             NotificationText::Verbatim(text) => text,
         };
@@ -454,6 +520,54 @@ pub fn state_json(state: &NotificationsState) -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A read superseded by a newer one is dropped when it lands late — the
+    /// spawned login hydration (or a push resync) landing after the agent's
+    /// awaited nav-to-tab read must not repaint the older rows.
+    #[test]
+    fn a_superseded_read_landing_late_is_dropped() {
+        let mut app = crate::app::tests::test_app();
+        app.notifications.nest = Some(NestClient::new(
+            "http://127.0.0.1:9".to_string(),
+            fauna_core::identity::ActorKeypair::from_secret([7u8; 32]),
+        ));
+        let Some(Op::Refresh {
+            query_gen: login_gen,
+            ..
+        }) = nav_enter_op(&app.notifications)
+        else {
+            panic!("the tab refetches");
+        };
+        let Some(Op::Refresh {
+            query_gen: nav_gen, ..
+        }) = nav_enter_op(&app.notifications)
+        else {
+            panic!("the tab refetches");
+        };
+
+        apply_outcome(
+            &mut app,
+            Outcome::Loaded {
+                items: vec![item("like", "A liked your post", false)],
+                unread: 1,
+                query_gen: nav_gen,
+            },
+        );
+        apply_outcome(
+            &mut app,
+            Outcome::Loaded {
+                items: Vec::new(),
+                unread: 0,
+                query_gen: login_gen,
+            },
+        );
+        assert_eq!(
+            app.notifications.items.len(),
+            1,
+            "the older read must not overwrite the newer rows"
+        );
+        assert_eq!(app.notifications.unread, 1);
+    }
 
     fn item(notif_type: &str, summary: &str, is_read: bool) -> NotifItem {
         NotifItem {

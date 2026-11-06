@@ -88,6 +88,8 @@ jobs:
           exit 1
 
       # The mirror re-stage reads the vetted table (which repositories to re-tag).
+      # Keeps the persisted token (the shape gate's TOKEN_NEEDED list): the
+      # "Extract version" step below runs `git fetch origin <sha>` through it.
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
 
       # The mirror re-stage reads the vetted table through `uv run`.
@@ -185,6 +187,8 @@ jobs:
       GITHUB_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
+        with:
+          persist-credentials: false
 
       # The scanner probe and the admission run under uv.
       - name: Install uv
@@ -256,6 +260,8 @@ jobs:
     steps:
       # The dispatching ref's tooling (the promoted sha may predate it).
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
+        with:
+          persist-credentials: false
 
       # The mirror copy and the verification read the vetted table through `uv run`.
       - name: Install uv

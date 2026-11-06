@@ -375,7 +375,7 @@ pub async fn start_nest() -> (String, Arc<fauna_nest::routes::AppState>) {
     ));
     let state = Arc::new(AppState {
         backup_service: Some(backup_svc),
-        sync: fauna_nest::state::SyncState { chunk_resolver },
+        sync: fauna_nest::state::SyncState::with_resolver(chunk_resolver),
         nest_identity: Arc::new(NestIdentity {
             signing_key,
             verifying_key,
@@ -467,6 +467,7 @@ pub async fn enroll_as_w5_app(
             owed_nests: None,
             peer_transport: None,
             enrollment_target_device_id,
+            enrollment_device_label: None,
         },
     )
     .await
@@ -564,6 +565,7 @@ impl AppSeat {
                 owed_nests: None,
                 peer_transport: None,
                 enrollment_target_device_id: hex::encode(device),
+                enrollment_device_label: None,
             },
         )
         .await

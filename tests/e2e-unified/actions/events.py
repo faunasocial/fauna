@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import re
 import time
+from datetime import date
 from typing import TYPE_CHECKING
+
+from helpers.waiting import wait_until
 
 if TYPE_CHECKING:
     from drivers.base import PlatformDriver
@@ -848,13 +851,13 @@ class EventsActions:
 
         tui draws this layout as the block's own text (``events/grids.rs``:
         ``"HH:MM–HH:MM Summary"``, suffixed ``" [i/n]"`` when ``n > 1``). web,
-        linux, macOS, iOS and windows position blocks in pixels, so they are MEASURED: see
+        linux, macOS, iOS, windows and android position blocks in pixels, so they are MEASURED: see
         :meth:`_measured_block_layout`. ``None`` on an app whose driver cannot read
         a block's geometry yet, so a witness of the layout is marked only where
         this answers."""
         if (self.driver.is_web() or self.driver.is_linux()
                 or self.driver.is_macos() or self.driver.is_ios()
-                or self.driver.is_windows()):
+                or self.driver.is_windows() or self.driver.is_android()):
             return self._measured_block_layout(summary)
         if not self.driver.is_tui():
             return None
@@ -1088,6 +1091,27 @@ class EventsActions:
 
     def back_from_detail(self) -> None:
         self.driver.click("event-detail-back")
+
+    def leave_detail(self) -> None:
+        """Return from an open event detail to the list, the way this app
+        does: `event-detail-back` on the apps whose detail is a navigated
+        surface (tui, windows, android); nothing on the split-view apps (linux,
+        web, macos), whose list stays beside the detail; and on ios, whose
+        system back is the whole affordance, the back gesture — the test
+        agent's `nav_back`, which pops the pushed detail as the nav-bar back
+        does — the scope ui.yaml rules for the id (2026-08-14, events.md
+        § Element IDs). Keyed on the control being painted, which is exactly
+        that line; a navigated app that lost it would still fail on the list
+        read that follows, never pass silently."""
+        if self.driver.count("event-detail-back"):
+            self.back_from_detail()
+        elif self.driver.is_ios() and self.driver.count("event-detail-summary"):
+            self.driver.call_command("nav_back")
+            wait_until(
+                lambda: not self.driver.count("event-detail-summary") or None,
+                10.0,
+                diagnose=lambda: "nav_back left the event detail open",
+            )
 
     # --- Reminders (event detail surface) ---
 
@@ -1378,11 +1402,33 @@ class EventsActions:
     def has_day_cell(self, iso_date: str) -> bool:
         """True if the month grid exposes the indexed day cell for ``iso_date``.
 
-        Used to skip the day-cell test on clients that have not yet rolled out
-        ``events-day-cell`` (events.md § Implementation status today). Month view
-        must be active.
+        A live probe, not a gate: which apps have built ``events-day-cell`` is the
+        surface registry's entry of that name (events.md § Implementation status
+        today), and on those apps a test asserts with this. Month view must be
+        active.
         """
         return not self.driver.is_absent(f"events-day-cell-{iso_date}")
+
+    def anchor_on_today(self) -> None:
+        """Put the page's displayed date on today, the way a user does, and
+        leave the page in Agenda.
+
+        The displayed date is device UI state that outlives a page visit and a
+        between-tests reset (`EventsVM.reset`), and on the apps whose driver is
+        session-scoped a test's drill-in stays behind for the next test: after
+        ``test_month_day_cell_click_opens_day_view`` the Day view paints the
+        15th, and an event created for today has no block in it. A test that
+        reads today's Day view states that here instead of assuming the default.
+
+        An app without ``events-day-cell`` has no way to move the date from the
+        month grid, and its Day view keeps whatever it holds; the test's own
+        block assertion then reports it.
+        """
+        today = date.today().isoformat()
+        self.switch_view("month")
+        if self.has_day_cell(today):
+            self.click_day_cell(today)
+        self.switch_view("agenda")
 
     def click_day_cell(self, iso_date: str) -> None:
         """Single-click the month-grid day cell for ISO date ``YYYY-MM-DD``.
@@ -1415,9 +1461,9 @@ class EventsActions:
         """True if the active week/day time grid exposes the indexed empty time
         slot for ``HH:MM``.
 
-        Used to skip the empty-slot quick-create tests on apps that have not
-        yet rolled out ``events-time-slot`` (events.md § Implementation status
-        today). Week or Day view must be active.
+        Every app paints the slots (events.md § Implementation status today), so
+        a test ASSERTS with this rather than skipping on it. Week or Day view
+        must be active.
 
         Deliberately ``count() > 0``, NOT ``is_visible()``: this is a *capability*
         probe — "does this app paint slot targets at all" — and its answer must
@@ -1458,17 +1504,6 @@ class EventsActions:
             pass  # the test assertion reports the real failure
 
     # --- RSVP on event cards (inline, not detail page) ---
-
-    def has_card_rsvp(self) -> bool:
-        """Does this app paint the CARD-level rsvp trio (`event-rsvp-*`)?
-
-        The detail-page trio (`event-detail-rsvp-*`) is a different surface and
-        is built everywhere — `test_event_rsvp` covers it. Used to declare the
-        card-level rollout as counted `skip_unbuilt` debt rather than let it
-        fail with a bare `LookupError` on apps that have not built it
-        (events.md § Implementation status today).
-        """
-        return self.driver.is_visible("event-rsvp-going")
 
     def rsvp_going(self, index: int = 0) -> None:
         """Click RSVP going on an event card."""

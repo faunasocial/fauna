@@ -28,10 +28,9 @@
          matching the uniform e2e action + the linux reveal idiom.
 
          The per-row disabled-toggle is two-way (Revoke + Enable) — disable is no
-         longer a one-way trap (mail-aliases.md § Disable, a product invariant). One
-         honest gap remains, mirrored from the lead (surfaced, never faked): the
-         per-row "Show audit" disclosure is inert (list_account_alias_hits is a
-         follow-on slice). -->
+         longer a one-way trap (mail-aliases.md § Disable, a product invariant). The
+         per-row "Show audit" toggle opens / closes that address's received-mail
+         history (ShowAudit / HideAudit), rendered inside the row. -->
     <StackPanel Spacing="12">
 
         <!-- ── Top group: heading + add/generate buttons (always present) ── -->
@@ -212,6 +211,11 @@
                                         <ColumnDefinition Width="*" />
                                         <ColumnDefinition Width="Auto" />
                                     </Grid.ColumnDefinitions>
+                                    <Grid.RowDefinitions>
+                                        <RowDefinition Height="Auto" />
+                                        <RowDefinition Height="Auto" />
+                                        <RowDefinition Height="Auto" />
+                                    </Grid.RowDefinitions>
                                     <StackPanel Grid.Column="0" Spacing="2">
                                         <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.MailAliasesListItemPattern}"
                                                    Text="{x:Bind Address}"
@@ -270,7 +274,69 @@
                                         <!-- Audit disclosure stays on EVERY row (incl. canonical). -->
                                         <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.MailAliasesListItemShowAudit}"
                                                 Content="{x:Bind ShowAuditLabel}"
-                                                IsEnabled="False" />
+                                                Tag="{x:Bind AliasIdHex}"
+                                                Click="ShowAudit_Click" />
+                                    </StackPanel>
+
+                                    <!-- A throwaway address's expiry and, while it still accepts mail,
+                                         the way to push it out (mail-aliases.md § Don't do these) — a
+                                         full-width line of its own: the page is at most 600 wide and the
+                                         controls' Auto column leaves the details column too narrow to hold
+                                         the button, which it would clip. Collapsed on an address with no
+                                         expiry; a collapsed button has no UIA peer, so the e2e reads it
+                                         absent. -->
+                                    <StackPanel Grid.Row="1" Grid.ColumnSpan="2"
+                                                Orientation="Horizontal" Spacing="8"
+                                                Visibility="{x:Bind local:MailAliasesPanel.BoolToVisibility(HasExpiry)}">
+                                        <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.MailAliasesListItemExpiresAt}"
+                                                   Text="{x:Bind ExpiresAt}"
+                                                   Opacity="0.7" FontSize="12" VerticalAlignment="Center" />
+                                        <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.MailAliasesListItemExtendButton}"
+                                                Content="{loc:Localize Key=mail_aliases/extend}"
+                                                Tag="{x:Bind AliasIdHex}"
+                                                Visibility="{x:Bind local:MailAliasesPanel.BoolToVisibility(CanExtend)}"
+                                                Loaded="Extend_Loaded"
+                                                Click="Extend_Click" />
+                                    </StackPanel>
+
+                                    <!-- The open per-address history (mail-aliases.md § Per-alias-hit
+                                         audit list), scoped inside this row: one audit-item per hit with
+                                         its three leaves, or the empty caption (inside a non-interactive
+                                         Button — a bare TextBlock that flips Visible gets no UIA peer). -->
+                                    <StackPanel Grid.Row="2" Grid.ColumnSpan="2" Spacing="4"
+                                                Visibility="{x:Bind local:MailAliasesPanel.BoolToVisibility(AuditOpen)}">
+                                        <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.MailAliasesAuditEmpty}"
+                                                Background="Transparent" BorderThickness="0" Padding="0"
+                                                HorizontalContentAlignment="Left" IsTabStop="False"
+                                                Visibility="{x:Bind local:MailAliasesPanel.BoolToVisibility(AuditEmpty)}">
+                                            <TextBlock Text="{loc:Localize Key=mail_aliases/audit_empty}"
+                                                       Opacity="0.7" FontSize="12" TextWrapping="Wrap" />
+                                        </Button>
+                                        <ItemsControl ItemsSource="{x:Bind AuditHits}">
+                                            <ItemsControl.ItemsPanel>
+                                                <ItemsPanelTemplate>
+                                                    <StackPanel Orientation="Vertical" Spacing="2" />
+                                                </ItemsPanelTemplate>
+                                            </ItemsControl.ItemsPanel>
+                                            <ItemsControl.ItemTemplate>
+                                                <DataTemplate x:DataType="vm:MailAliasAuditHit">
+                                                    <Border AutomationProperties.AutomationId="{x:Bind ids:Ids.MailAliasesAuditItem}"
+                                                            AutomationProperties.Name="{x:Bind MatchedAddress}">
+                                                        <StackPanel Orientation="Horizontal" Spacing="8">
+                                                            <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.MailAliasesAuditItemMatchedAddress}"
+                                                                       Text="{x:Bind MatchedAddress}"
+                                                                       FontSize="12" IsTextSelectionEnabled="True" />
+                                                            <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.MailAliasesAuditItemSenderDomain}"
+                                                                       Text="{x:Bind SenderDomain}"
+                                                                       Opacity="0.7" FontSize="12" />
+                                                            <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.MailAliasesAuditItemReceivedAt}"
+                                                                       Text="{x:Bind ReceivedAt}"
+                                                                       Opacity="0.7" FontSize="12" />
+                                                        </StackPanel>
+                                                    </Border>
+                                                </DataTemplate>
+                                            </ItemsControl.ItemTemplate>
+                                        </ItemsControl>
                                     </StackPanel>
                                 </Grid>
                             </Border>

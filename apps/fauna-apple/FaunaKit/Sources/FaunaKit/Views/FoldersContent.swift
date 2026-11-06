@@ -1,5 +1,33 @@
 import SwiftUI
 
+/// The set one `perSetBinding` section binds under: an M2 folder row or a group
+/// scope's row (`group-set.md` § Build design — the group set).
+public struct FolderBindingTarget {
+    /// The binding's set label — what `LocationBinding.folder` carries. A
+    /// folder's name; a group set's `FolderRef::Group` wire form, because a
+    /// name can change and can equal an M2 set's and the ref can do neither.
+    public let label: String
+    /// The set's `FolderRef` wire string — the binding's key. `nil` on a folder
+    /// row that yields none, which the section refuses rather than binding by
+    /// name.
+    public let folderRef: String?
+    /// Whether a nest folder's `folder-place-row` roster sits beside this
+    /// section for a confirmed bind to repaint. A group set has no nest leg.
+    public let hasNestPlaces: Bool
+
+    init(folder: FolderSummary) {
+        self.label = folder.name
+        self.folderRef = folder.folderRef
+        self.hasNestPlaces = true
+    }
+
+    init(groupRef: String) {
+        self.label = groupRef
+        self.folderRef = groupRef
+        self.hasNestPlaces = false
+    }
+}
+
 /// Shared (macOS + iOS) renderer for the **Settings → Folders** page — the
 /// folder **control plane**: the folder list with per-set in-place config
 /// (selective-sync paths + the conflict-policy picker), the create wizard, the
@@ -19,10 +47,10 @@ import SwiftUI
 /// Library" set's config (media.md § Apple photo-backup reframe).
 public struct FoldersContent<BindingContent: View>: View {
     let vm: DevicesMachineVM
-    /// Desktop-only local-folder binding for one folder, nested under its row.
+    /// Desktop-only local-folder binding for one set, nested under its row.
     /// macOS fills this with the `LocationsModel`-backed `folder-location-*` UI;
     /// iOS passes the default empty view (no user-bindable local folder tree).
-    @ViewBuilder let perSetBinding: (FolderSummary) -> BindingContent
+    @ViewBuilder let perSetBinding: (FolderBindingTarget) -> BindingContent
     /// The refs (`FolderRef` wire strings) of the sets whose local presence is a
     /// bound always-resident folder — the
     /// `folder-on-demand-toggle` arbitration input (bound folder > FP domain;
@@ -36,14 +64,24 @@ public struct FoldersContent<BindingContent: View>: View {
     /// `LocationsModel.revokedFolders`; iOS (no binding surface, so nothing
     /// to park) keeps the empty default.
     let revokedSets: () -> Set<String>
+    /// A group set's review rows as last read, by the set's `FolderRef` wire
+    /// form and its label on the page (`group-set.md` § Build design — the
+    /// group set, decision 9). macOS reads `LocationsModel`; iOS keeps the empty
+    /// default until a phone's door exists.
+    let setReviewRows: (_ folderId: String, _ setLabel: String) -> [ConflictSummary]
+    /// *Use the other version* on a group set's row: the caller's, because it
+    /// runs on the sync agent. The machine's own re-point reports these rows as
+    /// unknown, so a group row never reaches `vm.useOtherVersion`. A throw is
+    /// the refusal, which lands on `error-message` while the row stands.
+    let useRetainedVersion: (_ folderId: String, _ conflictId: Int64) async throws -> Void
     /// Re-converge the FP domains after an on-demand toggle flip (the app's
     /// `FileProviderCoordinator.reconcile` hook); `nil` defers to the next
     /// launch reconcile.
     let onDemandChanged: (() -> Void)?
 
-    /// Name of the single expanded folder row (only one open at a time so the
-    /// unindexed body widgets — `folder-include-paths`, `folder-delete-button`,
-    /// … — resolve uniquely to it).
+    /// The single expanded row — a folder's name, a group scope's ref (only one
+    /// open at a time so the unindexed body widgets — `folder-include-paths`,
+    /// `folder-delete-button`, … — resolve uniquely to it).
     @State private var expandedFolder: String?
 
     @Environment(FaunaClient.self) private var client: FaunaClient?
@@ -52,12 +90,16 @@ public struct FoldersContent<BindingContent: View>: View {
         vm: DevicesMachineVM,
         boundSets: @escaping () -> Set<String> = { [] },
         revokedSets: @escaping () -> Set<String> = { [] },
+        setReviewRows: @escaping (String, String) -> [ConflictSummary] = { _, _ in [] },
+        useRetainedVersion: @escaping (String, Int64) async throws -> Void = { _, _ in },
         onDemandChanged: (() -> Void)? = nil,
-        @ViewBuilder perSetBinding: @escaping (FolderSummary) -> BindingContent
+        @ViewBuilder perSetBinding: @escaping (FolderBindingTarget) -> BindingContent
     ) {
         self.vm = vm
         self.boundSets = boundSets
         self.revokedSets = revokedSets
+        self.setReviewRows = setReviewRows
+        self.useRetainedVersion = useRetainedVersion
         self.onDemandChanged = onDemandChanged
         self.perSetBinding = perSetBinding
     }
@@ -75,7 +117,9 @@ public struct FoldersContent<BindingContent: View>: View {
     public var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
+                #if !FAUNA_KIDS
                 photoLibrarySection
+                #endif
                 pendingSharesSection
                 #if !FAUNA_EXCISE_P2P_SHARE
                 offlineShareSection
@@ -110,8 +154,29 @@ public struct FoldersContent<BindingContent: View>: View {
         // `device-this-mark-badge` marks; the Devices page reads it on its own
         // appear, so this page re-reads it too (a local slot read, no network).
         .task { await vm.loadThisDeviceRow(ownDeviceId: client?.deviceId) }
+        .modifier(FolderOSEnableRefresh(boundSets: boundSets))
+        // A `fauna://folder-share` route (Finder's / the Files app's Share action
+        // on a set's root, `macos.md` § Sync → *Finder's Share entry*, link 4):
+        // once the list is in, expand that owner row; its "Shared with" section
+        // then opens the `folder-share-button` flow. A set this account does
+        // not own opens nothing. Re-keyed on every staged route and on the list
+        // arriving, as linux applies at once or on the list's next render.
+        .task(id: "\(ShareRouteOpen.shared.generation)/\(vm.snapshot?.folders.count ?? 0)") {
+            let folders = vm.snapshot?.folders ?? []
+            guard !folders.isEmpty else { return }
+            let owned = folders.filter { $0.role != "member" }.map { (id: $0.id, name: $0.name) }
+            if let name = ShareRouteOpen.shared.resolveFolderShare(ownerRows: owned) {
+                expandedFolder = name
+            }
+        }
         // Folders and the conflict-policy select read through the account store.
         .onStoreChange { await vm.resyncStore() }
+        // The VM's failed row reads paint only on the open row, and it re-reads
+        // that row on the `devices` surface, so it follows this view's state.
+        .onChange(of: expandedFolder, initial: true) { _, open in vm.setOpenFolderRow(open) }
+        .onAppear { vm.setOpenFolderRow(expandedFolder) }
+        .onDisappear { vm.setOpenFolderRow(nil) }
+        .onDevicesStale { await vm.devicesStale() }
     }
 
     // MARK: - Photo Library (Apple-only — the photo-backup ingress set's config)
@@ -120,6 +185,9 @@ public struct FoldersContent<BindingContent: View>: View {
     /// `PhotoBackupControlsView` (`photo-backup-*`), re-homed here from the former
     /// Apple Media tab / standalone `photo-backup` settings page (media.md § Apple
     /// photo-backup reframe; ui.yaml `photo-backup-controls` `used_in: [folders]`).
+    /// Not in the kids build: photo backup is outside the kids app's *Kept* set
+    /// (account-age-band.md § The account age band, the kids-app bullet, item (4)).
+    #if !FAUNA_KIDS
     @ViewBuilder
     private var photoLibrarySection: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -128,21 +196,55 @@ public struct FoldersContent<BindingContent: View>: View {
             PhotoBackupControlsView()
         }
     }
+    #endif
 
     // MARK: - Conflicts (candidate model — rendered per set when present)
 
     @ViewBuilder
     private var conflictSection: some View {
         let conflicts = vm.snapshot?.conflicts ?? []
-        if !conflicts.isEmpty {
+        let groupRows = groupReviewRows
+        if !conflicts.isEmpty || !groupRows.isEmpty {
             Divider()
             VStack(alignment: .leading, spacing: 8) {
                 Text(L.devices.conflicts.sectionTitle)
                     .font(.headline)
                 ForEach(Array(conflicts.enumerated()), id: \.offset) { _, conflict in
-                    ConflictRow(vm: vm, conflict: conflict)
+                    ConflictRow(conflict: conflict) {
+                        Task { await vm.useOtherVersion(conflictId: conflict.id) }
+                    }
+                }
+                // Continues the flat `conflict-*` list, `conflict-file-info`
+                // naming the set (`folders.md` § Conflicts).
+                ForEach(Array(groupRows.enumerated()), id: \.offset) { _, row in
+                    ConflictRow(conflict: row.conflict) {
+                        Task { await restoreRetained(row) }
+                    }
                 }
             }
+        }
+    }
+
+    /// Each group set's review rows, in the page's own scope order.
+    private var groupReviewRows: [GroupReviewRow] {
+        #if FAUNA_EXCISE_P2P_SHARE
+        return []
+        #else
+        return vm.groupShareViews.scopes.flatMap { scope in
+            setReviewRows(scope.folderId, scope.pageLabel).map {
+                GroupReviewRow(folderId: scope.folderId, conflict: $0)
+            }
+        }
+        #endif
+    }
+
+    private func restoreRetained(_ row: GroupReviewRow) async {
+        vm.setRetainedRestoreError(nil)
+        do {
+            try await useRetainedVersion(row.folderId, row.conflict.id)
+        } catch {
+            guard let message = DisplayError.message(error) else { return }
+            vm.setRetainedRestoreError(L.devices.errorUseOtherVersion(message: message))
         }
     }
 
@@ -261,7 +363,10 @@ public struct FoldersContent<BindingContent: View>: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             } else {
-                ForEach(Array(folders.enumerated()), id: \.element.name) { offset, folder in
+                // Identity is the row id, never the name: a member's own folder and a
+                // shared set of the same name are two rows (media.md § Encryption at
+                // rest, clause (c)); keyed by name SwiftUI painted only one.
+                ForEach(Array(folders.enumerated()), id: \.element.id) { offset, folder in
                     // A set shared WITH us (`role == "member"`) is READ-ONLY by
                     // default — no owner affordances (no paths, policy, delete,
                     // share). A `writer`-access member additionally gets the ONE
@@ -305,9 +410,17 @@ public struct FoldersContent<BindingContent: View>: View {
                 }
                 #if !FAUNA_EXCISE_P2P_SHARE
                 ForEach(Array(vm.groupShareViews.scopes.enumerated()), id: \.offset) { offset, scope in
-                    GroupScopeRow(scope: scope)
-                        // Continues the M2 folders' own index — one indexed list.
-                        .automationScope(Ids.folderRow, index: folders.count + offset)
+                    GroupScopeRow(
+                        scope: scope,
+                        isExpanded: expandedFolder == scope.folderId,
+                        // A client with no binding to host keeps the label-only row.
+                        onToggle: BindingContent.self == EmptyView.self
+                            ? nil : { toggleFolder(scope.folderId) }
+                    ) {
+                        perSetBinding(FolderBindingTarget(groupRef: scope.folderId))
+                    }
+                    // Continues the M2 folders' own index — one indexed list.
+                    .automationScope(Ids.folderRow, index: folders.count + offset)
                 }
                 #endif
             }
@@ -373,7 +486,7 @@ public struct FoldersContent<BindingContent: View>: View {
                 // Desktop local-folder binding, nested under this set (no-op on
                 // iOS/web). The set is contextual — the binding records only the
                 // folder path (no free-text set name; D3 / O-1).
-                perSetBinding(folder)
+                perSetBinding(FolderBindingTarget(folder: folder))
             }
         }
         .padding(.vertical, 2)
@@ -516,7 +629,7 @@ public struct FoldersContent<BindingContent: View>: View {
                         .font(.caption)
                         .foregroundStyle(.orange)
                 }
-                perSetBinding(folder)
+                perSetBinding(FolderBindingTarget(folder: folder))
                 memberOnDemandToggle(folder)
             }
         }
@@ -568,8 +681,8 @@ public struct FoldersContent<BindingContent: View>: View {
         }
     }
 
-    /// Expand the named folder row (collapsing any other), or collapse it if it
-    /// is already open. Shared by the row Button action and its automation Entry.
+    /// Expand the named row (collapsing any other), or collapse it if it is
+    /// already open. Shared by the row Button action and its automation Entry.
     private func toggleFolder(_ name: String) {
         expandedFolder = (expandedFolder == name) ? nil : name
     }
@@ -772,9 +885,18 @@ private struct FolderPaywallTierPicker: View {
                 )
             }
 
-            Text(hasTiers ? L.devices.paywallTierHint : L.devices.paywallTierNeedsTier)
-                .font(.caption)
-                .foregroundStyle(.secondary)
+            // `folder-paywall-hint` is present exactly while the select is disabled
+            // for want of a tier; the has-tiers line is the select's ordinary
+            // caption and carries no id (the android/linux shape).
+            if hasTiers {
+                Text(L.devices.paywallTierHint)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else {
+                automationText(Ids.folderPaywallHint, L.devices.paywallTierNeedsTier)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
         }
     }
 
@@ -1308,6 +1430,7 @@ private struct FolderAudienceSelect: View {
     let vm: DevicesMachineVM
     let folder: FolderSummary
     @Binding var armed: Bool
+    @Environment(FaunaClient.self) private var client: FaunaClient?
 
     /// Group-bound-ness — entered through the share flow and nowhere else, so
     /// it is what decides which transitions the picker may offer at all.
@@ -1350,6 +1473,10 @@ private struct FolderAudienceSelect: View {
                 .automationSelect(
                     Ids.folderAudienceSelect,
                     value: { current },
+                    // The painted set as WIRE values (the tui shape — `value`
+                    // and `set` speak the wire string too), live off the same
+                    // (bound, current) inputs as the ForEach above.
+                    options: { audienceOptions(bound: bound, current: current).map(\.value) },
                     set: { v in apply(v) }
                 )
                 // NOT `.faunaGate`d, deliberately, exactly like the residency
@@ -1365,9 +1492,33 @@ private struct FolderAudienceSelect: View {
             // so the copy and the picker cannot disagree: a bound folder
             // explains that sharing is edited below, and a bound folder
             // currently public explains the one exit its picker does offer.
-            Text(renderLocalizedText(audienceHint(bound: bound, current: current)))
+            automationText(
+                Ids.folderAudienceHint,
+                renderLocalizedText(audienceHint(bound: bound, current: current))
+            )
                 .font(.caption)
                 .foregroundStyle(.secondary)
+
+            // Re-confirm door for a public folder this seat cannot verify
+            // (`folders.md` § Audience and website serving → *Re-confirming a
+            // public folder this seat cannot verify*). The verdict is the
+            // shared predicate — never re-derive the signature check here.
+            // The button only ARMS `folder-audience-public-confirm` (the one
+            // place the flip is committed) and is hidden while it is armed.
+            if !armed, let ownActor = client?.ownActorIdHex,
+                devicesFolderIsPublicUnverified(folder: folder, ownActorId: ownActor)
+            {
+                automationText(Ids.folderAudienceUnattested, L.devices.folderAudienceUnattested)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Button(L.devices.folderAudienceReconfirm) {
+                    armed = true
+                }
+                .controlSize(.small)
+                .accessibilityIdentifier(Ids.folderAudienceReconfirmButton)
+                // Same mutation the Button action performs. Env-gated no-op.
+                .automationActivate(Ids.folderAudienceReconfirmButton) { armed = true }
+            }
         }
     }
 
@@ -1454,7 +1605,7 @@ private struct FolderWebsiteToggle: View {
             // `.faunaGate` and this one deliberately does not: `folders.update`
             // is `OfflineSafe`, so a gate here could never desensitize anything.
 
-            Text(hint)
+            automationText(Ids.folderWebsiteHint, hint)
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
@@ -1657,7 +1808,13 @@ private struct FolderRowBody: View {
                 }
             }
         } message: {
-            Text("\(L.devices.declassifyBody)\n\n\(L.devices.declassifyIrreversible)")
+            // Two identifiable lines (not one joined `Text`): each consequence
+            // is its own automation id, as on the other six apps.
+            VStack {
+                automationText(Ids.folderAudiencePublicNamesWarning, L.devices.declassifyBody)
+                automationText(
+                    Ids.folderAudiencePublicResealWarning, L.devices.declassifyIrreversible)
+            }
         }
         // `folder-residency-confirm` — present only while armed (the
         // `folder-audience-public-confirm` pattern, ui.yaml's own name for
@@ -1703,7 +1860,10 @@ private struct FolderRowBody: View {
         // both are no-ops in production.
         .automationPresentation(ids: [Ids.folderDeleteConfirm], isPresented: showingDelete)
         .automationPresentation(
-            ids: [Ids.folderAudiencePublicConfirm], isPresented: audienceArmed)
+            ids: [
+                Ids.folderAudiencePublicConfirm, Ids.folderAudiencePublicNamesWarning,
+                Ids.folderAudiencePublicResealWarning,
+            ], isPresented: audienceArmed)
         .automationPresentation(
             ids: [Ids.folderResidencyConfirm], isPresented: residencyArmed)
     }
@@ -1819,10 +1979,6 @@ private struct FolderPlacesSection: View {
         .task(id: folder.name) {
             await vm.loadFolderPlaces(name: folder.name)
         }
-        // A dropped push (offline, or the socket flapped) is recovered on the
-        // next reconnect — the same treatment the device-activity section beside
-        // it gets, for the same reason: the per-seat flags live off-snapshot.
-        .onReconnect { await vm.loadFolderPlaces(name: folder.name) }
     }
 }
 
@@ -2007,11 +2163,6 @@ private struct FolderDeviceActivitySection: View {
             guard change.names(folder.name) else { return }
             await vm.loadFolderDeviceActivity(name: folder.name)
         }
-        // A dropped push (offline, or the socket flapped) is recovered on the
-        // next reconnect — mirrors Media's own `.onReconnect` (transport.md
-        // § Which surfaces a push invalidates — `media` covers this section's
-        // per-set activity, part of the full reconnect sweep).
-        .onReconnect { await vm.loadFolderDeviceActivity(name: folder.name) }
     }
 }
 
@@ -2204,14 +2355,20 @@ private struct FolderDestinationAttachRow: View {
 /// `conflict-resolution-panel` / `conflict-keep-*` surface) are **retired**: keep-both
 /// is subsumed by versions.
 private struct ConflictRow: View {
-    let vm: DevicesMachineVM
     let conflict: ConflictSummary
+    /// The row's gesture: the machine's re-point on a nest set, the sync agent's
+    /// restore on a group set.
+    let useOtherVersion: () -> Void
 
-    /// Auto-resolution stamped a winner. A row without one is an **unresolved**
-    /// report (the engine's degraded path when an upload fails) — it renders informationally, with no button
-    /// (the resolving device handles it; `fauna.sync.conflicts.resolve` stays
-    /// served within the major version).
-    private var isResolved: Bool { conflict.winningManifestHash != nil }
+    /// Auto-resolution stamped a winner, or the row retains a version to go back
+    /// to: a group set's row whose winner is a delete has no winning head and
+    /// still retains the edit. Any other row is an **unresolved** report (the
+    /// engine's degraded path when an upload fails) — it renders
+    /// informationally, with no button (the resolving device handles it;
+    /// `fauna.sync.conflicts.resolve` stays served within the major version).
+    private var isResolved: Bool {
+        conflict.winningManifestHash != nil || conflict.hasOtherVersion
+    }
 
     /// The badge is the RESOLUTION on a resolved row ("Merged" / "Latest kept"),
     /// falling back to the (localized) conflict type on an unresolved row —
@@ -2253,19 +2410,17 @@ private struct ConflictRow: View {
                 // Read of the affected-file line. Env-gated no-op in production.
                 .automationValue(Ids.conflictFileInfo, text: { conflict.fileInfo })
 
-            if isResolved {
-                // Re-pointing is only offered when a *different* retained version
-                // actually exists to point at (precomputed `hasOtherVersion`).
-                if conflict.hasOtherVersion {
-                    // The ONE action: re-point at the retained other version.
-                    Button(L.devices.conflicts.useOtherVersion) { useOtherVersion() }
-                        .buttonStyle(.bordered)
-                        .controlSize(.small)
-                        .accessibilityIdentifier(Ids.conflictResolveButton)
-                        // Same `useOtherVersion()` the Button action runs. Env-gated no-op.
-                        .automationActivate(Ids.conflictResolveButton) { useOtherVersion() }
-                }
-            } else {
+            // Offered only when a *different* retained version actually exists to
+            // point at (precomputed `hasOtherVersion`), which is the whole gate.
+            if conflict.hasOtherVersion {
+                // The ONE action: go back to the retained other version.
+                Button(L.devices.conflicts.useOtherVersion) { useOtherVersion() }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .accessibilityIdentifier(Ids.conflictResolveButton)
+                    // Same `useOtherVersion()` the Button action runs. Env-gated no-op.
+                    .automationActivate(Ids.conflictResolveButton) { useOtherVersion() }
+            } else if !isResolved {
                 // Unresolved row — informational only, never a chooser.
                 Text(L.devices.conflicts.awaitingDevice)
                     .font(.caption2)
@@ -2274,8 +2429,11 @@ private struct ConflictRow: View {
         }
         .padding(.vertical, 2)
     }
+}
 
-    private func useOtherVersion() {
-        Task { await vm.useOtherVersion(conflictId: conflict.id) }
-    }
+/// A group set's review row with the set it belongs to: the restore addresses
+/// the row by (set, id), and the id means nothing outside its set.
+private struct GroupReviewRow {
+    let folderId: String
+    let conflict: ConflictSummary
 }

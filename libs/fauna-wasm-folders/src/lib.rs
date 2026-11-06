@@ -267,6 +267,43 @@ pub fn place_rows(members: JsValue, devices: JsValue) -> Result<JsValue, JsValue
     to_js(&fauna_devices_machine::place_rows(&members, &devices)).map_err(err_to_js)
 }
 
+/// The `error-message` texts a folder row's background reads put up, one slot
+/// per (read, set), so a later good answer retires exactly its own text and
+/// never a gesture's (`ui/folders.md` § Errors & edge cases). The rule is
+/// `fauna_devices_machine::RowReadErrors`; this class only carries it to the SPA.
+#[wasm_bindgen]
+#[derive(Default)]
+pub struct RowReadErrors(fauna_devices_machine::RowReadErrors);
+
+#[wasm_bindgen]
+impl RowReadErrors {
+    #[wasm_bindgen(constructor)]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Remember that `read` for `set` put `message` on the banner.
+    pub fn put(&mut self, read: &str, set: &str, message: String) {
+        self.0.put(read, set, message);
+    }
+
+    /// `read` answered for `set`: whether the banner, showing `shown`, clears.
+    pub fn retire(&mut self, read: &str, set: &str, shown: &str) -> bool {
+        self.0.retire(read, set, shown)
+    }
+
+    /// `set`'s row closed: whether the banner, showing `shown`, clears.
+    #[wasm_bindgen(js_name = retireSet)]
+    pub fn retire_set(&mut self, set: &str, shown: &str) -> bool {
+        self.0.retire_set(set, shown)
+    }
+
+    /// Whether `shown` is a row read's own text.
+    pub fn owns(&self, shown: &str) -> bool {
+        self.0.owns(shown)
+    }
+}
+
 /// The `folder-lease-status` line for one folder row (`LocalizedText`), or
 /// `undefined` while the folder is not lease-governed (`ui/folders.md` §
 /// Exclusive editing). Resolved once in shared Rust
@@ -827,6 +864,17 @@ impl DevicesMachine {
         })
     }
 
+    /// `refresh` for a background cause (a store-change notice, a push, a
+    /// poll): it leaves a gesture's error standing.
+    #[wasm_bindgen(js_name = resync)]
+    pub fn resync(&self) -> js_sys::Promise {
+        let inner = Arc::clone(&self.0);
+        wasm_bindgen_futures::future_to_promise(async move {
+            inner.resync().await;
+            Ok(JsValue::UNDEFINED)
+        })
+    }
+
     /// Load and fold the **T16 custody facet** (`docs/goal/ui/devices.md`
     /// § Custody facet) — the `custody-holder-*` family's rows, resolving to the
     /// same `CustodyFacetView` JSON shape the native apps get over UniFFI. One
@@ -846,6 +894,9 @@ impl DevicesMachine {
     /// are both the core chunk's account store's: both cross the account
     /// `port` (a `SharedAccountPort` minted for this account — the
     /// custody-ceremony and succession-ledger seams' forwarders).
+    /// Fetches the receipts custodian nests staged at this account's nest first,
+    /// over the page's own socket, and records them through the same port.
+    ///
     /// Resolves to `null` when either was unreadable this pass (no runtime in
     /// this tab included) — a transient, so keep the previous rows rather than
     /// painting an empty list over live ones.
@@ -870,7 +921,18 @@ impl DevicesMachine {
         let transport = fauna_account_port::JsAccountTransport::new(port.into())
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
         let records = fauna_client_config::custody_port::PortCustodyStore::new(transport);
+        let client = self.1.clone();
         Ok(wasm_bindgen_futures::future_to_promise(async move {
+            // Stage (c)'s owner-side leg rides every facet refresh, as on the
+            // native apps (`fauna_client_custody::load_custody_facet`), so the
+            // freshly-fetched receipt is in the very fold this call paints. A
+            // skipped fetch is a no-op: the fold below still answers.
+            for skipped in
+                fauna_client_capabilities::custody_ceremony::ingest_nest_receipts(client, &records)
+                    .await
+            {
+                console_debug(&skipped);
+            }
             let Ok(custody) = records.custody().await else {
                 return Ok(JsValue::NULL);
             };
@@ -1070,6 +1132,29 @@ impl DevicesMachine {
             inner.remove_device(index).await;
             Ok(JsValue::UNDEFINED)
         })
+    }
+
+    /// Name the listed device `deviceId` `label` (`devices.md` § Device
+    /// names, rule (1)) — keyed by the row's id, sealed under the owner's root
+    /// by the machine; with no owner key wired nothing is sent and the
+    /// refusal paints on `error-message`.
+    #[wasm_bindgen(js_name = renameDevice)]
+    pub fn rename_device(&self, device_id: String, label: String) -> js_sys::Promise {
+        let inner = Arc::clone(&self.0);
+        wasm_bindgen_futures::future_to_promise(async move {
+            inner.rename_device(device_id, label).await;
+            Ok(JsValue::UNDEFINED)
+        })
+    }
+
+    /// The opened name of the listed device `deviceId` (`devices.md` §
+    /// Device names) — what `device-rename-input` opens prefilled with
+    /// (`ui/devices.md` § Device names), without the ` · code` rule (c)
+    /// paints beside an alike name. `undefined` for an id the last roster
+    /// read did not list.
+    #[wasm_bindgen(js_name = deviceName)]
+    pub fn device_name(&self, device_id: String) -> Option<String> {
+        self.0.device_name(device_id)
     }
 
     /// `device-p2p-participation-toggle` — the row's
@@ -1370,14 +1455,45 @@ fn parse_opt_string_vec(v: JsValue, field: &str) -> Result<Option<Vec<String>>, 
 // `fauna-wasm-panic-hook` crate doc comment). `#[wasm_bindgen(start)]` runs
 // automatically the moment this chunk's module is instantiated — no SPA-side
 // call site to add or remember, unlike `fauna-wasm`'s explicit `installLogging`.
+#[wasm_bindgen]
+extern "C" {
+    /// This chunk's own log line: it is its own runtime, and the tracing
+    /// subscriber `installLogging` sets up lives in the core chunk's.
+    #[wasm_bindgen(js_namespace = console, js_name = debug)]
+    fn console_debug(line: &str);
+}
+
 #[wasm_bindgen(start)]
 fn panic_hook_start() {
     fauna_wasm_panic_hook::install("fauna-wasm-folders");
 }
 
+/// Hand this chunk's `tracing` to the SPA's `logMessage`, so a shared crate's
+/// log line running in this chunk reaches Settings → Logs (see
+/// [`fauna_wasm_panic_hook::forward_tracing`]; the SPA's `joinChunk` calls it).
+#[wasm_bindgen(js_name = setLogSink)]
+pub fn set_log_sink(sink: js_sys::Function) {
+    fauna_wasm_panic_hook::forward_tracing(sink);
+}
+
 /// Test-only: deliberately panics, so an e2e can assert the hook above really
 /// names this chunk in the browser console — a headless witness, not a
 /// review-only claim. Compiled out of every non-`test-helpers` build.
+/// Move the trust facet's render clock in THIS chunk's runtime — where
+/// `custodyFacetLoad` judges a receipt's freshness. Each wasm chunk is its own
+/// runtime with its own copy of the clock's static, so `fauna-wasm`'s export of
+/// the same name never reaches this fold; web's `trust_facet_advance_clock`
+/// moves both (`#lib/trust-clock-e2e`). Gated on `test-helpers` (testing.md
+/// convention 15).
+///
+/// ⚠ Module-wide, and nothing auto-resets it — zero it once the assertions are
+/// done.
+#[cfg(feature = "test-helpers")]
+#[wasm_bindgen(js_name = trustSetClockOffsetForTest)]
+pub fn trust_set_clock_offset_for_test(offset_secs: f64) {
+    fauna_client_capabilities::trust_clock::set_clock_offset_secs(offset_secs as i64);
+}
+
 #[cfg(feature = "test-helpers")]
 #[wasm_bindgen(js_name = panicForTestOnly)]
 pub fn panic_for_test_only() {

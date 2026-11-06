@@ -22,7 +22,7 @@
 //! piece at a time and drops it, and keeps only the manifest — so every byte
 //! the counter sees above the ceiling is the client's.
 
-use std::alloc::{GlobalAlloc, Layout, System};
+use fauna_alloc_probe::PeakLive;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
 use std::sync::Arc;
@@ -39,57 +39,8 @@ use fauna_sync_engine::ignore::IgnoreMatcher;
 use fauna_sync_engine::nest_client::SyncClient;
 use fauna_sync_engine::transfer::TransferPool;
 
-// ── the live-bytes counter (`fauna-archive`'s `member_inflation_bound.rs`) ───
-
-struct Counting;
-
-static LIVE: AtomicUsize = AtomicUsize::new(0);
-static PEAK: AtomicUsize = AtomicUsize::new(0);
-
-fn grew(by: usize) {
-    let now = LIVE.fetch_add(by, Relaxed) + by;
-    PEAK.fetch_max(now, Relaxed);
-}
-
-// SAFETY: every call forwards to `System` unchanged; the counter only reads
-// the sizes.
-unsafe impl GlobalAlloc for Counting {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        let ptr = unsafe { System.alloc(layout) };
-        if !ptr.is_null() {
-            grew(layout.size());
-        }
-        ptr
-    }
-
-    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-        let ptr = unsafe { System.alloc_zeroed(layout) };
-        if !ptr.is_null() {
-            grew(layout.size());
-        }
-        ptr
-    }
-
-    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        unsafe { System.dealloc(ptr, layout) };
-        LIVE.fetch_sub(layout.size(), Relaxed);
-    }
-
-    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        let moved = unsafe { System.realloc(ptr, layout, new_size) };
-        if !moved.is_null() {
-            if new_size >= layout.size() {
-                grew(new_size - layout.size());
-            } else {
-                LIVE.fetch_sub(layout.size() - new_size, Relaxed);
-            }
-        }
-        moved
-    }
-}
-
 #[global_allocator]
-static COUNTING: Counting = Counting;
+static ALLOC: PeakLive = PeakLive;
 
 // ── the fixture ──────────────────────────────────────────────────────────────
 
@@ -251,10 +202,9 @@ async fn a_large_files_first_upload_holds_a_window_of_chunks_not_the_file() {
     write_fixture(&dir.path().join(REL));
     let engine = engine(&uri, dir.path().to_path_buf());
 
-    let base = LIVE.load(Relaxed);
-    PEAK.store(base, Relaxed);
+    let base = PeakLive::begin();
     let outcome = engine.upload_file(REL).await;
-    let peak = PEAK.load(Relaxed) - base;
+    let peak = PeakLive::end(base);
     eprintln!("peak live bytes during the upload: {peak} (ceiling {CEILING})");
 
     // The record has no control plane to land on; the upload itself must

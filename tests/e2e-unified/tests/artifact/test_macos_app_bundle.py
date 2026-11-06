@@ -29,8 +29,8 @@ pytestmark = [pytest.mark.tier_4, pytest.mark.macos]
 
 # What `mac-app` puts in the bundle that a bare binary has no notion of. Each is
 # a real runtime dependency, not a manifest nicety:
-#   * fauna-sync-agent — the .dmg channel's agent source; `LaunchdSyncAgentSpawner`
-#     resolves `Contents/MacOS/fauna-sync-agent` and self-installs its LaunchAgent
+#   * fauna-sync-agent — the .dmg channel's agent source; the app's launchd spawner
+#     (`FfiLaunchdAgentSpawner`) resolves `Contents/MacOS/fauna-sync-agent` and self-installs its LaunchAgent
 #     (sync-agent.md § Packaging + lifecycle). Absent, file sync silently never runs
 #     for every user who installed from the DMG rather than the .pkg.
 #   * AppIcon.icns — the brand mark; its absence is the shipped-without-an-icon bug
@@ -53,6 +53,10 @@ _REQUIRED_BUNDLE_CONTENTS = (
 )
 
 
+# A test requesting `macos_artifact_bundle` may be the one that builds it, the
+# artifact this suite witnesses (e2e-conventions.md point 9: a subject build stays
+# in its test, on a 3600 s clock).
+@pytest.mark.timeout(3600)
 def test_the_bundle_carries_everything_it_needs_at_runtime(macos_artifact_bundle):
     """Packaging completeness — the assertions the recipe's own WARNING does not make."""
     missing = [
@@ -65,6 +69,7 @@ def test_the_bundle_carries_everything_it_needs_at_runtime(macos_artifact_bundle
     )
 
 
+@pytest.mark.timeout(3600)
 def test_the_bundle_is_signed_with_its_entitlements(macos_artifact_bundle):
     """A valid signature AND the declared entitlements.
 
@@ -371,6 +376,7 @@ def test_relaunching_the_bundle_after_quitting_starts_normally_as_the_same_accou
     )
 
 
+@pytest.mark.timeout(3600)
 def test_two_artifact_launches_get_distinct_identities(app, macos_artifact_bundle,
                                                        artifact_scratch):
     """Concurrency safety, which is what the whole staging design buys.

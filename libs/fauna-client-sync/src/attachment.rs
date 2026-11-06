@@ -65,6 +65,30 @@ pub fn attach_app(endpoint: AgentEndpoint, app: AttachingApp) -> AppAttachment {
     AppAttachment { stop }
 }
 
+/// Hold the attachment for the process's life, against the per-user endpoint
+/// ([`AgentEndpoint::default_for_user`]), once per process: an account switch
+/// re-installs the app's agent surface but the app stays open, so a second
+/// call is a no-op. The Rust-hosted apps (tui, linux) call this from their
+/// agent-surface install; a missing endpoint is logged and leaves the app
+/// unattached (the agent then keeps the banners).
+pub fn hold_app_attachment(app: &str) {
+    static ATTACHMENT: std::sync::OnceLock<Option<AppAttachment>> = std::sync::OnceLock::new();
+    ATTACHMENT.get_or_init(|| {
+        AgentEndpoint::default_for_user()
+            .inspect_err(|e| tracing::warn!("agent attachment: no endpoint: {e}"))
+            .ok()
+            .map(|endpoint| {
+                attach_app(
+                    endpoint,
+                    AttachingApp {
+                        app: app.into(),
+                        notification_identity: None,
+                    },
+                )
+            })
+    });
+}
+
 fn run(endpoint: &AgentEndpoint, app: &AttachingApp, stop: &AtomicBool) {
     let mut retry = RETRY_MIN;
     while !stop.load(Ordering::SeqCst) {

@@ -76,11 +76,30 @@ internal sealed class MockNestRpcClient : INestRpcClient
     public void RaiseMailSpamPushChanged() => MailSpamPushChanged?.Invoke();
 
     /// <inheritdoc />
-    public event Action<string>? FolderChangedPushed;
+    public event Action? MailImportPushChanged;
+    /// <summary>Test hook: simulate an import-event push (raises
+    /// <see cref="MailImportPushChanged"/>).</summary>
+    public void RaiseMailImportPushChanged() => MailImportPushChanged?.Invoke();
+
+    /// <inheritdoc />
+    public event Action? MailExportPushChanged;
+    /// <summary>Test hook: simulate an export-event push (raises
+    /// <see cref="MailExportPushChanged"/>).</summary>
+    public void RaiseMailExportPushChanged() => MailExportPushChanged?.Invoke();
+
+    /// <inheritdoc />
+    public event Action? DevicesStale;
+    /// <summary>Test hook: raise <see cref="DevicesStale"/>.</summary>
+    public void RaiseDevicesStale() => DevicesStale?.Invoke();
+    /// <inheritdoc />
+    public event Action? NestInfoStale;
+    /// <summary>Test hook: raise <see cref="NestInfoStale"/>.</summary>
+    public void RaiseNestInfoStale() => NestInfoStale?.Invoke();
+    public event Action<string, byte[]?>? FolderChangedPushed;
     /// <summary>Test hook: simulate an inbound <c>fauna.sync.changed</c> push
-    /// (raises <see cref="FolderChangedPushed"/> with <paramref name="folder"/>).</summary>
-    public void RaiseFolderChangedPushed(string folder) =>
-        FolderChangedPushed?.Invoke(folder);
+    /// (raises <see cref="FolderChangedPushed"/> with the pushed pair).</summary>
+    public void RaiseFolderChangedPushed(string folder, byte[]? folderHash = null) =>
+        FolderChangedPushed?.Invoke(folder, folderHash);
 
     /// <inheritdoc />
     public event Action<FfiConnectionState>? ConnectionStateChanged;
@@ -402,6 +421,72 @@ internal sealed class MockNestRpcClient : INestRpcClient
         return Task.FromResult(false);
     }
 
+    // ── Nest rules (nest-rules.md) ───────────────────────────────────────
+
+    /// The `fauna.nest.info` fold's answer; a test that drives the book sets it.
+    public FfiNestRulesRefresh? NextNestRulesRefresh { get; set; }
+
+    public Task<FfiNestRulesRefresh> RefreshNestRulesBookAsync(FfiNestRulesBook book)
+    {
+        _calls.Add("RefreshNestRulesBook");
+        Throw();
+        return Task.FromResult(NextNestRulesRefresh
+            ?? new FfiNestRulesRefresh("", "", new FfiNestRulesRead.NoRules()));
+    }
+
+    /// The admin mounting's read; `null` → a fresh install (no document).
+    public FfiAdminContentPolicy? NextAdminContentPolicy { get; set; }
+    /// The documents `AdminSetContentPolicyAsync` was handed, in order.
+    public List<byte[]> AdminContentPolicyWrites { get; } = new();
+    /// The write's answer; `null` → accepted at the next sequence.
+    public FfiAdminContentPolicy? NextAdminSetContentPolicy { get; set; }
+
+    public Task<FfiAdminContentPolicy> AdminContentPolicyAsync()
+    {
+        _calls.Add("AdminContentPolicy");
+        Throw();
+        return Task.FromResult(NextAdminContentPolicy ?? new FfiAdminContentPolicy(null, 0, 0, null));
+    }
+
+    public Task<FfiAdminContentPolicy> AdminSetContentPolicyAsync(byte[] document)
+    {
+        _calls.Add("AdminSetContentPolicy");
+        Throw();
+        AdminContentPolicyWrites.Add(document);
+        var seq = (NextAdminContentPolicy?.@sequence ?? 0) + 1;
+        return Task.FromResult(NextAdminSetContentPolicy ?? new FfiAdminContentPolicy(document, seq, 0, null));
+    }
+
+    /// The (ward, document) pairs `FamilySaveContentRulesAsync` was handed.
+    public List<(byte[] Ward, byte[] Document)> FamilyContentRulesWrites { get; } = new();
+    public FfiFamilyWardInfo? NextFamilySaveContentRules { get; set; }
+
+    public Task<FfiFamilyWardInfo?> FamilySaveContentRulesAsync(byte[] ward, byte[] document)
+    {
+        _calls.Add("FamilySaveContentRules");
+        Throw();
+        FamilyContentRulesWrites.Add((ward, document));
+        return Task.FromResult(NextFamilySaveContentRules);
+    }
+
+    public IReadOnlyList<string> NextRuleLabelers { get; set; } = Array.Empty<string>();
+
+    public Task<IReadOnlyList<string>> RuleLabelersAsync()
+    {
+        _calls.Add("RuleLabelers");
+        Throw();
+        return Task.FromResult(NextRuleLabelers);
+    }
+
+    public byte[]? NextRuleModule { get; set; }
+
+    public Task<byte[]?> RuleModuleAsync(byte[] labelerId)
+    {
+        _calls.Add("RuleModule");
+        Throw();
+        return Task.FromResult(NextRuleModule);
+    }
+
     public Task<IReadOnlyList<FfiFeatureRow>> FeaturesRowsAsync()
     {
         _calls.Add("FeaturesRows");
@@ -562,9 +647,13 @@ internal sealed class MockNestRpcClient : INestRpcClient
         return Task.FromResult(NextFollows);
     }
 
+    public (string BridgeId, string Id, string? Petname)? LastAddFollow { get; private set; }
+    public (string BridgeId, string FollowId)? LastRemoveFollow { get; private set; }
+
     public Task BridgesAddFollowAsync(string bridgeId, string id, string? petname)
     {
         _calls.Add("BridgesAddFollow");
+        LastAddFollow = (bridgeId, id, petname);
         if (NextAddFollowException is not null) throw NextAddFollowException;
         return Task.CompletedTask;
     }
@@ -572,6 +661,34 @@ internal sealed class MockNestRpcClient : INestRpcClient
     public Task BridgesRemoveFollowAsync(string bridgeId, string followId)
     {
         _calls.Add("BridgesRemoveFollow");
+        LastRemoveFollow = (bridgeId, followId);
+        return Task.CompletedTask;
+    }
+
+    /// <summary>The follow requests each bridge id lists. An answer removes its row,
+    /// as the nest does, so a caller that re-reads after answering sees it gone — what
+    /// makes a non-optimistic assertion non-vacuous (the <see cref="PersistSetSettings"/>
+    /// property).</summary>
+    public Dictionary<string, List<BridgeFollowRequest>> FollowRequests { get; } = new();
+    public (string BridgeId, string Id, bool Approve)? LastFollowRequestAnswer { get; private set; }
+
+    public Task<IReadOnlyList<BridgeFollowRequest>> BridgesListFollowRequestsAsync(string bridgeId)
+    {
+        _calls.Add("BridgesListFollowRequests");
+        Throw();
+        IReadOnlyList<BridgeFollowRequest> rows = FollowRequests.TryGetValue(bridgeId, out var held)
+            ? held.ToList()
+            : new List<BridgeFollowRequest>();
+        return Task.FromResult(rows);
+    }
+
+    public Task BridgesAnswerFollowRequestAsync(string bridgeId, string id, bool approve)
+    {
+        _calls.Add("BridgesAnswerFollowRequest");
+        LastFollowRequestAnswer = (bridgeId, id, approve);
+        Throw();
+        if (FollowRequests.TryGetValue(bridgeId, out var held))
+            held.RemoveAll(r => r.Id == id);
         return Task.CompletedTask;
     }
 
@@ -671,6 +788,89 @@ internal sealed class MockNestRpcClient : INestRpcClient
         return Task.CompletedTask;
     }
 
+    /// <summary>The installed plugins <see cref="PluginsListAsync"/> returns. An
+    /// install or uninstall edits it only when <see cref="PersistPlugins"/> is set.</summary>
+    public List<FfiInstalledPlugin> NextPlugins { get; set; } = new();
+
+    /// <summary>When set, <see cref="PluginsUninstallAsync"/> drops the row from
+    /// <see cref="NextPlugins"/>, so the re-read shows what the nest persisted.</summary>
+    public bool PersistPlugins { get; set; }
+
+    /// <summary>When set, only the <c>fauna.plugins.*</c> calls throw it.</summary>
+    public Exception? NextPluginsError { get; set; }
+
+    public string? LastPluginInstallUrl { get; private set; }
+    public string? LastPluginUninstall { get; private set; }
+
+    public Task<IReadOnlyList<FfiInstalledPlugin>> PluginsListAsync()
+    {
+        _calls.Add("PluginsList");
+        Throw();
+        if (NextPluginsError is { } e) throw e;
+        return Task.FromResult<IReadOnlyList<FfiInstalledPlugin>>(NextPlugins.ToList());
+    }
+
+    public Task PluginsInstallAsync(string documentUrl)
+    {
+        _calls.Add("PluginsInstall");
+        Throw();
+        if (NextPluginsError is { } e) throw e;
+        LastPluginInstallUrl = documentUrl;
+        return Task.CompletedTask;
+    }
+
+    public Task PluginsUninstallAsync(string principalIdHex)
+    {
+        _calls.Add("PluginsUninstall");
+        Throw();
+        if (NextPluginsError is { } e) throw e;
+        LastPluginUninstall = principalIdHex;
+        if (PersistPlugins) NextPlugins.RemoveAll(p => p.@principalIdHex == principalIdHex);
+        return Task.CompletedTask;
+    }
+
+    /// <summary>One installed plugin's paint-ready row.</summary>
+    public static FfiInstalledPlugin MakeInstalledPlugin(
+        string principalIdHex, string name, string clientId, string state = "running") =>
+        new(principalIdHex, name, clientId, state,
+            new LocalizedText("bridges.plugin_publisher_development", new Dictionary<string, string>()),
+            new[] { new LocalizedText("bridges.plugin_state_" + state, new Dictionary<string, string>()) });
+
+    /// <summary>The settings cards <see cref="PluginsAvailableAsync"/> returns.</summary>
+    public List<FfiPluginCard> NextPluginCards { get; set; } = new();
+
+    /// <summary>The last <see cref="PluginsSetSettingAsync"/> write, as (principal, value).</summary>
+    public (string PrincipalIdHex, BridgeSettingValue Value)? LastPluginSetting { get; private set; }
+
+    public Task<IReadOnlyList<FfiPluginCard>> PluginsAvailableAsync()
+    {
+        _calls.Add("PluginsAvailable");
+        Throw();
+        if (NextPluginsError is { } e) throw e;
+        return Task.FromResult<IReadOnlyList<FfiPluginCard>>(NextPluginCards.ToList());
+    }
+
+    public Task PluginsSetSettingAsync(string principalIdHex, BridgeSettingValue value)
+    {
+        _calls.Add("PluginsSetSetting");
+        Throw();
+        if (NextPluginsError is { } e) throw e;
+        LastPluginSetting = (principalIdHex, value);
+        return Task.CompletedTask;
+    }
+
+    /// <summary>One plugin's paint-ready settings card: unbound (Connect) unless a binding
+    /// row id is given (Disconnect).</summary>
+    public static FfiPluginCard MakePluginCard(
+        string principalIdHex, string name, string clientId,
+        string? bindingPrincipalIdHex = null, FfiBridgeSetting[]? settings = null) =>
+        new(principalIdHex, name, clientId,
+            new LocalizedText("bridges.plugin_card_badge", new Dictionary<string, string>()),
+            new LocalizedText("bridges.plugin_publisher_development", new Dictionary<string, string>()),
+            bindingPrincipalIdHex is not null,
+            bindingPrincipalIdHex,
+            settings ?? Array.Empty<FfiBridgeSetting>());
+
     // ── fauna.email.* ───────────────────────────────────────────────────
 
     public IReadOnlyList<FfiEmailFilter> NextFilters { get; set; } = new List<FfiEmailFilter>();
@@ -683,7 +883,8 @@ internal sealed class MockNestRpcClient : INestRpcClient
 
     public Task EmailFiltersCreateAsync(
         string name, IReadOnlyList<FfiEmailFilterRule> rules,
-        string combination, FfiEmailFilterAction action, int priority)
+        string combination, FfiEmailFilterAction action, int priority,
+        bool continueOnMatch = false)
     {
         _calls.Add("EmailFiltersCreate");
         return Task.CompletedTask;
@@ -717,7 +918,8 @@ internal sealed class MockNestRpcClient : INestRpcClient
 
     public Task EmailFiltersUpdateAsync(
         long id, string name, IReadOnlyList<FfiEmailFilterRule> rules,
-        string combination, FfiEmailFilterAction action, int priority)
+        string combination, FfiEmailFilterAction action, int priority,
+        bool continueOnMatch = false)
     {
         _calls.Add("EmailFiltersUpdate");
         LastFilterUpdate = (id, name, rules, combination, action, priority);
@@ -846,6 +1048,20 @@ internal sealed class MockNestRpcClient : INestRpcClient
     public Task<long> NotificationsMarkReadAsync(long? upTo)
     {
         _calls.Add("NotificationsMarkRead");
+        Throw();
+        return Task.FromResult(0L);
+    }
+
+    public Task<bool> NotificationsDismissAsync(long id)
+    {
+        _calls.Add("NotificationsDismiss");
+        Throw();
+        return Task.FromResult(true);
+    }
+
+    public Task<long> NotificationsClearAsync(long? upTo)
+    {
+        _calls.Add("NotificationsClear");
         Throw();
         return Task.FromResult(0L);
     }
@@ -1001,6 +1217,17 @@ internal sealed class MockNestRpcClient : INestRpcClient
         return Task.CompletedTask;
     }
 
+    /// Last <c>fauna.admin.tiers.delete</c> tier name.
+    public string? LastTierDelete { get; private set; }
+
+    public Task AdminTiersDeleteAsync(string name)
+    {
+        _calls.Add("AdminTiersDelete");
+        LastTierDelete = name;
+        Throw();
+        return Task.CompletedTask;
+    }
+
     /// Last <c>fauna.admin.tiers.create</c> args (name + the five raw-i64 caps).
     public (string Name, long Inbox, long Storage, long Devices, long BlobSize, long Feeds)? LastTierCreate { get; private set; }
 
@@ -1031,12 +1258,13 @@ internal sealed class MockNestRpcClient : INestRpcClient
         return Task.CompletedTask;
     }
 
-    public (byte[] actorId, string tier, string? handle)? LastUsersCreate { get; private set; }
+    public (byte[] actorId, string tier, string? handle, byte[]? guardianActor, string? ageBand)? LastUsersCreate { get; private set; }
 
-    public Task AdminUsersCreateAsync(byte[] actorId, string tier, string? handle)
+    public Task AdminUsersCreateAsync(byte[] actorId, string tier, string? handle,
+        byte[]? guardianActorId = null, string? ageBand = null)
     {
         _calls.Add("AdminUsersCreate");
-        LastUsersCreate = (actorId, tier, handle);
+        LastUsersCreate = (actorId, tier, handle, guardianActorId, ageBand);
         Throw();
         return Task.CompletedTask;
     }
@@ -1211,6 +1439,47 @@ internal sealed class MockNestRpcClient : INestRpcClient
         return Task.FromResult(NextWebAppOriginView);
     }
 
+    /// The <c>fauna.admin.update_channel.get</c> fixture (following Stable, settable).
+    public FfiAdminUpdateChannelView NextUpdateChannelView { get; set; } = new(
+        uniffi.fauna_provisioning.UpdateChannel.Stable,
+        new LocalizedText("admin.nest_page.update_channel_status_following_stable", new()),
+        true,
+        new FfiUpdateChannelOption[]
+        {
+            new(uniffi.fauna_provisioning.UpdateChannel.Stable,
+                new LocalizedText("onboarding.vps_config.update_channel_stable_label", new()),
+                new LocalizedText("onboarding.vps_config.update_channel_stable_desc", new())),
+            new(uniffi.fauna_provisioning.UpdateChannel.Test,
+                new LocalizedText("onboarding.vps_config.update_channel_test_label", new()),
+                new LocalizedText("onboarding.vps_config.update_channel_test_desc", new())),
+            new(uniffi.fauna_provisioning.UpdateChannel.Dev,
+                new LocalizedText("onboarding.vps_config.update_channel_dev_label", new()),
+                new LocalizedText("onboarding.vps_config.update_channel_dev_desc", new())),
+        });
+    /// Every <c>fauna.admin.update_channel.set</c> arg, in call order.
+    public List<uniffi.fauna_provisioning.UpdateChannel> UpdateChannelSetCalls { get; } = new();
+
+    /// Fail only the update-channel read (the section is best-effort).
+    public bool NextUpdateChannelReadError { get; set; }
+
+    public Task<FfiAdminUpdateChannelView> AdminUpdateChannelStatusAsync()
+    {
+        _calls.Add("AdminUpdateChannelStatus");
+        Throw();
+        if (NextUpdateChannelReadError) throw new InvalidOperationException("channel read failed");
+        return Task.FromResult(NextUpdateChannelView);
+    }
+
+    public Task<FfiAdminUpdateChannelView> SetUpdateChannelAsync(
+        uniffi.fauna_provisioning.UpdateChannel channel)
+    {
+        _calls.Add("SetUpdateChannel");
+        UpdateChannelSetCalls.Add(channel);
+        Throw();
+        NextUpdateChannelView = NextUpdateChannelView with { selected = channel };
+        return Task.FromResult(NextUpdateChannelView);
+    }
+
     /// The seed-rotation roster fixture (default: a confirmable single-inheritor
     /// roster — the ordinary case).
     public FfiSeedRotationConfirmView NextSeedRotateRoster { get; set; } = new(
@@ -1339,6 +1608,18 @@ internal sealed class MockNestRpcClient : INestRpcClient
         return Task.FromResult(NextAdminLogs);
     }
 
+    /// <summary>The audit-log section <see cref="AdminAuditLogAsync"/> hands out;
+    /// a test that never sets it gets a refusal.</summary>
+    public IFfiAuditLog? NextAuditLog { get; set; }
+
+    public Task<IFfiAuditLog> AdminAuditLogAsync()
+    {
+        _calls.Add("AdminAuditLog");
+        Throw();
+        return Task.FromResult(NextAuditLog
+            ?? throw new InvalidOperationException("MockNestRpcClient: NextAuditLog not set"));
+    }
+
     /// The <c>fauna.admin.custody_hosting.list</c> fixture (the
     /// admin-custody-hosting page source).
     public FfiAdminHostingRow[] NextAdminCustodyHostingRows { get; set; } = Array.Empty<FfiAdminHostingRow>();
@@ -1457,6 +1738,29 @@ internal sealed class MockNestRpcClient : INestRpcClient
         LastReportResolve = (reportId, acted);
         Throw();
         return Task.CompletedTask;
+    }
+
+    /// The <c>fauna.moderation.admin_block.list</c> fixture.
+    public IReadOnlyList<FfiBlockedRow> NextBlockedList { get; set; } = new List<FfiBlockedRow>();
+    /// Last <c>fauna.moderation.admin_block</c> args.
+    public (string ReportId, bool Restore)? LastAdminBlock { get; private set; }
+    /// Make the next <c>fauna.moderation.admin_block</c> throw (the refused-block arm).
+    public Exception? AdminBlockError { get; set; }
+
+    public Task<string> AdminBlockAsync(string reportId, bool restore)
+    {
+        _calls.Add("AdminBlock");
+        LastAdminBlock = (reportId, restore);
+        Throw();
+        if (AdminBlockError is not null) throw AdminBlockError;
+        return Task.FromResult(restore ? "restored" : "blocked");
+    }
+
+    public Task<IReadOnlyList<FfiBlockedRow>> AdminBlockListAsync()
+    {
+        _calls.Add("AdminBlockList");
+        Throw();
+        return Task.FromResult(NextBlockedList);
     }
 
     public Task<string[]> HideReportedAsync(string id)
@@ -1588,6 +1892,74 @@ internal sealed class MockNestRpcClient : INestRpcClient
         Throw();
         NextForwardPerHour = NextForwardPerHour with { value = value };
         return Task.FromResult(NextForwardPerHour);
+    }
+
+    /// The <c>fauna.bridges.get_mail_switches</c> fixture.
+    public MailSwitches NextMailSwitches { get; set; } = new(true, true, true);
+    /// When set, what the re-read after a switch write answers, in place of the
+    /// written value: a nest that kept something else than the gesture asked for.
+    public MailSwitches? MailSwitchesReread { get; set; }
+    /// Last <c>fauna.bridges.set_mail_switches</c> args (null until one is sent).
+    public (bool? Receive, bool? Send)? LastMailSwitchesSet { get; private set; }
+    /// The <c>fauna.bridges.get_mail_quotas</c> fixture.
+    public uniffi.fauna_client_mail_settings.MailQuotas NextMailQuotas { get; set; } = new(0, 0, 0, 0, 0, 0);
+    /// The automatic reply as the filter rules read (disabled carries no body).
+    public FfiAutoRespond NextAutorespond { get; set; } = new(false, string.Empty);
+    public string? LastAutorespondSet { get; private set; }
+    public int AutorespondSetCalls { get; private set; }
+    public int AutorespondClearCalls { get; private set; }
+
+    public Task<MailSwitches> MailSwitchesGetAsync()
+    {
+        _calls.Add("MailSwitchesGet");
+        Throw();
+        return Task.FromResult(NextMailSwitches);
+    }
+
+    public Task<MailSwitches> MailSwitchesSetAsync(bool? receiveEnabled, bool? sendEnabled)
+    {
+        _calls.Add("MailSwitchesSet");
+        LastMailSwitchesSet = (receiveEnabled, sendEnabled);
+        Throw();
+        NextMailSwitches = MailSwitchesReread ?? NextMailSwitches with
+        {
+            receiveEnabled = receiveEnabled ?? NextMailSwitches.receiveEnabled,
+            sendEnabled = sendEnabled ?? NextMailSwitches.sendEnabled,
+        };
+        return Task.FromResult(NextMailSwitches);
+    }
+
+    public Task<uniffi.fauna_client_mail_settings.MailQuotas> MailQuotasGetAsync()
+    {
+        _calls.Add("MailQuotasGet");
+        Throw();
+        return Task.FromResult(NextMailQuotas);
+    }
+
+    public Task<FfiAutoRespond> AutorespondGetAsync()
+    {
+        _calls.Add("AutorespondGet");
+        Throw();
+        return Task.FromResult(NextAutorespond);
+    }
+
+    public Task AutorespondSetAsync(string message)
+    {
+        _calls.Add("AutorespondSet");
+        AutorespondSetCalls++;
+        LastAutorespondSet = message;
+        Throw();
+        NextAutorespond = new(true, message);
+        return Task.CompletedTask;
+    }
+
+    public Task AutorespondClearAsync()
+    {
+        _calls.Add("AutorespondClear");
+        AutorespondClearCalls++;
+        Throw();
+        NextAutorespond = new(false, string.Empty);
+        return Task.CompletedTask;
     }
 
     // ── Layer-B signal sharing (engagement-cues.md § Layer B) ───────────
@@ -2266,9 +2638,14 @@ internal sealed class MockNestRpcClient : INestRpcClient
     public (string Id, string Url, string Name)? LastDestinationEdit { get; private set; }
     public string? LastDestinationRemove { get; private set; }
 
+    /// Set to make the destination LIST call throw this exact exception (a typed
+    /// refusal), leaving every other call untouched.
+    public Exception? NextDestinationsListException { get; set; }
+
     public Task<IReadOnlyList<FfiBackupDestinationView>> BackupDestinationsListAsync()
     {
         _calls.Add("BackupDestinationsList");
+        if (NextDestinationsListException is not null) throw NextDestinationsListException;
         Throw();
         return Task.FromResult(NextDestinations);
     }
@@ -2535,6 +2912,26 @@ internal sealed class MockNestRpcClient : INestRpcClient
         return Task.FromResult(NextSnapshotFileBytes);
     }
 
+    /// The whole-snapshot restore's summary (`snapshot-restore-button`).
+    public FfiRestoreSummary NextSnapshotRestore { get; set; } =
+        new(0, 0, 0, Array.Empty<string>());
+    /// A failure before the walk, thrown as the FFI's own <c>General</c> error.
+    public string? NextSnapshotRestoreError { get; set; }
+    /// When set, the restore waits on it — a test reads the running state.
+    public TaskCompletionSource? SnapshotRestoreGate { get; set; }
+    public (string DeviceId, ulong SnapshotId, string OutputDir)? LastSnapshotRestore { get; private set; }
+
+    public async Task<FfiRestoreSummary> RestoreSnapshotToDirAsync(
+        string deviceId, ulong snapshotId, string outputDir)
+    {
+        _calls.Add("RestoreSnapshotToDir");
+        LastSnapshotRestore = (deviceId, snapshotId, outputDir);
+        if (SnapshotRestoreGate is { } gate) await gate.Task;
+        if (NextSnapshotRestoreError is { } msg) throw new FfiException.General(msg);
+        Throw();
+        return NextSnapshotRestore;
+    }
+
     /// A <c>FfiBackupDestinationView</c> fixture (UI projection of a destination).
     /// The per-kind tail defaults to a plain nest row — <c>kind: "nest"</c> is what
     /// the serde default gives every pre-existing destination, and the two
@@ -2556,11 +2953,26 @@ internal sealed class MockNestRpcClient : INestRpcClient
     public IReadOnlyList<string> NextMutedKeywords { get; set; } = new List<string>();
     public IReadOnlyList<uniffi.fauna_core.MutedKeyword>? LastMutedKeywordsSet { get; private set; }
 
-    /// The queued terms as the shared record carries them: each muted at the
-    /// default weight, the full penalty (−1000,
-    /// <c>fauna_core::scoring::MUTED_KEYWORD_DEFAULT_WEIGHT</c>).
+    /// A term's stored weight when it is not the default — tests model a row
+    /// softened to Show less (−500, <c>MUTED_KEYWORD_SHOW_LESS_WEIGHT</c>) here.
+    public Dictionary<string, long> NextMutedKeywordWeights { get; } = new();
+
+    /// When set, every muted-keywords call waits on it after recording itself
+    /// (models a round trip still in flight).
+    public TaskCompletionSource? MutedKeywordsGate { get; set; }
+
+    /// The queued terms as the shared record carries them: each muted at its
+    /// <see cref="NextMutedKeywordWeights"/> entry, else the default weight, the
+    /// full penalty (−1000, <c>fauna_core::scoring::MUTED_KEYWORD_DEFAULT_WEIGHT</c>).
     private uniffi.fauna_core.MutedKeyword[] NextMutedKeywordEntries() =>
-        NextMutedKeywords.Select(w => new uniffi.fauna_core.MutedKeyword(w, -1000)).ToArray();
+        NextMutedKeywords.Select(w => new uniffi.fauna_core.MutedKeyword(
+            w, NextMutedKeywordWeights.TryGetValue(w, out var weight) ? weight : -1000)).ToArray();
+
+    private async Task<MutedWordsSnapshot> MutedKeywordsReply()
+    {
+        if (MutedKeywordsGate is { } gate) await gate.Task;
+        return new MutedWordsSnapshot(NextMutedKeywordEntries(), true);
+    }
 
     public Task<MutedWordsSnapshot> MutedKeywordsListAsync()
     {
@@ -2588,7 +3000,7 @@ internal sealed class MockNestRpcClient : INestRpcClient
         _calls.Add("MutedKeywordsAdd");
         LastMutedKeywordAdded = word;
         Throw();
-        return Task.FromResult(new MutedWordsSnapshot(NextMutedKeywordEntries(), true));
+        return MutedKeywordsReply();
     }
 
     public Task<MutedWordsSnapshot> MutedKeywordsRemoveAsync(string word)
@@ -2596,7 +3008,20 @@ internal sealed class MockNestRpcClient : INestRpcClient
         _calls.Add("MutedKeywordsRemove");
         LastMutedKeywordRemoved = word;
         Throw();
-        return Task.FromResult(new MutedWordsSnapshot(NextMutedKeywordEntries(), true));
+        return MutedKeywordsReply();
+    }
+
+    /// The level picker's save: the mock records the term and the level — only
+    /// that delta crosses; tests model the stored result in
+    /// <see cref="NextMutedKeywordWeights"/>.
+    public (string Word, uniffi.fauna_core.MutedKeywordLevel Level)? LastMutedKeywordLevelSet { get; private set; }
+
+    public Task<MutedWordsSnapshot> MutedKeywordsSetLevelAsync(string word, uniffi.fauna_core.MutedKeywordLevel level)
+    {
+        _calls.Add("MutedKeywordsSetLevel");
+        LastMutedKeywordLevelSet = (word, level);
+        Throw();
+        return MutedKeywordsReply();
     }
 
     // ── Trained topics ────────────────────────────────────────────────────
@@ -2862,10 +3287,15 @@ internal sealed class MockNestRpcClient : INestRpcClient
         return Task.FromResult(NextMineSubscriptions);
     }
 
-    public Task<FfiUnsubscribeReply> SubscriptionUnsubscribeAsync(byte[] authorId)
+    /// The (tier, home) the last unsubscribe carried.
+    public (string? Tier, string? Home)? LastUnsubscribeRoute { get; private set; }
+
+    public Task<FfiUnsubscribeReply> SubscriptionUnsubscribeAsync(
+        byte[] authorId, string? tier = null, string? homeNestUrl = null)
     {
         _calls.Add("SubscriptionUnsubscribe");
         LastUnsubscribeAuthorId = authorId;
+        LastUnsubscribeRoute = (tier, homeNestUrl);
         Throw();
         return Task.FromResult(NextUnsubscribeReply);
     }
@@ -2888,6 +3318,9 @@ internal sealed class MockNestRpcClient : INestRpcClient
     public string? LastProvidersRemove { get; private set; }
     public string? LastClaimsRedeem { get; private set; }
     public (string Tier, ulong? ValidUntil)? LastClaimsMint { get; private set; }
+    public string? LastClaimsVoid { get; private set; }
+    /// Thrown by <c>claims.void</c> alone (a typed refusal) without failing the §5 re-read.
+    public Exception? ClaimsVoidError { get; set; }
 
     public Task<IReadOnlyList<FfiProviderItem>> PaymentsProvidersListAsync()
     {
@@ -2935,6 +3368,15 @@ internal sealed class MockNestRpcClient : INestRpcClient
         return Task.FromResult(NextClaims);
     }
 
+    public Task<ulong> PaymentsClaimsVoidAsync(string code)
+    {
+        _calls.Add("PaymentsClaimsVoid");
+        LastClaimsVoid = code;
+        if (ClaimsVoidError is not null) throw ClaimsVoidError;
+        Throw();
+        return Task.FromResult(1UL);
+    }
+
 #endif   // PAYMENTS
 
     // ── Subscriptions OTHER-profile browse (offers.list + status.get + subscribe) ──
@@ -2967,12 +3409,30 @@ internal sealed class MockNestRpcClient : INestRpcClient
         return Task.FromResult(NextStatus);
     }
 
-    public Task<FfiSubscribeReply> SubscriptionSubscribeAsync(byte[] authorId, string tier)
+    /// The home the last subscribe carried (the actor-home slot).
+    public string? LastSubscribeHome { get; private set; }
+
+    public Task<FfiSubscribeReply> SubscriptionSubscribeAsync(byte[] authorId, string tier, string? homeNestUrl = null)
     {
         _calls.Add("SubscriptionSubscribe");
         LastSubscribe = (authorId, tier);
+        LastSubscribeHome = homeNestUrl;
         Throw();
         return Task.FromResult(NextSubscribeReply);
+    }
+
+    public Task SubscriptionPublishEncapsKeyAsync()
+    {
+        _calls.Add("SubscriptionPublishEncapsKey");
+        Throw();
+        return Task.CompletedTask;
+    }
+
+    public Task StartMailEpochRefreshOnEveryConnectAsync()
+    {
+        _calls.Add("StartMailEpochRefreshOnEveryConnect");
+        Throw();
+        return Task.CompletedTask;
     }
 
     /// A <c>FfiSubscriptionStatus</c> fixture (the viewer's status for an author).
@@ -3006,11 +3466,29 @@ internal sealed class MockNestRpcClient : INestRpcClient
         return Task.FromResult(NextProfile);
     }
 
+    /// The home the last <see cref="ProfileHeaderReadAsync"/> was seeded with.
+    public string? LastHeaderReadHome { get; private set; }
+    /// What the OTHER header read returns (null falls back to <see cref="NextProfile"/>).
+    public ProfileGetResult? NextHeaderRead { get; set; }
+
+    public Task<ProfileGetResult?> ProfileHeaderReadAsync(string actorId, string? home)
+    {
+        _calls.Add("ProfileHeaderRead");
+        LastHeaderReadHome = home;
+        Throw();
+        return Task.FromResult(NextHeaderRead ?? NextProfile);
+    }
+
+    /// The (lastDirectBody, audienceEveryone) the last save carried.
+    public (byte[]? LastDirectBody, bool? AudienceEveryone)? LastProfileSetAudience { get; private set; }
+
     public Task ProfileSetAsync(
-        ProfileDisplay edited, byte[]? baseBody, FfiProfileImageEdit avatar, FfiProfileImageEdit banner)
+        ProfileDisplay edited, byte[]? baseBody, FfiProfileImageEdit avatar, FfiProfileImageEdit banner,
+        byte[]? lastDirectBody = null, bool? audienceEveryone = null)
     {
         _calls.Add("ProfileSet");
         LastProfileSet = (edited, baseBody, avatar, banner);
+        LastProfileSetAudience = (lastDirectBody, audienceEveryone);
         if (NextProfileSetThrows)
             throw new InvalidOperationException("profile.set failed");
         Throw();
@@ -3020,10 +3498,12 @@ internal sealed class MockNestRpcClient : INestRpcClient
     /// A <see cref="ProfileGetResult"/> fixture for the profile-edit read path.
     public static ProfileGetResult MakeProfile(
         string? displayName = null, string? bio = null,
-        IReadOnlyList<ProfileLinkRow>? links = null, byte[]? rawBody = null) =>
+        IReadOnlyList<ProfileLinkRow>? links = null, byte[]? rawBody = null,
+        ProfilePictures? pictures = null) =>
         new ProfileGetResult(
             new ProfileDisplay(displayName, bio, links ?? new List<ProfileLinkRow>()),
-            rawBody ?? new byte[] { 0xff });
+            rawBody ?? new byte[] { 0xff },
+            Pictures: pictures);
 
     /// A <c>FfiMineSubscription</c> fixture (consumer own-subscriptions row).
     /// <paramref name="authorDisplay"/> defaults to what <c>From&lt;MineSubscription&gt;</c>
@@ -3173,7 +3653,8 @@ internal sealed class MockNestRpcClient : INestRpcClient
     /// can't supply. Unsupported here (mirrors the devices machine above).
     /// </summary>
     public Task<uniffi.fauna_media_machine.MediaMachine> BuildMediaMachineAsync(
-        uniffi.fauna_media_machine.MediaObserver observer)
+        uniffi.fauna_media_machine.MediaObserver observer,
+        uniffi.fauna_conversations.ConversationsSession? convSession)
     {
         _calls.Add("BuildMediaMachine");
         throw new NotSupportedException(
@@ -3254,6 +3735,13 @@ internal sealed class MockNestRpcClient : INestRpcClient
         _calls.Add("BuildForwardersMachine");
         throw new NotSupportedException(
             "MockNestRpcClient cannot build a ForwarderMachine (needs a live FfiNestClient).");
+    }
+
+    public Task<uniffi.fauna_client_mail_settings.DmarcReportsMachine> BuildDmarcReportsMachineAsync()
+    {
+        _calls.Add("BuildDmarcReportsMachine");
+        throw new NotSupportedException(
+            "MockNestRpcClient cannot build a DmarcReportsMachine (needs a live FfiNestClient).");
     }
 
     public Task<uniffi.fauna_client_mail_settings.BridgeApprovalMachine> BuildBridgeApprovalMachineAsync()
@@ -3347,6 +3835,21 @@ internal sealed class MockNestRpcClient : INestRpcClient
             "MockNestRpcClient cannot build a MailExportMachine (needs a live FfiNestClient).");
     }
 
+    public Task<uniffi.fauna_archive_import_machine.ArchiveImportMachine> BuildArchiveImportMachineAsync(string deviceIdHex)
+    {
+        _calls.Add("BuildArchiveImportMachine");
+        throw new NotSupportedException(
+            "MockNestRpcClient cannot build an ArchiveImportMachine (needs a live FfiNestClient).");
+    }
+
+    /// <summary>No conversations session, so no archive links (the factory's own answer
+    /// before a session).</summary>
+    public Task<uniffi.fauna_archive_import_machine.ArchiveLinks?> ArchiveLinksAsync()
+    {
+        _calls.Add("ArchiveLinks");
+        return Task.FromResult<uniffi.fauna_archive_import_machine.ArchiveLinks?>(null);
+    }
+
     public Task<uniffi.fauna_client_mail_settings.MailImportMachine> BuildMailImportMachineAsync()
     {
         _calls.Add("BuildMailImportMachine");
@@ -3434,12 +3937,32 @@ internal sealed class MockNestRpcClient : INestRpcClient
             ?? throw new InvalidOperationException("MockNestRpcClient: set NextReseedResult first"));
     }
 
+    /// <summary>What <see cref="PullBackFromDestinationAsync"/> answers — the
+    /// shared host needs a live <c>FfiNestClient</c>, so the mock stands in for
+    /// the whole pass-through.</summary>
+    public FfiReseedResult? NextPullBackResult { get; set; }
+
+    /// <summary>Thrown by <see cref="PullBackFromDestinationAsync"/> when set.</summary>
+    public Exception? NextPullBackException { get; set; }
+
+    /// <summary>The (device id, destination id) each pull-back was asked with, in order.</summary>
+    public List<(string DeviceId, string DestinationId)> PullBackCalls { get; } = new();
+
+    public Task<FfiReseedResult> PullBackFromDestinationAsync(string deviceIdHex, string destinationId)
+    {
+        _calls.Add($"PullBackFromDestination:{destinationId}");
+        PullBackCalls.Add((deviceIdHex, destinationId));
+        if (NextPullBackException is not null) throw NextPullBackException;
+        return Task.FromResult(NextPullBackResult
+            ?? throw new InvalidOperationException("MockNestRpcClient: set NextPullBackResult first"));
+    }
+
     /// <summary>
     /// Unsupported in the mock: the FeedManager needs a live <c>FfiNestClient</c>
     /// the mock can't supply (mirrors the page-machine factories). The Feed page's
     /// snapshot consume is exercised by the tier_3 e2e, not a VM unit test.
     /// </summary>
-    public Task<uniffi.fauna_ffi.FfiFeedManager> BuildFeedManagerAsync()
+    public Task<uniffi.fauna_ffi.FfiFeedManager> BuildFeedManagerAsync(string? deviceIdHex = null)
     {
         _calls.Add("BuildFeedManager");
         throw new NotSupportedException(
@@ -3457,6 +3980,18 @@ internal sealed class MockNestRpcClient : INestRpcClient
         _calls.Add("BuildSearchManager");
         throw new NotSupportedException(
             "MockNestRpcClient cannot build a FfiSearchManager (needs a live FfiNestClient).");
+    }
+
+    /// <summary>
+    /// Unsupported in the mock: the post-blob planes need a live <c>FfiNestClient</c>
+    /// (mirrors <see cref="BuildSearchManagerAsync"/>); the byte legs are exercised by
+    /// the tier_3 e2e and by the shared Rust face's own tests.
+    /// </summary>
+    public Task<uniffi.fauna_ffi.FfiPostBlobHosts> BuildPostBlobHostsAsync()
+    {
+        _calls.Add("BuildPostBlobHosts");
+        throw new NotSupportedException(
+            "MockNestRpcClient cannot build a FfiPostBlobHosts (needs a live FfiNestClient).");
     }
 
     /// <summary>
@@ -3658,6 +4193,54 @@ internal sealed class MockNestRpcClient : INestRpcClient
         LastTaskDelegationSetAssignment = (deviceId, taskKind, option);
         Throw();
         return Task.CompletedTask;
+    }
+
+    // ── Sessions (ui/sessions.md) ────────────────────────────────────────
+
+    /// <summary>What every sessions pass hands back; an empty page by default.</summary>
+    public FfiSessionsPage NextSessionsPage { get; set; } =
+        new(new FfiSessionsSnapshot(Array.Empty<FfiSessionRow>(), null), false);
+
+    /// <summary>The <c>previous</c> page the last pass was handed.</summary>
+    public FfiSessionsSnapshot? LastSessionsPrevious { get; private set; }
+    public string? LastSessionsOwnDeviceId { get; private set; }
+    public string? LastSessionsRevokeTokenId { get; private set; }
+    public string? LastSessionsLockoutWord { get; private set; }
+
+    private Task<FfiSessionsPage> SessionsPass(
+        string call, string? ownDeviceId, FfiSessionsSnapshot? previous)
+    {
+        _calls.Add(call);
+        LastSessionsOwnDeviceId = ownDeviceId;
+        LastSessionsPrevious = previous;
+        Throw();
+        return Task.FromResult(NextSessionsPage);
+    }
+
+    public Task<FfiSessionsPage> SessionsLoadAsync(
+        uniffi.fauna_devices_machine.DevicesMachine? devices, string? ownDeviceId,
+        FfiSessionsSnapshot? previous)
+        => SessionsPass("SessionsLoad", ownDeviceId, previous);
+
+    public Task<FfiSessionsPage> SessionsRevokeAsync(
+        uniffi.fauna_devices_machine.DevicesMachine? devices, string? ownDeviceId,
+        FfiSessionsSnapshot? previous, string tokenId)
+    {
+        LastSessionsRevokeTokenId = tokenId;
+        return SessionsPass("SessionsRevoke", ownDeviceId, previous);
+    }
+
+    public Task<FfiSessionsPage> SessionsRevokeOthersAsync(
+        uniffi.fauna_devices_machine.DevicesMachine? devices, string? ownDeviceId,
+        FfiSessionsSnapshot? previous)
+        => SessionsPass("SessionsRevokeOthers", ownDeviceId, previous);
+
+    public Task<FfiSessionsPage> SessionsLockoutAsync(
+        uniffi.fauna_devices_machine.DevicesMachine? devices, string? ownDeviceId,
+        FfiSessionsSnapshot? previous, string confirmWord)
+    {
+        LastSessionsLockoutWord = confirmWord;
+        return SessionsPass("SessionsLockout", ownDeviceId, previous);
     }
 
     // ── Recovery kit + succession ────────────────────────────────────────
@@ -3871,6 +4454,19 @@ internal sealed class MockNestRpcClient : INestRpcClient
         return Task.FromResult(NextEnrollmentNotice);
     }
 
+    // ── The once-per-sign-in newer-version look ──
+
+    /// <summary>What <see cref="LookForNewerReleaseAtSignInAsync"/> returns — the
+    /// newer release the nest reports, or null (nothing newer, the default).</summary>
+    public NewerRelease? NextNewerReleaseAtSignIn { get; set; }
+
+    public Task<NewerRelease?> LookForNewerReleaseAtSignInAsync()
+    {
+        _calls.Add("LookForNewerReleaseAtSignIn");
+        Throw();
+        return Task.FromResult(NextNewerReleaseAtSignIn);
+    }
+
     /// <summary>What <see cref="ThisDeviceRowAsync"/> returns when set; null
     /// (the default) echoes the own id — the shared rule's no-enrollment
     /// fallback.</summary>
@@ -3889,6 +4485,28 @@ internal sealed class MockNestRpcClient : INestRpcClient
         LastCustodyRevoke = (grantId, holder);
         Throw();
         return Task.FromResult(NextCustodyActOutcome);
+    }
+
+    // ── Nests page: restore from a custodian nest ──
+
+    /// <summary>What <see cref="AccountRestoreFromCustodianAsync"/> answers.</summary>
+    public FfiCustodianRestoreOutcome NextCustodianRestoreOutcome { get; set; } =
+        new FfiCustodianRestoreOutcome.NotAdmitted();
+
+    /// <summary>When set, <see cref="AccountRestoreFromCustodianAsync"/> waits
+    /// on it before answering — a restore held in flight, for the running state.</summary>
+    public Task? CustodianRestoreGate { get; set; }
+
+    /// <summary>Every address <see cref="AccountRestoreFromCustodianAsync"/>
+    /// was called with, in order.</summary>
+    public List<string> CustodianRestoreUrls { get; } = new();
+
+    public async Task<FfiCustodianRestoreOutcome> AccountRestoreFromCustodianAsync(string url)
+    {
+        _calls.Add("AccountRestoreFromCustodian");
+        CustodianRestoreUrls.Add(url);
+        if (CustodianRestoreGate is { } gate) await gate;
+        return NextCustodianRestoreOutcome;
     }
 
     /// <summary>What <see cref="CustodyEscrowHoldersAsync"/> returns (null =

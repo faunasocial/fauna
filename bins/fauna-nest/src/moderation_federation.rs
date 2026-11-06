@@ -60,19 +60,88 @@ fn not_hosted() -> RpcError {
     crate::rpc_errors::not_found_ns("federation", "author not hosted here")
 }
 
-/// The handle domain a delivered row names its issuer by: the host its
-/// verified id answers at, a dial-proven address first.
+/// The handle domain a delivered row names its issuer by: the host a
+/// federation handshake proved its verified id answers at, else the id's hex.
+/// Never a declared address — the delivery itself records one, and a peer
+/// this nest never dialled would otherwise choose the name the author reads.
 pub(crate) async fn issuer_host(state: &AppState, issuer_nest_id_hex: &str) -> Option<String> {
     let id = fauna_core::hex32::decode(issuer_nest_id_hex).ok()?;
-    match state.db.resolve_foreign_nest_urls(&id, 1).await {
-        Ok(urls) => urls
-            .first()
-            .map(|u| crate::abuse_report_federation::url_host(u)),
+    match state.db.proven_foreign_nest_urls(&id).await {
+        Ok(urls) => Some(
+            urls.first()
+                .map(|u| crate::abuse_report_federation::url_host(u))
+                .unwrap_or_else(|| hex::encode(id)),
+        ),
         Err(e) => {
             tracing::warn!("obligation issuer address: {e:#}");
-            None
+            Some(hex::encode(id))
         }
     }
+}
+
+/// A delivered row names its issuer by a PROVED host only ([`issuer_host`]),
+/// and the home dials the issuer only to relay an appeal — so an issuer this
+/// nest never dialled would read as a hex id on the author's queue until the
+/// author appealed. When a delivery stores a row from an origin with no
+/// proven address, this proves the one it declared: a background,
+/// handshake-only dial ([`FederationChannelPool::prove_peer_address`]) that
+/// must land on the verified origin, so the label becomes a host the issuer
+/// really answers at — never one it merely names. Bounded: one try per origin
+/// per window ([`FederationChannelPool::begin_address_proof`]), under the
+/// fleet-wide in-flight cap every peer-asserted dial shares, and only after
+/// the delivery spent its budgets; a failure is logged and the row keeps the
+/// hex.
+///
+/// [`FederationChannelPool::prove_peer_address`]: crate::federation_pool::FederationChannelPool::prove_peer_address
+/// [`FederationChannelPool::begin_address_proof`]: crate::federation_pool::FederationChannelPool::begin_address_proof
+async fn prove_issuer_address(state: &Arc<AppState>, origin: [u8; 32], declared: &str) {
+    let Some(declared) =
+        crate::ssrf::peer_declared_origin(declared, state.peer_fetch_loopback.is_some())
+    else {
+        tracing::debug!(
+            origin = %hex::encode(origin),
+            "obligation issuer address not origin-form; not dialled"
+        );
+        return;
+    };
+    match state.db.proven_foreign_nest_urls(&origin).await {
+        Ok(proven) if proven.is_empty() => {}
+        Ok(_) => return,
+        Err(e) => {
+            tracing::warn!("obligation issuer address: {e:#}");
+            return;
+        }
+    }
+    // The in-flight cap first: a drop there is no attempt, so it must not
+    // spend the origin's window.
+    let Some(in_flight) = crate::federation_handlers::start_domain_verification(
+        state,
+        &origin,
+        "obligation issuer address proof",
+    ) else {
+        return;
+    };
+    if !state.federation_pool.begin_address_proof(&origin).await {
+        return;
+    }
+    // Generation-scoped, as every peer-asserted domain binding is
+    // (`folder_handlers.rs`'s `bind_domain_to_origin` spawn): the proof holds
+    // `AppState`, so a deployment-seed rotation's teardown must reach it.
+    let task_state = Arc::clone(state);
+    let url = declared.to_string();
+    state.spawn_scoped(async move {
+        let _in_flight = in_flight;
+        if let Err(e) = task_state
+            .federation_pool
+            .prove_peer_address(&task_state, &url, origin)
+            .await
+        {
+            tracing::debug!(
+                origin = %hex::encode(origin),
+                "obligation issuer address not proven: {e}"
+            );
+        }
+    });
 }
 
 // ── issuer side ─────────────────────────────────────────────────────────────
@@ -216,7 +285,12 @@ async fn author_home(
         "conversation" => {
             let record_id = fauna_core::hex32::decode(&row.content_id)?;
             let record_cid = fauna_cbor::Cid::from_digest_dag_cbor(record_id);
-            let Some((channel, _)) = state.db.conv_record_scope_and_takedown(&record_cid).await?
+            // The channel whose copy attests this author — one cid can name
+            // copies in several channels (2026-11-03).
+            let Some(channel) = state
+                .db
+                .conv_record_scope_of_author(&record_cid, author)
+                .await?
             else {
                 return Ok(None);
             };
@@ -357,9 +431,11 @@ fn deliver_handler() -> RpcHandler {
                 }
             }
             // Both halves of the dedupe key are the caller's to choose, so a
-            // new row spends two per-target budgets — the author and the whole
-            // nest, summed over every origin — before anything is written. A
-            // re-delivery of a stored row stays free, and a refusal is
+            // new row spends the origin's own budget, then two per-target
+            // budgets — the author and the whole nest, summed over every
+            // origin — before anything is written. The origin's comes first so
+            // one peer can hold at most its share of the shared pair, never all
+            // of it. A re-delivery of a stored row stays free, and a refusal is
             // `rate_limited`, which the sender's queue retries.
             let origin = hex::encode(origin_nest_id);
             if !state
@@ -370,6 +446,11 @@ fn deliver_handler() -> RpcHandler {
             {
                 let budget = &state.federation_target_budget;
                 if !budget.check_with_max(
+                    &origin_nest_id,
+                    &[0u8; 32],
+                    "obligation_deliver_origin",
+                    crate::bridge_rate_limit::OBLIGATION_DELIVER_ORIGIN_TARGET_MAX,
+                ) || !budget.check_with_max(
                     &author,
                     &[0u8; 32],
                     "obligation_deliver",
@@ -385,10 +466,11 @@ fn deliver_handler() -> RpcHandler {
             }
             // The issuer's declared address, recorded against its verified id,
             // is how the author's appeal finds its way back.
+            let declared = req.issuer_nest_url.clone();
             crate::federation_handlers::resolve_origin_home_url(
                 &state,
                 &origin_nest_id,
-                req.issuer_nest_url.as_deref(),
+                declared.as_deref(),
             )
             .await?;
             state
@@ -401,10 +483,17 @@ fn deliver_handler() -> RpcHandler {
                     author,
                     category: req.category,
                     action_taken: req.action,
-                    timestamp: req.timestamp,
+                    // The author's queue is newest-first: a sender's clock past
+                    // this nest's would bury every other issuer's row.
+                    timestamp: req
+                        .timestamp
+                        .min(fauna_core::data::Timestamp::now().0 as i64),
                 })
                 .await
                 .map_err(internal)?;
+            if let Some(declared) = declared {
+                prove_issuer_address(&state, origin_nest_id, &declared).await;
+            }
             Ok(Bytes::from(
                 encode_canonical(&ObligationDeliverAck::default())
                     .map_err(internal)?

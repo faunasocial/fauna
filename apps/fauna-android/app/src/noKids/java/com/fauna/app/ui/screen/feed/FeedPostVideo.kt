@@ -32,12 +32,12 @@ import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import com.fauna.app.core.feed.InlineVideoPlayback
-import com.fauna.app.core.feed.PlaybackPeaks
 import com.fauna.app.core.feed.RangedNestDataSource
 import com.fauna.app.core.feed.VideoPlayerState
 import social.fauna.generated.Ids
 import com.fauna.app.ui.components.documentMediaVideoHash
 import com.fauna.app.ui.components.documentProxiedPostVideoPath
+import com.fauna.app.ui.util.AutomationAttributePack
 import com.fauna.app.ui.viewmodel.FeedVM
 import com.fauna.ffi.cueSampleIntervalMs
 import kotlinx.coroutines.delay
@@ -54,7 +54,11 @@ import uniffi.fauna_core.RenderDocument
  * asks the shared `playbackSource` projection what plays ([InlineVideoPlayback]) and
  * swaps the glyph for the framework `MediaPlayer` on a `SurfaceView` in the same element.
  * The element publishes its phase ([VideoPlayerState]) as `stateDescription`, and the
- * player's progress feeds [postId]'s engagement-cue row ([PlaybackPeaks]). Renders
+ * player's progress is noted on the shared tracker (`notePlayed`) for [postId]'s engagement-cue row, and its
+ * engagement — `true` at the tap (loading counts) and while it plays, `false` on pause
+ * (the poll's `isPlaying` true→false edge — the app has no pause control), end, error
+ * and teardown — is noted on the shared tracker (`notePlaying`): a play is attention.
+ * Renders
  * nothing when the document has no video block.
  */
 @Composable
@@ -69,22 +73,52 @@ fun FeedPostVideo(document: RenderDocument, postId: String, vm: FeedVM) {
     var phase by remember(label) { mutableStateOf(machine.phase) }
     var media by remember(label) { mutableStateOf<InlineVideoPlayback.Media?>(null) }
     var generation by remember(label) { mutableIntStateOf(0) }
+    // The player's position in ms, kept past the end of the clip (a finished video
+    // reads as its whole length, as a web `<video>`'s `currentTime` does).
+    var positionMs by remember(label) { mutableIntStateOf(0) }
+    // The player's own transitions, relayed; the shared tracker decides what attention is.
+    val noteEngaged: (Boolean) -> Unit = { engaged ->
+        runCatching { vm.cueTracker()?.notePlaying(postId, engaged) }
+    }
+    // Every progress report, its end included; the tracker clamps it per-mille and keeps
+    // the post's peak itself, so no store lives here. A duration `MediaPlayer` does not
+    // know yet (-1 or 0) is no reading, as the tracker decides.
+    val notePlayed: (Int, Int) -> Unit = { positionMs, durationMs ->
+        runCatching { vm.cueTracker()?.notePlayed(postId, positionMs.toDouble(), durationMs.toDouble()) }
+    }
+    // Covers a card disposed while still `loading`, before the surface (and its own
+    // teardown) ever existed.
+    DisposableEffect(label) {
+        onDispose { noteEngaged(false) }
+    }
 
     Box(
         modifier = Modifier
             .testTag(Ids.VIDEO_THUMBNAIL)
-            .semantics { stateDescription = phase.wire }
+            .semantics {
+                // `state`, `position` (seconds) and `source` ride one `stateDescription`
+                // (`AutomationAttributePack`), read back per key by the debug bridge.
+                stateDescription = AutomationAttributePack.pack(
+                    "state" to phase.wire,
+                    "position" to (positionMs / 1000.0).toString(),
+                    "source" to machine.source,
+                )
+            }
             .clickable {
                 val gen = machine.tap() ?: return@clickable
                 generation = gen
                 media = null
+                positionMs = 0
                 phase = machine.phase
+                noteEngaged(true)
                 scope.launch {
                     val resolved = vm.resolvePlayback(postId, block, cacheDir)
                     if (machine.resolved(gen, resolved)) {
                         media = resolved
                     } else {
                         resolved?.let(InlineVideoPlayback::release)
+                        // Nothing plays: a null resolve of the current tap is the error path.
+                        if (resolved == null && generation == gen) noteEngaged(false)
                     }
                     phase = machine.phase
                 }
@@ -94,7 +128,9 @@ fun FeedPostVideo(document: RenderDocument, postId: String, vm: FeedVM) {
         if (playing != null) {
             InlineVideoSurface(
                 media = playing,
-                postId = postId,
+                onPlayed = notePlayed,
+                onPosition = { positionMs = it },
+                onEngaged = noteEngaged,
                 onPrepared = {
                     machine.prepared(generation)
                     phase = machine.phase
@@ -120,13 +156,15 @@ fun FeedPostVideo(document: RenderDocument, postId: String, vm: FeedVM) {
  * through [RangedNestDataSource], a sealed one from its opened temp file. The player is
  * prepared once the surface exists, started on prepared, and released — with the
  * reader or temp file it owns — when this leaves composition. While it plays, its
- * position is noted for [postId] on the shared sampling tick, and its completion as the
+ * position is noted through [onPlayed] on the shared sampling tick, and its completion as the
  * whole play.
  */
 @Composable
 private fun InlineVideoSurface(
     media: InlineVideoPlayback.Media,
-    postId: String,
+    onPlayed: (positionMs: Int, durationMs: Int) -> Unit,
+    onPosition: (Int) -> Unit,
+    onEngaged: (Boolean) -> Unit,
     onPrepared: () -> Unit,
     onError: () -> Unit,
 ) {
@@ -142,29 +180,46 @@ private fun InlineVideoSurface(
             }
             player.setOnPreparedListener {
                 it.start()
+                onEngaged(true)
                 onPrepared()
             }
             player.setOnCompletionListener {
-                runCatching { PlaybackPeaks.note(postId, it.duration, it.duration) }
+                runCatching {
+                    onPlayed(it.duration, it.duration)
+                    onPosition(it.duration)
+                }
+                onEngaged(false)
             }
             player.setOnErrorListener { _, _, _ ->
+                onEngaged(false)
                 onError()
                 true
             }
         }.isSuccess
         if (!started) onError()
         onDispose {
+            onEngaged(false)
             player.release()
             InlineVideoPlayback.release(media)
         }
     }
     LaunchedEffect(media) {
         val intervalMs = cueSampleIntervalMs().toLong()
+        var wasPlaying = false
         while (true) {
             delay(intervalMs)
             // A player not yet prepared, or already released, throws: no reading.
             runCatching {
-                if (player.isPlaying) PlaybackPeaks.note(postId, player.currentPosition, player.duration)
+                val isPlaying = player.isPlaying
+                if (isPlaying) {
+                    onPlayed(player.currentPosition, player.duration)
+                    onPosition(player.currentPosition)
+                }
+                // The transition, not every tick: play/resume and pause are the edges.
+                if (isPlaying != wasPlaying) {
+                    wasPlaying = isPlaying
+                    onEngaged(isPlaying)
+                }
             }
         }
     }

@@ -1,7 +1,7 @@
 <script lang="ts">
   import { identity } from '#lib/store';
   import { adminDashboardSnapshot, type AdminStatCard } from '#lib/rpc';
-  import { onMount } from 'svelte';
+  import { afterNavigate } from '$app/navigation';
   import MessageBanner from '#lib/components/MessageBanner.svelte';
   import { t } from '#lib/i18n/strings';
   import { resolveLocalized } from '#lib/i18n/localized';
@@ -21,18 +21,25 @@
   // The admin's only pairing control is the admin knob on the Services page
   // (admin-service-pairing-toggle). See linked-nests.md § The surface / § 53.
 
-  onMount(async () => {
+  // Every visit re-reads, one to this very route included: a `goto()` to the
+  // route already mounted does not remount the page, so `onMount` would leave the
+  // cards as they stood at the first visit. `afterNavigate` also fires on mount.
+  // Only the newest read paints, whichever answers last.
+  let latestRead = 0;
+
+  afterNavigate(async () => {
     const id = $identity;
     if (!id?.secretHex) return;
 
+    const read = ++latestRead;
     try {
       const snapshot = await adminDashboardSnapshot(id.secretHex);
+      if (read !== latestRead) return;
       cards = snapshot.stats;
       // A failed read still leaves the cards the other reads produced.
-      if (snapshot.error) {
-        error = t.admin.dashboard.load_error({ message: snapshot.error });
-      }
+      error = snapshot.error ? t.admin.dashboard.load_error({ message: snapshot.error }) : '';
     } catch (r: unknown) {
+      if (read !== latestRead) return;
       error = t.admin.dashboard.load_error({
         message: r instanceof Error ? r.message : String(r),
       });

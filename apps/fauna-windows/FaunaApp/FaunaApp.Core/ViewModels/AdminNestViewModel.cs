@@ -186,6 +186,54 @@ public partial class AdminNestViewModel : ObservableObject
     /// <summary>A save is in flight.</summary>
     [ObservableProperty] private bool _webAppOriginWorking;
 
+    // ── Update channel (admin-nest-update-channel-*, nest/update-channel.md §
+    //    The UI) ──────────────────────────────────────────────────────────────
+    //
+    // Every sentence, the radio set and `can_set` are the shared
+    // `admin_update_channel_view` fold; this VM holds its answer plus the local
+    // radio draft (an `internal` FFI enum, so the public surface is bools — CS0053).
+
+    private FfiAdminUpdateChannelView? _updateChannelView;
+
+    /// The marked radio — the local selection the save commits.
+    private uniffi.fauna_provisioning.UpdateChannel? _updateChannelDraft;
+
+    /// <summary>Whether the read has landed. The radios stay unmarked and disabled
+    /// until it has.</summary>
+    public bool UpdateChannelLoaded => _updateChannelView is not null;
+
+    /// <summary>Whether the radios are live — the view's <c>can_set</c> verbatim,
+    /// withheld while a save is in flight (re-tap guard).</summary>
+    public bool UpdateChannelCanSet => _updateChannelView is { canSet: true } && !UpdateChannelWorking;
+
+    /// <summary>Whether <c>admin-nest-update-channel-save-button</c> is enabled —
+    /// live radios and a marked one.</summary>
+    public bool UpdateChannelCanSave => UpdateChannelCanSet && _updateChannelDraft is not null;
+
+    /// <summary>Whether <paramref name="channel"/>'s radio is marked.</summary>
+    internal bool IsUpdateChannelSelected(uniffi.fauna_provisioning.UpdateChannel channel) =>
+        _updateChannelDraft == channel;
+
+    /// <summary><c>admin-nest-update-channel-status</c> — the view's line, or the
+    /// loading caption until the read lands.</summary>
+    public string UpdateChannelStatus => _updateChannelView is { } v
+        ? Strings.Resolve(v.status)
+        : Strings.Get("admin/nest_page/update_channel_loading");
+
+    /// <summary>The radio's label and description, both the fold's own; empty
+    /// strings for a channel the view does not offer (before the read lands).</summary>
+    internal (string Label, string Description) UpdateChannelOptionText(
+        uniffi.fauna_provisioning.UpdateChannel channel)
+    {
+        var option = _updateChannelView?.options.FirstOrDefault(o => o.channel == channel);
+        return option is null
+            ? (string.Empty, string.Empty)
+            : (Strings.Resolve(option.label), Strings.Resolve(option.description));
+    }
+
+    /// <summary>A save is in flight.</summary>
+    [ObservableProperty] private bool _updateChannelWorking;
+
     /// <summary>The deployment-identity rotation ceremony's arm state
     /// (box-recovery.md § Deployment-seed rotation) — mirrors linux's
     /// <c>SeedRotateConfirmState</c> / android's <c>SeedRotateConfirmState</c>
@@ -255,7 +303,8 @@ public partial class AdminNestViewModel : ObservableObject
     /// reason <see cref="OpenOauthForcedConfirm"/>'s own remark names.</summary>
     internal FfiIssuerForcedArm? OauthArmedArm => _oauthArmedArm;
 
-    /// <summary><c>admin-nest-oauth-key-item-{n}</c> rows — painted ONLY from
+    /// <summary><c>admin-nest-oauth-key-item</c> rows (one repeated id,
+    /// addressed by index) — painted ONLY from
     /// an answered read (<see cref="_oauthView"/> non-null); empty in every
     /// other state, per ui.yaml's "never an empty list that would read as
     /// 'no keys'" rule (the reason line covers those states instead).</summary>
@@ -348,6 +397,10 @@ public partial class AdminNestViewModel : ObservableObject
             // unloaded, never this page's Error.
             await HydrateWebAppOriginAsync();
 
+            // Update channel (fauna.admin.update_channel.get) — same best-effort
+            // nav-edge read, own catch.
+            await HydrateUpdateChannelAsync();
+
             // Outside-app sign-in keys (fauna.oauth.issuer_key_status) — folded
             // onto the same nav-edge read, but NEVER through this try's catch: a
             // failed key-set read is the section's OWN reason line (mirrors
@@ -369,6 +422,9 @@ public partial class AdminNestViewModel : ObservableObject
         // reason line — NEVER through the catch above, so a faulted queue read still
         // shows every other section (and an earlier fault still shows the queue).
         await LoadReportsAsync();
+        // The blocked list beside it (takedown-and-block.md § Admin block of a
+        // reported item), the same way: its own loaded bit, never the page error.
+        await LoadBlockedAsync();
     }
 
     /// <summary>Flip the admin <c>pairing</c> flag and re-read <c>services.list</c>
@@ -566,6 +622,57 @@ public partial class AdminNestViewModel : ObservableObject
         finally
         {
             WebAppOriginWorking = false;
+        }
+    }
+
+    /// <summary>Read the update-channel view
+    /// (<c>fauna.admin.update_channel.get</c>) and repaint. Best-effort: a failure
+    /// leaves the section unloaded (radios disabled), never the page failed.</summary>
+    private async Task HydrateUpdateChannelAsync()
+    {
+        try
+        {
+            PaintUpdateChannel(await _rpc.AdminUpdateChannelStatusAsync());
+        }
+        catch
+        {
+            // Leave the section unloaded; the loading caption says so.
+        }
+    }
+
+    private void PaintUpdateChannel(FfiAdminUpdateChannelView view)
+    {
+        _updateChannelView = view;
+        _updateChannelDraft = view.selected;
+    }
+
+    /// <summary>A radio pick is local — it only arms the save. Ignored while the
+    /// radios are not live. <c>internal</c>: <c>UpdateChannel</c> is an
+    /// <c>internal</c> uniffi type (CS0051).</summary>
+    internal void SelectUpdateChannel(uniffi.fauna_provisioning.UpdateChannel channel)
+    {
+        if (UpdateChannelCanSet) _updateChannelDraft = channel;
+    }
+
+    /// <summary><c>admin-nest-update-channel-save-button</c> —
+    /// <c>fauna.admin.update_channel.set</c>, repainting from the fresh read it
+    /// answers. A failure routes to <see cref="Error"/> and leaves the draft.</summary>
+    public async Task SaveUpdateChannelAsync()
+    {
+        if (!UpdateChannelCanSave || _updateChannelDraft is not { } channel) return;
+        UpdateChannelWorking = true;
+        try
+        {
+            PaintUpdateChannel(await _rpc.SetUpdateChannelAsync(channel));
+            Error = null;
+        }
+        catch (Exception ex)
+        {
+            Error = Strings.Error(ex);
+        }
+        finally
+        {
+            UpdateChannelWorking = false;
         }
     }
 
@@ -1052,24 +1159,190 @@ public partial class AdminNestViewModel : ObservableObject
     /// “excerpt”</c> — the same join web's <c>reportLine</c> and tui's
     /// <c>reports_elements</c> make (the e2e reads it); every part but the join is
     /// shared Rust's, and the time is the shared fixed local render.</summary>
-    internal static ReportQueueRowView MapReportRow(FfiReportQueueRow r)
+    internal static ReportQueueRowView MapReportRow(FfiReportQueueRow r, long? nowMs = null)
     {
         var id = ReportSheetViewModel.SubjectIdOf(r.subject);
         var kind = ReportSheetViewModel.SubjectKindOf(r.subject);
+        // How old the report is (moderation.md § App surface), by the shared
+        // relative-time fold web and apple use; `createdAt` is epoch micros.
+        var now = nowMs ?? DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
         var text =
             $"{Strings.Resolve(r.reason)} · {kind} {id} · {Strings.Resolve(r.origin)} · " +
-            FaunaFfiMethods.FormatUnixLocal(r.createdAt / 1_000_000);
+            ValueFormat.RelativeTime(now, r.createdAt / 1_000);
         if (!string.IsNullOrEmpty(r.note)) text += $" — {r.note}";
         if (!string.IsNullOrEmpty(r.excerpt)) text += $" — “{r.excerpt}”";
-        return new ReportQueueRowView(r.reportId, id, kind, text, r.canOpenTakedown);
+        // The Block verb's label is the shared form view's (an item subject only —
+        // the shared `can_block`), so no app words or gates it.
+        var blockLabel = r.canBlock
+            ? Strings.Resolve(FaunaFfiMethods.ReportBlockFormView(r.subject, false).armLabel)
+            : string.Empty;
+        return new ReportQueueRowView(
+            r.reportId, id, kind, text, r.canOpenTakedown, r.canBlock, blockLabel);
+    }
+
+    // ── The admin block of a reported item (takedown-and-block.md § Admin block
+    //     of a reported item) ──────────────────────────────────────────────────
+    //
+    // A fourth verb on a report row, Block, withholds the reported item from
+    // everyone the nest serves but its author; Unblock, from the blocked list,
+    // re-serves the same bytes. ONE armed confirm serves both: its summary names
+    // the verb, the item and the reason before anything dispatches, and is folded
+    // once at arm time over the row the admin is looking at, so a re-read
+    // underneath cannot change what the confirm already named. Every word and
+    // every gate is the shared `fauna_client_moderation::block` fold's; this VM
+    // only holds which row is armed. Reference: tui's admin/nest.rs
+    // blocked_elements + Action::{OpenBlockConfirm, ConfirmBlock, CancelBlock},
+    // FaunaKit's AdminNestVM.
+
+    /// <summary>The blocked items, newest first, as the page paints them (flat
+    /// <c>admin-nest-blocked-item[i]</c> with its
+    /// <c>admin-nest-blocked-unblock-button</c>); the raw rows stay in
+    /// <see cref="_blockedRows"/>, UniFFI types being <c>internal</c>.</summary>
+    public ObservableCollection<BlockedRowView> Blocked { get; } = new();
+
+    private readonly Dictionary<string, FfiBlockedRow> _blockedRows = new();
+
+    /// <summary>Whether a blocked-list read has landed — the loading line paints
+    /// until it has and the empty line only after it.</summary>
+    [ObservableProperty] private bool _blockedLoaded;
+
+    /// <summary>The armed Block / Unblock confirm, or <c>null</c> while un-armed
+    /// (<c>admin-nest-report-block-confirm-*</c> are present only while set).</summary>
+    [ObservableProperty] private BlockArmedView? _blockArmed;
+
+    /// <summary>The last Block / Unblock verdict (the shared
+    /// <c>report_block_verdict</c>'s words) — its own line, never
+    /// <see cref="Error"/>: a completed block is a success with consequences, and a
+    /// refused one must not blank the page's other sections.</summary>
+    [ObservableProperty] private string? _blockStatus;
+
+    /// <summary>Read the blocked list (<c>fauna.moderation.admin_block.list</c>).
+    /// A failed read lands on <see cref="Error"/> and leaves
+    /// <see cref="BlockedLoaded"/> as it was (tui's <c>apply_blocked</c>) — never an
+    /// empty line off a read that did not land.</summary>
+    public async Task LoadBlockedAsync()
+    {
+        try
+        {
+            var rows = await _rpc.AdminBlockListAsync();
+            var nowMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            _blockedRows.Clear();
+            Blocked.Clear();
+            foreach (var r in rows)
+            {
+                _blockedRows[r.reportId] = r;
+                Blocked.Add(MapBlockedRow(r, nowMs));
+            }
+            BlockedLoaded = true;
+        }
+        catch (Exception ex)
+        {
+            Error = Strings.Error(ex);
+        }
+    }
+
+    /// <summary><c>admin-nest-report-block-button</c>: arm the confirm for a queue
+    /// row. Refused by the shared form view's own test (an account report, an
+    /// unknown subject), so a driver-forced press cannot arm what the fold refuses.
+    /// Returns whether it armed.</summary>
+    public bool ArmBlock(string reportId)
+    {
+        if (!_reportRows.TryGetValue(reportId, out var row)) return false;
+        var form = FaunaFfiMethods.ReportBlockFormView(row.subject, false);
+        if (!form.canSubmit) return false;
+        BlockStatus = null;
+        BlockArmed = new BlockArmedView(
+            row.reportId, Restore: false,
+            Summary: Strings.ResolveNested(
+                FaunaFfiMethods.ReportBlockConfirmSummary(row.subject, row.reasonToken, false)),
+            ConfirmLabel: Strings.Resolve(form.confirmLabel));
+        return true;
+    }
+
+    /// <summary><c>admin-nest-blocked-unblock-button</c>: arm the same confirm for a
+    /// blocked row, with <c>restore</c>. Returns whether it armed.</summary>
+    public bool ArmUnblock(string reportId)
+    {
+        if (!_blockedRows.TryGetValue(reportId, out var row)) return false;
+        if (!row.unblock.canSubmit) return false;
+        BlockStatus = null;
+        BlockArmed = new BlockArmedView(
+            row.reportId, Restore: true,
+            Summary: Strings.ResolveNested(
+                FaunaFfiMethods.ReportBlockConfirmSummary(row.subject, row.reasonToken, true)),
+            ConfirmLabel: Strings.Resolve(row.unblock.confirmLabel));
+        return true;
+    }
+
+    /// <summary><c>admin-nest-report-block-cancel-button</c>: disarm, touching
+    /// nothing.</summary>
+    public void CancelBlock() => BlockArmed = null;
+
+    /// <summary><c>admin-nest-report-block-confirm-button</c>: dispatch
+    /// <c>fauna.moderation.admin_block</c>. Disarms FIRST (a double press must not
+    /// repeat the act), words the outcome through the shared verdict, and re-reads
+    /// both lists — a blocked item's report leaves the queue and the item joins the
+    /// blocked list (an unblock, the reverse).</summary>
+    public async Task ConfirmBlockAsync()
+    {
+        if (BlockArmed is not { } armed) return;
+        BlockArmed = null;
+        BlockStatus = Strings.Get("admin/nest_page/block_working");
+        string? error = null;
+        try
+        {
+            await _rpc.AdminBlockAsync(armed.ReportId, armed.Restore);
+        }
+        catch (Exception ex)
+        {
+            error = Strings.Error(ex);
+        }
+        BlockStatus = Strings.ResolveNested(FaunaFfiMethods.ReportBlockVerdict(armed.Restore, error));
+        await LoadReportsAsync();
+        await LoadBlockedAsync();
+    }
+
+    /// <summary>One blocked row's line — <c>reason · kind id · when</c> — the join
+    /// tui's <c>blocked_elements</c> and FaunaKit's <c>blockedLine</c> make (the e2e
+    /// reads the item id and the reason off it); every part but the join is shared
+    /// Rust's.</summary>
+    internal static BlockedRowView MapBlockedRow(FfiBlockedRow r, long? nowMs = null)
+    {
+        var id = ReportSheetViewModel.SubjectIdOf(r.subject);
+        var kind = ReportSheetViewModel.SubjectKindOf(r.subject);
+        var now = nowMs ?? DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        var text =
+            $"{Strings.Resolve(r.reason)} · {kind} {id} · " +
+            ValueFormat.RelativeTime(now, r.blockedAt / 1_000);
+        return new BlockedRowView(
+            r.reportId, id, kind, text, r.unblock.canSubmit,
+            Strings.Resolve(r.unblock.armLabel));
     }
 }
 
 /// <summary>
 /// One open row of the admin's abuse-report queue (<c>admin-nest-report-item</c>):
-/// the id the three buttons act on, the subject it names, the shared-worded line the
-/// e2e reads, and whether <c>admin-nest-report-open-takedown-button</c> paints
-/// (posts and messages only).
+/// the id the buttons act on, the subject it names, the shared-worded line the
+/// e2e reads, whether <c>admin-nest-report-open-takedown-button</c> paints (posts
+/// and messages only), and whether <c>admin-nest-report-block-button</c> paints
+/// with its shared label (an item subject only — the shared <c>can_block</c>).
 /// </summary>
 public record ReportQueueRowView(
-    string ReportId, string SubjectId, string Kind, string Line, bool CanOpenTakedown);
+    string ReportId, string SubjectId, string Kind, string Line, bool CanOpenTakedown,
+    bool CanBlock = false, string BlockLabel = "");
+
+/// <summary>
+/// One row of the admin's blocked list (<c>admin-nest-blocked-item</c>): the report
+/// id Unblock acts on, the subject, the line the e2e reads, and the shared Unblock
+/// label and gate.
+/// </summary>
+public record BlockedRowView(
+    string ReportId, string SubjectId, string Kind, string Line, bool CanUnblock,
+    string UnblockLabel);
+
+/// <summary>
+/// The armed Block / Unblock confirm (<c>admin-nest-report-block-confirm-*</c>):
+/// the report it acts on, the verb, and the summary + confirm label folded once at
+/// arm time.
+/// </summary>
+public record BlockArmedView(string ReportId, bool Restore, string Summary, string ConfirmLabel);

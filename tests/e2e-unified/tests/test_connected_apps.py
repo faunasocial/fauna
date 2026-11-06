@@ -26,6 +26,11 @@ starts are built*):
   operation, its detail verbatim (``connected-apps.md`` § Layout & flow,
   region 3). tui only until the other apps' trickle-down; the per-operation
   record's own controls await rule-A approval.
+- **Key replacement** — an app the user approved asks again under a different
+  holder key: its card says approving ends what the earlier key was given, and
+  approving there ends that key's capability grant on the nest before the app
+  redeems (``third-party.md`` § The principal model → *Key replacement*).
+  tui first; the other apps' markers ride their witness lift.
 - **The same-device handoff** — a device app pushes a PAR and opens
   ``fauna://consent/<request_uri>``; the user's app takes the route onto this
   page (``fauna.oauth.consent.open_handoff`` through the shared machine) and
@@ -53,6 +58,7 @@ builds its own mail machine for the app-password rows.
 """
 
 import sqlite3
+import time
 import uuid
 
 import pytest
@@ -77,6 +83,8 @@ from helpers.client_metadata_server import (
     manifest_payload,
     sign_manifest,
 )
+from helpers.budgets import RPC_ROUNDTRIP_S
+from helpers.waiting import wait_until
 from helpers.xrpc_client import xrpc_post
 from helpers.oauth_client import (
     BC_AUTHORIZE_PATH,
@@ -108,6 +116,17 @@ def _oracle_document_path(app_name: str) -> str:
     return f"/client-metadata-{app_name}.json"
 
 
+# The key-replacement case's client is a publisher's too: a `fauna:records:`
+# scope needs the document's verified kind manifest, and only a records
+# consent mints the consent-time capability grant a key replacement ends.
+_RECORDS_SCOPE = f"fauna:records:rw:ext.{_ORACLE_PUBLISHER}.*"
+_RECORDS_REDIRECT_URI = "http://127.0.0.1:17802/callback"
+
+
+def _key_replacement_document_path(app_name: str) -> str:
+    return f"/client-metadata-key-replacement-{app_name}.json"
+
+
 @pytest.fixture(scope="module")
 def metadata_server(tmp_path_factory):
     server = ClientMetadataServer(_ORACLE_PUBLISHER, tmp_path_factory.mktemp("client-metadata"))
@@ -122,6 +141,13 @@ def metadata_server(tmp_path_factory):
             server.client_id(path),
             _ORACLE_REDIRECT_URI,
             _ORACLE_SCOPE,
+            manifest_jws=sign_manifest(publisher_key, payload),
+        )
+    for path in map(_key_replacement_document_path, _ORACLE_APPS):
+        server.documents[path] = client_document(
+            server.client_id(path),
+            _RECORDS_REDIRECT_URI,
+            _RECORDS_SCOPE,
             manifest_jws=sign_manifest(publisher_key, payload),
         )
     yield server
@@ -181,6 +207,12 @@ def connected_app(request, app, consent_nest, consent_bridge):
     return app
 
 
+def _cards_seen(ca: ConnectedAppsActions) -> str:
+    """The tray as painted, for a failure message (convention 6): which cards
+    were there when the expected one was not."""
+    return repr([ca.request_text(i) for i in range(ca.request_count())])
+
+
 def _scope_lines(text: str) -> list[str]:
     return [line.strip()[2:] for line in text.splitlines() if line.strip().startswith("• ")]
 
@@ -207,13 +239,14 @@ def test_a_typed_code_connects_the_app_and_revoke_ends_it(connected_app, consent
     index = ca.wait_for_request_from(client.client_id)
     assert index is not None, (
         "typing a live code must open its card in the tray. "
-        f"error: {ca.current_error_text()!r}"
+        f"error: {ca.current_error_text()!r} client_id: {client.client_id!r} "
+        f"cards: {_cards_seen(ca)}"
     )
     assert client.client_id in ca.request_text(index), "the client id renders verbatim"
 
     ca.approve_request(index)
-    status, tokens = client.poll_token(
-        GRANT_TYPE_DEVICE_CODE, "device_code", started["device_code"]
+    status, tokens = client.poll_until_answered(
+        GRANT_TYPE_DEVICE_CODE, "device_code", started["device_code"], timeout=RPC_ROUNDTRIP_S
     )
     assert status == 200 and tokens.get("refresh_token"), (
         f"approving in the app must release the device app's poll: {status} {tokens!r}"
@@ -245,6 +278,9 @@ def test_a_typed_code_connects_the_app_and_revoke_ends_it(connected_app, consent
 @pytest.mark.web
 @pytest.mark.linux
 @pytest.mark.android
+@pytest.mark.macos
+@pytest.mark.ios
+@pytest.mark.windows
 @pytest.mark.feature("atproto")
 def test_a_connected_apps_row_names_the_permission_set_it_came_from(
     connected_app, consent_nest
@@ -266,11 +302,12 @@ def test_a_connected_apps_row_names_the_permission_set_it_came_from(
     index = ca.wait_for_request_from(client.client_id)
     assert index is not None, (
         "typing a live code must open its card in the tray. "
-        f"error: {ca.current_error_text()!r}"
+        f"error: {ca.current_error_text()!r} client_id: {client.client_id!r} "
+        f"cards: {_cards_seen(ca)}"
     )
     ca.approve_request(index)
-    status, tokens = client.poll_token(
-        GRANT_TYPE_DEVICE_CODE, "device_code", started["device_code"]
+    status, tokens = client.poll_until_answered(
+        GRANT_TYPE_DEVICE_CODE, "device_code", started["device_code"], timeout=RPC_ROUNDTRIP_S
     )
     assert status == 200 and tokens.get("refresh_token"), (
         f"approving in the app must release the device app's poll: {status} {tokens!r}"
@@ -369,7 +406,9 @@ def test_declining_a_quiet_push_tells_the_app_no(connected_app, consent_nest):
 
     ca.decline_request(index)
 
-    status, body = stranger.poll_token(GRANT_TYPE_CIBA, "auth_req_id", pushed["auth_req_id"])
+    status, body = stranger.poll_until_answered(
+        GRANT_TYPE_CIBA, "auth_req_id", pushed["auth_req_id"], timeout=RPC_ROUNDTRIP_S
+    )
     assert (status, body.get("error")) == (400, "access_denied"), (status, body)
     assert ca.visit(), f"the page must re-read. error: {ca.current_error_text()!r}"
     assert ca.item_index_containing(stranger.client_id) is None, (
@@ -562,6 +601,18 @@ def _poll_handoff(client: OAuthClient, request_uri: str):
     )
 
 
+def _answered_handoff(client: OAuthClient, request_uri: str):
+    """The device's poll once the answer given in the app has reached the nest —
+    the click returns on dispatch, not on the nest's record (convention 14)."""
+    return client.poll_until_answered(
+        GRANT_TYPE_HANDOFF,
+        "request_uri",
+        request_uri,
+        {"code_verifier": client.verifier},
+        timeout=RPC_ROUNDTRIP_S,
+    )
+
+
 def _open_handoff_card(ca: ConnectedAppsActions, client: OAuthClient, request_uri: str) -> int:
     """Open the route and return the card's index. No re-navigation: the
     command acks once the open has landed, so the card must already be painted
@@ -573,7 +624,8 @@ def _open_handoff_card(ca: ConnectedAppsActions, client: OAuthClient, request_ur
     index = ca.request_index_for_client(client.client_id)
     assert index is not None, (
         "the route must open its card in the tray. "
-        f"error: {ca.current_error_text()!r}"
+        f"error: {ca.current_error_text()!r} client_id: {client.client_id!r} "
+        f"cards: {_cards_seen(ca)}"
     )
     assert ca.current_error_text() == ""
     return index
@@ -606,7 +658,7 @@ def test_a_handoff_link_opens_the_card_and_approving_connects_the_app(
     assert device.client_id in ca.request_text(index), "the client id renders verbatim"
 
     ca.approve_request(index)
-    status, tokens = _poll_handoff(device, request_uri)
+    status, tokens = _answered_handoff(device, request_uri)
     assert status == 200 and tokens.get("refresh_token"), (
         f"approving in the app must release the device app's poll: {status} {tokens!r}"
     )
@@ -627,7 +679,6 @@ def test_a_handoff_link_opens_the_card_and_approving_connects_the_app(
 @pytest.mark.windows
 @pytest.mark.android
 @pytest.mark.linux
-@pytest.mark.web  # declared absence — open_handoff_route declares it (apps/web.md § Implementation status today)
 def test_a_declined_handoff_tells_the_app_no(handoff_app, consent_nest):
     """(g): declining the card a handoff link opened answers the device's
     poll with ``access_denied`` and connects nothing."""
@@ -638,7 +689,7 @@ def test_a_declined_handoff_tells_the_app_no(handoff_app, consent_nest):
     index = _open_handoff_card(ca, device, request_uri)
     ca.decline_request(index)
 
-    status, body = _poll_handoff(device, request_uri)
+    status, body = _answered_handoff(device, request_uri)
     assert (status, body.get("error")) == (400, "access_denied"), (status, body)
     assert ca.visit(), f"the page must re-read. error: {ca.current_error_text()!r}"
     assert ca.item_index_containing(device.client_id) is None, (
@@ -658,11 +709,10 @@ _SWITCH_PORT = 17796
 
 
 # The switch moved to this page 2026-10-17 (owner-ruled 2026-10-16); tui led,
-# web, linux, android, macos and ios followed, and windows re-adds its marker
-# in the batched trickle-down that lifts the toggle there (it still paints it
-# on the AT Protocol page until then).
+# web, linux, android, macos, ios and windows followed.
 @pytest.mark.web
 @pytest.mark.linux
+@pytest.mark.windows
 @pytest.mark.macos
 @pytest.mark.ios
 @pytest.mark.android
@@ -750,6 +800,9 @@ def test_the_external_apps_switch_pauses_a_connected_app_and_on_restores_it(
 @pytest.mark.web
 @pytest.mark.android
 @pytest.mark.linux
+@pytest.mark.macos
+@pytest.mark.ios
+@pytest.mark.windows
 @pytest.mark.feature("connected-apps")
 def test_a_principal_the_oracle_served_shows_what_the_nest_did_on_its_row(
     request, connected_app, consent_nest, metadata_server
@@ -789,7 +842,8 @@ def test_a_principal_the_oracle_served_shows_what_the_nest_did_on_its_row(
     index = ca.wait_for_request_code(browser_code)
     assert index is not None, (
         "the request must open its card in the tray. "
-        f"error: {ca.current_error_text()!r}"
+        f"error: {ca.current_error_text()!r} code: {browser_code!r} "
+        f"cards: {_cards_seen(ca)}"
     )
     ca.approve_request(index)
     tokens = redeem(client, flow_token)
@@ -824,6 +878,145 @@ def test_a_principal_the_oracle_served_shows_what_the_nest_did_on_its_row(
     assert ops is not None and ops.isdigit(), f"the window's count, as a value: {ops!r}"
     text = ca.item_text(row)
     assert detail in text, f"the newest operation's detail, verbatim: {text!r}"
+
+
+def _owned_grant_ids(consent_nest) -> set[bytes]:
+    """The capability grants the account holds on the nest, read owner-side."""
+    from helpers.principal_session import alice_client
+
+    with alice_client(consent_nest) as ws:
+        return {bytes(g) for g in ws.call("fauna.capabilities.reconcile", {})["grant_ids"]}
+
+
+def _wait_owned(consent_nest, accept, what: str) -> set[bytes]:
+    """Poll the owner's grant ids until ``accept`` holds (a state, never a
+    delay — convention 14); fail naming ``what`` with the last reading."""
+    deadline = time.monotonic() + RPC_ROUNDTRIP_S
+    owned = _owned_grant_ids(consent_nest)
+    while not accept(owned) and time.monotonic() < deadline:
+        time.sleep(0.5)
+        owned = _owned_grant_ids(consent_nest)
+    assert accept(owned), f"{what}; the account's grants on the nest: {sorted(g.hex() for g in owned)!r}"
+    return owned
+
+
+def _raw_public(private_key) -> bytes:
+    return private_key.public_key().public_bytes(
+        serialization.Encoding.Raw, serialization.PublicFormat.Raw
+    )
+
+
+@pytest.mark.tui
+@pytest.mark.web
+@pytest.mark.linux
+@pytest.mark.android
+@pytest.mark.windows
+@pytest.mark.macos
+@pytest.mark.ios
+@pytest.mark.feature("connected-apps")
+def test_a_re_request_with_a_new_key_says_what_it_ends_and_approving_ends_it(
+    request, connected_app, consent_nest, metadata_server
+):
+    """Outcome 43 (``connected-apps.md`` § User actions; ``third-party.md``
+    § The principal model → *Key replacement*): an app the user approved asks
+    again under a different holder key. Its card says approving ends what the
+    earlier key was given, and approving on that card ends it — nest first,
+    from the approving app, before the app has even redeemed its code.
+
+    The first consent asks for a ``fauna:records:`` scope, so its approve on
+    the card mints the consent-time capability grant to the first key: the
+    grant the replacement must end. The nest ends the old key's grants on its
+    own too, but only at ``/oauth/token`` when the app redeems; the assertion
+    that the old grant is gone is therefore made between the approve and the
+    redemption, where only the approving app's end can have removed it. The
+    roster holds one row per (account, client), so the old key never shows as
+    a row of its own: after the redemption the one row is still connected and
+    the grant minted to the new key is still held."""
+    from helpers.principal_session import redeem
+
+    ca: ConnectedAppsActions = connected_app.connected_apps
+    app_name = request.node.callspec.params["app"]
+    client_id_url = metadata_server.client_id(_key_replacement_document_path(app_name))
+    writer_pub = _raw_public(ed25519.Ed25519PrivateKey.generate())
+
+    def ask(holder_pub: bytes) -> tuple[OAuthClient, str, int]:
+        client = OAuthClient(
+            base=consent_nest["url"],
+            htu_origin=f"https://{HANDLE_DOMAIN}",
+            redirect_uri=_RECORDS_REDIRECT_URI,
+            scope=_RECORDS_SCOPE,
+            holder_x25519=holder_pub,
+            writer_ed25519=writer_pub,
+            client_id_url=client_id_url,
+        )
+        request_uri = client.push_authorization_request()
+        browser_code, flow_token = client.open_consent_page(request_uri)
+        index = ca.wait_for_request_code(browser_code)
+        assert index is not None, (
+            "the request must open its card in the tray. "
+            f"error: {ca.current_error_text()!r} code: {browser_code!r} "
+            f"cards: {_cards_seen(ca)}"
+        )
+        return client, flow_token, index
+
+    ends_line = S.connected_apps.consent_ends_holder
+
+    # ── The first ceremony: nothing to end, and the approve mints a grant. ──
+    before_first = _owned_grant_ids(consent_nest)
+    first, first_flow, index = ask(_raw_public(x25519.X25519PrivateKey.generate()))
+    assert ends_line not in ca.request_text(index), (
+        "a first ceremony replaces no key, so its card says nothing ends. "
+        f"card: {ca.request_text(index)!r}"
+    )
+    ca.approve_request(index)
+    redeem(first, first_flow)
+    first_grants = (
+        _wait_owned(
+            consent_nest,
+            lambda owned: bool(owned - before_first),
+            "approving a records consent on the card must mint its grant to the first key",
+        )
+        - before_first
+    )
+    assert ca.wait_for_item_containing(first.client_id) is not None, (
+        "the approved app must be on the roster. "
+        f"error: {ca.current_error_text()!r}"
+    )
+
+    # ── The same app asks again under a new holder key. ──
+    second, second_flow, index = ask(_raw_public(x25519.X25519PrivateKey.generate()))
+    assert second.client_id == first.client_id, "the same document is the same app"
+    card = ca.request_text(index)
+    assert ends_line in card, (
+        f"the card must say approving ends what the earlier key was given: {card!r}"
+    )
+
+    ca.approve_request(index)
+    after_approve = _wait_owned(
+        consent_nest,
+        lambda owned: not (owned & first_grants),
+        "approving on the card must end the earlier key's grant before the app "
+        f"redeems (old grants {sorted(g.hex() for g in first_grants)!r})",
+    )
+    second_grants = after_approve - before_first - first_grants
+    assert second_grants, (
+        "the approve must mint the new key its own grant: "
+        f"{sorted(g.hex() for g in after_approve)!r}"
+    )
+    assert ca.current_error_text() == "", ca.current_error_text()
+
+    redeem(second, second_flow)
+    owned = _owned_grant_ids(consent_nest)
+    assert second_grants <= owned, (
+        "the redemption ends only the old key's grants, never the new one's: "
+        f"{sorted(g.hex() for g in owned)!r}"
+    )
+    row = ca.wait_for_item_status(second.client_id, "connected")
+    assert row is not None, (
+        "the one roster row stays connected under the new key. "
+        f"row: {ca.item_text(ca.item_index_containing(second.client_id) or 0)!r} "
+        f"error: {ca.current_error_text()!r}"
+    )
 
 
 def _app_password_rows(ca: ConnectedAppsActions) -> list[int]:
@@ -866,6 +1059,12 @@ def _sign_in_with_app_password(app, consent_bridge) -> tuple[dict, int]:
 
 
 @pytest.mark.tui
+@pytest.mark.android
+@pytest.mark.web
+@pytest.mark.linux
+@pytest.mark.macos
+@pytest.mark.ios
+@pytest.mark.windows
 @pytest.mark.feature("connected-apps")
 def test_a_nostr_signer_app_has_its_row_and_disconnecting_it_ends_the_connection(
     connected_app, consent_nest
@@ -919,6 +1118,12 @@ def test_a_nostr_signer_app_has_its_row_and_disconnecting_it_ends_the_connection
 
 
 @pytest.mark.tui
+@pytest.mark.android
+@pytest.mark.web
+@pytest.mark.linux
+@pytest.mark.macos
+@pytest.mark.ios
+@pytest.mark.windows
 @pytest.mark.feature("connected-apps")
 def test_an_app_signed_in_with_an_app_password_has_its_row(connected_app, consent_bridge):
     """(i): an app that signs in with one of the user's Bluesky app passwords is
@@ -954,6 +1159,12 @@ def test_an_app_signed_in_with_an_app_password_has_its_row(connected_app, consen
 
 
 @pytest.mark.tui
+@pytest.mark.android
+@pytest.mark.web
+@pytest.mark.linux
+@pytest.mark.macos
+@pytest.mark.ios
+@pytest.mark.windows
 @pytest.mark.feature("connected-apps")
 def test_each_row_says_when_the_app_was_last_used_and_how_long_it_lasts(
     connected_app, consent_nest, consent_bridge
@@ -973,8 +1184,8 @@ def test_each_row_says_when_the_app_was_last_used_and_how_long_it_lasts(
     index = ca.wait_for_request_from(client.client_id)
     assert index is not None, f"the card must open. error: {ca.current_error_text()!r}"
     ca.approve_request(index)
-    status, tokens = client.poll_token(
-        GRANT_TYPE_DEVICE_CODE, "device_code", started["device_code"]
+    status, tokens = client.poll_until_answered(
+        GRANT_TYPE_DEVICE_CODE, "device_code", started["device_code"], timeout=RPC_ROUNDTRIP_S
     )
     assert status == 200, f"approval must release the poll: {status} {tokens!r}"
     row = ca.wait_for_item_containing(client.client_id)
@@ -999,12 +1210,15 @@ def test_each_row_says_when_the_app_was_last_used_and_how_long_it_lasts(
         )
         assert until in text, f"the row says how long the sign-in lasts: {text!r}"
 
-        status, refreshed = xrpc_post(
-            consent_bridge["base"],
-            "com.atproto.server.refreshSession",
-            None,
-            bearer=session["refreshJwt"],
-        )
+        try:
+            status, refreshed = xrpc_post(
+                consent_bridge["base"],
+                "com.atproto.server.refreshSession",
+                None,
+                bearer=session["refreshJwt"],
+            )
+        except OSError as e:
+            pytest.fail(f"refreshSession got no answer ({e!r}). bridge:\n{consent_bridge['tail']()}")
         assert status == 200, f"refreshSession refused: {status} {refreshed!r}"
         changed = ca._poll(
             lambda: True
@@ -1027,6 +1241,12 @@ def test_each_row_says_when_the_app_was_last_used_and_how_long_it_lasts(
 
 
 @pytest.mark.tui
+@pytest.mark.web
+@pytest.mark.linux
+@pytest.mark.macos
+@pytest.mark.ios
+@pytest.mark.android
+@pytest.mark.windows
 @pytest.mark.feature("connected-apps")
 def test_a_code_nobody_issued_gets_one_plain_message_and_opens_no_card(
     connected_app, consent_nest
@@ -1042,6 +1262,10 @@ def test_a_code_nobody_issued_gets_one_plain_message_and_opens_no_card(
     other = next(c for c in dict.fromkeys(live) if c != live[-1] and c.isalnum())
     unissued = live[:-1] + other
 
+    # The page's own read lands first: a re-read finishing after the submit
+    # repaints the page from the nest and takes the gesture's error with it
+    # (linux and web re-read on every visit, off the GUI thread).
+    assert ca.visit(), f"the page must read. error: {ca.current_error_text()!r}"
     before = ca.request_count()
     ca.connect_with_code(unissued)
     shown = ca._poll(lambda: ca.current_error_text() or None, 10.0, renavigate=False)
@@ -1050,6 +1274,30 @@ def test_a_code_nobody_issued_gets_one_plain_message_and_opens_no_card(
     )
     assert ca.request_count() == before, "an unissued code must open no request card"
     assert ca.request_index_for_client(client.client_id) is None
+
+    # The machine logs the miss it shows (`set_error`: target
+    # `fauna_connected_apps`, the message key), and the log is the app's own:
+    # on web the machine runs in the connected-apps wasm chunk, a runtime of
+    # its own that the core chunk does not link, so the line reaches the core
+    # chunk's ring and the console only through that chunk's `setLogSink`
+    # (`observability.md` § Persistence & privacy, the Web bullet). Waited on,
+    # not read once: the web console ring is fetched over the agent.
+    driver = connected_app.driver
+    reader = getattr(driver, "app_log_text", None) or getattr(driver, "app_stderr_text", None)
+    if reader is not None:
+        wait_until(
+            lambda: any(
+                "fauna_connected_apps" in line and "connected_apps.error_code_expired" in line
+                for line in (reader() or "").splitlines()
+            ),
+            RPC_ROUNDTRIP_S, interval=0.5,
+            diagnose=lambda: (
+                "the miss logs `connected_apps.error_code_expired` (target "
+                "fauna_connected_apps), so it must reach the app's own log; "
+                "on web that is the console ring, through the chunk's "
+                "setLogSink. tail:\n" + "\n".join((reader() or "").splitlines()[-30:])
+            ),
+        )
 
 
 # ── The oracle at the `atproto.commit` door ────────────────────────────────
@@ -1110,8 +1358,8 @@ def test_a_revoke_bites_at_the_very_next_write_and_each_session_is_ceilinged(
     index = ca.wait_for_request_from(client.client_id)
     assert index is not None, f"the card must open. error: {ca.current_error_text()!r}"
     ca.approve_request(index)
-    status, tokens = client.poll_token(
-        GRANT_TYPE_DEVICE_CODE, "device_code", started["device_code"]
+    status, tokens = client.poll_until_answered(
+        GRANT_TYPE_DEVICE_CODE, "device_code", started["device_code"], timeout=RPC_ROUNDTRIP_S
     )
     assert status == 200 and tokens.get("access_token"), f"{status} {tokens!r}"
     access = tokens["access_token"]

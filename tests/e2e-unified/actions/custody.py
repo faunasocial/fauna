@@ -74,7 +74,18 @@ class CustodyActions:
         """Reveal the mint flow (``custody-mint-button``). A missing 1:1
         conversation surfaces on ``error-message`` (convention 11) — callers
         establish the conversation first."""
-        self.driver.wait_for("custody-mint-button", timeout=10)
+        try:
+            self.driver.wait_for("custody-mint-button", timeout=10)
+        except TimeoutError as e:
+            # Name the page the nav actually landed on: the registered ids
+            # say whether the Devices page rendered at all.
+            snapshot = self.driver.registry_snapshot() or []
+            ids = sorted({str(entry.get("id")) for entry in snapshot})
+            try:
+                nav = self.driver.get_state("nav")
+            except Exception as state_error:  # diagnostics only, never mask e
+                nav = f"<{state_error!r}>"
+            raise TimeoutError(f"{e} (registered ids: {ids}; nav: {nav!r})") from e
         self.driver.click("custody-mint-button")
         try:
             self.driver.wait_for("custody-mint-host-select", timeout=10)
@@ -88,17 +99,32 @@ class CustodyActions:
             )
             raise TimeoutError(f"{e} (error-message: {error!r})") from e
 
-    def mint_offer(self, host_label: str) -> None:
+    def mint_offer(self, host_label: str, *aliases: str) -> None:
         """Run the whole mint flow: open, pick ``host_label`` in the host
         select (the 1:1 conversation's thread label), confirm past the
         REQUIRED floor copy. The confirm records the offer through the config
-        CAS and a drive pass posts it to the channel."""
+        CAS and a drive pass posts it to the channel.
+
+        ``aliases`` are other labels the same thread paints under on an app
+        that resolves the peer's handle (apple paints ``<handle>@<domain>``
+        where the others paint the short id): each is tried, in order, only
+        when the previous was not offered — the last refusal propagates, so a
+        genuinely wrong label still fails loudly listing the painted options."""
+        from drivers.http_bridge import SelectOptionNotOffered
+
         self.open_mint()
         assert self.driver.get_text("custody-mint-floor-note"), (
             "the custody-floor copy must render before the confirm "
             "(nests.md § Trust facet — custody rows: REQUIRED copy)"
         )
-        self.driver.select("custody-mint-host-select", host_label)
+        labels = (host_label, *aliases)
+        for i, label in enumerate(labels):
+            try:
+                self.driver.select("custody-mint-host-select", label)
+                break
+            except SelectOptionNotOffered:
+                if i == len(labels) - 1:
+                    raise
         self.driver.wait_for("custody-mint-confirm-button", timeout=5)
         self.driver.click("custody-mint-confirm-button")
 

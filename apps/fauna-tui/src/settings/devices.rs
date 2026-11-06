@@ -9,29 +9,20 @@
 //! native Rust, not FFI-mediated — priority #2). Unlike linux's push-observer
 //! render loop, this follows the Mail/Privacy sub-page shape already
 //! established in this file: an awaited nav-edge hydrate + re-snapshot after
-//! every mutating gesture, no live observer tick (`NoopObserver` below is
-//! wired but never fires a repaint itself).
+//! every mutating gesture, no live observer tick (the shared `NullObserver`
+//! is wired but never fires a repaint itself).
 
 use fauna_ui_ids as ids;
 use std::sync::Arc;
 
 use fauna_client::NestClient;
 use fauna_core::label_custody::LabelCustody;
+use fauna_devices_machine::observer::NullObserver;
 use fauna_devices_machine::{DevicesMachine, DevicesObserver, DevicesSnapshot};
 use fauna_i18n::strings::devices as t;
 
 use super::Action;
 use crate::element::{Element, Gesture};
-
-/// [`DevicesObserver`] is only a construction requirement — `DevicesMachine`
-/// notifies it synchronously after every mutation, but this page reads a fresh
-/// `snapshot()` right after each awaited `Op` instead (the Mail/Privacy
-/// shape), so there is nothing for the callback to do.
-struct NoopObserver;
-
-impl DevicesObserver for NoopObserver {
-    fn on_changed(&self) {}
-}
 
 /// The Devices sub-page's state.
 ///
@@ -118,6 +109,20 @@ pub struct DevicesState {
     /// cancel, by the confirm's dispatch, and on a fresh visit
     /// (`route_subpage`'s reset, the `sign_out_pending` precedent).
     pub(super) member_remove_pending: Option<String>,
+    /// The open `device-rename-input` editor (`ui/devices.md` § Device
+    /// names): which roster row it names, by `device_id` — never a painted
+    /// index, since a refresh while the user types may re-order the list —
+    /// and the text typed so far, opened on the row's name
+    /// (`DevicesMachine::device_name`). One editor at a time; cleared by
+    /// cancel, by the confirm's dispatch, and on a fresh visit.
+    pub(super) rename: Option<RenameDraft>,
+}
+
+/// The rename editor's view state — see [`DevicesState::rename`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct RenameDraft {
+    pub device_id: String,
+    pub text: String,
 }
 
 /// The custody facet's fold output — the three shared-Rust projections the
@@ -205,7 +210,7 @@ impl DevicesState {
         runtime: super::AccountRuntimeSlot,
     ) -> Self {
         let follows = super::follows_door(Arc::clone(&runtime));
-        let observer: Arc<dyn DevicesObserver> = Arc::new(NoopObserver);
+        let observer: Arc<dyn DevicesObserver> = Arc::new(NullObserver);
         // One runtime slot for every account-plane door of the page — the fleet
         // door, the participation door and the folder-key custody the create /
         // delete helpers, the foreign-set list and the label resolver read —
@@ -519,6 +524,49 @@ pub(super) fn devices_elements(state: &DevicesState) -> Vec<Element> {
             .enabled(paint.actionable)
             .within(ids::DEVICE_CARD, i),
         );
+        // The rename affordance (`ui/devices.md` § Device names): the editor
+        // over THIS card when it is the one open, else the card's button.
+        match state.rename.as_ref() {
+            Some(draft) if draft.device_id == device.device_id => {
+                els.push(
+                    Element::input_commit(
+                        ids::DEVICE_RENAME_INPUT,
+                        draft.text.clone(),
+                        crate::element::Field::Settings(super::SettingsField::DeviceRename),
+                        Gesture::Settings(Action::ConfirmRenameDevice),
+                    )
+                    .labelled(t::RENAME_LABEL)
+                    .within(ids::DEVICE_CARD, i),
+                );
+                els.push(
+                    Element::gesture_button(
+                        ids::DEVICE_RENAME_CONFIRM_BUTTON,
+                        t::RENAME_CONFIRM,
+                        true,
+                        Gesture::Settings(Action::ConfirmRenameDevice),
+                    )
+                    .within(ids::DEVICE_CARD, i),
+                );
+                els.push(
+                    Element::gesture_button(
+                        ids::DEVICE_RENAME_CANCEL_BUTTON,
+                        fauna_i18n::strings::common::CANCEL,
+                        true,
+                        Gesture::Settings(Action::CancelRenameDevice),
+                    )
+                    .within(ids::DEVICE_CARD, i),
+                );
+            }
+            _ => els.push(
+                Element::gesture_button(
+                    ids::DEVICE_RENAME_BUTTON,
+                    t::RENAME,
+                    true,
+                    Gesture::Settings(Action::RenameDevice(device.device_id.clone())),
+                )
+                .within(ids::DEVICE_CARD, i),
+            ),
+        }
         els.push(
             Element::gesture_button(
                 ids::DEVICE_REMOVE_BUTTON,
@@ -1151,6 +1199,7 @@ mod tests {
             owed_nests: None,
             peer_transport: None,
             enrollment_target_device_id: "ab".repeat(32),
+            enrollment_device_label: None,
         })
         .await
         .expect("the scratch runtime starts")
@@ -1263,6 +1312,83 @@ mod tests {
             ids_of(&els)
         );
         assert!(!els.iter().any(|e| e.text == t::MEMBERS_TITLE));
+    }
+
+    /// **Every device-card carries `device-rename-button`; the open editor
+    /// replaces it on ITS card only** (`ui/devices.md` § Device names): the
+    /// input (prefilled with the draft), the save and the cancel, in that
+    /// order, between the participation toggle and the remove button, scoped
+    /// under the card the draft names by id — so a snapshot that re-orders
+    /// the roster moves the editor with its device.
+    #[test]
+    fn the_rename_editor_opens_over_its_own_card_and_the_others_keep_the_button() {
+        let state = DevicesState {
+            snapshot: Some(snapshot(vec![
+                device("d1", "laptop", true, false),
+                device("d2", "phone", false, false),
+            ])),
+            ..Default::default()
+        };
+        let els = devices_elements(&state);
+        let buttons: Vec<&Element> = els
+            .iter()
+            .filter(|e| e.id == "device-rename-button")
+            .collect();
+        assert_eq!(buttons.len(), 2, "one rename button per card");
+        assert_eq!(buttons[1].path, vec![("device-card".to_string(), 1)]);
+        assert_eq!(buttons[1].text, t::RENAME);
+        assert!(matches!(
+            buttons[1].gesture(),
+            Some(Gesture::Settings(Action::RenameDevice(id))) if id == "d2"
+        ));
+        assert!(!ids_of(&els).contains(&"device-rename-input"));
+
+        // Open the editor on d2, then list d2 FIRST: the editor follows it.
+        let mut state = DevicesState {
+            rename: Some(RenameDraft {
+                device_id: "d2".into(),
+                text: "kitchen".into(),
+            }),
+            ..state
+        };
+        state.snapshot = Some(snapshot(vec![
+            device("d2", "phone", false, false),
+            device("d1", "laptop", true, false),
+        ]));
+        let els = devices_elements(&state);
+        let ids = ids_of(&els);
+        let input = ids
+            .iter()
+            .position(|id| *id == "device-rename-input")
+            .expect("the editor paints");
+        assert_eq!(
+            &ids[input - 1..input + 4],
+            [
+                "device-p2p-participation-toggle",
+                "device-rename-input",
+                "device-rename-confirm-button",
+                "device-rename-cancel-button",
+                "device-remove-button",
+            ]
+        );
+        assert_eq!(els[input].text, "kitchen");
+        for el in &els[input..input + 3] {
+            assert_eq!(el.path, vec![("device-card".to_string(), 0)], "{}", el.id);
+        }
+        assert!(matches!(
+            els[input + 1].gesture(),
+            Some(Gesture::Settings(Action::ConfirmRenameDevice))
+        ));
+        assert!(matches!(
+            els[input + 2].gesture(),
+            Some(Gesture::Settings(Action::CancelRenameDevice))
+        ));
+        let buttons: Vec<&Element> = els
+            .iter()
+            .filter(|e| e.id == "device-rename-button")
+            .collect();
+        assert_eq!(buttons.len(), 1, "the open card's button gave way");
+        assert_eq!(buttons[0].path, vec![("device-card".to_string(), 1)]);
     }
 
     /// **A member no roster row accounts for paints its card by key, with the
@@ -1457,6 +1583,7 @@ mod tests {
                 "device-name",
                 "device-status",
                 "device-p2p-participation-toggle",
+                "device-rename-button",
                 "device-remove-button",
                 "settings-nav-back",
             ]

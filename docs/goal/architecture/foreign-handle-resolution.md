@@ -158,7 +158,12 @@ Last verified: 2026-09-28 (the split; every ruling date, pin and residual below 
   address is not a Fauna handle, and the probe declines so the picker reaches
   mail (an alias or a mailing list lives there — `../behavior/mail-mass-mailing.md`
   § Composing a list message) instead of re-probing the home domain as foreign,
-  where a failed hop on an always-known domain would read as an error. The security
+  where a failed hop on an always-known domain would read as an error. A same-nest
+  answer that the handle *exists* but is not yet addressable is terminal the
+  first way — a `not-reachable` status, never mail (ruled 2026-10-23; owned by
+  [`../ui/conversations.md`](../ui/conversations.md) § Errors & edge cases →
+  *The picker tells the truth*, rule 2; case 1's foreign found-but-unaddressable
+  → email above stands unchanged). The security
   framing is § Security's *TLS is the floor*: a hop that fails must never
   produce a *less* confidential send than the one the user asked for. The UX
   arm — what the picker shows and refuses — is owned by

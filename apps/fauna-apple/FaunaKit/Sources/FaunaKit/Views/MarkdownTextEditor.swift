@@ -517,6 +517,9 @@ public struct MarkdownComposeField: View {
     let maxLines: Int
     let markersShown: Bool
     let handle: MarkdownFieldHandle?
+    /// `false` while the room cannot take a send (`ThreadCapabilities.canSend`):
+    /// the field stays in view but takes no input.
+    let isEditable: Bool
 
     @State private var measuredHeight: CGFloat = 0
 
@@ -527,8 +530,10 @@ public struct MarkdownComposeField: View {
         minLines: Int = 1,
         maxLines: Int = 6,
         markersShown: Bool = false,
+        isEditable: Bool = true,
         handle: MarkdownFieldHandle? = nil
     ) {
+        self.isEditable = isEditable
         self._text = text
         self._selection = selection
         self.placeholder = placeholder
@@ -550,6 +555,7 @@ public struct MarkdownComposeField: View {
                 text: $text,
                 selection: $selection,
                 markersShown: markersShown,
+                isEditable: isEditable,
                 handle: handle,
                 onHeightChange: { height in
                     let clamped = min(max(height, minHeight), maxHeight)
@@ -585,6 +591,7 @@ struct MarkdownTextEditorRepresentable: NSViewRepresentable {
     @Binding var text: String
     @Binding var selection: NSRange
     var markersShown: Bool
+    var isEditable: Bool
     var handle: MarkdownFieldHandle?
     var onHeightChange: (CGFloat) -> Void
 
@@ -613,6 +620,7 @@ struct MarkdownTextEditorRepresentable: NSViewRepresentable {
         // delegate that suppresses concealed marker runs.
         tv.layoutManager?.delegate = context.coordinator.glyphDelegate
         tv.setAccessibilityIdentifier(Ids.dmTextField)
+        tv.isEditable = isEditable
         handle?.textView = tv
         tv.string = text
         context.coordinator.decorate(tv)
@@ -622,6 +630,7 @@ struct MarkdownTextEditorRepresentable: NSViewRepresentable {
     func updateNSView(_ scroll: NSScrollView, context: Context) {
         context.coordinator.parent = self
         guard let tv = scroll.documentView as? NSTextView else { return }
+        tv.isEditable = isEditable
         context.coordinator.isProgrammatic = true
         defer { context.coordinator.isProgrammatic = false }
         if tv.string != text {
@@ -679,6 +688,7 @@ struct MarkdownTextEditorRepresentable: UIViewRepresentable {
     @Binding var text: String
     @Binding var selection: NSRange
     var markersShown: Bool
+    var isEditable: Bool
     var handle: MarkdownFieldHandle?
     var onHeightChange: (CGFloat) -> Void
 
@@ -700,6 +710,7 @@ struct MarkdownTextEditorRepresentable: UIViewRepresentable {
         tv.smartDashesType = .no
         tv.layoutManager.delegate = context.coordinator.glyphDelegate
         tv.accessibilityIdentifier = "dm-text-field"
+        tv.isEditable = isEditable
         handle?.textView = tv
         tv.text = text
         context.coordinator.decorate(tv)
@@ -708,6 +719,7 @@ struct MarkdownTextEditorRepresentable: UIViewRepresentable {
 
     func updateUIView(_ tv: UITextView, context: Context) {
         context.coordinator.parent = self
+        tv.isEditable = isEditable
         context.coordinator.isProgrammatic = true
         defer { context.coordinator.isProgrammatic = false }
         if tv.text != text {

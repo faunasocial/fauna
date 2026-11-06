@@ -114,6 +114,29 @@ public partial class ModerationViewModel : ViewModelBase
         AppealOpen = true;
     }
 
+    /// The content id a <c>dm-message-withheld-badge</c> tap asked to appeal, held until
+    /// the next queue read lands (<see cref="RequestAppeal"/>).
+    private string? _pendingAppealContentId;
+
+    /// <summary>The withheld-message badge's hand-off (takedown-and-block.md § Legal
+    /// takedown → <i>App render</i>, the fourth surface): the Conversations page navigates
+    /// here with the matched queue row's <c>content_id</c>, and the next queue read opens
+    /// THAT row's own appeal — the one appeal flow, never a second form. Mirrors linux's
+    /// <c>queue_appeal</c> and android's <c>PendingAppealStore</c>.</summary>
+    public void RequestAppeal(string contentId) => _pendingAppealContentId = contentId;
+
+    /// <summary>Open the appeal a badge tap asked for, on the loaded row it names —
+    /// behind the same <c>RowIsAppealable</c> gate as the row's own <c>appeal-button</c>.
+    /// A row the queue no longer carries opens nothing. One-shot: a later read reopens
+    /// nothing.</summary>
+    private void OpenPendingAppeal()
+    {
+        if (_pendingAppealContentId is not { } contentId) return;
+        _pendingAppealContentId = null;
+        var row = Actions.FirstOrDefault(r => r.ContentId == contentId);
+        if (row is { IsAppealable: true }) OpenAppeal(row);
+    }
+
     /// <summary><c>appeal-cancel-button</c>: drop the draft and the stale status
     /// together, touching nothing nest-side.</summary>
     public void CancelAppeal()
@@ -207,6 +230,9 @@ public partial class ModerationViewModel : ViewModelBase
         {
             IsLoading = false;
         }
+        // A badge tap's appeal opens on the rows this read just painted (a failed read
+        // leaves nothing to match, so nothing opens).
+        OpenPendingAppeal();
         // The ledger rides the same entry, but its own read: an unavailable ledger
         // must never cost the queue, nor paint an empty line it cannot vouch for.
         await RefreshReportsAsync();

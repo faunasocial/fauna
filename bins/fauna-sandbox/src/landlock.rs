@@ -12,8 +12,20 @@ use landlock::{
 };
 use std::path::Path;
 
-/// Minimum ABI — Linux 5.13+. We don't need V2+ features (Refer, Truncate).
-const LANDLOCK_ABI: ABI = ABI::V1;
+/// The filesystem rights every profile's domain handles: ABI 3 (Linux 6.2+).
+///
+/// V1's rights alone leave `truncate(2)` by path outside the domain — a
+/// sandboxed parser could not open the sealed store but could still destroy
+/// it, since it shares a uid DAC lets through (`deployment-threat-model.md`
+/// § Concern 1b). V2 adds Refer (cross-directory rename/link, granted inside
+/// each read-write tree by `from_all`), V3 adds Truncate. The ruleset is
+/// best-effort (the crate's default compatibility), so V1 (Linux 5.13) stays
+/// the floor: an older kernel enforces what it has and the wrapper reports
+/// `partial`. Not V4+: V4's rights are network ones (a separate access type
+/// this crate never handles), and V5's device-ioctl right would refuse
+/// ioctls on the read-only `/dev` grant — no file access a profile needs is
+/// gained by either.
+const LANDLOCK_ABI: ABI = ABI::V3;
 
 /// Apply Landlock filesystem restrictions for the given profile.
 ///
@@ -286,6 +298,98 @@ mod tests {
             ),
             other => panic!("unexpected child outcome {other:?}"),
         }
+    }
+
+    /// The kernel's Landlock ABI version, 0 when it has none —
+    /// `landlock_create_ruleset(NULL, 0, LANDLOCK_CREATE_RULESET_VERSION)`.
+    fn kernel_landlock_abi() -> i64 {
+        // SAFETY: the version query takes no attribute and creates no fd.
+        let v = unsafe {
+            libc::syscall(
+                libc::SYS_landlock_create_ruleset,
+                std::ptr::null::<libc::c_void>(),
+                0usize,
+                1u32, // LANDLOCK_CREATE_RULESET_VERSION
+            )
+        };
+        v.max(0)
+    }
+
+    /// A decoder exploit cannot `truncate(2)` the sealed store. The path form
+    /// needs no open fd, so the V1 rights (which already refuse an open for
+    /// write) never saw it: only the truncate right of ABI 3 does. DAC allows
+    /// it — the nest's uid owns `/data/nest.db` — so the domain is the only
+    /// thing refusing it.
+    #[test]
+    fn test_transcode_profile_denies_truncate_outside_the_job_dir() {
+        const NOT_FULLY_ENFORCED: i32 = 25;
+        const TRUNCATED_OUTSIDE: i32 = 26;
+
+        let abi = kernel_landlock_abi();
+        if abi < 3 {
+            eprintln!("kernel Landlock ABI {abi} < 3 has no truncate right — nothing to assert");
+            return;
+        }
+        let job_dir = tempfile::tempdir().unwrap();
+        let own = job_dir.path().join("seg000.ts");
+        std::fs::write(&own, b"segment bytes").unwrap();
+        let secrets = tempfile::tempdir().unwrap();
+        let secret_file = secrets.path().join("nest.db");
+        let contents = b"SQLite format 3\0";
+        std::fs::write(&secret_file, contents).unwrap();
+
+        let ruleset = build(Profile::Transcode, Some(job_dir.path())).unwrap();
+        let own_c = CString::new(own.to_str().unwrap()).unwrap();
+        let secret_c = CString::new(secret_file.to_str().unwrap()).unwrap();
+
+        let verdict = run_bounded(move || {
+            unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) };
+            let Ok(status) = ruleset.restrict_self() else {
+                return RESTRICT_FAILED;
+            };
+            // ABI >= 3 kernel: every right the ruleset asks for is there.
+            if !matches!(status.ruleset, RulesetStatus::FullyEnforced) {
+                return NOT_FULLY_ENFORCED;
+            }
+            // SAFETY: both are live NUL-terminated C strings.
+            if unsafe { libc::truncate(own_c.as_ptr(), 0) } != 0 {
+                return ALLOWED_PATH_REFUSED;
+            }
+            if unsafe { libc::truncate(secret_c.as_ptr(), 0) } == 0 {
+                return TRUNCATED_OUTSIDE;
+            }
+            // SAFETY: `__errno_location` returns this thread's errno pointer.
+            let errno = unsafe { *libc::__errno_location() };
+            if errno != libc::EACCES && errno != libc::EPERM {
+                return BLOCKED_PATH_WRONG_ERRNO;
+            }
+            OK
+        });
+
+        match verdict {
+            ForkProbe::Exited(OK) => {}
+            ForkProbe::Exited(RESTRICT_FAILED) => panic!("restrict_self() failed in the child"),
+            ForkProbe::Exited(NOT_FULLY_ENFORCED) => {
+                panic!("on a kernel with Landlock ABI {abi} the ruleset was not fully enforced")
+            }
+            ForkProbe::Exited(ALLOWED_PATH_REFUSED) => {
+                panic!("the transcode profile refused a truncate inside its own job directory")
+            }
+            ForkProbe::Exited(TRUNCATED_OUTSIDE) => {
+                panic!("the transcode profile let a file outside its job directory be truncated")
+            }
+            ForkProbe::Exited(BLOCKED_PATH_WRONG_ERRNO) => {
+                panic!("the outside truncate was refused, but not with EACCES/EPERM")
+            }
+            ForkProbe::TimedOut => panic!(
+                "the sandboxed child never exited — the fork-in-a-threaded-runner \
+                 deadlock `fork_probe` documents; move what the child allocates \
+                 before the fork"
+            ),
+            other => panic!("unexpected child outcome {other:?}"),
+        }
+        assert_eq!(std::fs::metadata(&own).unwrap().len(), 0);
+        assert_eq!(std::fs::read(&secret_file).unwrap(), contents);
     }
 
     #[test]

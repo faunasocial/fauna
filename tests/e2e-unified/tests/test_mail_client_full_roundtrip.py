@@ -55,10 +55,15 @@ import time
 
 import pytest
 
-from helpers.app_surface import skip_unbuilt
+from helpers.app_surface import require_surface
 from helpers.mail_client_ui import claim_enable_and_ready, deliver_inbound
 
-pytestmark = pytest.mark.tier_3
+# `real_conversations`: windows (and macOS/iOS) start the REAL shared-Rust receive
+# loop only under the session-wide flag this marker sets, and the external reply
+# below can surface only through it (`helpers.mail_client_ui.claim_enable_and_ready`
+# fails naming the cause otherwise). Run the module in its own invocation, as the
+# sibling `test_mail_html_roundtrip.py` does.
+pytestmark = [pytest.mark.tier_3, pytest.mark.real_conversations]
 
 # The (external) sender/recipient domain — routed to the stub MX by the bridge's
 # mta_mx_override, and (for inbound) with no loopback/local-domain exemption so a
@@ -158,12 +163,5 @@ def _run_full_roundtrip(app, nest, *, credential_kind):
 @pytest.mark.parametrize("credential_kind", ["oauthbearer", "plain"])
 @pytest.mark.feature("email-in-conversations")
 def test_full_client_ui_mail_roundtrip(app, unclaimed_mail_nest_ui, credential_kind):
-    if not (app.driver.is_linux() or app.driver.is_macos() or app.driver.is_ios()):
-        skip_unbuilt(
-            app.driver,
-            surface="the full client-UI mail round-trip",
-            detail="wired on linux first; web/windows/android/tui are "
-            "the cross-app follow-on",
-            tracked="mail-settings.md",
-        )
+    require_surface(app.driver, "mail-full-roundtrip")
     _run_full_roundtrip(app, unclaimed_mail_nest_ui, credential_kind=credential_kind)

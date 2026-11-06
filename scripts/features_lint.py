@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""The catalog lint — the six rules of `docs/goal/architecture/feature-catalog.md`
+"""The catalog lint — the seven rules of `docs/goal/architecture/feature-catalog.md`
 § The catalog lint, cheap merge tier, parse-only, stdlib-only.
 
 The rules, in the doc's own numbering:
@@ -15,11 +15,18 @@ The rules, in the doc's own numbering:
 5. the committed `MATRIX.md`, every `## Status` block and `matrix.json` equal a fresh
    render;
 6. the ledger holds no record under a feature that no longer maps its test (re-marked,
-   renamed, deleted — `just features-prune` removes them); no declared-absent app has
+   renamed, deleted — `just features-prune` removes them), nor a `skipped: unbuilt`
+   record whose `surface` the registry now lists as built on its column; no declared-absent app has
    a *passing* record for the feature — nor, for a
    per-outcome absence, for a witness of that outcome (the declaration is
    stale), and a page whose outcomes are all `[nest]` says so in its
-   `What a user gets`.
+   `What a user gets`;
+7. the surface registry (`tests/e2e-unified/surfaces.toml`, e2e-conventions.md
+   convention 7) reads, and every `@pytest.mark.requires_surface("<key>")` names a
+   key it declares; no surface is declared unbuilt on an app whose ledger holds a
+   passing record of a test that requires it, nor — keyed by a ui.yaml id — on an app
+   whose `ui-actual-<app>.yaml` records that id; and no `product` entry lists all
+   seven apps (finished: the entry and its gates are deleted together).
 
 Rules 2 and 3 are the two directions of the same promise, which is why they are
 separate rules rather than one: a contract line naming a test that does not carry the
@@ -234,18 +241,103 @@ def _rule_5(features: Path, repo: Path = REPO) -> list:
     return stale
 
 
-def _rule_6(pages: list, ledger: dict) -> list:
+def _marks_of(tests: dict) -> tuple:
+    """`(app marks, host-platform marks)` from a `scan_tree` answer — the first and
+    third halves of `features_catalog.scan_marks`, without a second scan."""
+    return ({n: f.apps for n, f in tests.items() if f.apps},
+            {n: f.platforms for n, f in tests.items() if f.platforms is not None})
+
+
+def _rule_6_host_platforms(tests: dict) -> list:
+    """Every `@pytest.mark.host_platform(...)` declaration reads (e2e-conventions.md
+    convention 7, the fourth skip kind; feature-catalog.md § The ledger, *Stale
+    records*, ruling (i)): its words are the ledger's platform vocabulary; it names no
+    platform outside its `tests/platform/<os>/` venue; it names none outside every
+    column the test can speak for (`COLUMN_PLATFORMS` over its apps — the
+    `contradictory` reading); and its folded marks leave at least one platform."""
     problems = []
-    # The ledger holds no record under a feature that no longer maps its test (§ The
-    # ledger, *Stale records*). Reported per app file and feature, with the one fix.
+    for node_id, facts in sorted(tests.items()):
+        if facts.platforms is None:
+            continue
+        where = f"{facts.rel}:{facts.line}: `{node_id.split('::', 1)[1]}`"
+        if not facts.platforms:
+            problems.append(f"{where}: its host_platform marks share no platform — no "
+                            "host can ever run it")
+            continue
+        unknown = sorted(set(facts.platforms) - fc.PLATFORMS)
+        if unknown:
+            problems.append(f"{where}: host_platform names {', '.join(map(repr, unknown))}, "
+                            f"outside the ledger's platform vocabulary {sorted(fc.PLATFORMS)}")
+            continue
+        venue = fc.venue_platforms(node_id)
+        outside_venue = sorted(set(facts.platforms) - venue)
+        if outside_venue:
+            problems.append(f"{where}: host_platform names {', '.join(outside_venue)}, outside "
+                            f"its venue's platforms {sorted(venue)} — a `tests/platform/<os>/` "
+                            "module is declared by its venue")
+        # A nest witness (no app driver) speaks for the nest file, which every
+        # platform can stamp; an app witness for the columns its marks allow.
+        columns = facts.apps or fc.APPS
+        spoken = (frozenset().union(*(fc.COLUMN_PLATFORMS.get(a, frozenset()) for a in columns))
+                  if facts.drives_app else fc.PLATFORMS)
+        outside_columns = sorted(set(facts.platforms) - spoken)
+        if outside_columns:
+            problems.append(f"{where}: host_platform names {', '.join(outside_columns)}, on "
+                            f"which none of its columns ({', '.join(columns)}) runs")
+    return problems
+
+
+def _rule_6(pages: list, ledger: dict, registry: dict | None = None,
+            app_marks: dict | None = None, platform_marks: dict | None = None) -> list:
+    problems = []
+    # A `skipped: unbuilt` record whose surface the registry now lists as built on its
+    # column (§ Cell semantics, *Staleness is decided by the registry*) — named one by
+    # one, because the commit that widened the entry is the one that owes the prune.
+    unbuilt = fc.stale_unbuilt_records(ledger, registry or {})
+    for app, slug, node_id, platform in unbuilt:
+        record = ledger[app][slug]["tests"][node_id][platform]
+        problems.append(
+            f"ledger/{app}.json: `{node_id}` under `{slug}` ({platform}) is a stale "
+            f"`skipped: unbuilt` record — tests/e2e-unified/surfaces.toml lists "
+            f"`{record.get('surface')}` as built on {app} — run `just features-prune` "
+            "and commit the ledger")
+    # The ledger holds no record under a feature that no longer maps its test, nor one
+    # on a platform its column can no longer run on (§ The ledger, *Stale records*).
+    # Reported per app file and feature, with the one fix.
     stale: dict = {}
-    for app, slug, node_id in fc.stale_records(pages, ledger):
-        stale.setdefault((app, slug), []).append(node_id)
+    unrunnable: dict = {}
+    for app, slug, node_id, platform in fc.stale_records(pages, ledger, None,
+                                                          app_marks, platform_marks):
+        if platform is None:
+            stale.setdefault((app, slug), []).append(node_id)
+        else:
+            unrunnable.setdefault((app, slug), set()).add(platform)
     for (app, slug), node_ids in sorted(stale.items()):
         problems.append(
             f"ledger/{app}.json: {len(node_ids)} record(s) under `{slug}` for test(s) its "
             f"contract no longer maps (e.g. `{node_ids[0]}`) — run `just features-prune` "
             "and commit the ledger")
+    for (app, slug), platforms in sorted(unrunnable.items()):
+        named = ", ".join(f"`{p}`" for p in sorted(platforms))
+        why = ((f"a platform the {app} column cannot run it on, or on no leg of the "
+                "column's set" if app != fc.NEST else
+                "a platform that cannot complete the feature's nest set")
+               + " (a `tests/platform/docker/` witness runs only where a docker daemon is, "
+               "a `tests/platform/<os>/` or `host_platform`-marked one on those OSes "
+               "alone, and a platform whose set a sibling's contains outright is on no "
+               "leg — § The ledger, *Stale records*, rulings (e), (g), (h) and (i))")
+        problems.append(
+            f"ledger/{app}.json: records under `{slug}` on {named}, {why} — run "
+            "`just features-prune` and commit the ledger")
+    # Every file's top level is the fold of its platforms over the surface's legs
+    # (§ The ledger, *Stale records*, rulings (h) and (i)) — complete only once every
+    # leg holds a stamp; a top level that disagrees was written before the contract
+    # or a marker gained or lost a leg, re-folded without the legs, or merged by hand.
+    for app, slug in fc.misfolded_cells(pages, ledger, app_marks, platform_marks):
+        problems.append(
+            f"ledger/{app}.json: the cell under `{slug}` is not the fold of its platforms "
+            "over that surface's legs (§ The ledger, *Stale records*, rulings (h) and "
+            "(i)) — run `just features-prune` and commit the ledger")
     for page in pages:
         mapped = fc.mapped_tests(page)
         for app, citation in sorted(page.absences.items()):
@@ -313,7 +405,148 @@ def lint(features: Path = fc.FEATURES, e2e: Path = fs.E2E, repo: Path = REPO, *,
         problems += _rule_5(features, repo)
     except fc.CatalogError as exc:
         problems.append(str(exc))
-    problems += _rule_6(pages, ledger)
+    try:
+        registry = fc.load_surface_registry(e2e / "surfaces.toml")
+    except fc.CatalogError:
+        registry = None  # rule 7 reports it; the rules reading it skip their halves
+    # Rule 6 judges the files as written — only a file can be pruned — never the
+    # two-source reading every cell is computed on (§ Cell semantics, *Two sources*).
+    try:
+        written = fc.load_ledger(features, last_green=False)
+    except fc.CatalogError as exc:
+        return problems + [str(exc)]
+    app_marks, platform_marks = _marks_of(tests)
+    problems += _rule_6(pages, written, registry, app_marks, platform_marks)
+    problems += _rule_6_host_platforms(tests)
+    problems += _rule_7(tests, e2e / "surfaces.toml")
+    if registry is not None:
+        problems += _rule_7_declarations(pages, ledger, tests, registry, e2e)
+    return problems
+
+
+def _rule_7(tests: dict, registry_path: Path) -> list:
+    """The surface registry reads, and every `requires_surface` key is declared in it
+    (e2e-conventions.md convention 7 — the marker's unknown-key rule, without a run)."""
+    try:
+        registry = fc.load_surface_registry(registry_path)
+    except fc.CatalogError as exc:
+        return [str(exc)]
+    problems = []
+    for _node_id, facts in sorted(tests.items()):
+        for key in facts.surfaces:
+            if key not in registry:
+                problems.append(
+                    f"{facts.rel}:{facts.line}: "
+                    f"@pytest.mark.requires_surface(\"{key}\") names no table in "
+                    f"tests/e2e-unified/surfaces.toml")
+    return problems
+
+
+#: A list item in the e2e YAML files that names an element id: `- <kebab-id>`, with an
+#: optional trailing comment. `state_fields` paths (dotted) and quoted strings never match.
+_YAML_ITEM = re.compile(r"^(\s*)-\s+([a-z0-9][a-z0-9-]*)\s*(?:#.*)?$")
+_YAML_KEY = re.compile(r"^(\s*)([A-Za-z0-9_.-]+):(?:\s|$)")
+
+
+def yaml_list_ids(text: str, under: frozenset | None = None) -> frozenset:
+    """Every element id a YAML list item names — with `under`, only items whose nearest
+    enclosing key is one of those names (`elements`, `optional_elements`).
+
+    A line reader, not a YAML parse, ON PURPOSE: this lint is the cheap merge tier,
+    stdlib-only (the module docstring), and the ui lints' loader is PyYAML. Every list
+    the rule 7 fence reads — ui.yaml's and each `ui-actual-<app>.yaml`'s `elements:` —
+    is the one-id-per-line block form both files are written in."""
+    stack: list = []          # (indent, key)
+    out = set()
+    for line in text.splitlines():
+        item = _YAML_ITEM.match(line)
+        if item:
+            indent = len(item.group(1))
+            while stack and stack[-1][0] > indent:
+                stack.pop()
+            if under is None or (stack and stack[-1][1] in under):
+                out.add(item.group(2))
+            continue
+        key = _YAML_KEY.match(line)
+        if key:
+            indent = len(key.group(1))
+            while stack and stack[-1][0] >= indent:
+                stack.pop()
+            stack.append((indent, key.group(2)))
+    return frozenset(out)
+
+
+#: The `ui-actual-<app>.yaml` keys whose lists record an id as PRESENT on the app;
+#: `missing`, `missing_pages`, `missing_from_client` and the rest record its absence.
+UI_ACTUAL_PRESENT = frozenset({"elements", "optional_elements"})
+
+
+def _rule_7_declarations(pages: list, ledger: dict, tests: dict, registry: dict,
+                         e2e: Path) -> list:
+    """Convention 7's two declaration lints and its finished entry (§ Cell semantics,
+    *Not built is declared* — the registry the run refutes in both directions):
+
+    (a) a surface declared unbuilt on an app whose ledger holds a PASSING record of a
+        mapped test whose map names the surface, read for that record — a key only
+        another record taught counts only if this run reached it too (`Declared.requires`)
+        — a stale declaration, the twin of a passing test on a declared-absent app;
+    (b) a `product` surface keyed by a ui.yaml id, declared unbuilt on an app whose
+        `ui-actual-<app>.yaml` records that id present — the fence against declaring
+        unbuilt what exists, naming both files;
+    (c) a `product` entry whose `built` is all seven apps — finished."""
+    problems = []
+    surface_marks = {node_id: facts.surfaces for node_id, facts in tests.items()
+                     if facts.surfaces}
+    declared = fc.build_declared(registry, surface_marks, ledger)
+    by_slug = {page.slug: page for page in pages}
+    for app in fc.APPS:
+        passed: dict = {}
+        for slug, entry in sorted((ledger.get(app) or {}).items()):
+            mapped = fc.mapped_tests(by_slug.get(slug))
+            for node_id, by_platform in sorted((entry.get("tests") or {}).items()):
+                if node_id not in mapped:
+                    continue
+                for record in by_platform.values():
+                    if record.get("outcome") in fc.PASSING:
+                        for key in declared.requires(node_id, record):
+                            passed.setdefault(key, node_id)
+        for key, node_id in sorted(passed.items()):
+            entry = registry.get(key)
+            if entry is not None and app not in entry.built:
+                problems.append(
+                    f"tests/e2e-unified/surfaces.toml [{key}]: declared not built on {app}, "
+                    f"but `{node_id}`, which requires it, PASSED there "
+                    f"(ledger/{app}.json) — the declaration is stale; add {app} to `built` "
+                    "and run `just features-prune`")
+    ui_yaml = e2e / "ui.yaml"
+    ui_ids = (yaml_list_ids(ui_yaml.read_text(encoding="utf-8"))
+              if ui_yaml.is_file() else frozenset())
+    present: dict = {}
+    for key, entry in sorted(registry.items()):
+        if entry.kind != "product":
+            continue
+        if entry.built == frozenset(fc.APPS):
+            problems.append(
+                f"tests/e2e-unified/surfaces.toml [{key}]: built on all seven apps — "
+                "finished: delete the entry and its gates (e2e-conventions.md convention 7)")
+            continue
+        if key not in ui_ids:
+            continue
+        for app in fc.APPS:
+            if app in entry.built:
+                continue
+            if app not in present:
+                actual = e2e / f"ui-actual-{app}.yaml"
+                present[app] = (yaml_list_ids(actual.read_text(encoding="utf-8"),
+                                              UI_ACTUAL_PRESENT)
+                                if actual.is_file() else frozenset())
+            if key in present[app]:
+                problems.append(
+                    f"tests/e2e-unified/surfaces.toml [{key}]: declared not built on {app}, "
+                    f"but tests/e2e-unified/ui-actual-{app}.yaml records the ui.yaml id "
+                    f"`{key}` present there — declaring unbuilt what exists is a never-move "
+                    "(feature-catalog.md § Closing a gap); widen `built` or correct the "
+                    "snapshot")
     return problems
 
 

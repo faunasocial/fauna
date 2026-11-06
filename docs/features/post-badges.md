@@ -39,13 +39,13 @@ Stamped 2026-09-19 at 3ac2cf0c74.
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ✅ full | 0.1.5-dev+110d1248 standalone |
-| linux | ✅ full | 0.1.4-dev+ea391d07 standalone |
+| web | ✅ full | 0.1.5-dev+acde58f9 standalone |
+| linux | ✅ full | 0.1.5-dev+cbd813be standalone |
 | windows | ✅ full | 0.1.2-dev+f5c0a21a.dirty standalone |
-| macos | ✅ full | 0.1.5-dev+61b844ca standalone |
-| ios | ✅ full | 0.1.5-dev+61b844ca standalone |
+| macos | ✅ full | 0.1.5-dev+3f9f2b95 standalone |
+| ios | ✅ full | 0.1.6-dev+aa0b8e99 standalone |
 | android |  no run recorded | |
-| tui | ✅ full | 0.1.2-dev+831d48ef live |
+| tui | ✅ full | 0.1.6-dev+aa0b8e99 standalone |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
@@ -57,6 +57,6 @@ Stamped 2026-09-19 at 3ac2cf0c74.
 | 3 | app | `tests/e2e-unified/tests/test_feed_delegated_origin.py::test_quoted_embed_badge_shows_only_on_a_delegated_quote` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 4 | app | `tests/e2e-unified/tests/test_feed_content_label_badge.py::test_content_label_badge_shows_only_on_labeled_post` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 5 | nest | `tests/e2e-unified/tests/api/test_feed_content_labels.py::test_attached_label_is_served_per_row_on_feed_reads` | nest (linux): passed |
-| 6 | nest | `tests/e2e-unified/tests/api/test_content_moderation.py::test_spam_filtering_pipeline` | nest (linux): passed |
+| 6 | nest | `tests/e2e-unified/tests/api/test_content_moderation.py::test_spam_filtering_pipeline` | nest (linux): passed, nest (macos): passed |
 | 7 | app | `tests/e2e-unified/tests/test_conversations_content_label_badge.py::test_a_labeled_message_shows_its_content_label` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 <!-- features-render:end -->

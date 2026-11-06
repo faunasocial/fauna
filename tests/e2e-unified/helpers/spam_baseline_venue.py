@@ -31,7 +31,15 @@ def open_mail_gate_and_wait_for_the_bridges(venue, budget_s: float = 120.0) -> N
     and rebind only the ones that exited.
     """
     venue.admin_opens_mail_gate()
-    roles = {"mta": (venue.mta, venue.mx_port), "mda": (venue.mda, venue.imaps_port)}
+    if getattr(venue, "mta", None) is None:
+        # A container venue (`DockerMailVenueHandle`): the bridges are the
+        # image's own s6 services, so there is no harness-held process to poll
+        # and the supervisor has already relaunched them on the enable flag.
+        # Its `rebind_after_enable` is the convergence wait (`MailVenueHandle`
+        # docstring: a different act, not an absence).
+        venue.rebind_after_enable()
+        return
+    roles ={"mta": (venue.mta, venue.mx_port), "mda": (venue.mda, venue.imaps_port)}
 
     def _states():
         states = {}

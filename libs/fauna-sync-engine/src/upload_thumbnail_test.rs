@@ -1,12 +1,15 @@
-//! SyncEngine thumbnail producer: [`SyncEngine::upload_file`] generates, seals,
+//! SyncEngine thumbnail producer: [`SyncEngine::upload_file`] renders, seals,
 //! and uploads a thumbnail for a synced image, so `fauna.media.list` can surface
 //! it.
 //!
-//! The thumbnail rides as a standalone blob: a >300px image yields a JPEG
-//! thumbnail (`fauna_media::pipeline::seal_thumbnail_only`), sealed under the
-//! owner `BackupKey` (`Audience::Library`), POSTed to `/api/v1/blob`, and its
-//! hash recorded on the change. These tests assert the blob POST happens for a
-//! real image and does NOT for a small image / non-image / non-owner-sealed set.
+//! A thumbnail rests as its file rests (`media.md` § Encryption at rest → *A
+//! thumbnail rests as its file rests*): a >300px image yields a JPEG thumbnail
+//! (`fauna_media::pipeline::render_thumbnail_only`), sealed through the file's
+//! own pipeline under the file's root, posted as chunks behind a manifest —
+//! never a `/api/v1/blob` blob — and that manifest's hash recorded on the
+//! change. These tests assert the second manifest lands and opens under the
+//! file's root for a real image, and does NOT for a small image / non-image /
+//! keyless set.
 //!
 //! Lives under `src/` (gated `#[cfg(test)]` in `lib.rs`), mirroring
 //! `download_file_bytes_test.rs`.
@@ -48,8 +51,8 @@ fn test_sync_client(server_uri: &str) -> SyncClient {
 }
 
 /// A `SyncEngine` rooted at `watch_dir`, folder `__test`. `backup_key = Some`
-/// seals chunks + the thumbnail under the owner key (the owner-encrypted set the
-/// producer targets); `None` is a plaintext set (no thumbnail in v1).
+/// seals chunks + the thumbnail under the owner's root; `None` is a keyless
+/// owner-only engine, which fails closed.
 fn test_engine(
     server_uri: &str,
     watch_dir: std::path::PathBuf,
@@ -94,6 +97,43 @@ fn test_engine(
 // renders a JPEG thumbnail.
 use fauna_media::test_fixtures::build_png;
 
+/// The owner key every keyed engine here seals under.
+const KEY: [u8; 32] = [0x11; 32];
+
+/// How many manifests the byte plane has stored.
+fn manifests(nest: &crate::test_support::BlobStore) -> usize {
+    nest.manifests.lock().unwrap().len()
+}
+
+/// Open the LAST posted manifest — the thumbnail's, posted after its file's —
+/// through the shared walk under the owner root, and check it is a JPEG.
+async fn assert_last_manifest_is_an_owner_sealed_jpeg(
+    engine: &SyncEngine,
+    nest: &crate::test_support::BlobStore,
+) {
+    let thumb = nest.expect_last_manifest_hash();
+    let owner = fauna_core::file_download::FileDownloadKeys::owner(BackupKey::from_bytes(KEY));
+    let opened = fauna_core::file_download::download_file_bytes_by_manifest(
+        &engine.blob_fetcher(),
+        &owner,
+        thumb,
+        None,
+        "photo.png",
+    )
+    .await
+    .expect("the file's own root opens the thumbnail manifest");
+    assert_eq!(&opened[..2], &[0xFF, 0xD8], "a JPEG thumbnail");
+    fauna_core::file_download::download_file_bytes_by_manifest(
+        &engine.blob_fetcher(),
+        &fauna_core::file_download::FileDownloadKeys::default(),
+        thumb,
+        None,
+        "photo.png",
+    )
+    .await
+    .expect_err("it rests sealed, never in the clear");
+}
+
 // ─────────────────────────────────────────────────────────────────────
 // Tests
 // ─────────────────────────────────────────────────────────────────────
@@ -109,7 +149,7 @@ async fn upload_file_posts_thumbnail_for_large_image() {
     let engine = test_engine(
         &server.uri(),
         dir.path().to_path_buf(),
-        Some(BackupKey::from_bytes([0x11; 32])),
+        Some(BackupKey::from_bytes(KEY)),
     );
     engine
         .upload_file("photo.png")
@@ -118,9 +158,15 @@ async fn upload_file_posts_thumbnail_for_large_image() {
 
     assert_eq!(
         nest.blob_posts(),
-        1,
-        "a >300px image must POST exactly one thumbnail blob"
+        0,
+        "a thumbnail is never a blob-store blob"
     );
+    assert_eq!(
+        manifests(&nest),
+        2,
+        "the file's manifest, then the thumbnail's"
+    );
+    assert_last_manifest_is_an_owner_sealed_jpeg(&engine, &nest).await;
 }
 
 #[tokio::test]
@@ -134,14 +180,15 @@ async fn upload_file_no_thumbnail_for_small_image() {
     let engine = test_engine(
         &server.uri(),
         dir.path().to_path_buf(),
-        Some(BackupKey::from_bytes([0x11; 32])),
+        Some(BackupKey::from_bytes(KEY)),
     );
     engine.upload_file("tiny.png").await.expect("upload_file");
 
+    assert_eq!(nest.blob_posts(), 0);
     assert_eq!(
-        nest.blob_posts(),
-        0,
-        "a ≤300px image yields no thumbnail, so no blob POST"
+        manifests(&nest),
+        1,
+        "a ≤300px image yields no thumbnail, so only the file's manifest"
     );
 }
 
@@ -156,11 +203,12 @@ async fn upload_file_no_thumbnail_for_non_image() {
     let engine = test_engine(
         &server.uri(),
         dir.path().to_path_buf(),
-        Some(BackupKey::from_bytes([0x11; 32])),
+        Some(BackupKey::from_bytes(KEY)),
     );
     engine.upload_file("notes.txt").await.expect("upload_file");
 
-    assert_eq!(nest.blob_posts(), 0, "a non-image file yields no thumbnail");
+    assert_eq!(nest.blob_posts(), 0);
+    assert_eq!(manifests(&nest), 1, "a non-image file yields no thumbnail");
 }
 
 #[tokio::test]
@@ -180,8 +228,9 @@ async fn upload_file_keyless_owner_only_fails_closed_and_posts_nothing() {
         .await
         .expect_err("keyless owner-only upload must fail closed, not upload plaintext");
 
+    assert_eq!(nest.blob_posts(), 0);
     assert_eq!(
-        nest.blob_posts(),
+        manifests(&nest),
         0,
         "no owner BackupKey ⇒ nothing posted (no thumbnail either)"
     );
@@ -189,7 +238,7 @@ async fn upload_file_keyless_owner_only_fails_closed_and_posts_nothing() {
 
 // ─────────────────────────────────────────────────────────────────────
 // Streaming path (>= STREAMING_THRESHOLD): the thumbnail is generated by
-// reading the file incrementally from disk (`seal_thumbnail_only_from_path`),
+// reading the file incrementally from disk (`render_thumbnail_only_from_path`),
 // so the O(MAX_CHUNK) streaming upload never loads the whole file. We drive
 // `upload_file_streaming` directly with a small real image (its real size), so
 // the test exercises the streaming code path without materializing a 64 MiB
@@ -210,7 +259,7 @@ async fn upload_file_streaming_posts_thumbnail_for_large_image() {
     let engine = test_engine(
         &server.uri(),
         dir.path().to_path_buf(),
-        Some(BackupKey::from_bytes([0x11; 32])),
+        Some(BackupKey::from_bytes(KEY)),
     );
     engine
         .upload_file_streaming_inner("photo.png", &full_path, file_size, false)
@@ -219,9 +268,15 @@ async fn upload_file_streaming_posts_thumbnail_for_large_image() {
 
     assert_eq!(
         nest.blob_posts(),
-        1,
-        "a >300px image on the streaming path must POST exactly one thumbnail blob"
+        0,
+        "a thumbnail is never a blob-store blob"
     );
+    assert_eq!(
+        manifests(&nest),
+        2,
+        "a >300px image on the streaming path posts its thumbnail's manifest too"
+    );
+    assert_last_manifest_is_an_owner_sealed_jpeg(&engine, &nest).await;
 }
 
 #[tokio::test]
@@ -237,16 +292,17 @@ async fn upload_file_streaming_no_thumbnail_for_small_image() {
     let engine = test_engine(
         &server.uri(),
         dir.path().to_path_buf(),
-        Some(BackupKey::from_bytes([0x11; 32])),
+        Some(BackupKey::from_bytes(KEY)),
     );
     engine
         .upload_file_streaming_inner("tiny.png", &full_path, file_size, false)
         .await
         .expect("streaming upload");
 
+    assert_eq!(nest.blob_posts(), 0);
     assert_eq!(
-        nest.blob_posts(),
-        0,
+        manifests(&nest),
+        1,
         "a ≤300px image yields no thumbnail on the streaming path either"
     );
 }
@@ -269,8 +325,9 @@ async fn upload_file_streaming_keyless_owner_only_fails_closed() {
         .await
         .expect_err("keyless owner-only streaming upload must fail closed");
 
+    assert_eq!(nest.blob_posts(), 0);
     assert_eq!(
-        nest.blob_posts(),
+        manifests(&nest),
         0,
         "no owner BackupKey ⇒ nothing posted on the streaming path"
     );

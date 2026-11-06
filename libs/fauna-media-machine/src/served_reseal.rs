@@ -366,9 +366,14 @@ where
             self.fetcher.as_ref(),
             &record_keys,
             head.manifest_hash,
-            head.row.content_key_version,
+            head.row
+                .content_key_version
+                .map(fauna_core::blob_seal::SealStamp::Version),
             &head.path,
-            Some(seal_root),
+            Some((
+                seal_root.0,
+                seal_root.1.map(fauna_core::blob_seal::SealStamp::Version),
+            )),
             &sink,
         )
         .await?;
@@ -387,7 +392,7 @@ where
             self.fetcher.as_ref(),
             &verify_keys,
             manifest_hash,
-            generation,
+            generation.map(fauna_core::blob_seal::SealStamp::Version),
             &head.path,
         )
         .await
@@ -412,6 +417,7 @@ where
                 // whose frontier already passed the head skips it.
                 Some(head.row.seq),
                 Some(true),
+                None,
                 None,
             )
             .await
@@ -864,7 +870,7 @@ mod tests {
                 store.as_ref(),
                 &mda,
                 hash,
-                Some(generation),
+                Some(fauna_core::blob_seal::SealStamp::Version(generation)),
                 &req.path,
             ))
             .expect("the mount's walk opens the re-sealed copy under the served key alone");

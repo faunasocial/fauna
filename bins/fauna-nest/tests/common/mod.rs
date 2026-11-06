@@ -59,23 +59,20 @@ use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::http::header::SEC_WEBSOCKET_PROTOCOL;
 
-/// One non-default record of each kind in the delegable preference cluster
-/// (muted words and the hidden-content list, sync prefs, trained topics, task
-/// delegations), as the preference pages store them: the kind, and its
-/// sub-record in canonical dag-cbor, built through the mutations the pages
-/// share (`fauna_client_config::preference_records`).
+/// One non-default record of each kind behind the preference door (sync
+/// prefs, trained topics, task delegations), as the preference pages store
+/// them: the kind, and its sub-record in canonical dag-cbor at
+/// `PREFERENCE_KEY`, built through the mutations the pages share
+/// (`fauna_client_config::preference_records`). Moderation is not in it: its
+/// muted words and hidden ids are one row each, written through
+/// `write_moderation`, never a singleton at `PREFERENCE_KEY`.
 pub fn preference_cluster() -> Vec<(&'static str, Vec<u8>)> {
     use fauna_client_config::preference_records;
     use fauna_core::data::{
-        DelegationConfig, ModerationConfig, ParticipantRef, PersonalizationConfig, SyncPrefsConfig,
+        DelegationConfig, ParticipantRef, PersonalizationConfig, SyncPrefsConfig,
     };
-    use fauna_protocol::merge_policy::{
-        KIND_DELEGATION, KIND_MODERATION, KIND_PERSONALIZATION, KIND_SYNC_PREFS,
-    };
+    use fauna_protocol::merge_policy::{KIND_DELEGATION, KIND_PERSONALIZATION, KIND_SYNC_PREFS};
 
-    let mut moderation = ModerationConfig::default();
-    preference_records::set_muted_keywords(&mut moderation, vec!["witness".into()]);
-    preference_records::hide_reported_content(&mut moderation, "post-1");
     let mut sync_prefs = SyncPrefsConfig::default();
     preference_records::set_default_conflict_policy(&mut sync_prefs, Some("latest_wins_always"));
     let mut personalization = PersonalizationConfig::default();
@@ -89,7 +86,6 @@ pub fn preference_cluster() -> Vec<(&'static str, Vec<u8>)> {
         }),
     );
     vec![
-        (KIND_MODERATION, canonical_encode(&moderation).unwrap()),
         (KIND_SYNC_PREFS, canonical_encode(&sync_prefs).unwrap()),
         (
             KIND_PERSONALIZATION,
@@ -392,21 +388,74 @@ pub fn register_payload(
 /// opens what was sealed to it and so has no reason to name its own.
 pub const FIXTURE_MSEK: [u8; 32] = [9u8; 32];
 
-/// Give `actor` a recipient seal key the way the provision door does: both
-/// halves, derived from `msek`, in one write through the production writer
-/// (`CacheDb::put_actor_recipient_seal_key`). Returns the X25519 public half.
+/// A structurally valid sealed-record envelope of `kind` whose "ciphertext" is
+/// `label` — deterministic, so a fixture can compare stored bytes against the
+/// bytes it sent. It passes every per-kind put-path check (the envelope kind is
+/// plaintext) and opens with no key; a test that opens what it stored seals for
+/// real instead.
+pub fn fixture_record(kind: fauna_mls::wrapped_blob::RecordKind, label: &[u8]) -> Vec<u8> {
+    use fauna_mls::wrapped_blob::{BLOB_FORMAT_VERSION, HpkeWire, KemSuite, MailRecordEnvelope};
+    MailRecordEnvelope {
+        version: BLOB_FORMAT_VERSION,
+        kind: kind.as_str().into(),
+        hpke: HpkeWire {
+            kem_suite: KemSuite::STANDARD,
+            enc: serde_bytes::ByteBuf::from(vec![0u8; 32]),
+            ciphertext: serde_bytes::ByteBuf::from(label.to_vec()),
+        },
+    }
+    .to_canonical_bytes()
+    .expect("canonical fixture record")
+}
+
+/// The three standing seal keys an app derives from `msek` and registers —
+/// mail, calendar and card (`owner-key-material.md` § Path B-sibling-5 / -6).
+pub fn recipient_seal_keys_for(
+    msek: &[u8; 32],
+) -> fauna_nest::db::bridge_routing::RecipientSealKeys {
+    use fauna_mls::wrapped_blob::{
+        DavKind, derive_dav_root, derive_recipient_dav_hpke_keypair,
+        derive_recipient_dav_xwing_keypair,
+    };
+    use fauna_nest::db::bridge_routing::{RecipientSealKey, RecipientSealKeys};
+    let dav = |kind: DavKind| {
+        let root = derive_dav_root(kind, msek);
+        RecipientSealKey {
+            mls_pubkey: derive_recipient_dav_hpke_keypair(kind, &root).1,
+            mlkem_ek: derive_recipient_dav_xwing_keypair(kind, &root)
+                .public
+                .mlkem_encaps_key()
+                .to_vec(),
+        }
+    };
+    RecipientSealKeys {
+        mail: RecipientSealKey {
+            mls_pubkey: derive_recipient_hpke_keypair(msek).1,
+            mlkem_ek: fauna_mls::wrapped_blob::derive_recipient_xwing_keypair(msek)
+                .public
+                .mlkem_encaps_key()
+                .to_vec(),
+        },
+        calendar: dav(DavKind::Calendar),
+        card: dav(DavKind::Card),
+    }
+}
+
+/// Give `actor` its recipient seal keys the way the provision door does: all
+/// three pairs, derived from `msek`, in one write through the production
+/// writer (`CacheDb::put_actor_recipient_seal_keys`). Returns the mail X25519
+/// public half.
 ///
 /// The one fixture writer for `actor_mls_pubkeys` in the integration tests.
-/// The key is a real MSEK-derived pair, so a seal to it selects the X-Wing
-/// suite as it does for an app user, and [`open_recipient_record`] opens the
-/// result.
+/// The keys are real MSEK-derived pairs, so a seal to one selects the X-Wing
+/// suite as it does for an app user, and [`open_recipient_record`] opens a
+/// mail record.
 pub async fn seed_recipient_seal_key(db: &CacheDb, actor: &[u8; 32], msek: &[u8; 32]) -> [u8; 32] {
-    let (_secret, pubkey) = derive_recipient_hpke_keypair(msek);
-    let xwing = fauna_mls::wrapped_blob::derive_recipient_xwing_keypair(msek);
-    db.put_actor_recipient_seal_key(actor, &pubkey, xwing.public.mlkem_encaps_key())
+    let keys = recipient_seal_keys_for(msek);
+    db.put_actor_recipient_seal_keys(actor, &keys)
         .await
-        .expect("seed recipient seal key");
-    pubkey
+        .expect("seed recipient seal keys");
+    keys.mail.mls_pubkey
 }
 
 /// The secret halves of the recipient key [`seed_recipient_seal_key`] wrote for
@@ -1283,6 +1332,17 @@ pub fn sealed(plaintext: &[u8]) -> Vec<u8> {
         .expect("canonical test fixture")
 }
 
+/// [`sealed`] as a record of `kind` — what a DAV put door takes since the
+/// calendar and card key split (a calendar store takes `calendar-record`s
+/// only, an address book `card-record`s).
+pub fn sealed_as(kind: fauna_mls::wrapped_blob::RecordKind, plaintext: &[u8]) -> Vec<u8> {
+    let (_secret, pubkey) = derive_recipient_hpke_keypair(&[0x5Eu8; 32]);
+    fauna_mls::wrapped_blob::seal_record_to_recipient(kind, plaintext, &pubkey)
+        .expect("seal test fixture")
+        .to_canonical_bytes()
+        .expect("canonical test fixture")
+}
+
 /// Fixed MSEK for DM-gate fixtures — `sealed_dm` seals to its derived
 /// pubkey (the same envelope shape the production D2-resolved seal writes);
 /// a caller opening the sealed bytes back derives its secret from the same
@@ -1579,6 +1639,166 @@ impl ServedCertSpki for FixedSpki {
     }
     fn served_cert_spki_sha256(&self, _sni: &str) -> Option<[u8; 32]> {
         Some(self.0)
+    }
+}
+
+/// A `ServedCertSpki` whose fingerprint the test **moves** — the nest's own
+/// cert reload, which moves the served leaf and the SPKI its channel binding
+/// signs over together. `None` until the first leaf is served.
+pub struct SwitchableSpki(pub std::sync::Mutex<Option<[u8; 32]>>);
+impl ServedCertSpki for SwitchableSpki {
+    fn current_spki_sha256(&self) -> Option<[u8; 32]> {
+        *self.0.lock().unwrap()
+    }
+    fn served_cert_facts(&self, _sni: &str) -> Option<fauna_nest::acme::ServedCertFacts> {
+        None
+    }
+    fn served_cert_spki_sha256(&self, _sni: &str) -> Option<[u8; 32]> {
+        *self.0.lock().unwrap()
+    }
+}
+
+/// **One nest state served over several certs** — the shape of a served-cert
+/// rotation under a pinned client (`tls_stale_pin_heal.rs`,
+/// `tls_stale_pin_consumer_heal.rs`). One `AppState` (one db, one deployment
+/// identity, one bearer custody) behind as many loopback TLS listeners as
+/// [`Self::serve_leaf`] is called, each with a fresh self-signed cert; the
+/// SPKI the nest's binding signs over follows [`Self::rotate_to`], as the
+/// real cert watcher's hot reload moves both at once. The genuine arm of
+/// `tls_channel_binding_roundtrip.rs`'s harness, re-shaped for a rotation.
+pub struct RotatingNest {
+    state: Arc<AppState>,
+    spki: Arc<SwitchableSpki>,
+}
+
+pub async fn rotating_nest(db: Arc<CacheDb>, signing_key: SigningKey) -> RotatingNest {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let spki = Arc::new(SwitchableSpki(std::sync::Mutex::new(None)));
+    let state = Arc::new(AppState {
+        rpc_router: Arc::new({
+            let mut b = RpcRouter::builder();
+            fauna_nest::auth_handlers::register_auth_handlers(&mut b);
+            b.build()
+        }),
+        nest_signing_key: Some(signing_key),
+        served_cert_spki: Some(spki.clone()),
+        ..AppState::for_test(db)
+    });
+    RotatingNest { state, spki }
+}
+
+impl RotatingNest {
+    /// Serve this nest over a **fresh self-signed leaf** on a new loopback
+    /// listener. The first leaf served is the one the binding signs over
+    /// until [`Self::rotate_to`] moves it. Returns the listen address and the
+    /// leaf's SPKI.
+    pub async fn serve_leaf(&self) -> (std::net::SocketAddr, [u8; 32]) {
+        use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+
+        let cert = rcgen::generate_simple_self_signed(vec!["localhost".to_string()])
+            .expect("self-signed cert");
+        let cert_der: CertificateDer<'static> = cert.cert.der().clone();
+        let spki =
+            fauna_nest::acme::spki_sha256_of_cert_der(cert_der.as_ref()).expect("served leaf SPKI");
+        let key_der: PrivateKeyDer<'static> =
+            PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(cert.key_pair.serialize_der()));
+        self.spki.0.lock().unwrap().get_or_insert(spki);
+
+        let app = fauna_nest::build_router(self.state.clone());
+        let server_cfg = rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(vec![cert_der], key_der)
+            .expect("server tls config");
+        let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(server_cfg));
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(fauna_nest::serve_tls(
+            listener,
+            acceptor,
+            app.into_make_service(),
+            fauna_conn_limit::PerIpConnLimit::new(fauna_conn_limit::DEFAULT_MAX_CONNS_PER_IP),
+        ));
+        (addr, spki)
+    }
+
+    /// The rotation's nest-side half: the binding now signs over `spki`, the
+    /// leaf the listener the test switches to serves.
+    pub fn rotate_to(&self, spki: [u8; 32]) {
+        *self.spki.0.lock().unwrap() = Some(spki);
+    }
+}
+
+/// A plain TCP forwarder whose upstream can be **switched** mid-test, counting
+/// every connection a client opens through it — the on-path vantage point,
+/// minus the attack. TLS runs end to end through it untouched, so the client
+/// sees whichever nest is upstream: its cert and its binding. Switching
+/// repoints new connections and **drops the live ones**, which is what a
+/// nest's cert reload does to a client's open socket. A count is a fact about
+/// what the client *sent*: on the bearer dial's graduate-and-retry, the third
+/// connection is the pinned retry that carries the bearer.
+pub struct SwitchableForwarder {
+    /// Where clients dial.
+    pub addr: std::net::SocketAddr,
+    upstream: Arc<std::sync::Mutex<std::net::SocketAddr>>,
+    accepted: Arc<std::sync::atomic::AtomicUsize>,
+    live: Arc<std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>>,
+}
+
+impl SwitchableForwarder {
+    pub async fn start(upstream: std::net::SocketAddr) -> Self {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let upstream = Arc::new(std::sync::Mutex::new(upstream));
+        let accepted = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let live: Arc<std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (up, counter, sessions) = (upstream.clone(), accepted.clone(), live.clone());
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut inbound, _)) = listener.accept().await else {
+                    return;
+                };
+                counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let target = *up.lock().unwrap();
+                let session = tokio::spawn(async move {
+                    let Ok(mut outbound) = tokio::net::TcpStream::connect(target).await else {
+                        return;
+                    };
+                    let _ = tokio::io::copy_bidirectional(&mut inbound, &mut outbound).await;
+                });
+                sessions.lock().unwrap().push(session);
+            }
+        });
+        Self {
+            addr,
+            upstream,
+            accepted,
+            live,
+        }
+    }
+
+    /// The nest URL a client dials to reach the forwarder.
+    pub fn nest_url(&self) -> String {
+        format!("https://{}", self.addr)
+    }
+
+    /// Connections accepted since the last [`Self::reset_count`].
+    pub fn accepted(&self) -> usize {
+        self.accepted.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    pub fn reset_count(&self) {
+        self.accepted.store(0, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Repoint new connections at `to` and drop every live session: the
+    /// served cert moved, and the sockets that saw the old one are gone.
+    pub fn switch(&self, to: std::net::SocketAddr) {
+        *self.upstream.lock().unwrap() = to;
+        for session in self.live.lock().unwrap().drain(..) {
+            session.abort();
+        }
     }
 }
 

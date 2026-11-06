@@ -3,6 +3,10 @@
 //! splits long threads across numbered files, so every file of a thread is
 //! read before anything is yielded — one file at a time, never all of their
 //! JSON at once (`archive-import.md` § Parser contract rule 9).
+//!
+//! Instagram's direct messages are exported in this same Messenger shape, so
+//! the Instagram parser streams its threads through this module too; every
+//! function takes the [`Platform`] the IDs and actor refs are minted under.
 
 use std::collections::VecDeque;
 
@@ -10,8 +14,8 @@ use serde_json::Value;
 
 use crate::error::EntityError;
 use crate::facebook::json::{
-    actor, arr, check_identity, entity_error, index_dated, media_ref, millis_field, parse_member,
-    str_field,
+    actor_on, arr, check_identity, entity_error, index_dated, media_ref, millis_field,
+    parse_member, str_field,
 };
 use crate::facebook::layout::ThreadFiles;
 use crate::facebook::posts::hash_media;
@@ -33,8 +37,8 @@ pub fn index_messages(value: &Value, summary: &mut ArchiveSummary) {
     );
 }
 
-fn resolve(owner: &ExternalActorRef, name: &str) -> ExternalActorRef {
-    let a = actor(name);
+fn resolve(platform: &Platform, owner: &ExternalActorRef, name: &str) -> ExternalActorRef {
+    let a = actor_on(platform.clone(), name);
     if a.name_key == owner.name_key {
         owner.clone()
     } else {
@@ -86,6 +90,7 @@ struct ThreadHead {
 /// `Err` when the thread's ID outgrows [`MAX_IDENTITY_BYTES`](crate::facebook::json::MAX_IDENTITY_BYTES): every one of
 /// its messages carries a copy, so the thread is refused whole.
 fn thread_head(
+    platform: &Platform,
     first: Option<&Value>,
     dir: &str,
     owner: &ExternalActorRef,
@@ -97,19 +102,21 @@ fn thread_head(
             arr(v, "participants")
                 .iter()
                 .filter_map(|p| str_field(p, "name"))
-                .map(|n| resolve(owner, &n))
+                .map(|n| resolve(platform, owner, &n))
                 .collect()
         })
         .unwrap_or_default();
     Ok(ThreadHead {
-        external_id: ExternalId::native(Platform::Facebook, EntityKind::Thread, &id),
+        external_id: ExternalId::native(platform.clone(), EntityKind::Thread, &id),
         path,
         title: first.and_then(|v| str_field(v, "title")),
         participants,
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn parse_message(
+    platform: &Platform,
     reader: &mut ArchiveReader<'_>,
     owner: &ExternalActorRef,
     thread: &ExternalId,
@@ -148,13 +155,13 @@ fn parse_message(
             let emoji = str_field(r, "reaction")?;
             let who = str_field(r, "actor")?;
             Some(MessageReaction {
-                actor: resolve(owner, &who),
+                actor: resolve(platform, owner, &who),
                 emoji,
             })
         })
         .collect();
     let external_id = ExternalId::derive(
-        Platform::Facebook,
+        platform.clone(),
         EntityKind::Message,
         created_at,
         text.as_deref().unwrap_or(""),
@@ -163,7 +170,7 @@ fn parse_message(
     Ok(ArchiveMessage {
         external_id,
         thread: thread.clone(),
-        sender: resolve(owner, &sender),
+        sender: resolve(platform, owner, &sender),
         created_at,
         text,
         media,
@@ -183,6 +190,7 @@ fn parse_message(
 /// A thread whose ID outgrows [`MAX_IDENTITY_BYTES`](crate::facebook::json::MAX_IDENTITY_BYTES) is refused before any
 /// of its messages is built, since each would carry a copy.
 fn parse_thread(
+    platform: &Platform,
     reader: &mut ArchiveReader<'_>,
     owner: &ExternalActorRef,
     files: &ThreadFiles,
@@ -207,7 +215,7 @@ fn parse_thread(
         };
         let thread = match head {
             Some(ref thread) => thread,
-            None => match thread_head(Some(&value), &files.dir, owner) {
+            None => match thread_head(platform, Some(&value), &files.dir, owner) {
                 Ok(fresh) => head.insert(fresh),
                 Err(reason) => {
                     return refused(errors, entity_error(Category::Threads, member, 0, reason));
@@ -216,6 +224,7 @@ fn parse_thread(
         };
         for (i, m) in arr(&value, "messages").iter().enumerate() {
             match parse_message(
+                platform,
                 reader,
                 owner,
                 &thread.external_id,
@@ -239,7 +248,7 @@ fn parse_thread(
     // No file was readable: the directory names the thread.
     let head = match head {
         Some(head) => head,
-        None => match thread_head(None, &files.dir, owner) {
+        None => match thread_head(platform, None, &files.dir, owner) {
             Ok(head) => head,
             Err(reason) => {
                 return refused(
@@ -268,6 +277,7 @@ fn parse_thread(
 /// Yields threads (one per directory) or messages (oldest-first per
 /// directory), directory by directory.
 pub struct ThreadStream<'r, 's> {
+    platform: Platform,
     reader: &'r mut ArchiveReader<'s>,
     threads: VecDeque<ThreadFiles>,
     category: Category,
@@ -277,12 +287,14 @@ pub struct ThreadStream<'r, 's> {
 
 impl<'r, 's> ThreadStream<'r, 's> {
     pub fn new(
+        platform: Platform,
         reader: &'r mut ArchiveReader<'s>,
         threads: Vec<ThreadFiles>,
         category: Category,
         owner: ExternalActorRef,
     ) -> Self {
         ThreadStream {
+            platform,
             reader,
             threads: threads.into(),
             category,
@@ -302,7 +314,13 @@ impl Iterator for ThreadStream<'_, '_> {
             }
             let files = self.threads.pop_front()?;
             let want_messages = self.category == Category::Messages;
-            let parsed = parse_thread(self.reader, &self.owner, &files, want_messages);
+            let parsed = parse_thread(
+                &self.platform,
+                self.reader,
+                &self.owner,
+                &files,
+                want_messages,
+            );
             // Member-level failures (category Threads) belong to both streams;
             // per-message failures (category Messages) only to the Messages stream.
             let (thread_errors, message_errors): (Vec<EntityError>, Vec<EntityError>) = parsed

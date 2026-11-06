@@ -136,6 +136,13 @@ pub enum DataMessage {
     /// private overlay): the roster rows and knock senders name people through
     /// it, so both lists repaint from the data already held.
     ContactOverlaysChanged,
+    /// Phase two's per-contact link views re-read (`archive-import.md`
+    /// § Linking and merging, ruling 8): the Contacts rows repaint their
+    /// `contact-archive-*` affordances from them (`archive_glue`'s tick and
+    /// the row gestures send it).
+    ArchiveLinkViews {
+        views: Vec<fauna_archive_import_machine::link::ArchiveLinkView>,
+    },
     CalendarsLoaded {
         calendars: Vec<crate::rows::CalendarRow>,
     },
@@ -744,7 +751,7 @@ pub enum DataMessage {
     /// One of the four folder-row reads above failed for set `name`. Painted on
     /// `error-message` like any failed read, and remembered as that read's own
     /// text so the read's next good answer retires it
-    /// (`views::devices_folders::folders::RowReadErrors`). `read` is the wire
+    /// (`fauna_devices_machine::RowReadErrors`). `read` is the wire
     /// kind, which is also the banner's prefix.
     FolderRowReadFailed {
         name: String,
@@ -942,6 +949,9 @@ pub struct AppState {
     /// conversations view is handed this same `Rc` at build), written only by
     /// the `MemberReviewsLoaded` arm (`settings::member_review::Roster`).
     pub member_reviews: Rc<crate::settings::member_review::Roster>,
+    /// Phase two's link views from the most recent ArchiveLinkViews — one
+    /// per (contact, platform) pair; the Contacts rows paint from them.
+    pub archive_views: Vec<fauna_archive_import_machine::link::ArchiveLinkView>,
     /// Incoming knocks from the most recent KnocksLoaded.
     pub knocks: Vec<crate::rows::KnockRow>,
     /// Events from the most recent EventsLoaded.
@@ -965,7 +975,7 @@ pub struct AppState {
     pub folder_pending_shares: Vec<crate::client::PendingShareView>,
     /// The `error-message` texts the folder-row reads put up, so each read's
     /// next good answer retires its own and never a gesture's.
-    pub folder_row_read_errors: views::devices_folders::folders::RowReadErrors,
+    pub folder_row_read_errors: fauna_devices_machine::RowReadErrors,
     /// The co-present ceremony's group-share surface from the most recent
     /// `GroupSharesLoaded` — see [`Self::folder_pending_shares`] for why this
     /// is cached rather than painted inline.
@@ -1419,10 +1429,11 @@ pub fn build_main_window(
             }
         })
     };
-    // What the page's becoming visible re-reads: the Tiers tab's sections and
-    // the Posts tab's author window.
+    // What the page's becoming visible re-reads: the header, the Tiers tab's
+    // sections and the Posts tab's author window.
     let on_profile_visible = |handles: views::profile::ProfileHandles| -> Rc<dyn Fn()> {
         Rc::new(move || {
+            (handles.refresh_header)();
             (handles.refresh_tiers)();
             (handles.open_posts)();
         })
@@ -1618,7 +1629,7 @@ pub fn build_main_window(
                     // The Feed page self-refreshes via its `FeedManager` observer
                     // loop + the split's `connect_map` (re-list feeds + reload on
                     // becoming visible) — no nav-handler fetch needed.
-                    "feed" => {}
+                    "feed" => crate::conversations::conv_backend::refresh_archive_comments(),
                     // Refresh the moderation queue (a flag may have landed since
                     // login / last visit — the actions are nest-authoritative).
                     "moderation" => client_for_nav.fetch_moderation_actions(),
@@ -1632,6 +1643,11 @@ pub fn build_main_window(
                     // Roster, knocks and the review badge — the same door the
                     // test agent's navigate takes (`main.rs`).
                     "contacts" => client_for_nav.refresh_contacts_page(),
+                    // The `Archive` rail's imported threads, re-read per visit
+                    // so an import finished since login lists there.
+                    "conversations" => {
+                        crate::conversations::conv_backend::refresh_archive_threads()
+                    }
                     // Re-list calendars (which cascades into per-calendar event
                     // fetches) so calendars/events created *outside* the app —
                     // e.g. via the macOS Calendar app talking CalDAV to the MDA
@@ -1933,6 +1949,7 @@ pub fn build_main_window(
         let lock_for_nav = screen_lock_overlay.clone();
         let settings_sub_stack = settings_sub_stack.clone();
         let admin_sub_stack = admin_sub_stack.clone();
+        let sidebar_list_for_nav = sidebar_list.clone();
         stack.connect_visible_child_name_notify(move |s| {
             let rail = match s.visible_child_name().as_deref() {
                 Some("admin") => "admin",
@@ -1940,6 +1957,12 @@ pub fn build_main_window(
                 _ => "main",
             };
             sidebar_stack.set_visible_child_name(rail);
+            // Every door into a page moves the main sidebar's selection with it,
+            // so the row of a page left by another door stays pressable
+            // (`views::sidebar::sync_selection_to_page`).
+            if let Some(page) = s.visible_child_name() {
+                views::sidebar::sync_selection_to_page(&sidebar_list_for_nav, &page);
+            }
             // Entering a shell lands on its canonical entry — Settings → Status,
             // Admin → Dashboard (`docs/goal/ui/README.md` § Navigation model,
             // ratified 2026-08-13): a shell's sub-page is shell state, not session
@@ -3063,6 +3086,7 @@ pub fn handle_ui_message(
                     &widgets.contacts_filter_index,
                     contacts,
                     &state.borrow().member_reviews.reviews(),
+                    &state.borrow().archive_views,
                     fauna_client,
                 );
             }
@@ -3076,23 +3100,28 @@ pub fn handle_ui_message(
                 // `AppState` borrow is held across the repaint.
                 let roster = Rc::clone(&state.borrow().member_reviews);
                 roster.set(reviews.clone());
-                let contacts = state.borrow().contacts.clone();
+                let (contacts, archive_views) = {
+                    let st = state.borrow();
+                    (st.contacts.clone(), st.archive_views.clone())
+                };
                 views::contacts::list::update_contacts_list(
                     &widgets.contacts_list_box,
                     &widgets.contacts_filter_index,
                     &contacts,
                     reviews,
+                    &archive_views,
                     fauna_client,
                 );
             }
 
             DataMessage::ContactOverlaysChanged => {
-                let (contacts, knocks, roster) = {
+                let (contacts, knocks, roster, archive_views) = {
                     let st = state.borrow();
                     (
                         st.contacts.clone(),
                         st.knocks.clone(),
                         Rc::clone(&st.member_reviews),
+                        st.archive_views.clone(),
                     )
                 };
                 views::contacts::list::update_knocks_list(
@@ -3105,8 +3134,32 @@ pub fn handle_ui_message(
                     &widgets.contacts_filter_index,
                     &contacts,
                     &roster.reviews(),
+                    &archive_views,
                     fauna_client,
                 );
+            }
+
+            DataMessage::ArchiveLinkViews {
+                views: archive_views,
+            } => {
+                // Unchanged views (the tick re-reads after every drive pass)
+                // repaint nothing: a rebuild would drop a row's focus.
+                let moved = state.borrow().archive_views != *archive_views;
+                if moved {
+                    let (contacts, roster) = {
+                        let mut st = state.borrow_mut();
+                        st.archive_views = archive_views.clone();
+                        (st.contacts.clone(), Rc::clone(&st.member_reviews))
+                    };
+                    views::contacts::list::update_contacts_list(
+                        &widgets.contacts_list_box,
+                        &widgets.contacts_filter_index,
+                        &contacts,
+                        &roster.reviews(),
+                        archive_views,
+                        fauna_client,
+                    );
+                }
             }
 
             DataMessage::RefusedChangesLoaded { rows } => {
@@ -4247,11 +4300,15 @@ pub fn handle_ui_message(
                     fauna_client.fetch_admin_pending_actions();
                     fauna_client.fetch_local_domains();
                     fauna_client.fetch_pending_bridges();
-                    fauna_client.fetch_custody_hosting();
+                    // No `fetch_custody_hosting` here: the page reads the
+                    // registry on entry (`views::admin`), for the same reason
+                    // as the Logs ring below.
                     fauna_client.fetch_dns_records();
                     fauna_client.fetch_admin_services();
                     fauna_client.fetch_forwarders();
-                    fauna_client.fetch_admin_logs();
+                    // No `fetch_admin_logs` here: the Logs page fetches the ring
+                    // on entry (`views::admin`), and a login-time fetch's reply,
+                    // landing after an entry fetch's, would paint the older ring.
                     fauna_client.fetch_admin_audit(None);
                 }
             }
@@ -4998,13 +5055,21 @@ fn show_toast(widgets: &WidgetHandles, message: &str) {
     widgets.toast_overlay.add_toast(toast);
 }
 
+/// The banner funnel's log half: a displayed error lands in the ring at
+/// `error`. [`set_error_message`] calls it, and so does the test agent's
+/// `messages` patch, which paints the current page's label directly — so the
+/// displayed-banner→ring witness checks this line, not one of its own.
+pub fn log_displayed_error(message: &str) {
+    tracing::error!("{message}");
+}
+
 /// Set the persistent error banner to the given message and make it visible.
 /// Call `clear_error_message` to hide it again.
 ///
 /// The banner is "displayed to the user" (observability.md § category 1); the
 /// funnel logs it at `error` as it shows, so it also lands in Settings → Logs.
 pub fn set_error_message(widgets: &WidgetHandles, message: &str) {
-    tracing::error!("{message}");
+    log_displayed_error(message);
     // On Settings → Account the banner IS that page's error surface, and a
     // pending stolen-ceremony persist-failure message — the only copy of the
     // successor's key — wins over every other writer there until the user
@@ -5025,7 +5090,7 @@ pub fn clear_error_message(widgets: &WidgetHandles) {
 
 /// A folder-row `read` answered for `set`: clear the banner when it still shows
 /// the text that read put up, and leave anything else on it standing
-/// ([`views::devices_folders::folders::RowReadErrors`]).
+/// ([`fauna_devices_machine::RowReadErrors`]).
 fn retire_row_read_error(
     widgets: &WidgetHandles,
     state: &Rc<RefCell<AppState>>,
@@ -5242,7 +5307,7 @@ fn apply_stale(stale: &StaleSurfaces, widgets: &Rc<WidgetHandles>, fauna_client:
     // each open row's device / member / destination reads and each shared
     // row's actor read (`folders::update_folder_list`'s restored expansion).
     // A good answer then retires the "connection to the nest was lost" text
-    // those reads put up while the nest was down (`folders::RowReadErrors`).
+    // those reads put up while the nest was down (`fauna_devices_machine::RowReadErrors`).
     if stale.devices {
         let machine = std::sync::Arc::clone(&widgets.devices_machine);
         fauna_client
@@ -5300,6 +5365,15 @@ fn apply_stale(stale: &StaleSurfaces, widgets: &Rc<WidgetHandles>, fauna_client:
         // enforcement state on a successful reply. Until 2026-09-13 this arm did
         // not exist and linux re-read only at login.
         fauna_client.check_family_status();
+    }
+    if stale.admin_gate {
+        // The nest-admin gate — the same `fauna.account.am_i_admin` read the
+        // post-auth arm fires. A login read that found no nest (a first mint
+        // before the nest's name resolved) failed closed, and without this
+        // re-read the admin had no Admin row for the session. Safe to re-fire:
+        // `check_admin_status` sends nothing on a failed read or on a reply
+        // that only confirms the admin it already knew.
+        fauna_client.check_admin_status();
     }
     if stale.nest_info {
         // The nest's rules changed, or a reconnect may have missed the push

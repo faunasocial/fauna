@@ -29,15 +29,15 @@ from helpers.admin_wire import (
     admin_user,
     catch_all_actor_for,
     dmarc_policy_for,
+    dns_matrix_domain_count,
     dns_matrix_for,
     dns_verdicts_for,
     picker_option,
     role_overrides_for,
     seed_local_domain,
 )
-from helpers.app_surface import app_name, skip_unbuilt
+from helpers.app_surface import app_name, require_surface
 from helpers.budgets import PROVIDER_VERIFY_S, RPC_ROUNDTRIP_S, UI_SETTLE_S
-from helpers.dns_recheck import require_dns_background_recheck
 from helpers.waiting import wait_until
 from i18n.strings import S
 
@@ -243,6 +243,103 @@ def test_admin_dns_add_remove_restore_domain(admin_app, nest_instance):
             f"restored domain {domain!r} not back in active admin-dns-domain-name rows "
             f"{admin_app.admin.dns_domain_names()!r} (error: "
             f"{admin_app.driver.get_text('error-message') if admin_app.has_error() else 'none'})"
+        ),
+    )
+
+
+def _foreground_loads_reporting(log: str, domains: int) -> int:
+    """How many matrix loads in ``log`` were not a background tick's and report
+    ``domains`` domains. A tick names itself before its own load
+    (``BACKGROUND_LINE``), so each tick line claims the next load line and every
+    unclaimed load is the page's own."""
+    pending_ticks, count = 0, 0
+    for ln in log.splitlines():
+        if BACKGROUND_LINE in ln:
+            pending_ticks += 1
+        elif MATRIX_LOAD_LINE in ln:
+            if pending_ticks:
+                pending_ticks -= 1
+            elif f"{MATRIX_LOAD_LINE} {domains} domain(s)" in ln:
+                count += 1
+    return count
+
+
+@pytest.mark.feature("admin-dns-and-certificates")
+def test_admin_dns_added_domain_shows_its_records_without_a_tick(
+    admin_app, nest_instance
+):
+    """A domain added from admin-dns appears with its per-domain record matrix
+    and each record's status (``mail-multidomain.md`` § Wizard steps, step 8):
+    the add itself re-reads and re-verifies the matrix
+    (``fauna_client_dns::DnsManagementMachine::recheck_matrix``), so neither a
+    refresh nor the page's background tick is what brings the records.
+
+    The e2e launch compresses the tick to seconds, so rows alone would pass on
+    an app that only waits for it; the witness is the app's own log — a matrix
+    load after the add that no tick line claims, reporting the domain count the
+    add produced — then the rows under the new domain read the nest's matrix
+    and live verdicts.
+    """
+    require_surface(admin_app.driver, "app-log-reader")
+    domain = f"step8-{secrets.token_hex(4)}.test"
+    _open_domain(admin_app, nest_instance, f"step8-base-{secrets.token_hex(4)}.test")
+    mark = admin_app.driver.app_log_mark()
+
+    admin_app.admin.add_domain(domain)
+    wait_until(
+        lambda: domain in admin_app.admin.dns_domain_names() or None,
+        RPC_ROUNDTRIP_S,
+        diagnose=lambda: (
+            f"added domain {domain!r} not in admin-dns-domain-name rows "
+            f"{admin_app.admin.dns_domain_names()!r}"
+        ),
+    )
+    domains = dns_matrix_domain_count(nest_instance)
+
+    def since_add() -> str:
+        return admin_app.driver.app_log_since(mark)
+
+    wait_until(
+        lambda: _foreground_loads_reporting(since_add(), domains) or None,
+        RPC_ROUNDTRIP_S,
+        diagnose=lambda: (
+            f"the add of {domain!r} never re-read the record matrix itself — no "
+            f"matrix load of {domains} domain(s) that a background tick does not "
+            f"claim; the log since the add:\n"
+            + "\n".join(
+                ln
+                for ln in since_add().splitlines()
+                if MATRIX_LOAD_LINE in ln or BACKGROUND_LINE in ln
+            )
+        ),
+    )
+
+    want = sorted(
+        (r["name"], r["record_type"], r["expected"])
+        for r in dns_matrix_for(nest_instance, domain)
+    )
+
+    def rows_read_the_nest():
+        rows = admin_app.admin.dns_records(admin_app.admin.dns_domain_names().index(domain))
+        if sorted((r["name"], r["type"], r["value"]) for r in rows) != want:
+            return None
+        verdicts = dns_verdicts_for(nest_instance, domain)
+        if all(
+            _label_matches(r["status"], verdicts.get((r["name"], r["type"]), "checking"))
+            for r in rows
+        ):
+            return rows
+        return None
+
+    wait_until(
+        rows_read_the_nest,
+        PROVIDER_VERIFY_S,
+        diagnose=lambda: (
+            f"admin-dns rows under the added {domain!r} never read the nest:\n"
+            f"  page: "
+            f"{admin_app.admin.dns_records(admin_app.admin.dns_domain_names().index(domain))!r}\n"
+            f"  nest matrix: {want!r}\n"
+            f"  nest verdicts: {dns_verdicts_for(nest_instance, domain)!r}"
         ),
     )
 
@@ -699,9 +796,6 @@ def test_admin_dns_record_value_copies_to_the_clipboard(admin_app, nest_instance
     reads_clipboard = admin_app.driver.is_tui() or admin_app.driver.is_windows()
     for i in (first, last):
         scope = f"admin-dns-domain[{admin_app.admin.dns_domain_names().index(domain)}]"
-        admin_app.admin.copy_dns_record(
-            admin_app.admin.dns_domain_names().index(domain), i
-        )
 
         def copied(i=i, scope=scope):
             if reads_clipboard:
@@ -710,8 +804,17 @@ def test_admin_dns_record_value_copies_to_the_clipboard(admin_app, nest_instance
                 "admin-dns-record-copy-button", "copied", i, scope=scope
             )
 
+        def copy_landed(i=i, copied=copied):
+            # Pressed again on each poll: a re-render from the page's own fetches
+            # rebuilds the row, and the `copied` attribute a driver reads on the
+            # button goes with the old one. The press itself is idempotent.
+            admin_app.admin.copy_dns_record(
+                admin_app.admin.dns_domain_names().index(domain), i
+            )
+            return copied() == rows[i]["value"] or None
+
         wait_until(
-            lambda i=i, copied=copied: copied() == rows[i]["value"] or None,
+            copy_landed,
             UI_SETTLE_S,
             diagnose=lambda i=i, copied=copied: (
                 f"copying {rows[i]['type']} {rows[i]['name']} left {copied()!r}, "
@@ -740,12 +843,7 @@ def test_admin_dns_rechecks_on_demand_and_by_itself_while_open(admin_app, nest_i
     The e2e launch compresses the cadence (``FAUNA_DNS_RECHECK_SECS``); the
     journey polls for the lines, never a fixed delay.
     """
-    if admin_app.driver.log_scope_across_relaunch() == "none":
-        skip_unbuilt(
-            admin_app.driver,
-            surface="app-log reader in the e2e driver",
-            detail="a re-check is witnessed by the app's own log line",
-        )
+    require_surface(admin_app.driver, "app-log-reader")
     domain = f"recheck-{secrets.token_hex(4)}.test"
     _open_domain(admin_app, nest_instance, domain)
 
@@ -769,7 +867,6 @@ def test_admin_dns_rechecks_on_demand_and_by_itself_while_open(admin_app, nest_i
     )
 
     # --- 2. by itself ---
-    require_dns_background_recheck(admin_app.driver)
     ticks, checks = _count(admin_app, BACKGROUND_LINE), _count(admin_app, RECHECK_LINE)
     wait_until(
         lambda: (
@@ -784,6 +881,20 @@ def test_admin_dns_rechecks_on_demand_and_by_itself_while_open(admin_app, nest_i
             f"{_count(admin_app, RECHECK_LINE)})"
         ),
     )
+
+
+def _reopen_dns_page(app) -> None:
+    """Leave the Domains page and open it afresh. The two nav writes are not one
+    step: a push issued while the pop is still settling is dropped on the apple
+    apps (the page never reopens), so wait for the admin shell's row to be on
+    screen again before navigating back in — a state wait, not a delay."""
+    app.driver.set_state({"nav": {"stack": [{"view": "admin"}]}})
+    wait_until(
+        lambda: app.driver.is_visible("admin-nav-row[admin-dns]") or None,
+        UI_SETTLE_S,
+        diagnose=lambda: "the admin shell never came back after leaving the Domains page",
+    )
+    app.admin.navigate_dns()
 
 
 @pytest.mark.feature("admin-dns-and-certificates")
@@ -810,8 +921,7 @@ def test_admin_dns_row_shows_where_catch_all_and_role_addresses_go(
     )
 
     # Open the page afresh: nothing below is the picker remembering a click.
-    admin_app.driver.set_state({"nav": {"stack": [{"view": "admin"}]}})
-    admin_app.admin.navigate_dns()
+    _reopen_dns_page(admin_app)
 
     def row_reads_back():
         names = admin_app.admin.dns_domain_names()
@@ -896,8 +1006,7 @@ def test_admin_softens_one_domains_dmarc_policy_from_its_row(admin_app, nest_ins
     }, f"softening {soft!r} changed another domain's DMARC policy"
 
     # Open the page afresh: what the row shows now is read back from the nest.
-    admin_app.driver.set_state({"nav": {"stack": [{"view": "admin"}]}})
-    admin_app.admin.navigate_dns()
+    _reopen_dns_page(admin_app)
     wait_until(
         lambda: picker_for(soft) == "quarantine" or None,
         RPC_ROUNDTRIP_S,

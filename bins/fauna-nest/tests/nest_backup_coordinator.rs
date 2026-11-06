@@ -3936,16 +3936,19 @@ async fn materialize_refuses_a_set_name_it_cannot_reconstitute() {
 const CALENDAR: [u8; 32] = [0xCA; 32];
 const ADDRESSBOOK: [u8; 32] = [0xAB; 32];
 
-/// Seal `plaintext` as every production calendar/card writer does — the only
-/// currency the DAV put doors accept (S6.12's structural seal).
-fn sealed(plaintext: &[u8]) -> Vec<u8> {
-    use fauna_mls::wrapped_blob::{derive_recipient_hpke_keypair, seal_to_recipient};
+/// Seal `plaintext` as a record of `kind`, as every production calendar/card
+/// writer does — the only currency the DAV put doors accept (S6.12's
+/// structural seal, per kind since the calendar and card key split).
+fn sealed(kind: fauna_mls::wrapped_blob::RecordKind, plaintext: &[u8]) -> Vec<u8> {
+    use fauna_mls::wrapped_blob::{derive_recipient_hpke_keypair, seal_record_to_recipient};
     let (_secret, pubkey) = derive_recipient_hpke_keypair(&[0x5E; 32]);
-    seal_to_recipient(plaintext, &pubkey)
+    seal_record_to_recipient(kind, plaintext, &pubkey)
         .expect("seal a fixture")
         .to_canonical_bytes()
         .expect("canonical sealed bytes")
 }
+
+use fauna_mls::wrapped_blob::RecordKind;
 
 /// Provision `OWNER`'s calendar and put one event per uid, through the
 /// production `fauna.bridges.*` doors a calendar app reaches.
@@ -3961,14 +3964,17 @@ async fn put_events(nest: &Arc<AppState>, uids: &[u8]) {
         &ProvisionCalendarRequest {
             actor_id: OWNER.to_vec(),
             calendar_id: CALENDAR.to_vec(),
-            encrypted_metadata: sealed(b"Personal"),
+            encrypted_metadata: sealed(RecordKind::Calendar, b"Personal"),
             ..Default::default()
         },
     )
     .await
     .expect("provision the calendar");
     for uid in uids {
-        let body = sealed(format!("BEGIN:VEVENT uid-{uid}").as_bytes());
+        let body = sealed(
+            RecordKind::Calendar,
+            format!("BEGIN:VEVENT uid-{uid}").as_bytes(),
+        );
         let _: PutEventCiphertextReply = client_call(
             nest,
             OWNER,
@@ -3979,7 +3985,7 @@ async fn put_events(nest: &Arc<AppState>, uids: &[u8]) {
                 uid_hash: vec![*uid; 32],
                 ciphertext_size: body.len() as u32,
                 encrypted_body: body,
-                encrypted_index_hint: sealed(format!("hint-{uid}").as_bytes()),
+                encrypted_index_hint: sealed(RecordKind::Mail, format!("hint-{uid}").as_bytes()),
                 timestamp: 1_752_000_000 + i64::from(*uid),
                 ..Default::default()
             },
@@ -4020,14 +4026,17 @@ async fn put_cards(nest: &Arc<AppState>, uids: &[u8]) {
         &ProvisionAddressbookRequest {
             actor_id: OWNER.to_vec(),
             addressbook_id: ADDRESSBOOK.to_vec(),
-            encrypted_metadata: sealed(b"Contacts"),
+            encrypted_metadata: sealed(RecordKind::Card, b"Contacts"),
             ..Default::default()
         },
     )
     .await
     .expect("provision the addressbook");
     for uid in uids {
-        let body = sealed(format!("BEGIN:VCARD uid-{uid}").as_bytes());
+        let body = sealed(
+            RecordKind::Card,
+            format!("BEGIN:VCARD uid-{uid}").as_bytes(),
+        );
         let _: PutCardCiphertextReply = client_call(
             nest,
             OWNER,
@@ -4038,7 +4047,7 @@ async fn put_cards(nest: &Arc<AppState>, uids: &[u8]) {
                 uid_hash: vec![*uid; 32],
                 ciphertext_size: body.len() as u32,
                 encrypted_body: body,
-                encrypted_index_hint: sealed(format!("hint-{uid}").as_bytes()),
+                encrypted_index_hint: sealed(RecordKind::Mail, format!("hint-{uid}").as_bytes()),
                 timestamp: 1_752_000_000 + i64::from(*uid),
                 ..Default::default()
             },
@@ -4409,8 +4418,8 @@ impl Dav {
             PutCardCiphertextReply, PutCardCiphertextRequest, PutEventCiphertextReply,
             PutEventCiphertextRequest,
         };
-        let body = sealed(format!("arrival uid-{uid}").as_bytes());
-        let hint = sealed(b"hint-arrival");
+        let body = sealed(self.record_kind(), format!("arrival uid-{uid}").as_bytes());
+        let hint = sealed(RecordKind::Mail, b"hint-arrival");
         let proven = |b: &[u8]| SealedRecordBytes::verify(b.to_vec()).expect("a sealed fixture");
         let timestamp = 1_753_000_000 + i64::from(uid);
         match self {
@@ -4810,6 +4819,300 @@ async fn a_card_arriving_later_than_the_corpus_version_of_its_resource_stands() 
 #[tokio::test]
 async fn a_card_arriving_earlier_than_the_corpus_version_of_its_resource_yields_to_it() {
     a_dav_arrival_on_a_held_resource_goes_to_the_later_write(Dav::Card, false).await;
+}
+
+/// A second collection id, for a collection created while the flip is torn.
+const OTHER_COLLECTION: [u8; 32] = [0xCB; 32];
+
+impl Dav {
+    /// Delete item `uid` from the home collection as its delete door's
+    /// storage step does — the row removed, a tombstone written, the counter
+    /// bumped. (The door's journal append is left out: in a flip torn before
+    /// its halves that append lands in the journal the corpus's supersedes, so
+    /// the re-filing never sees it either way.)
+    async fn delete_row(self, nest: &Arc<AppState>, uid: u8) {
+        let now = 1_753_100_000;
+        match self {
+            Self::Calendar => {
+                nest.db
+                    .delete_caldav_event_by_uid(&OWNER, &CALENDAR, &[uid; 32], None, now)
+                    .await
+                    .expect("delete the event's row");
+            }
+            Self::Card => {
+                nest.db
+                    .delete_carddav_card_by_uid(&OWNER, &ADDRESSBOOK, &[uid; 32], None, now)
+                    .await
+                    .expect("delete the card's row");
+            }
+        }
+    }
+
+    /// Is sync token `since` below the home collection's prune floor — would
+    /// its client be told to resync? (A cutoff of 0 leaves the aged-tombstone
+    /// arm of the check out, so only the floor answers.)
+    async fn token_stale(self, nest: &Arc<AppState>, since: i64) -> bool {
+        match self {
+            Self::Calendar => nest
+                .db
+                .caldav_has_expunged_past_retention(&OWNER, &CALENDAR, since, 0)
+                .await
+                .expect("read the token's standing"),
+            Self::Card => nest
+                .db
+                .carddav_has_expunged_past_retention(&OWNER, &ADDRESSBOOK, since, 0)
+                .await
+                .expect("read the token's standing"),
+        }
+    }
+
+    /// Rename collection `id` as its PROPPATCH door's storage step does.
+    async fn rename_row(self, nest: &Arc<AppState>, id: [u8; 32], metadata: &[u8]) {
+        match self {
+            Self::Calendar => {
+                nest.db
+                    .update_bridge_caldav_calendar_metadata(&OWNER, &id, metadata)
+                    .await
+                    .expect("rename the calendar");
+            }
+            Self::Card => {
+                nest.db
+                    .update_bridge_carddav_addressbook_metadata(&OWNER, &id, metadata)
+                    .await
+                    .expect("rename the addressbook");
+            }
+        }
+    }
+
+    /// Create collection `id` as its MKCOL door's storage step does.
+    async fn create_row(self, nest: &Arc<AppState>, id: [u8; 32], metadata: &[u8]) {
+        let now = 1_753_100_000;
+        match self {
+            Self::Calendar => {
+                nest.db
+                    .insert_bridge_caldav_calendar(&OWNER, &id, metadata, now)
+                    .await
+                    .expect("create the calendar");
+            }
+            Self::Card => {
+                nest.db
+                    .insert_bridge_carddav_addressbook(&OWNER, &id, metadata, now)
+                    .await
+                    .expect("create the addressbook");
+            }
+        }
+    }
+
+    /// The metadata collection `id`'s row serves, if the row exists.
+    async fn served_metadata(self, nest: &Arc<AppState>, id: [u8; 32]) -> Option<Vec<u8>> {
+        let (coll, col) = match self {
+            Self::Calendar => ("bridge_caldav_calendars", "calendar_id"),
+            Self::Card => ("bridge_carddav_addressbooks", "addressbook_id"),
+        };
+        let conn = nest.db.conn().await;
+        conn.query_row(
+            &format!("SELECT encrypted_metadata FROM {coll} WHERE actor_id = ?1 AND {col} = ?2"),
+            rusqlite::params![OWNER.as_slice(), id.as_slice()],
+            |r| r.get(0),
+        )
+        .ok()
+    }
+
+    /// The metadata the journal holds for collection `id`, if it holds one.
+    async fn journaled_metadata(self, nest: &Arc<AppState>, id: [u8; 32]) -> Option<Vec<u8>> {
+        match self {
+            Self::Calendar => nest
+                .cal_placement
+                .current_manifest(&OWNER)
+                .await
+                .unwrap()
+                .calendars
+                .into_iter()
+                .find(|c| c.calendar_id == id)
+                .map(|c| c.encrypted_metadata),
+            Self::Card => nest
+                .card_placement
+                .current_manifest(&OWNER)
+                .await
+                .unwrap()
+                .addressbooks
+                .into_iter()
+                .find(|c| c.addressbook_id == id)
+                .map(|c| c.encrypted_metadata),
+        }
+    }
+}
+
+/// **A deletion made while the flip is torn is never silently lost to a
+/// client that saw the item it deleted** (mclxxxvi, arm 2;
+/// `nest/common.md` § Client-state recoverability).
+///
+/// The re-filing does not re-file a tombstone a door wrote since the gesture,
+/// and the commit replaces the expunge log with the adopted journal's. A
+/// client whose sync token falls between the arrival and its deletion would
+/// then ask "what changed since?" and hear nothing about the item it holds. So
+/// the commit raises the collection's prune floor over the dropped tombstone:
+/// that client is told its token is no longer valid and resyncs, while a
+/// client already past the deletion keeps its token.
+async fn a_deletion_since_the_gesture_invalidates_the_tokens_between(dav: Dav) {
+    let (source, dest) = delivered_dav(dav).await;
+    let squatter = tear_before_halves(dav, &source, &dest).await;
+    dav.arrive(&dest, 9).await;
+    let (_, token) = dav.served_items(&dest).await;
+    let token = token.expect("the home collection");
+    dav.delete_row(&dest, 9).await;
+    let (_, past) = dav.served_items(&dest).await;
+    assert!(
+        past.expect("the home collection") > token,
+        "the deletion took a change number of its own"
+    );
+
+    std::fs::remove_file(&squatter).unwrap();
+    materialize(&dest, dav.set())
+        .await
+        .expect("the interrupted flip completes over the deletion");
+
+    assert!(
+        dav.token_stale(&dest, token).await,
+        "a client that saw the arrival but not its deletion is told to resync"
+    );
+    let (_, counter) = dav.served_items(&dest).await;
+    assert!(
+        !dav.token_stale(&dest, counter.expect("the home collection"))
+            .await,
+        "a client at the collection's current change keeps its token"
+    );
+}
+
+#[tokio::test]
+async fn an_event_deleted_while_a_calendar_flip_is_torn_invalidates_the_tokens_that_saw_it() {
+    a_deletion_since_the_gesture_invalidates_the_tokens_between(Dav::Calendar).await;
+}
+
+#[tokio::test]
+async fn a_card_deleted_while_a_contacts_flip_is_torn_invalidates_the_tokens_that_saw_it() {
+    a_deletion_since_the_gesture_invalidates_the_tokens_between(Dav::Card).await;
+}
+
+/// **A rename and a new, empty collection made while the flip is torn survive
+/// its retry** (mclxxxvi, arm 3).
+///
+/// The retry writes the corpus's containers again: it must not put the
+/// corpus's name back over one a door wrote since. And a collection a door
+/// created that holds no item yet has no arrival to carry it: the re-filing
+/// carries it on its own. Both land in the adopted journal too, so the next
+/// backup holds them.
+async fn a_rename_and_a_new_collection_survive_a_retried_dav_flip(dav: Dav) {
+    let (source, dest) = delivered_dav(dav).await;
+    let squatter = tear_before_halves(dav, &source, &dest).await;
+    let renamed = sealed(dav.record_kind(), b"Renamed");
+    let fresh = sealed(dav.record_kind(), b"Fresh and empty");
+    dav.rename_row(&dest, dav.home(), &renamed).await;
+    dav.create_row(&dest, OTHER_COLLECTION, &fresh).await;
+
+    std::fs::remove_file(&squatter).unwrap();
+    materialize(&dest, dav.set())
+        .await
+        .expect("the interrupted flip completes over the rename and the new collection");
+
+    assert_eq!(
+        dav.served_metadata(&dest, dav.home()).await,
+        Some(renamed.clone()),
+        "the rename a door wrote since stands"
+    );
+    assert_eq!(
+        dav.served_metadata(&dest, OTHER_COLLECTION).await,
+        Some(fresh.clone()),
+        "the empty collection a door created since stands"
+    );
+    assert_eq!(
+        dav.journaled_metadata(&dest, dav.home()).await,
+        Some(renamed),
+        "the adopted journal holds the rename"
+    );
+    assert_eq!(
+        dav.journaled_metadata(&dest, OTHER_COLLECTION).await,
+        Some(fresh),
+        "the adopted journal holds the new collection"
+    );
+}
+
+#[tokio::test]
+async fn a_rename_and_a_new_calendar_survive_a_retried_calendar_flip() {
+    a_rename_and_a_new_collection_survive_a_retried_dav_flip(Dav::Calendar).await;
+}
+
+#[tokio::test]
+async fn a_rename_and_a_new_addressbook_survive_a_retried_contacts_flip() {
+    a_rename_and_a_new_collection_survive_a_retried_dav_flip(Dav::Card).await;
+}
+
+/// **An address book a door deletes while the flip is torn stays deleted on
+/// retry** — a retry keeps post-gesture activity, never undoes it
+/// (`backup-destinations.md` § *the in-flight marker*). Contacts only: the
+/// address book is the one DAV collection with a delete door
+/// (`delete_carddav_addressbook`); calendars have none.
+///
+/// The delete door notes the deletion beside the standing marker, in its own
+/// transaction; the retry's containers write skips the noted book and the
+/// re-filing journals its removal over the corpus's version, so neither the
+/// book nor its cards are served or journaled again.
+#[tokio::test]
+async fn an_addressbook_deleted_while_the_flip_is_torn_stays_deleted_on_retry() {
+    let dav = Dav::Card;
+    let (source, dest) = delivered_dav(dav).await;
+    let squatter = tear_before_halves(dav, &source, &dest).await;
+    let outcome = dest
+        .db
+        .delete_carddav_addressbook(&OWNER, &dav.home())
+        .await
+        .expect("the delete door's storage step");
+    assert!(
+        !matches!(
+            outcome,
+            fauna_nest::db::bridge_carddav::DeleteCarddavAddressbookOutcome::NotFound
+        ),
+        "the torn flip left the address book for the door to delete"
+    );
+
+    std::fs::remove_file(&squatter).unwrap();
+    materialize(&dest, dav.set())
+        .await
+        .expect("the interrupted flip completes over the deletion");
+
+    assert_eq!(
+        dav.served_metadata(&dest, dav.home()).await,
+        None,
+        "the address book a door deleted since is not served again"
+    );
+    assert_eq!(
+        dav.served_items(&dest).await.0,
+        Vec::<DavItem>::new(),
+        "none of its cards is served again"
+    );
+    assert_eq!(
+        dav.journaled_metadata(&dest, dav.home()).await,
+        None,
+        "the adopted journal holds no current version of the deleted book"
+    );
+    assert!(
+        dest.card_placement
+            .current_manifest(&OWNER)
+            .await
+            .unwrap()
+            .cards
+            .iter()
+            .all(|c| c.addressbook_id != dav.home()),
+        "nor any of its cards"
+    );
+    assert!(
+        dest.db
+            .materialize_deleted_collections(&OWNER, "card")
+            .await
+            .unwrap()
+            .is_empty(),
+        "the commit retires the deletion note with the marker"
+    );
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -6348,6 +6651,14 @@ const NEW_COLLECTION: [u8; 32] = [0x7E; 32];
 type Served = ([u8; 32], u8, Vec<u8>, Vec<u8>, Vec<u8>);
 
 impl Dav {
+    /// The envelope kind this DAV kind's records are sealed as.
+    fn record_kind(self) -> RecordKind {
+        match self {
+            Self::Calendar => RecordKind::Calendar,
+            Self::Card => RecordKind::Card,
+        }
+    }
+
     fn kind(self) -> &'static str {
         match self {
             Self::Calendar => "calendar",
@@ -6377,7 +6688,7 @@ impl Dav {
                     &ProvisionCalendarRequest {
                         actor_id: OWNER.to_vec(),
                         calendar_id: collection.to_vec(),
-                        encrypted_metadata: name.to_vec(),
+                        encrypted_metadata: common::fixture_record(self.record_kind(), name),
                         ..Default::default()
                     },
                 )
@@ -6392,7 +6703,7 @@ impl Dav {
                     &ProvisionAddressbookRequest {
                         actor_id: OWNER.to_vec(),
                         addressbook_id: collection.to_vec(),
-                        encrypted_metadata: name.to_vec(),
+                        encrypted_metadata: common::fixture_record(self.record_kind(), name),
                         ..Default::default()
                     },
                 )
@@ -6409,8 +6720,8 @@ impl Dav {
             PutCardCiphertextReply, PutCardCiphertextRequest, PutEventCiphertextReply,
             PutEventCiphertextRequest,
         };
-        let body = sealed(format!("{tag} uid-{uid}").as_bytes());
-        let hint = sealed(format!("hint-{tag}").as_bytes());
+        let body = sealed(self.record_kind(), format!("{tag} uid-{uid}").as_bytes());
+        let hint = sealed(RecordKind::Mail, format!("hint-{tag}").as_bytes());
         let timestamp = 1_752_000_000 + i64::from(uid);
         match self {
             Self::Calendar => {
@@ -6785,7 +7096,10 @@ async fn a_regressed_source_recovers_its_lost_dav_resources(dav: Dav) {
 
     // ── The lost collection is back; recovered rows sit above the tokens ──
     let collections = dav.collections(&a).await;
-    assert_eq!(collections[&NEW_COLLECTION].1, b"new-meta".to_vec());
+    assert_eq!(
+        collections[&NEW_COLLECTION].1,
+        common::fixture_record(dav.record_kind(), b"new-meta")
+    );
     for (collection, uid, _) in &lost {
         let item = &served
             .iter()
@@ -7778,6 +8092,9 @@ async fn a_nest_held_backup_is_pulled_back(same_identity: bool) {
                 device_id: hex::encode(RESTORE_DEVICE),
             },
             OWNER,
+            fauna_core::file_download::FileDownloadKeys::owner(NestBackupKey::derive(
+                &OWNER_SECRET,
+            )),
         )
         .with_folder_names(names)
         .with_rehome_signing(fauna_client_sync::RecordSigning {
@@ -7866,6 +8183,7 @@ async fn a_nest_held_backup_is_pulled_back(same_identity: bool) {
         &store,
         OWNER_SECRET,
         restored_box,
+        lost_box,
         &row,
         &outcome,
     )

@@ -12,10 +12,11 @@ namespace FaunaApp.Core.Services;
 ///
 /// <para>Everything that decides the answer is shared Rust: the round trip, the feed's
 /// shape, the semver rule and the release page all come through the <c>fauna-ffi</c>
-/// face of <c>fauna_client::update_look</c> (<c>CheckForNewerRelease</c>,
-/// <c>LookAtSignIn</c>, <c>ReleaseFeedOrigin</c>) — the calls linux and tui make
-/// directly and macOS makes over the same face (<c>UpdateCheck.swift</c>). This type
-/// keeps no feed URL and no round trip of its own; it only holds what the page paints.</para>
+/// face of <c>fauna_client::update_look</c> (<c>CheckForNewerRelease</c> and
+/// <c>ReleaseFeedOrigin</c> for the asked check, <c>FfiNestClient.LookForNewerReleaseAtSignIn</c>
+/// for the sign-in look) — the calls linux and tui make directly and macOS makes over
+/// the same face (<c>UpdateCheck.swift</c>). This type keeps no feed URL and no round
+/// trip of its own; it only holds what the page paints.</para>
 ///
 /// <para>One instance per process (<see cref="Shared"/>), written by the asked check and
 /// by the sign-in look, so both paint the same notice in the same place. The look can
@@ -115,14 +116,20 @@ public sealed partial class UpdateCheck : ObservableObject
 
     /// <summary>
     /// The once-per-sign-in look — called from each path that builds a signed-in
-    /// session. Silent unless a newer release is out: a failed look paints nothing.
+    /// session, with the client that just signed in. It reads the newest release THAT
+    /// nest reports (<c>installers/README.md</c> § Knowing a newer version is out →
+    /// <i>The nest's newest-release field</i>), never the release host; a nest that says
+    /// nothing means no notice. Silent unless a newer release is out — a failed look
+    /// paints nothing — and with several nests a notice already showing only moves up
+    /// (<c>fauna_client::update_look::keep_the_newer</c>'s rule).
     /// </summary>
-    public async Task LookOnceAtSignInAsync()
+    internal async Task LookOnceAtSignInAsync(INestRpcClient nest)
     {
         try
         {
-            if (await FaunaFfiMethods.LookAtSignIn(_feedOrigin, UserAgent) is { } release)
-                Show(release);
+            if (await nest.LookForNewerReleaseAtSignInAsync() is not { } release) return;
+            if (_shownVersion is { } shown && !FaunaFfiMethods.IsNewer(shown, release.version)) return;
+            Show(release);
         }
         catch (Exception)
         {
@@ -130,8 +137,14 @@ public sealed partial class UpdateCheck : ObservableObject
         }
     }
 
-    private void Show(NewerRelease release) =>
+    /// <summary>The version the showing notice names, for the only-moves-up rule.</summary>
+    private string? _shownVersion;
+
+    private void Show(NewerRelease release)
+    {
+        _shownVersion = release.version;
         Notice = Strings.Format("settings/update_available_notice", release.version, release.releasePageUrl);
+    }
 
     private async Task ReturnToIdleAsync(int generation)
     {

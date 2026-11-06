@@ -150,6 +150,27 @@
                                    Margin="28,0,0,0" />
                     </StackPanel>
 
+                    <!-- The SSH door, beside the mail mode (onboarding-provisioning.md
+                         § 5): DEFAULT OFF for every box. Decided here for the mail
+                         mode's reason — cloud-init carries it. Turning it on reveals
+                         the warning that the door reduces the server's security; the
+                         codebehind re-syncs IsChecked from the shared getter each
+                         tick, guarded against re-firing SetProvisionSshDoor, as the
+                         mail-mode CheckBox above. Mirrors linux's vps_config.rs. -->
+                    <StackPanel Spacing="4" Margin="0,8,0,0">
+                        <CheckBox x:Name="SshDoorCheck"
+                                  AutomationProperties.AutomationId="{x:Bind ids:Ids.VpsConfigSshDoorToggle}"
+                                  Content="{loc:Localize Key=onboarding/vps_config/ssh_door_label}"
+                                  Checked="SshDoorCheck_Toggled"
+                                  Unchecked="SshDoorCheck_Toggled" />
+                        <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.VpsConfigSshDoorWarning}"
+                                   Text="{loc:Localize Key=onboarding/vps_config/ssh_door_warning}"
+                                   TextWrapping="Wrap"
+                                   Foreground="{ThemeResource SystemFillColorCautionBrush}"
+                                   Margin="28,0,0,0"
+                                   Visibility="{x:Bind local:VpsConfigView.BoolToVisibility(ViewModel.SshDoorWarningVisible), Mode=OneWay}" />
+                    </StackPanel>
+
                     <!-- Server-type radio group. ItemsControl + RadioButton
                          with shared GroupName gives us a flat list whose
                          children carry vps-server-type-radio[i] ids

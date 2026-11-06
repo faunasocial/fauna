@@ -1,3 +1,4 @@
+import FaunaFFISwift
 import SwiftUI
 
 /// The shared "Muted words" Settings sub-page (macOS + iOS, one FaunaKit view)
@@ -40,6 +41,7 @@ public struct MutedWordsView: View {
                         .automationField(Ids.mutedWordInput, text: $newWord)
                         .onSubmit { submitAdd() }
                     Button(L.mutedWords.add) { submitAdd() }
+                        .disabled(vm.busy)
                         .accessibilityIdentifier(Ids.mutedWordAddButton)
                         .automationActivate(Ids.mutedWordAddButton) { submitAdd() }
                 }
@@ -83,16 +85,58 @@ public struct MutedWordsView: View {
         Task { await vm.add(word) }
     }
 
+    /// The row's `muted-word-level-select`: options are the shared
+    /// `mutedKeywordLevels()`, the selection the shared classification of the
+    /// stored weight; the e2e registry reads and writes the TOKEN
+    /// (`mutedKeywordLevelValue`), the human sees the label.
+    private func levelPicker(index: Int) -> some View {
+        let levels = mutedKeywordLevels()
+        let current = vm.level(at: index) ?? .hide
+        return Picker(
+            "",
+            selection: Binding(
+                get: { vm.level(at: index) ?? .hide },
+                set: { level in Task { await vm.setLevel(at: index, to: level) } })
+        ) {
+            ForEach(levels, id: \.self) { level in
+                Text(Self.levelLabel(level)).tag(level)
+            }
+        }
+        .labelsHidden()
+        .fixedSize()
+        .disabled(vm.busy)
+        .accessibilityIdentifier(Ids.mutedWordLevelSelect)
+        .automationSelect(
+            Ids.mutedWordLevelSelect,
+            value: { mutedKeywordLevelValue(level: vm.level(at: index) ?? current) },
+            options: { mutedKeywordLevels().map { mutedKeywordLevelValue(level: $0) } },
+            isEnabled: { !vm.busy }
+        ) { token in
+            if let level = mutedKeywordLevelFromValue(value: token) {
+                Task { await vm.setLevel(at: index, to: level) }
+            }
+        }
+    }
+
+    private static func levelLabel(_ level: MutedKeywordLevel) -> String {
+        switch level {
+        case .hide: return L.mutedWords.levelHide
+        case .showLess: return L.mutedWords.levelShowLess
+        }
+    }
+
     /// One `muted-word-item` row (indexed — rows are addressed positionally,
     /// matching `task-delegation-kind-item`'s `.automationScope` idiom).
     private func wordRow(_ word: String, index: Int) -> some View {
         HStack {
             automationText(Ids.mutedWordText, word)
             Spacer()
+            levelPicker(index: index)
             Button(L.mutedWords.remove) {
                 Task { await vm.remove(at: index) }
             }
             .buttonStyle(.borderless)
+            .disabled(vm.busy)
             .accessibilityIdentifier(Ids.mutedWordRemoveButton)
             .automationActivate(Ids.mutedWordRemoveButton) {
                 Task { await vm.remove(at: index) }

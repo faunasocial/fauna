@@ -24,6 +24,18 @@ import FaunaFFISwift
 private struct ProfilePageKey: Equatable {
     let session: SessionKey
     let viewedActorId: String
+    /// The home the opener carried: opening the same actor with a different home
+    /// is a fresh open.
+    let home: String?
+}
+
+/// The Posts tab's `.task(id:)` key: the session (with the posts reload token, so
+/// every `profile-posts-tab` activation re-reads), the viewed actor, and whether
+/// the tab is active at all.
+private struct ProfilePostsKey: Equatable {
+    let session: SessionKey
+    let viewedActorId: String
+    let active: Bool
 }
 
 public struct ProfileView: View {
@@ -55,6 +67,15 @@ public struct ProfileView: View {
     /// The published `display_name` (`fauna.profile.get`), `nil` until fetched or
     /// when the actor has not published.
     @State private var headerName: String?
+    /// The stored avatar / banner the profile names: `named` = the profile carries the
+    /// picture (the element renders, empty until its bytes land); `image` = the decoded
+    /// bytes. Both reset on every header read (`profile.md` § Layout & flow).
+    @State private var avatarNamed = false
+    @State private var avatarImage: FaunaPlatformImage?
+    @State private var bannerNamed = false
+    @State private var bannerImage: FaunaPlatformImage?
+    /// Bumped per header read so a slow picture fetch cannot paint over a newer read.
+    @State private var pictureEpoch = 0
     /// Active tab — "posts" (default landmark) or "tiers".
     @State private var activeTab = "posts"
     /// Bumped on every Tiers-tab activation (switch-to AND re-tap-while-active)
@@ -62,10 +83,27 @@ public struct ProfileView: View {
     /// mirrors android's `tiersReloadToken` (`monetization.md` § Pillar 1 → *The
     /// Tiers-tab re-read door*, ruled 2026-08-12: every activation re-reads).
     @State private var tiersReloadToken = 0
+    /// Bumped on every Posts-tab activation — the tab reads its author window
+    /// afresh on every open (`profile.md` § Layout & flow → *The Posts tab*).
+    @State private var postsReloadToken = 0
+    #if !FAUNA_KIDS
+    /// The app-root timeline view model the Posts tab's author window is minted
+    /// off (`FeedVM.authorWindow(actorId:)`).
+    @Environment(FeedVM.self) private var feedVM: FeedVM?
+    /// The Posts tab's author window — `nil` while its first read is in flight
+    /// (nothing renders then) and whenever the tab is not active.
+    @State private var postsWindow: FeedVM?
+    #endif
 
     private let session: SessionState
     /// The viewed actor's hex id; `nil` ⇒ the SELF profile.
     private let actorId: String?
+    /// The home nest the opener carried for the viewed actor — a Find User result's
+    /// `nest_url`, an author line's `PostSummary.home_nest_url`, a contact row's
+    /// `ContactItem.home_nest_url`, or the state-protocol nav patch's `home_nest_url`
+    /// (`profile.md` § Layout & flow → *Reaching another actor's profile with their
+    /// home carried*). Seeds the page's actor-home slot; `nil` = none carried.
+    private let homeNestUrl: String?
     /// Per-target nav glue for the OTHER-profile `profile-start-dm-button`: seed
     /// the Conversations new-thread composer with this actor and switch to the
     /// Conversations page. `nil` (the default) hides nothing — the button still
@@ -73,6 +111,21 @@ public struct ProfileView: View {
     /// `on_open_conversations`). The actor is passed as a hex id; the call site
     /// owns the app routing (macOS `selectedSidebar` / iOS `selectedTab`).
     private let onStartDm: ((String) -> Void)?
+    /// Per-target nav glue for a Posts-tab `post-card` activation: switch to the
+    /// feed page. The activation is the search door (`profile.md` § Layout & flow
+    /// → *The Posts tab*, "Activating a card"): this page stages the post id on
+    /// the timeline's `pendingPostOpen`, which the feed page resolves
+    /// (`resolvePost`) and pushes as its `post_detail`, exactly as a
+    /// `search-result-item` activation does. No detail surface is painted here.
+    private let onOpenFeed: (() -> Void)?
+    /// Per-target nav glue for a card's "personalization" jump (the feed card's
+    /// own `onNavigateToPersonalization`).
+    private let onNavigateToPersonalization: (() -> Void)?
+    /// The per-target app state the feed's card reads (`PostCardAppStateProviding`
+    /// — iOS `AppState`, macOS `MacAppState`). Typed `AnyObject` because the
+    /// protocol lives in the feed plane the Fauna Kids build excises, while this
+    /// page and its call sites compile in both flavors.
+    private let postCardAppState: AnyObject?
 
     /// Block ⇄ unblock toggle state (OTHER profile). `isBlocked` is derived from
     /// the viewed actor's contact edge (`fauna.contacts.list`, read on open via
@@ -89,11 +142,19 @@ public struct ProfileView: View {
     public init(
         session: SessionState,
         actorId: String? = nil,
-        onStartDm: ((String) -> Void)? = nil
+        homeNestUrl: String? = nil,
+        onStartDm: ((String) -> Void)? = nil,
+        postCardAppState: AnyObject? = nil,
+        onOpenFeed: (() -> Void)? = nil,
+        onNavigateToPersonalization: (() -> Void)? = nil
     ) {
         self.session = session
         self.actorId = actorId
+        self.homeNestUrl = homeNestUrl
         self.onStartDm = onStartDm
+        self.postCardAppState = postCardAppState
+        self.onOpenFeed = onOpenFeed
+        self.onNavigateToPersonalization = onNavigateToPersonalization
     }
 
     /// `true` for the viewer's own profile (edit + author management); `false`
@@ -105,11 +166,12 @@ public struct ProfileView: View {
     private var viewedActorId: String { actorId ?? session.actorId ?? "" }
 
     /// The SELF header identity label: the published `display_name` if known,
-    /// else the handle, else the hex actor_id (mirrors linux `build_header` /
-    /// `refresh_header_name`).
+    /// else the handle on the nest's CURRENT primary (`SessionState.displayHandle`,
+    /// the shared resolver), else the hex actor_id (mirrors linux `build_header` /
+    /// `refresh_header_name` and tui's `session_display_handle`).
     private var selfHeaderDisplay: String {
         if let n = headerName, !n.isEmpty { return n }
-        if let h = session.handle, !h.isEmpty { return h }
+        if let h = session.displayHandle, !h.isEmpty { return h }
         return viewedActorId
     }
 
@@ -154,11 +216,7 @@ public struct ProfileView: View {
             }
 
             if activeTab == "posts" {
-                Text(L.profile.noPosts)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .padding(.horizontal)
-                Spacer()
+                postsTab
             }
             // The Tiers tab is monetization, which the Fauna Kids build excises
             // (family-safety.md § The account age band, the kids-app bullet).
@@ -188,7 +246,8 @@ public struct ProfileView: View {
         // is redundant — carried for uniformity, as `SearchVM`'s is
         // .
         .task(id: ProfilePageKey(session: SessionKey(client, reloadToken: tiersReloadToken),
-                                 viewedActorId: viewedActorId)) {
+                                 viewedActorId: viewedActorId,
+                                 home: homeNestUrl)) {
             guard let client else {
                 // BOTH branches' view models drop: which branch is live depends on
                 // `isSelf`, which is itself derived from the session that just went
@@ -199,6 +258,8 @@ public struct ProfileView: View {
                 knockVM.reset()
                 privateVM.reset()
                 labelInput = ""
+                // The mirrored actor/home belong to the outgoing account too.
+                ProfileStateMirror.clear()
                 return
             }
             // One private-section editor per open of one person's profile, over
@@ -219,11 +280,39 @@ public struct ProfileView: View {
                 }
                 // A fresh open: the knock's per-open state (error, "sent", route)
                 // starts clean, as a rebuilt page would.
-                knockVM.beginOpen(peer: viewedActorId)
+                knockVM.beginOpen(peer: viewedActorId, carried: homeNestUrl)
                 blockEdge.reset()
+                publishState()
                 await refreshBlockState()
             }
+            if isSelf { publishState() }
             await refreshHeader()
+            // The OTHER header holds no handle: re-read the contact roster now,
+            // so a contact accepted a moment ago is named by the roster's handle
+            // rather than the short id until the receive loop's next tick
+            // (`value-formatting.md` § Peer display label → *the roster
+            // handle*). The projection's move re-paints through
+            // `overlayRevision`.
+            if !isSelf, let conversationsVM {
+                await conversationsVM.contactOverlays.refreshRoster()
+            }
+        }
+        // The Posts tab: a fresh author window on every open of the tab — the
+        // page's open and each `profile-posts-tab` activation (the reload token)
+        // — minted off the timeline's manager, which is configured here first so
+        // a profile opened before the Feed page ever was still has one.
+        .task(id: ProfilePostsKey(session: SessionKey(client, reloadToken: postsReloadToken),
+                                  viewedActorId: viewedActorId,
+                                  active: activeTab == "posts")) {
+            #if !FAUNA_KIDS
+            postsWindow = nil
+            guard activeTab == "posts", let client, let feedVM,
+                  let secret = session.secretHex else { return }
+            await feedVM.configure(api: client.api, secretHex: secret, deviceIdHex: client.deviceId)
+            let window = await feedVM.authorWindow(actorId: viewedActorId)
+            guard !Task.isCancelled else { return }
+            postsWindow = window
+            #endif
         }
         // An untouched private section follows a sibling device's edit: re-read
         // the form whenever the overlay projection moves.
@@ -233,8 +322,35 @@ public struct ProfileView: View {
     /// The page-level error — the active branch's VM (`error-message`). The
     /// private section's refusals ride the same element.
     private var currentError: String? {
-        isSelf ? vm.errorMessage
-               : (privateVM.errorMessage ?? knockVM.errorMessage ?? offersVM.errorMessage)
+        #if !FAUNA_KIDS
+        // The Posts tab's failed read lands on the page's `error-message`.
+        if activeTab == "posts", let error = postsWindow?.errorMessage { return error }
+        #endif
+        return isSelf ? vm.errorMessage
+                      : (privateVM.errorMessage ?? knockVM.errorMessage ?? offersVM.errorMessage)
+    }
+
+    /// The Posts tab's content (`profile-posts-section`). The Fauna Kids build
+    /// has no feed, so its twin paints nothing (as android's kids flavor).
+    @ViewBuilder
+    private var postsTab: some View {
+        #if !FAUNA_KIDS
+        if let cardAppState = postCardAppState as? any PostCardAppStateProviding {
+            ProfilePostsSection(
+                window: postsWindow,
+                appState: cardAppState,
+                onOpenPost: { postId in
+                    feedVM?.pendingPostOpen = postId
+                    onOpenFeed?()
+                },
+                onNavigateToPersonalization: { onNavigateToPersonalization?() }
+            )
+        } else {
+            Spacer()
+        }
+        #else
+        Spacer()
+        #endif
     }
 
     /// Re-read the published `display_name` for the header (publish-on-first-edit;
@@ -242,27 +358,92 @@ public struct ProfileView: View {
     /// `headerDisplay`). Called on appear + after a SELF edit-form save.
     private func refreshHeader() async {
         guard let client else { return }
-        if let body = try? await client.api.profileGet(actorId: viewedActorId),
-           let display = try? client.api.decodeProfile(body: body) {
+        // The OTHER header reads through the composed shared read — this nest, then
+        // the relay to the page's actor-home slot as the open seeded it
+        // (`profile.md` § Where logic lives → *The remote read*). A remote actor
+        // that has not opted in is the id fallback, never `error-message`.
+        let fetched: Data?
+        var read: FfiProfileHeaderRead?
+        if isSelf {
+            fetched = try? await client.api.profileGet(actorId: viewedActorId)
+        } else {
+            read = await client.api.profileHeaderRead(
+                actorId: viewedActorId, home: knockVM.home(peer: viewedActorId))
+            fetched = read?.body
+        }
+        if let body = fetched, let display = try? client.api.decodeProfile(body: body) {
             headerName = display.displayName
-            // OTHER profile: the knock's route is the shared rule over the profile
-            // this open just fetched — no second fetch (`profile.md` § Where logic
-            // lives → *Request contact routing*). Keyed on the peer the body is
+            loadPictures(display: display, read: read, api: client.api)
+            // OTHER profile: the actor-home slot is replaced through the shared rule
+            // over the profile this open just fetched — no second fetch (`profile.md`
+            // § Where logic lives → *The actor's home*). Keyed on the peer the body is
             // ABOUT, so a read that outlives its open cannot route the next actor.
-            if !isSelf { knockVM.noteProfile(body: body, peer: viewedActorId) }
+            if !isSelf {
+                knockVM.noteProfile(body: body, peer: viewedActorId)
+                publishState()
+            }
         } else {
             headerName = nil
+            pictureEpoch += 1
+            (avatarNamed, avatarImage, bannerNamed, bannerImage) = (false, nil, false, nil)
         }
+    }
+
+    /// Render the pictures the profile names at once, empty, and paint each as its
+    /// bytes arrive from the nest that served the profile (`read.relayedFrom`, pinned
+    /// to the stamped identity; SELF = this nest). A failed fetch stays empty.
+    private func loadPictures(display: FfiProfileDisplay, read: FfiProfileHeaderRead?, api: APIClient) {
+        pictureEpoch += 1
+        let epoch = pictureEpoch
+        avatarNamed = display.avatarHashHex != nil
+        bannerNamed = display.bannerHashHex != nil
+        avatarImage = nil
+        bannerImage = nil
+        #if !FAUNA_KIDS
+        for (hash, isAvatar) in [(display.avatarHashHex, true), (display.bannerHashHex, false)] {
+            guard let hash else { continue }
+            Task {
+                guard let bytes = await api.fetchProfilePicture(read: read, hash: hash),
+                      let image = FaunaImage.decode(bytes), epoch == pictureEpoch else { return }
+                if isAvatar { avatarImage = image } else { bannerImage = image }
+            }
+        }
+        #endif
+    }
+
+    /// Mirror `is_self` / `actor_id` / `home_nest_url` for the state-protocol read
+    /// (``ProfileStateMirror``).
+    private func publishState() {
+        ProfileStateMirror.publish(
+            isSelf: isSelf, actorId: viewedActorId,
+            homeNestUrl: knockVM.home(peer: viewedActorId))
     }
 
     // MARK: - Header (shared `user-header`)
 
     private var header: some View {
+        VStack(spacing: 8) {
+            if bannerNamed {
+                ProfileHeaderPicture(id: Ids.profileBanner, image: bannerImage)
+                    .frame(height: 96)
+                    .frame(maxWidth: .infinity)
+            }
+            headerRow
+        }
+    }
+
+    private var headerRow: some View {
         HStack(spacing: 12) {
-            Image(systemName: "person.crop.circle")
-                .resizable()
-                .frame(width: 48, height: 48)
-                .foregroundStyle(.secondary)
+            if avatarNamed {
+                ProfileHeaderPicture(id: Ids.profileAvatar, image: avatarImage)
+                    .frame(width: 48, height: 48)
+                    .clipShape(Circle())
+            } else {
+                Image(systemName: "person.crop.circle")
+                    .resizable()
+                    .frame(width: 48, height: 48)
+                    .foregroundStyle(.secondary)
+            }
 
             // With a nickname set, the primary line is the nickname and the
             // public name it replaced stays visible beneath — the page never
@@ -297,20 +478,30 @@ public struct ProfileView: View {
                 // `contactToggleBlockLabel`. `isFollowing` flips optimistically on a
                 // successful follow.
                 Button(renderLocalizedText(followToggleLabel(isFollowing: offersVM.isFollowing))) {
-                    Task { await offersVM.follow() }
+                    follow()
                 }
                 .accessibilityIdentifier(Ids.profileFollowButton)
                 .automationActivate(
                     Ids.profileFollowButton,
                     value: { renderLocalizedText(followToggleLabel(isFollowing: offersVM.isFollowing)) }
                 ) {
-                    Task { await offersVM.follow() }
+                    follow()
                 }
                 #endif
             }
         }
         .padding([.top, .horizontal])
     }
+
+    #if !FAUNA_KIDS
+    /// `profile-follow-button` — the follow carries the page's actor-home slot (the
+    /// home the opener carried, replaced after the header read), so an author homed
+    /// on another nest is followed across nests; `nil` = today's local follow.
+    private func follow() {
+        let home = knockVM.home(peer: viewedActorId)
+        Task { await offersVM.follow(home: home) }
+    }
+    #endif
 
     // MARK: - Secondary relationship actions (OTHER profile only)
 
@@ -556,11 +747,18 @@ public struct ProfileView: View {
 
     // MARK: - Tab strip
 
+    /// Every Posts-tab activation (switch-to AND re-tap-while-active) re-reads
+    /// the author window, as every Tiers-tab activation re-reads its tiers.
+    private func openPostsTab() {
+        activeTab = "posts"
+        postsReloadToken += 1
+    }
+
     private var tabStrip: some View {
         HStack(spacing: 8) {
-            Button(L.profile.posts) { activeTab = "posts" }
+            Button(L.profile.posts) { openPostsTab() }
                 .accessibilityIdentifier(Ids.profilePostsTab)
-                .automationActivate(Ids.profilePostsTab) { activeTab = "posts" }
+                .automationActivate(Ids.profilePostsTab) { openPostsTab() }
             #if !FAUNA_KIDS
             Button(L.profile.tiers) { activeTab = "tiers"; tiersReloadToken += 1 }
                 .accessibilityIdentifier(Ids.profileTiersTab)
@@ -572,6 +770,98 @@ public struct ProfileView: View {
 }
 
 #if !FAUNA_KIDS
+// MARK: - Posts tab (the author's posts, as the feed paints them)
+
+/// The Posts tab's content host (`profile.md` § Layout & flow → *The Posts tab*):
+/// the author window's posts, newest first, each the feed's own
+/// ``PostCardBody`` with every child it has on the feed — interaction bar,
+/// badges, quoted post, media, the ⋯ menu — acting on the window. No post logic
+/// here: the window's snapshot answers the rows, the empty state
+/// (`FeedSnapshot::empty_state()`, as `feed-empty-state`) and `has_more`; the
+/// next page is the feed's own load-more gesture. Mirrors the feed page's row
+/// wiring (iOS `FeedListView`, macOS `MacFeedDetailView`).
+private struct ProfilePostsSection: View {
+    /// `nil` while the first read is in flight — nothing renders then.
+    let window: FeedVM?
+    let appState: any PostCardAppStateProviding
+    let onOpenPost: (String) -> Void
+    let onNavigateToPersonalization: () -> Void
+    /// The reply-compose target — the feed card's reply dialog, opened here on
+    /// the profile and replying through the window.
+    @State private var replyingTo: PostSummary?
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 8) {
+                if let window, !window.showsLoadingSpinner {
+                    if window.emptyState != nil {
+                        automationText(Ids.profilePostsEmpty, L.profile.noPosts)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    } else {
+                        // `enumerated` so each card pushes `post-card[offset]` as
+                        // the ancestor scope of its children, as on the feed.
+                        ForEach(Array(window.posts.enumerated()), id: \.element.id) { offset, post in
+                            card(post, window: window)
+                                .contentShape(Rectangle())
+                                .onTapGesture { open(post) }
+                                .accessibilityElement(children: .contain)
+                                .accessibilityIdentifier(Ids.postCard)
+                                .automationActivate(Ids.postCard, value: { post.body },
+                                                    attributes: { ["post": post.postId] }) { open(post) }
+                                .automationScope(Ids.postCard, index: offset)
+                            Divider()
+                        }
+                        if window.hasMore {
+                            Button(L.common.loadMore) {
+                                Task { await window.loadMore() }
+                            }
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 8)
+                        }
+                    }
+                }
+            }
+            .padding(.horizontal)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .accessibilityIdentifier(Ids.profilePostsSection)
+        .automationValue(Ids.profilePostsSection, text: { "" })
+        .sheet(item: $replyingTo) { post in
+            if let window { FeedReplyDialog(post: post, vm: window) }
+        }
+    }
+
+    /// The feed's card at each platform's feed metrics (iOS `PostCardView`,
+    /// macOS `MacPostCardView`); `post-card` is registered on the row above.
+    @ViewBuilder
+    private func card(_ post: PostSummary, window: FeedVM) -> some View {
+        #if os(macOS)
+        PostCardBody(
+            post: post, vm: window, appState: appState,
+            verticalPadding: 4, cardSpacing: 6, bodyFont: .body, bodyLineLimit: nil,
+            selfRegistersPostCardId: false,
+            onReply: { replyingTo = post },
+            onNavigateToPersonalization: onNavigateToPersonalization
+        )
+        #else
+        PostCardBody(
+            post: post, vm: window, appState: appState,
+            verticalPadding: 2, cardSpacing: 4, bodyFont: nil, bodyLineLimit: 3,
+            selfRegistersPostCardId: false,
+            onReply: { replyingTo = post },
+            onNavigateToPersonalization: onNavigateToPersonalization
+        )
+        #endif
+    }
+
+    /// The search door: a repost row opens its original, as on the feed
+    /// (`openPostCard`).
+    private func open(_ post: PostSummary) {
+        onOpenPost(post.repostedPostId ?? post.postId)
+    }
+}
+
 // MARK: - Tiers tab (SELF author management — §1 / §2 / §3)
 
 /// The three SELF author-management sections. A dumb renderer of
@@ -958,7 +1248,7 @@ private struct SubscriptionTiersTab: View {
                     .font(.caption).foregroundStyle(.secondary)
             }
             ForEach(vm.claims, id: \.code) { claim in
-                SubscriptionClaimRow(claim: claim)
+                SubscriptionClaimRow(claim: claim, vm: vm)
                     .accessibilityElement(children: .contain)
                     .accessibilityIdentifier(Ids.subscriptionClaimRow)
                     .automationValue(Ids.subscriptionClaimRow, text: { claim.code })
@@ -1093,6 +1383,7 @@ private struct SubscriptionProviderRow: View {
 /// 3-state decision (`claim_status_label`); redeemed wins over voided.
 private struct SubscriptionClaimRow: View {
     let claim: FfiClaimItem
+    @Bindable var vm: SubscriptionsVM
 
     var body: some View {
         HStack(spacing: 8) {
@@ -1104,7 +1395,36 @@ private struct SubscriptionClaimRow: View {
                                redeemed: claim.redeemedBy != nil,
                                voided: claim.voidedAt != nil)))
                 .foregroundStyle(.secondary)
+            // A voided code has nothing left to void. First press arms the row
+            // (the same button names the consequence, Keep appears); the second
+            // press sends the void.
+            if claim.voidedAt == nil {
+                let armed = vm.claimVoidArmed == claim.code
+                Button(voidLabel(armed: armed)) {
+                    Task { await vm.pressVoidClaim(code: claim.code) }
+                }
+                .accessibilityIdentifier(Ids.subscriptionClaimVoidButton)
+                .automationActivate(
+                    Ids.subscriptionClaimVoidButton,
+                    text: { voidLabel(armed: vm.claimVoidArmed == claim.code) }
+                ) {
+                    Task { await vm.pressVoidClaim(code: claim.code) }
+                }
+                .faunaGate("fauna.payments.claims.void")
+                if armed {
+                    Button(L.subscriptions.voidClaimCancel) { vm.keepClaim() }
+                }
+            }
         }
+    }
+
+    private func voidLabel(armed: Bool) -> String {
+        guard armed else { return L.subscriptions.voidClaim }
+        if let redeemer = claim.redeemedBy {
+            return L.subscriptions.voidClaimConfirmRedeemed(
+                redeemer: redeemer.hexString, tier: claim.tier)
+        }
+        return L.subscriptions.voidClaimConfirmUnredeemed
     }
 }
 #endif
@@ -1278,6 +1598,22 @@ private struct ProfileEditFormView: View {
             Button(L.profile.editAddLink) { vm.addLink() }
                 .accessibilityIdentifier(Ids.profileEditLinkAddButton)
                 .automationActivate(Ids.profileEditLinkAddButton) { vm.addLink() }
+
+            // `profile-edit-audience-toggle` — the signed `Profile.audience`: open to
+            // people on other nests (`profile.md` § Where logic lives → *The remote
+            // read*). Starts at the base's own audience; a press rides the save.
+            HStack {
+                Text(L.profile.editAudienceToggle).foregroundStyle(.secondary)
+                Toggle("", isOn: Binding(
+                    get: { vm.audienceEveryone },
+                    set: { vm.setAudienceEveryone($0) }))
+                    .labelsHidden()
+                    .accessibilityIdentifier(Ids.profileEditAudienceToggle)
+                    .automationActivate(Ids.profileEditAudienceToggle,
+                                        value: { vm.audienceEveryone ? "on" : "off" }) {
+                        vm.setAudienceEveryone(!vm.audienceEveryone)
+                    }
+            }
 
             if let error = vm.errorMessage {
                 ErrorBanner(message: error)

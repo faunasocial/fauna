@@ -138,6 +138,22 @@ impl FfiContactOverlays {
     }
 }
 
+/// What a notification row says, with a fauna-native row's sender named as the
+/// viewer calls them — [`crate::notification_text_for`] through
+/// `fauna_client_notifications::notification_text_naming` over `overlays`'
+/// projection (`behavior/notifications.md` § Localized body → *The sender
+/// arg*). The Notifications row paints this, never the unnamed twin.
+#[uniffi::export]
+pub fn notification_text_naming_for(
+    item: crate::FfiNotifItem,
+    overlays: Arc<FfiContactOverlays>,
+) -> crate::FfiNotificationText {
+    let item = fauna_client_notifications::notifications::NotifItem::from(item);
+    let cache = overlays.manager.contacts();
+    fauna_client_notifications::notification_text_naming(&item, |id| cache.known_peer_label(id))
+        .into()
+}
+
 /// What a Save did. Every text is a finished `LocalizedText`: the app
 /// resolves it and shows it on the page's `error-message`, with no wording of
 /// its own.
@@ -247,6 +263,21 @@ impl FfiOverlayEditor {
     }
 }
 
+#[fauna_uniffi_async::export]
+impl FfiContactOverlays {
+    /// Re-read the contact roster into the projection now
+    /// (`ConversationsManager::refresh_contact_roster`), so a surface that
+    /// holds no handle — the OTHER Profile header — names a contact accepted a
+    /// moment ago by the roster's handle at once, not at the receive loop's
+    /// next tick (`value-formatting.md` § Peer display label → *the roster
+    /// handle*). [`Self::revision`] moves when it changed anything. A read
+    /// failure keeps the roster already held; with no roster source
+    /// registered on the manager it does nothing.
+    pub async fn refresh_roster(&self) {
+        self.manager.refresh_contact_roster().await;
+    }
+}
+
 impl From<StagedSave> for FfiOverlaySave {
     fn from(answer: StagedSave) -> Self {
         match answer {
@@ -295,6 +326,44 @@ mod tests {
     /// installed must not load its (empty) overlays over this projection.
     fn face(manager: Arc<ConversationsManager>) -> FfiContactOverlays {
         FfiContactOverlays { manager }
+    }
+
+    /// A fixed roster, standing in for the nest's `fauna.contacts.list`.
+    struct FixedRoster(Vec<fauna_conversations::RosterEntry>);
+
+    #[async_trait::async_trait]
+    impl fauna_conversations::backend::ContactRosterSource for FixedRoster {
+        async fn roster(&self) -> Result<Vec<fauna_conversations::RosterEntry>, String> {
+            Ok(self.0.clone())
+        }
+    }
+
+    /// The Profile header holds no handle: a contact the roster knows by one
+    /// is named by it once the face re-reads the roster — without waiting for
+    /// a receive loop's tick, and on a manager no conversations session
+    /// serves (`value-formatting.md` § Peer display label → *the roster
+    /// handle*).
+    #[tokio::test]
+    async fn a_roster_refresh_names_a_handle_less_header_by_the_roster_handle() {
+        let manager = ConversationsManager::new();
+        let face = face(Arc::clone(&manager));
+        let viewed = "cd".repeat(32);
+        let before = face.peer_label(None, None, viewed.clone());
+        assert_eq!(before.primary, fauna_core::format::short_id(&viewed));
+
+        manager.register_contact_roster(Arc::new(FixedRoster(vec![
+            fauna_conversations::RosterEntry {
+                actor_id_hex: viewed.clone(),
+                handle: Some("tester".into()),
+                domain: None,
+                status: "accepted".into(),
+            },
+        ])));
+        let revision = face.revision();
+        face.refresh_roster().await;
+
+        assert_eq!(face.peer_label(None, None, viewed).primary, "tester");
+        assert_ne!(face.revision(), revision, "the paint wakes on the move");
     }
 
     /// The face answers exactly what the projection answers — a mutation of

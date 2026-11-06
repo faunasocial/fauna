@@ -12,6 +12,7 @@
 //! SPKI pin for the self-signed / LAN trust path. The types are re-exported so
 //! existing `fauna_client::ws_adapter::…` paths keep resolving.
 
+use fauna_anon_client::tls_dial::TrustedDialError;
 use fauna_ws_substrate::{KEEPALIVE_INTERVAL, KEEPALIVE_TIMEOUT, TungsteniteAdapter};
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::handshake::client::Request;
@@ -123,8 +124,26 @@ fn map_bearer_err(e: NestClientError) -> NestClientError {
 /// SubprotocolMismatch`, `fauna_ws_substrate::adapter`). No retry can fix a
 /// version mismatch, so `connect_error_is_terminal` treats both sources the
 /// same way (`transport.md` § Close codes).
-fn map_ws_connect_err(e: tokio_tungstenite::tungstenite::Error) -> NestClientError {
+///
+/// The dial's identity verdict — a stale-pin re-bind the pinned identity did
+/// not sign ([`TrustedDialError::IdentityChanged`]) — becomes
+/// [`NestClientError::NestIdentityChanged`], the variant [`map_bearer_err`]
+/// passes through unchanged, so `connect_error_is_terminal` stops on it and
+/// the app lands it on `launch_identity_changed` (`transport-trust.md`
+/// § Post-auth surfacing — the plumbing rule). Read as a `WebSocket` string it
+/// was retryable, and the supervisor redialled a box the pin refused.
+fn map_ws_connect_err(e: TrustedDialError) -> NestClientError {
     use tokio_tungstenite::tungstenite::Error as WsErr;
+    let e = match e {
+        TrustedDialError::IdentityChanged { host, verdict } => {
+            return NestClientError::NestIdentityChanged {
+                host,
+                pinned_hex: verdict.pinned_hex,
+                seen_hex: verdict.seen_hex,
+            };
+        }
+        TrustedDialError::Ws(e) => e,
+    };
     if let WsErr::Http(ref resp) = e {
         let status = resp.status().as_u16();
         // 429: the nest is throttling this actor's upgrades. Not an auth
@@ -221,10 +240,36 @@ mod tests {
 
         assert!(
             matches!(
-                map_ws_connect_err(err),
+                map_ws_connect_err(err.into()),
                 NestClientError::SubprotocolMismatch
             ),
             "a real HTTP 426 upgrade rejection must classify as SubprotocolMismatch"
         );
+    }
+
+    /// The dial's identity verdict reaches the supervisor as the one variant
+    /// it stops on — never as a `WebSocket` string it would back off and
+    /// redial (`transport-trust.md` § Post-auth surfacing, the plumbing rule).
+    #[test]
+    fn the_dials_identity_verdict_survives_the_connect_seam() {
+        let e = map_ws_connect_err(TrustedDialError::IdentityChanged {
+            host: "nest.example:8443".into(),
+            verdict: fauna_anon_client::IdentityChangedVerdict {
+                pinned_hex: "aa".repeat(32),
+                seen_hex: Some("bb".repeat(32)),
+                fork: false,
+            },
+        });
+        let NestClientError::NestIdentityChanged {
+            host,
+            pinned_hex,
+            seen_hex,
+        } = e
+        else {
+            panic!("the verdict must arrive typed, got {e:?}");
+        };
+        assert_eq!(host, "nest.example:8443");
+        assert_eq!(pinned_hex, "aa".repeat(32));
+        assert_eq!(seen_hex, Some("bb".repeat(32)));
     }
 }

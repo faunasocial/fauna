@@ -26,9 +26,8 @@ import { nestRulesRefresh } from '#lib/rpc';
 import { registerActorScopedReset } from '#lib/actorScope';
 import { t } from '#lib/i18n/strings';
 
-/** The language the admin's reason is picked in — the app's UI language (tui
- *  `UI_LANG`). */
-export const NEST_RULES_LANG = 'en';
+import { NEST_RULES_LANG } from '#lib/nestRulesPaint';
+export { NEST_RULES_LANG };
 
 const DB_NAME = 'fauna-nest-rules';
 const STORE = 'book';
@@ -36,7 +35,12 @@ const KEY = 'records';
 
 let book: NestRulesBookHandle | null = null;
 let opening: Promise<void> | null = null;
-let reading = false;
+/** The session generation whose read is in flight; `null` when none is. */
+let readingGeneration: number | null = null;
+/** The secret of a read asked for while one was in flight; `null` when none. */
+let rerunSecret: string | null = null;
+/** Bumped at every identity change, so a read begun before it is not applied. */
+let sessionGeneration = 0;
 /** The session nest's identity, once its self-description was read — which nest
  *  every item on this page is read through. */
 let sessionNestId: string | null = null;
@@ -118,23 +122,40 @@ export function openNestRules(): Promise<void> {
 export async function refreshNestRules(secretHex: string): Promise<void> {
   await openNestRules();
   const b = book;
-  if (!b || reading) return;
-  reading = true;
+  if (!b) return;
+  // A read asked for while one of the same session is in flight runs once that
+  // one ends — never dropped. A new session's read never waits on the old one:
+  // after a sign-in switch the previous seat's read can stay pending on its
+  // closed connection until it times out, and skipping the new seat's read
+  // behind it left the page with no session nest, so no verdict painted.
+  rerunSecret = secretHex;
+  const generation = sessionGeneration;
+  if (readingGeneration === generation) return;
+  readingGeneration = generation;
   try {
-    const { nestId, read } = await nestRulesRefresh(secretHex, b);
-    sessionNestId = nestId;
-    if (read.kind === 'changed') {
-      changedNoticeDomain = read.domain;
-      await writeRecords(b.stored()).catch((e) => console.warn('nest rules: persist failed:', e));
-    } else if (read.kind === 'first') {
-      await writeRecords(b.stored()).catch((e) => console.warn('nest rules: persist failed:', e));
-    } else if (read.kind === 'refused') {
-      console.warn('nest rules: self-description refused, last-known rules stay:', read.reason);
+    while (rerunSecret !== null && generation === sessionGeneration) {
+      const secret = rerunSecret;
+      rerunSecret = null;
+      try {
+        const { nestId, read } = await nestRulesRefresh(secret, b);
+        // A read that began before an identity change speaks for the old seat.
+        if (generation !== sessionGeneration) break;
+        sessionNestId = nestId;
+        if (read.kind === 'changed') {
+          changedNoticeDomain = read.domain;
+          await writeRecords(b.stored()).catch((e) => console.warn('nest rules: persist failed:', e));
+        } else if (read.kind === 'first') {
+          await writeRecords(b.stored()).catch((e) => console.warn('nest rules: persist failed:', e));
+        } else if (read.kind === 'refused') {
+          console.warn('nest rules: self-description refused, last-known rules stay:', read.reason);
+        }
+      } catch (e) {
+        console.warn('nest rules: fauna.nest.info failed:', e);
+      }
+      revision += 1;
     }
-  } catch (e) {
-    console.warn('nest rules: fauna.nest.info failed:', e);
   } finally {
-    reading = false;
+    if (readingGeneration === generation) readingGeneration = null;
     revision += 1;
   }
 }
@@ -203,6 +224,7 @@ export function nestBlockRenderForTest(): { blocked: number; placeholders: numbe
 /** An identity change forgets which nest this page reads through; the book is the
  *  device's and stays. The next connect reads the new session nest. */
 function resetNestRulesSession(): void {
+  sessionGeneration += 1;
   sessionNestId = null;
   changedNoticeDomain = null;
   revision += 1;

@@ -8,11 +8,9 @@ guide: docs/guides/install.md § The no-install option: the web app
 
 ## What a user gets
 
-There is nothing to choose to get this: the released nest image carries the web app and serves
-it at its own address, on every start, with the security headers a browser expects.
+There is nothing to choose to get this: Fauna's container image for the nest carries the web app and serves it at the nest's own address, on every start, with the security headers a browser expects.
 A nest whose saved settings never recorded where the app is finds it again on the
-next restart. An admin who would rather send visitors to the central app picks
-that in the admin area.
+next restart. An admin can instead send visitors to the Fauna project's own address for the app, with the nest already filled in on the sign-in page, by choosing it under **Web app** in the admin area (a nest without a domain yet keeps serving the app itself); that address serves the app's code and holds nothing of yours, and it is not live yet.
 
 ## Coverage contract
 
@@ -39,19 +37,21 @@ Stamped 2026-10-21 at 77c610862e.
 8. [app] Arriving at the app from a nest that sends visitors to the Fauna project's own address for the app, the sign-in page already names that nest, and a link naming anything that is not a nest address is quietly ignored — `docs/goal/behavior/onboarding.md` § 2. Handle entry (`handle_entry`)
    - `tests/e2e-unified/tests/test_onboarding_nest_hint.py::test_the_nest_hint_prefills_the_domain_part_and_the_check_still_runs`
    - `tests/e2e-unified/tests/test_onboarding_nest_hint.py::test_an_unclassifiable_nest_hint_is_dropped_silently`
+   - `tests/e2e-unified/tests/test_onboarding_nest_hint_tui.py::test_the_nest_hint_prefills_the_domain_part_and_the_check_still_runs`
+   - `tests/e2e-unified/tests/test_onboarding_nest_hint_tui.py::test_an_unclassifiable_nest_hint_is_dropped_silently`
 
 ## Status
 
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ✅ full | 0.1.2-dev+b3cb40c5 docker |
-| linux | ⚠ partial | 0.1.2-dev+b3cb40c5 docker |
-| windows | ⚠ partial | 0.1.2-dev+b3cb40c5 docker |
-| macos | ⚠ partial | 0.1.2-dev+b3cb40c5 docker |
-| ios | ⚠ partial | 0.1.2-dev+b3cb40c5 docker |
-| android | ⚠ partial | 0.1.2-dev+b3cb40c5 docker |
-| tui | ⚠ partial | 0.1.2-dev+b3cb40c5 docker |
+| web | ✅ full | 0.1.5-dev+99dc4c58 standalone |
+| linux | ⚠ partial | 0.1.5-dev+99dc4c58 standalone |
+| windows | ⚠ partial | 0.1.5-dev+99dc4c58 standalone |
+| macos | ⚠ partial | 0.1.5-dev+99dc4c58 standalone |
+| ios | ⚠ partial | 0.1.5-dev+99dc4c58 standalone |
+| android | ⚠ partial | 0.1.5-dev+99dc4c58 standalone |
+| tui | ✅ full | 0.1.5-dev+99dc4c58 standalone |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
@@ -60,12 +60,14 @@ Stamped 2026-10-21 at 77c610862e.
 | 1 | nest | `tests/e2e-unified/tests/platform/docker/test_spa_serving.py::test_spa_origin_security_headers_ride_the_real_mount` | nest (linux): passed |
 | 1 | nest | `tests/e2e-unified/tests/test_static_serving.py::test_spa_js_modules_have_correct_content_type` | nest (linux): passed |
 | 2 | nest | `tests/e2e-unified/tests/platform/docker/test_spa_serving.py::test_a_box_with_no_static_dir_self_heals_on_restart` | nest (linux): passed |
-| 3 | nest | `tests/e2e-unified/tests/api/test_web_app_origin.py::test_the_admin_choice_flips_app_to_the_central_origin_and_back` | nest (linux): passed |
-| 4 | nest | `tests/e2e-unified/tests/api/test_web_app_origin.py::test_the_admin_choice_flips_app_to_the_central_origin_and_back` | nest (linux): passed |
+| 3 | nest | `tests/e2e-unified/tests/api/test_web_app_origin.py::test_the_admin_choice_flips_app_to_the_central_origin_and_back` | nest (linux): passed, nest (macos): passed |
+| 4 | nest | `tests/e2e-unified/tests/api/test_web_app_origin.py::test_the_admin_choice_flips_app_to_the_central_origin_and_back` | nest (linux): passed, nest (macos): passed |
 | 5 | nest | `tests/e2e-unified/tests/platform/docker/test_spa_serving.py::test_the_served_app_runs_only_its_own_scripts` | nest (linux): passed |
 | 6 | nest | `tests/e2e-unified/tests/platform/docker/test_spa_serving.py::test_the_served_app_never_sets_a_cookie` | nest (linux): passed |
-| 6 | nest | `tests/e2e-unified/tests/api/test_web_served_headers.py::test_no_door_of_the_nest_ever_sets_a_cookie` | nest (linux): passed |
+| 6 | nest | `tests/e2e-unified/tests/api/test_web_served_headers.py::test_no_door_of_the_nest_ever_sets_a_cookie` | nest (linux): passed, nest (macos): passed |
 | 7 | nest | `tests/e2e-unified/tests/test_static_serving.py::test_missing_asset_under_the_hashed_tree_is_not_found_not_the_page` | nest (linux): passed |
 | 8 | app | `tests/e2e-unified/tests/test_onboarding_nest_hint.py::test_the_nest_hint_prefills_the_domain_part_and_the_check_still_runs` | web (linux): passed |
 | 8 | app | `tests/e2e-unified/tests/test_onboarding_nest_hint.py::test_an_unclassifiable_nest_hint_is_dropped_silently` | web (linux): passed |
+| 8 | app | `tests/e2e-unified/tests/test_onboarding_nest_hint_tui.py::test_the_nest_hint_prefills_the_domain_part_and_the_check_still_runs` | tui (linux): passed |
+| 8 | app | `tests/e2e-unified/tests/test_onboarding_nest_hint_tui.py::test_an_unclassifiable_nest_hint_is_dropped_silently` | tui (linux): passed |
 <!-- features-render:end -->

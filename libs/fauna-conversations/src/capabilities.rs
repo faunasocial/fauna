@@ -34,6 +34,17 @@ pub enum ThreadEncryption {
     NestReadable,
 }
 
+impl ThreadEncryption {
+    /// Is an item of this class **sealed** — read by its members and nobody
+    /// else? Only end-to-end: a community room's home nest reads it and a
+    /// transport-only room's carrier does. The `sealed` input of
+    /// `fauna_core::obligation::region_sealed_note_owed` (`region-blocking.md`
+    /// § Implementation status today, the sealed-item sentence).
+    pub fn is_sealed(self) -> bool {
+        matches!(self, Self::E2E)
+    }
+}
+
 /// `#[serde(default)]` helper for the role-gated capability fields, which
 /// default **open** wherever no policy governs.
 fn default_true() -> bool {
@@ -350,6 +361,15 @@ pub fn derive_capabilities(rail: Rail, flavor: ThreadFlavor) -> ThreadCapabiliti
             can_leave_room: false,
             can_search_room: false,
             can_send: true,
+        },
+        // An imported archive thread is a read-only record of another
+        // platform's past (`behavior/archive-import.md` § What each category
+        // becomes): every affordance withheld and no reply bar — the one rail
+        // whose `can_send` is false by its own answer, so an app withholds the
+        // bar the way it already does for a disconnected bridge.
+        (Archive, _) => ThreadCapabilities {
+            can_send: false,
+            ..derive_capabilities(Bridged, OneToOne)
         },
     }
 }

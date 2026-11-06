@@ -333,6 +333,16 @@ fn main() {
             // Go-mirror field-name typo observable on round-trip; see this
             // file's header.
             succession_pending: true,
+            calendar_key: Some(RecipientSealKeyHalves {
+                mls_pubkey: ByteBuf::from(b32(0x35)),
+                mlkem_ek: ByteBuf::from(vec![0x36u8; 1184]),
+                extra: Default::default(),
+            }),
+            card_key: Some(RecipientSealKeyHalves {
+                mls_pubkey: ByteBuf::from(b32(0x37)),
+                mlkem_ek: ByteBuf::from(vec![0x38u8; 1184]),
+                extra: Default::default(),
+            }),
         }
     );
     emit!(

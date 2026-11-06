@@ -53,8 +53,9 @@
                      virtualizing) realizes every row so FlaUI can count them;
                      the container carries recover-box-list and a blank Name to
                      force it into the UIA content view (mirrors the vps radio
-                     list). Each row's dash-indexed recover-box-item-{i} id
-                     matches the e2e + web/linux. -->
+                     list). Every row carries the one repeated recover-box-item
+                     id; a driver picks row n by index (e2e-conventions.md
+                     convention 1). -->
                 <ItemsControl x:Name="BoxList"
                               AutomationProperties.AutomationId="{x:Bind ids:Ids.RecoverBoxList}"
                               AutomationProperties.Name=" "
@@ -62,7 +63,7 @@
                               ItemsSource="{x:Bind ViewModel.RecoveryBoxItems, Mode=OneWay}">
                     <ItemsControl.ItemTemplate>
                         <DataTemplate x:DataType="vm:RecoveryBoxItemViewModel">
-                            <Button AutomationProperties.AutomationId="{x:Bind BoxItemId}"
+                            <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.RecoverBoxItem}"
                                     Content="{x:Bind ShortId}"
                                     HorizontalAlignment="Stretch"
                                     HorizontalContentAlignment="Left"

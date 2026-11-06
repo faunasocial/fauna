@@ -22,6 +22,14 @@ public struct EncryptionSettingsView: View {
 
     public init() {}
 
+    private var countText: String {
+        vm.keyPackageCount.map { "\($0)" } ?? L.status.encryption.checking
+    }
+
+    private var lowBody: String {
+        L.settings.encryptionPage.lowKeyWarningBody(count: "\(vm.keyPackageCount ?? 0)")
+    }
+
     public var body: some View {
         Form {
             if vm.isKeyPackageLow {
@@ -33,9 +41,11 @@ public struct EncryptionSettingsView: View {
                         VStack(alignment: .leading, spacing: 4) {
                             Text(L.settings.encryptionPage.lowKeyWarningTitle)
                                 .font(.headline)
-                            Text(L.settings.encryptionPage.lowKeyWarningBody(count: "\(vm.keyPackageCount ?? 0)"))
+                            Text(lowBody)
                                 .font(.subheadline)
                                 .foregroundStyle(.secondary)
+                                .accessibilityIdentifier(Ids.encryptionKeypackageLowWarning)
+                                .automationValue(Ids.encryptionKeypackageLowWarning, text: { lowBody })
                         }
                     }
                     .padding(.vertical, 4)
@@ -47,19 +57,24 @@ public struct EncryptionSettingsView: View {
             }
 
             Section(L.settings.encryptionPage.mlsKeyPackages) {
-                if let count = vm.keyPackageCount {
-                    LabeledContent(L.common.available) {
-                        Text("\(count)")
-                    }
-                } else {
-                    Text(L.status.encryption.checking)
-                        .foregroundStyle(.secondary)
+                // ONE stable element for both states (the bare count, or the
+                // loading copy before the first read): two branches registering
+                // one id leave a stale registration behind on the swap.
+                LabeledContent(L.common.available) {
+                    Text(countText)
+                        .accessibilityIdentifier(Ids.encryptionKeypackageCount)
+                        .automationValue(Ids.encryptionKeypackageCount, text: { countText })
                 }
 
                 Button(L.settings.encryptionPage.refreshKeys) {
                     Task { await vm.refreshKeys() }
                 }
                 .disabled(vm.isPublishing)
+                .accessibilityIdentifier(Ids.encryptionKeypackageRefreshButton)
+                .automationActivate(
+                    Ids.encryptionKeypackageRefreshButton,
+                    isEnabled: { !vm.isPublishing }
+                ) { Task { await vm.refreshKeys() } }
                 .buttonStyle(.borderedProminent)
 
                 if vm.isPublishing {
@@ -72,10 +87,14 @@ public struct EncryptionSettingsView: View {
             }
         }
         .formStyle(.grouped)
+        // The low card's section leaves a table-backed iOS Form without its
+        // window detach ever reaching the e2e registry, so the warning would read
+        // present after a top-up: a new identity per flag rebuilds the Form.
+        .id(vm.isKeyPackageLow)
         #if os(iOS)
         .pageTitle(L.settings.encryptionPage.title)
         #endif
-        .task {
+        .task(id: client?.ownActorIdHex) {
             // The client's OWN actor, never the registry's active account: that
             // is, on a bound instance, possibly
             // another account (`FaunaClient.ownSecretHex`).
@@ -85,6 +104,9 @@ public struct EncryptionSettingsView: View {
                     manager: conversationsVM?.manager
                 )
             }
+            // Every visit re-reads the nest's count (a read only, never a mint),
+            // showing the loading copy until it lands.
+            vm.keyPackageCount = nil
             await vm.loadKeyCount()
         }
     }

@@ -57,7 +57,7 @@ struct BackupSplitView: View {
                     // destination-management section, matching the goal-doc order. The
                     // divergence-details modal is an inline reveal reached by the
                     // apple-bridge `safeTap` scroll-into-view within this ScrollView.
-                    RestoreSectionView()
+                    RestoreSectionView(snapshotsChanged: vm.snapshotsChanged)
                     Divider()
                     BackupDestinationsView()
                 }
@@ -94,7 +94,9 @@ struct BackupSplitView: View {
         )) { folder in
             VStack(alignment: .leading, spacing: 4) {
                 HStack {
-                    Text(folder.name)
+                    // A kind entry's `name` is its label key (the `.tag` below
+                    // keeps it as the selection value); the label is resolved.
+                    Text(BackupsMachineVM.folderLabel(folder))
                         .font(.headline)
                     Spacer()
                 }
@@ -121,12 +123,14 @@ struct BackupSplitView: View {
         }
         .frame(minWidth: 220)
         .accessibilityIdentifier(Ids.backupFolderSelector)
-        // Driver `select("backup-folder-selector", <name>)` runs the same
-        // selection path the List's set-binding does (extracted into
+        // Driver `select("backup-folder-selector", <key or label>)` runs the
+        // same selection path the List's set-binding does (extracted into
         // `selectFolder`). `value` reads the machine's current selection.
         // One Entry (read + select).
         .automationSelect(Ids.backupFolderSelector,
-                          value: { vm.selectedFolder }) { name in
+                          value: { vm.selectedFolder },
+                          options: { vm.folderOptionLabels },
+                          optionKeys: { vm.folderOptionKeys }) { name in
             selectFolder(name)
         }
     }

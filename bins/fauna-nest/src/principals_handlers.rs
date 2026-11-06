@@ -43,24 +43,33 @@ fn list_handler() -> RpcHandler {
                 .await
                 .map_err(internal)?
                 .into_iter()
-                .map(|p| PrincipalInfo {
-                    oracle: oracle.remove(&p.principal_id),
-                    principal_id: p.principal_id,
-                    client_id: p.client_id,
-                    holder_x25519: p.holder_x25519.map(ByteBuf::from),
-                    execution_form: p.execution_form,
-                    declared_kinds: p.declared_kinds,
-                    granted_scopes: p.granted_scopes,
-                    created_at: p.created_at,
-                    last_used_at: p.last_used_at,
-                    label: p.label,
-                    publisher_key: p.publisher_key.map(ByteBuf::from),
-                    writer_ed25519: p.writer_ed25519.map(ByteBuf::from),
-                    live_grants: p.live_grants,
-                    bridge: p.declared_bridge,
-                    service_auth: p.declared_service_auth,
-                    activitypub_peers: p.declared_activitypub_peers,
-                    extra: Default::default(),
+                .map(|p| {
+                    let oracle = oracle.remove(&p.principal_id);
+                    // A custodian-served act is a use too; the oracle keeps
+                    // its `at` in seconds, the roster milliseconds.
+                    let served = oracle
+                        .as_ref()
+                        .and_then(|o| o.last_op.as_ref())
+                        .map(|op| op.at.saturating_mul(1000));
+                    PrincipalInfo {
+                        oracle,
+                        last_used_at: p.last_used_at.max(served),
+                        principal_id: p.principal_id,
+                        client_id: p.client_id,
+                        holder_x25519: p.holder_x25519.map(ByteBuf::from),
+                        execution_form: p.execution_form,
+                        declared_kinds: p.declared_kinds,
+                        granted_scopes: p.granted_scopes,
+                        created_at: p.created_at,
+                        label: p.label,
+                        publisher_key: p.publisher_key.map(ByteBuf::from),
+                        writer_ed25519: p.writer_ed25519.map(ByteBuf::from),
+                        live_grants: p.live_grants,
+                        bridge: p.declared_bridge,
+                        service_auth: p.declared_service_auth,
+                        activitypub_peers: p.declared_activitypub_peers,
+                        extra: Default::default(),
+                    }
                 })
                 .collect();
             encode_reply(&ListPrincipalsReply {
@@ -292,4 +301,81 @@ pub fn register_principals_handlers(b: &mut RpcRouterBuilder) {
             handler: revoke_handler(),
         },
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::CacheDb;
+    use crate::db::third_party_principals::{AttestedKeys, ExecutionForm, PrincipalAttestation};
+    use crate::routes::AppState;
+    use std::sync::Arc;
+
+    const ACCOUNT: [u8; 32] = [0xA1; 32];
+
+    async fn listed(state: &Arc<AppState>) -> Vec<PrincipalInfo> {
+        let payload = fauna_protocol::encode_canonical(&ListPrincipalsRequest::default()).unwrap();
+        let reply = list_handler()(Arc::clone(state), ACCOUNT, payload)
+            .await
+            .expect("list");
+        decode::<ListPrincipalsReply>(&reply).unwrap().principals
+    }
+
+    fn op(id: u8, at: i64) -> RecordedPrincipalOp {
+        RecordedPrincipalOp {
+            op_id: vec![id; 16],
+            at,
+            class: "conversation.read".into(),
+            detail: "room".into(),
+            extra: Default::default(),
+        }
+    }
+
+    /// *Last used* on the roster includes the custodian's served acts, which
+    /// the oracle records in unix seconds against the principal's
+    /// milliseconds: an act newer than the ceremony moves it, and an older
+    /// one never winds it back.
+    #[tokio::test]
+    async fn last_used_includes_the_newest_custodian_served_act() {
+        let db = Arc::new(CacheDb::open_in_memory().unwrap());
+        db.create_user(&ACCOUNT, "free", "test").await.unwrap();
+        db.record_atproto_oauth_grant(
+            &ACCOUNT,
+            b"family-1",
+            "https://app.example/client.json",
+            Some("Example App"),
+            "atproto",
+            &[],
+            "jkt",
+            i64::MAX,
+            None,
+            crate::db::atproto_pds::OAUTH_GRANT_ISSUER_NEST,
+            &PrincipalAttestation {
+                keys: AttestedKeys {
+                    holder_x25519: Some([0x77; 32]),
+                    writer_ed25519: None,
+                },
+                execution_form: ExecutionForm::Device,
+                manifest: None,
+            },
+        )
+        .await
+        .unwrap();
+        let state = Arc::new(AppState::for_test(Arc::clone(&db)));
+        let before = listed(&state).await;
+        let principal_id = before[0].principal_id.clone();
+        let ceremony = before[0].last_used_at.expect("the ceremony stamps it");
+
+        let older = ceremony / 1000 - 600;
+        db.record_device_principal_ops(&ACCOUNT, &principal_id, &[op(1, older)], None)
+            .await
+            .unwrap();
+        assert_eq!(listed(&state).await[0].last_used_at, Some(ceremony));
+
+        let newer = ceremony / 1000 + 120;
+        db.record_device_principal_ops(&ACCOUNT, &principal_id, &[op(2, newer)], None)
+            .await
+            .unwrap();
+        assert_eq!(listed(&state).await[0].last_used_at, Some(newer * 1000));
+    }
 }

@@ -60,6 +60,7 @@ pytestmark = [
     pytest.mark.ios,
     pytest.mark.windows,
     pytest.mark.web,
+    pytest.mark.android,
 ]
 
 BEFORE_ONE = "before the newcomer: one"

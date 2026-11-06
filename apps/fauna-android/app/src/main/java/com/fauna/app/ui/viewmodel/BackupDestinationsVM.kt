@@ -10,6 +10,7 @@ import com.fauna.app.ui.util.loadFailureText
 import com.fauna.ffi.FfiBackupDestinationStatus
 import com.fauna.ffi.FfiBackupDestinationView
 import com.fauna.ffi.FfiDestinationAuditRow
+import com.fauna.ffi.FfiPullBackPreflight
 import com.fauna.ffi.FfiReseedResult
 import com.fauna.ffi.destinationRowIsAClientDevice
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -70,6 +71,14 @@ class BackupDestinationsVM @Inject constructor(
     private val _auditRows = MutableStateFlow<Map<String, FfiDestinationAuditRow>>(emptyMap())
     val auditRows: StateFlow<Map<String, FfiDestinationAuditRow>> = _auditRows.asStateFlow()
 
+    init {
+        // The e2e `backup_audit_run_now` poke (debug TestAgent only; production
+        // never emits): re-run the same audit refresh a destination edit does.
+        viewModelScope.launch {
+            com.fauna.app.core.E2eBackupAuditPoke.requests.collect { refreshAudit() }
+        }
+    }
+
     /**
      * Bytes this device is holding with **no** destination row claiming them, or
      * `null` when the `backup-orphaned-store-row` must not paint at all
@@ -106,6 +115,15 @@ class BackupDestinationsVM @Inject constructor(
      */
     private val _reseedResult = MutableStateFlow<FfiReseedResult?>(null)
     val reseedResult: StateFlow<FfiReseedResult?> = _reseedResult.asStateFlow()
+
+    /**
+     * The pull-back's preflight while its confirm is open: the nest row it was
+     * run for, plus the shared face's own record (`lines` the confirm shows,
+     * `acceptance` the run carries — `backups.md` § Restore after losing the
+     * nest). `null` outside a nest-kind confirm.
+     */
+    private val _pullBackPreflight = MutableStateFlow<Pair<String, FfiPullBackPreflight>?>(null)
+    val pullBackPreflight: StateFlow<Pair<String, FfiPullBackPreflight>?> = _pullBackPreflight.asStateFlow()
 
     /**
      * The nest destination the last restore pulled back from, or `null` for
@@ -295,6 +313,11 @@ class BackupDestinationsVM @Inject constructor(
         val pullFrom = source
             ?.takeIf { reseedRunsPullBack(_destinations.value, it) }
             ?.let { id -> _destinations.value.firstOrNull { it.destinationId == id } }
+        // A nest row's run carries exactly the preflight its confirm showed.
+        val accepted = pullFrom?.let { p ->
+            _pullBackPreflight.value?.takeIf { it.first == p.destinationId }?.second
+        }
+        _pullBackPreflight.value = null
         viewModelScope.launch {
             _reseedRunning.value = true
             _reseedResult.value = null
@@ -302,7 +325,8 @@ class BackupDestinationsVM @Inject constructor(
             val result = try {
                 if (deviceId.isNullOrBlank()) throw ApiException("no device id")
                 if (pullFrom != null) {
-                    api.pullBackFromDestination(deviceId, pullFrom.destinationId)
+                    if (accepted == null) throw ApiException("no preflight")
+                    api.pullBackAccepted(deviceId, pullFrom.destinationId, accepted.acceptance)
                 } else {
                     api.reseedCustodianStore(deviceId, dataDir())
                 }
@@ -316,6 +340,36 @@ class BackupDestinationsVM @Inject constructor(
                 refresh()
             }
         }
+    }
+
+    /**
+     * The press on a nest row's `backup-destination-reseed-button`: run the
+     * shared pull-back preflight; the confirm opens on [pullBackPreflight]. A
+     * failed preflight is a failed gesture — it lands in [reseedResult] as a
+     * stop and no confirm opens.
+     */
+    fun preflightPullBack(destinationId: String) {
+        if (_reseedRunning.value) return
+        _pullBackPreflight.value = null
+        _reseedResult.value = null
+        viewModelScope.launch {
+            val preflight = try {
+                api.pullBackPreflight(destinationId)
+            } catch (e: Exception) {
+                FfiPullBackPreflight(stopped = e.message ?: "error", lines = emptyList(), acceptance = "")
+            }
+            if (preflight.stopped != null) {
+                _reseedPulledFrom.value = _destinations.value.firstOrNull { it.destinationId == destinationId }
+                _reseedResult.value = reseedStopped(preflight.stopped!!)
+            } else {
+                _pullBackPreflight.value = destinationId to preflight
+            }
+        }
+    }
+
+    /** `backup-destination-reseed-cancel-button`: drop the held preflight, nothing ran. */
+    fun cancelPullBackPreflight() {
+        _pullBackPreflight.value = null
     }
 
     /** `backup-audit-recover-button[i]`: arm the confirm for [destinationId]. */

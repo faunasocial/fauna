@@ -14,6 +14,7 @@
 use serde::{Deserialize, Serialize};
 
 use fauna_core::localized::LocalizedText;
+use fauna_core::sync::RetainedConflict;
 use fauna_folders_machine::FolderWizardSnapshot;
 
 /// A device's place in one folder, as the page-level device list reports it.
@@ -697,6 +698,50 @@ impl From<ConflictCandidate> for ConflictCandidateSummary {
     }
 }
 
+impl ConflictSummary {
+    /// A group set's review row, as the replica holding it reports it — the
+    /// one mapping from [`RetainedConflict`] to the shared review row, so every
+    /// app renders it through the same fold and the same ids (`group-set.md`
+    /// § Build design — the group set, decision 9). `set_label` is the set's
+    /// label on the page.
+    ///
+    /// The row is **presented auto-resolved** whatever the state DB says:
+    /// there `resolved_at IS NULL` means *awaiting review*, while here a `None`
+    /// is the unresolved, informational reading, and this edit has already
+    /// lost. `has_other_version` is true by construction — the row exists
+    /// because this device retains the version — including on a winning delete,
+    /// whose `winning_manifest_hash` is `None`. `candidates` stays empty: the
+    /// one candidate rests on this device and the gesture addresses it through
+    /// the row, never the nest's re-point.
+    #[must_use]
+    pub fn of_retained(set_label: &str, row: &RetainedConflict) -> Self {
+        Self {
+            id: row.id,
+            folder: set_label.to_string(),
+            device_id: row.winner_device.clone().unwrap_or_default(),
+            path: row.path.clone(),
+            conflict_type: "concurrent_edit".to_string(),
+            details: row.details.clone(),
+            created_at: row.created_at,
+            candidates: Vec::new(),
+            resolved_at: Some(row.created_at),
+            resolution: Some("latest_wins".to_string()),
+            winning_manifest_hash: row.winner_manifest.clone(),
+            has_other_version: true,
+            file_info: review_file_info(set_label, &row.path, row.winner_manifest.as_deref()),
+        }
+    }
+}
+
+/// `conflict-file-info`: the set and path, and once a row has a winning head,
+/// its shortened hash.
+fn review_file_info(folder: &str, path: &str, winning: Option<&str>) -> String {
+    match winning {
+        Some(w) => format!("{folder}: {path} → {}", w.get(..8).unwrap_or(w)),
+        None => format!("{folder}: {path}"),
+    }
+}
+
 impl From<SyncConflict> for ConflictSummary {
     fn from(c: SyncConflict) -> Self {
         // Review-row derivations, computed once here (the `owner_display`
@@ -707,10 +752,7 @@ impl From<SyncConflict> for ConflictSummary {
             Some(w) => c.candidates.iter().any(|cand| &cand.manifest_hash != w),
             None => false,
         };
-        let file_info = match &c.winning_manifest_hash {
-            Some(w) => format!("{}: {} → {}", c.folder, c.path, w.get(..8).unwrap_or(w)),
-            None => format!("{}: {}", c.folder, c.path),
-        };
+        let file_info = review_file_info(&c.folder, &c.path, c.winning_manifest_hash.as_deref());
         Self {
             id: c.id,
             folder: c.folder,
@@ -935,6 +977,45 @@ mod wire_transcription_tests {
             empty_handle.owner_display,
             fauna_core::format::short_id(&actor)
         );
+    }
+
+    /// A group set's row is presented as the auto-resolved review row it is,
+    /// though its state DB still reads it as awaiting review, and it keeps the
+    /// gesture whether the winner was a put or a delete (decision 9).
+    #[test]
+    fn a_retained_row_maps_to_an_auto_resolved_review_row() {
+        let winner = "c0ffee00".repeat(8);
+        let row = RetainedConflict {
+            id: 4,
+            path: "notes.md".into(),
+            created_at: 1_700,
+            winner_device: Some("bb22".into()),
+            winner_manifest: Some(winner.clone()),
+            ..Default::default()
+        };
+        let summary = ConflictSummary::of_retained("Holiday", &row);
+        assert_eq!(summary.id, 4);
+        assert_eq!(summary.folder, "Holiday");
+        assert_eq!(summary.resolved_at, Some(1_700));
+        assert_eq!(summary.resolution.as_deref(), Some("latest_wins"));
+        assert_eq!(
+            summary.winning_manifest_hash.as_deref(),
+            Some(winner.as_str())
+        );
+        assert!(summary.has_other_version);
+        assert_eq!(summary.file_info, "Holiday: notes.md → c0ffee00");
+
+        let delete = RetainedConflict {
+            winner_manifest: None,
+            ..row
+        };
+        let summary = ConflictSummary::of_retained("Holiday", &delete);
+        assert!(
+            summary.has_other_version,
+            "the edit is retained all the same"
+        );
+        assert_eq!(summary.winning_manifest_hash, None);
+        assert_eq!(summary.file_info, "Holiday: notes.md");
     }
 
     /// The conflict review-row derivations are computed ONCE at transcribe

@@ -22,22 +22,25 @@ import (
 const maxInFlightDataBytes = 256 << 20
 
 // dataSourceShareDivisor sets one source's share of the budget (limit/8, 32
-// MiB in production): a source — an IPv4 address or an IPv6 /64, loopback
+// MiB in production): a source — an IPv4 address or an IPv6 /48, loopback
 // exempt — holds at most that much across its concurrent DATA transactions,
-// so one stranger fanning trickled DATA over its 50 connections cannot defer
-// every other sender's mail. A source's sole transaction may pass
+// so one stranger fanning trickled DATA over its 50 connections, or over the
+// /64s of its /56, cannot defer every other sender's mail. A source's sole transaction may pass
 // the share, so one message at the size cap stays admissible; while it is
 // past the share the source's other transactions get nothing. Hard-coded:
 // internal anti-abuse tuning, not a human-chosen knob.
 const dataSourceShareDivisor = 8
 
 // dataDeadlineGrace and dataMinBytesPerSecond bound a whole DATA transfer:
-// after the grace a transfer must have averaged the minimum rate since DATA
-// began, or it is dropped (421 4.4.2) and its charge returned. The per-read
-// timeout alone let a byte every < 30 s hold a reservation for as long as the
-// sender liked. 16 KiB/s is far below any mail server's link, and
-// the check runs after each read, which the per-read timeout returns within
-// 30 s. Hard-coded: internal anti-abuse tuning, not a human-chosen knob.
+// each byte received moves its deadline on by 1/dataMinBytesPerSecond, never
+// past the grace from now, and a transfer whose deadline has passed is dropped
+// (421 4.4.2) and its charge returned. The per-read timeout alone let a byte
+// every < 30 s hold a reservation for as long as the sender liked; a deadline
+// averaged from DATA start let bytes sent up front bank hold time for the
+// trickle after them, so a transfer banks at most the grace.
+// 16 KiB/s is far below any mail server's link, and the check runs after each
+// read, which the per-read timeout returns within 30 s. Hard-coded: internal
+// anti-abuse tuning, not a human-chosen knob.
 const (
 	dataDeadlineGrace     = 2 * time.Minute
 	dataMinBytesPerSecond = 16 << 10
@@ -92,8 +95,9 @@ type dataCharge struct {
 	b      *dataBudget
 	source string
 	held   int64
-	start  time.Time
-	closed bool
+	// deadline is when the transfer falls behind the minimum rate.
+	deadline time.Time
+	closed   bool
 }
 
 // open starts a transaction for source (dataShareKey; "" is exempt from the
@@ -112,7 +116,7 @@ func (b *dataBudget) open(source string) *dataCharge {
 		}
 		sc.open++
 	}
-	return &dataCharge{b: b, source: source, start: b.now()}
+	return &dataCharge{b: b, source: source, deadline: b.now().Add(dataDeadlineGrace)}
 }
 
 // grow charges n more bytes, or returns errDataBudgetFull /
@@ -143,14 +147,18 @@ func (c *dataCharge) grow(n int64) error {
 	return nil
 }
 
-// tooSlow reports whether the transfer, holding received bytes, has fallen
-// behind the whole-DATA deadline.
-func (c *dataCharge) tooSlow(received int) bool {
+// tooSlow moves the whole-DATA deadline on by n newly received bytes, at most
+// to the grace from now, and reports whether it has passed.
+func (c *dataCharge) tooSlow(n int) bool {
 	if c.b == nil {
 		return false
 	}
-	allowed := dataDeadlineGrace + time.Duration(int64(received)*int64(time.Second)/dataMinBytesPerSecond)
-	return c.b.now().Sub(c.start) > allowed
+	now := c.b.now()
+	c.deadline = c.deadline.Add(time.Duration(int64(n) * int64(time.Second) / dataMinBytesPerSecond))
+	if ceiling := now.Add(dataDeadlineGrace); c.deadline.After(ceiling) {
+		c.deadline = ceiling
+	}
+	return now.After(c.deadline)
 }
 
 // close returns everything the transaction holds; it is idempotent.
@@ -186,7 +194,8 @@ func (b *dataBudget) inUse() int64 {
 }
 
 // dataShareKey is the source a port-25 peer's DATA is charged to: the IPv4
-// address, or the IPv6 /64 (one host is routinely handed a whole /64). Loopback
+// address, or the IPv6 /48 (one site is routinely handed a /56 or a /48, so a
+// /64 key would give it 256 shares or more). Loopback
 // — the in-container dials — is exempt ("") as for the per-IP connection caps;
 // an address that does not parse is still charged, under its raw text.
 func dataShareKey(clientIP string) string {
@@ -200,7 +209,7 @@ func dataShareKey(clientIP string) string {
 	if v4 := ip.To4(); v4 != nil {
 		return v4.String()
 	}
-	return ip.Mask(net.CIDRMask(64, 128)).String() + "/64"
+	return ip.Mask(net.CIDRMask(48, 128)).String() + "/48"
 }
 
 // readDataWithinBudget reads r to EOF, or to limit+1 bytes when limit > 0 (the
@@ -240,7 +249,7 @@ func readDataWithinBudget(r io.Reader, limit int64, charge *dataCharge) ([]byte,
 		if rerr != nil {
 			return nil, rerr
 		}
-		if charge.tooSlow(len(raw)) {
+		if charge.tooSlow(n) {
 			return nil, errDataTooSlow
 		}
 	}

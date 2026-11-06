@@ -110,30 +110,40 @@ public final class AccountSwitcherVM {
         }
     }
 
-    public func remove(actorId: String) {
+    ///
+    /// **One shared whole gesture** (`account-scoping.md` § Erasure follows scope →
+    /// *Removing an account retires this machine from it, as a sign-out does*): the
+    /// `removeAccountGesture` export runs the ask, the snapshot-and-remove, the
+    /// nest half of the retirement (this machine's named row loses its grant) and
+    /// the erase, in that order. Async because the retirement is a nest round trip.
+    public func remove(actorId: String) async {
         error = nil
         let registry = FaunaAccounts.registry()
-        if let blocked = removeAccountBlocked(
-            baseDir: AccountStateDir.base.path,
-            actorIdHex: actorId,
-            storeContainerDir: AccountStateDir.storeContainerDir,
-            ownLock: ownLock,
-            servingHere: servedActorId(registry)
-        ) {
-            error = renderLocalizedText(Self.line(blocked))
-            logMessage(level: .warn, target: "fauna.accounts",
-                       message: "[account-switcher] remove(\(actorId)) REFUSED: \(blocked)")
-            return
+        let storeContainer = AccountStateDir.storeContainerDir.map { dir in
+            FfiStoreContainer(
+                dir: dir,
+                exclusion: .excludedByShell(excluder: CloudBackupExcluder()))
         }
         do {
-            try registry.remove(actorId: actorId)
+            if let blocked = try await removeAccountGesture(
+                registry: registry,
+                actorIdHex: actorId,
+                baseDirs: [AccountStateDir.base.path],
+                storeContainer: storeContainer,
+                ownLock: ownLock,
+                servingHere: servedActorId(registry)
+            ) {
+                error = renderLocalizedText(Self.line(blocked))
+                logMessage(level: .warn, target: "fauna.accounts",
+                           message: "[account-switcher] remove(\(actorId)) REFUSED: \(blocked)")
+                return
+            }
         } catch {
             self.error = DisplayError.message(error)
             logMessage(level: .error, target: "fauna.accounts",
                        message: "[account-switcher] remove(\(actorId)) failed: \(error)")
             return
         }
-        AccountStateDir.erase(actorIdHex: actorId)
         reload()
     }
 

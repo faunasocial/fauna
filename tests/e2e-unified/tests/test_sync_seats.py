@@ -22,11 +22,13 @@ testing.md § convention 16 owns the normative claims.
 
 from __future__ import annotations
 
+import os
 import re
 from pathlib import Path
 
 import pytest
 
+from actions.backups import BackupsActions
 from helpers import multiseat_config as cfg
 from helpers import sync_seats
 
@@ -170,16 +172,15 @@ def test_the_trio_matrix_mirrors_the_pair_matrix_one_seat_wider():
 def test_the_platform_filter_is_seat_count_agnostic():
     """One filter for every seat count — the exclusions cannot fall out of step.
 
-    tui cannot drive a sync agent on windows whether there are two seats or
-    three, so the trio is filtered out of collection there for the same
-    structural reason and by the same code path (convention 7: filtered, never
-    skipped)."""
+    Whatever a platform cannot drive is filtered from the trios by the same code
+    path as from the pairs (convention 7: filtered, never skipped); with the map
+    empty, windows collects both trios."""
     trios = sync_seats.seat_sets_for_platform("win32", sync_seats.DEFAULT_TRIOS)
     assert ("native", "native", "native") in trios
-    assert ("tui", "tui", "tui") not in trios
-    assert ("tui", "tui", "tui") in sync_seats.seat_sets_for_platform(
-        "linux", sync_seats.DEFAULT_TRIOS
-    )
+    assert ("tui", "tui", "tui") in trios
+    assert sync_seats.seat_sets_for_platform(
+        "win32", sync_seats.DEFAULT_TRIOS, unbuilt={"win32": {"tui": "owed"}}
+    ) == (("native", "native", "native"),)
 
 
 def test_the_seat_pool_is_a_prefix_so_seat_a_means_the_same_thing_everywhere():
@@ -221,13 +222,12 @@ def test_every_seat_platform_collects_at_least_the_native_pair():
         assert ("native", "native") in sync_seats.seat_sets_for_platform(platform)
 
 
-def test_the_tui_pair_is_filtered_out_on_windows_not_skipped():
-    """tui drives no sync agent on windows (structural, convention 7) — the pair
-    must never be COLLECTED there, because a skip reports `s` in a summary line
-    that reads like success."""
-    assert ("tui", "tui") not in sync_seats.seat_sets_for_platform("win32")
-    assert ("tui", "tui") in sync_seats.seat_sets_for_platform("linux")
-    assert ("tui", "tui") in sync_seats.seat_sets_for_platform("darwin")
+def test_the_tui_pair_is_collected_on_every_platform_windows_included():
+    """The tui drives the sync agent on windows too (`sync-agent.md`), so the
+    `tui+tui` pair is collected on all three platforms; the former windows
+    absence was stale and is retired (2026-10-31)."""
+    for platform in ("win32", "linux", "darwin"):
+        assert ("tui", "tui") in sync_seats.seat_sets_for_platform(platform)
 
 
 def test_the_default_matrix_is_both_seat_counts_of_the_same_modes():
@@ -315,9 +315,15 @@ def test_seat_sets_from_env_makes_the_mixed_bisect_invocable():
 
 def test_a_platform_filter_removes_a_pair_if_either_seat_is_unsupported():
     """A mixed pair is only as collectable as its weaker seat — filtering on
-    `any` rather than `all` is what keeps `tui+native` off windows too."""
+    `any` rather than `all` is what drops a mixed pair for a mode the platform
+    lacks (exercised through a caller's own ``unbuilt`` debt, the real
+    UNSUPPORTED_MODES map being empty)."""
     mixed = (("tui", "native"), ("native", "tui"), ("native", "native"))
-    assert sync_seats.seat_sets_for_platform("win32", mixed) == (("native", "native"),)
+    owed = {"win32": {"tui": "owed"}}
+    assert sync_seats.seat_sets_for_platform("win32", mixed, unbuilt=owed) == (
+        ("native", "native"),
+    )
+    assert sync_seats.seat_sets_for_platform("win32", mixed) == mixed
     assert sync_seats.seat_sets_for_platform("linux", mixed) == mixed
 
 
@@ -336,16 +342,83 @@ def test_the_native_pair_collects_on_every_gui_desktop_platform():
         assert ("native", "native") in sync_seats.seat_sets_for_platform(platform)
 
 
+def test_a_phone_seat_resolves_to_the_simulator_app_and_never_joins_the_matrix():
+    """`phone` is the device-journey seat (the participation switch's leg the
+    phones owe), not a folder-syncing mode: it resolves to iOS on darwin and to
+    the android emulator on linux (the box whose harness drives it), no other
+    platform guesses an app for it, and the convergence matrix — built from
+    `SEAT_MODES` — never multiplies over it (a phone syncs no folder)."""
+    assert sync_seats.seat_mode_app("phone", "darwin") == "ios"
+    assert sync_seats.seat_mode_app("phone", "linux") == "android"
+    assert sync_seats.seat_mode_app("phone", "win32") is None
+    assert sync_seats.seat_mode_app("native", "darwin") == "macos"
+    assert sync_seats.seat_mode_app("tui", "darwin") == "tui"
+    assert sync_seats.PHONE_MODE not in sync_seats.SEAT_MODES
+    assert not any(
+        sync_seats.PHONE_MODE in seat_set for seat_set in sync_seats.DEFAULT_SEAT_SETS
+    )
+    assert sync_seats.DeviceSeatDriver.carries_peer_leg is False
+    assert sync_seats.AppSeatDriver.carries_peer_leg is True
+
+
+def test_a_phone_pair_builds_both_seats_but_credits_only_the_phone(monkeypatch):
+    """The prebuild and the lane need both apps of a `tui+phone` pair; the
+    feature ledger credits only the phone — the tui seat is a helper there, and
+    the phone variant leaves out outcomes the tui pair witnesses."""
+    import conftest
+
+    monkeypatch.setattr(conftest.sys, "platform", "darwin")
+    assert conftest._apps_for_seat_pair(("tui", "phone")) == ("tui", "ios")
+    assert conftest._apps_for_seat_pair(("tui", "phone"), under_test=True) == ("ios",)
+    # A pair with no phone is credited to every seat, as before.
+    assert conftest._apps_for_seat_pair(("native", "native"), under_test=True) == (
+        "macos", "macos",
+    )
+
+    # Under `--app ios` the helper seat is still built, though `tui` is not a
+    # selected app — while the ledger reads the phone alone.
+    class _Item:
+        class callspec:
+            params = {"seat_pair": ("tui", "phone")}
+
+    assert conftest._item_param_apps(_Item, {"ios"}) == {"tui", "ios"}
+    assert conftest._item_param_apps(_Item, {"ios"}, under_test=True) == {"ios"}
+    assert conftest._parametrized_clients(_Item) == {"ios"}
+
+
+def test_a_web_seat_is_a_device_only_seat_on_linux_credited_alone(monkeypatch):
+    """`web` is the second device-only seat: the web app in a browser, signed in
+    as one more device and bound to no folder. It resolves on linux alone (web
+    is built and run only on Linux), never joins the convergence matrix, is
+    driven by the same `DeviceSeatDriver` as the phone, and in a `web+tui` pair
+    the ledger credits web alone — the tui seat is the helper whose row web's
+    Devices page reads."""
+    import conftest
+
+    assert sync_seats.seat_mode_app("web", "linux") == "web"
+    for platform in ("win32", "darwin"):
+        assert sync_seats.seat_mode_app("web", platform) is None
+    assert set(sync_seats.DEVICE_ONLY_MODES) == {"phone", "web"}
+    assert sync_seats.WEB_MODE not in sync_seats.SEAT_MODES
+    assert not any(
+        sync_seats.WEB_MODE in seat_set for seat_set in sync_seats.DEFAULT_SEAT_SETS
+    )
+
+    monkeypatch.setattr(conftest.sys, "platform", "linux")
+    assert conftest._apps_for_seat_pair(("web", "tui")) == ("web", "tui")
+    assert conftest._apps_for_seat_pair(("web", "tui"), under_test=True) == ("web",)
+
+
 def test_no_platform_owes_an_unbuilt_seat_any_more():
     """`UNBUILT_MODES` reached `{}` on 2026-08-10 with the linux seat — the state
     the map was always shaped to arrive at, and the reason it was kept apart
     from `UNSUPPORTED_MODES` in the first place.
 
-    The distinction convention 7 exists to keep: `tui` on windows CANNOT exist
-    (the terminal client drives no agent there) and is closed forever, while a
-    missing native seat was only ever debt with a named owner. Filing debt as
-    *unsupported* would have taught every future reader it was impossible —
-    which is how an owed track dies.
+    The distinction convention 7 exists to keep: a seat that CANNOT exist is
+    closed forever (`UNSUPPORTED_MODES`, empty since 2026-10-31 when the stale
+    tui-on-windows entry was retired), while a missing native seat was only ever
+    debt with a named owner. Filing debt as *unsupported* would have taught every
+    future reader it was impossible — which is how an owed track dies.
 
     The empty map is asserted directly rather than per-platform because a stale
     entry for ANY platform silently filters that platform's pair right back out
@@ -354,10 +427,9 @@ def test_no_platform_owes_an_unbuilt_seat_any_more():
     for platform in ("win32", "darwin", "linux"):
         assert "native" not in sync_seats.UNSUPPORTED_MODES.get(platform, ())
         assert ("native", "native") in sync_seats.seat_sets_for_platform(platform)
-    # And the structural map keeps its own meaning intact — emptying the debt
-    # map must not be read as "every exclusion is gone".
-    assert "tui" in sync_seats.UNSUPPORTED_MODES["win32"]
-    assert ("tui", "tui") not in sync_seats.seat_sets_for_platform("win32")
+    # The tui pair is collected on windows too (the tui drives the agent there).
+    assert "tui" not in sync_seats.UNSUPPORTED_MODES.get("win32", ())
+    assert ("tui", "tui") in sync_seats.seat_sets_for_platform("win32")
 
 
 def test_every_unbuilt_entry_names_the_owner_that_owes_it():
@@ -812,6 +884,89 @@ def test_a_macos_seat_finds_its_agent_log_through_the_drivers_state_base(tmp_pat
     assert "fauna.log.2026-10-01" in note, "the note must name the file it read"
 
 
+def test_a_macos_seat_reads_its_sync_entries_through_the_drivers_state_base(tmp_path):
+    """The same missing `config_home`, on the read of the engine's own rows:
+    `test_seat_ignore` died on macOS with `the driver exposes no launch root to
+    search` before it could look at a single row. The agent re-scopes under
+    `<state base>/<actor-id-hex>/`, so the read walks the whole tree."""
+    import sqlite3
+
+    state_base = tmp_path / "home" / "Library" / "Application Support" / "Fauna" / "sync"
+    state_dir = state_base / ("ab" * 32)
+    state_dir.mkdir(parents=True)
+    conn = sqlite3.connect(state_dir / "fsid-local-1.db")
+    conn.execute("CREATE TABLE sync_entries (path TEXT, state TEXT, local_hash BLOB)")
+    conn.execute("INSERT INTO sync_entries VALUES ('kept.txt', 'synced', x'00')")
+    conn.commit()
+    conn.close()
+
+    seat = _app_seat("a", tmp_path / "a")
+
+    class _MacosDriver:
+        sync_agent_state_base = str(state_base)
+
+    seat._driver = _MacosDriver()
+
+    assert seat.sync_entry_states() == {"kept.txt": ("synced", True)}
+
+
+class _TuiOnWindowsDriver:
+    """The tui driver on a windows host: it has a ``config_home`` AND names its
+    agent's ``--data-dir`` (`drivers/tui.py::sync_agent_state_base`), which sits
+    at ``<launch root>/sync-agent`` with no ``sync`` component, since
+    ``--data-dir`` suppresses the ``fauna/sync`` derivation."""
+
+    def __init__(self, launch_root):
+        self.config_home = str(launch_root / "config")
+        self.sync_agent_state_base = str(launch_root / "sync-agent")
+
+
+def test_a_tui_seat_on_windows_finds_its_agent_log_through_the_drivers_state_base(tmp_path):
+    """The tui seat pair collects on windows since 2026-10-31, and its first
+    two-seat run there died at seat launch: `_await_adopted_rescan` globbed
+    `**/sync/logs/` under the launch root, the agent's flat `--data-dir` holds
+    `sync-agent/logs/`, and the note read "the agent wrote NOTHING" over a log
+    that was there. A driver that names its agent's state root is believed
+    before anything is derived from ``config_home``."""
+    launch_root = tmp_path / "fauna-e2e-tui-agent-xyz"
+    (launch_root / "config").mkdir(parents=True)
+    logs = launch_root / "sync-agent" / "logs"
+    logs.mkdir(parents=True)
+    (logs / "fauna.log.2026-11-02").write_text(
+        "rescan tick armed rescan_interval_ms=2311000\n", encoding="utf-8"
+    )
+
+    seat = _app_seat("b", tmp_path / "b")
+    seat._driver = _TuiOnWindowsDriver(launch_root)
+
+    note = seat.agent_log_note()
+    assert "not locatable" not in note
+    assert "fauna.log.2026-11-02" in note, "the note must name the file it read"
+    assert sync_seats.adopted_rescan_ms(seat.agent_log_lines()) == {2311000}
+
+
+def test_a_tui_seat_on_windows_reads_its_sync_entries_through_the_drivers_state_base(tmp_path):
+    """The same flat `--data-dir`, on the read of the engine's own rows: the
+    `**/sync/**/*.db` sweep under the launch root finds no state DB, because
+    the per-actor scope nests under `sync-agent/`, never under a `sync` dir."""
+    import sqlite3
+
+    launch_root = tmp_path / "fauna-e2e-tui-agent-xyz"
+    (launch_root / "config").mkdir(parents=True)
+    state_dir = launch_root / "sync-agent" / ("cd" * 32)
+    state_dir.mkdir(parents=True)
+    conn = sqlite3.connect(state_dir / "fsid-local-1.db")
+    conn.execute("CREATE TABLE sync_entries (path TEXT, state TEXT, local_hash BLOB)")
+    conn.execute("INSERT INTO sync_entries VALUES ('cloud.txt', 'placeholder', NULL)")
+    conn.commit()
+    conn.close()
+
+    seat = _app_seat("b", tmp_path / "b")
+    seat._driver = _TuiOnWindowsDriver(launch_root)
+
+    assert seat.sync_entry_states() == {"cloud.txt": ("placeholder", False)}
+
+
 # ── the seat's own agent: where it answers, and how it stops ─────────────────
 
 
@@ -967,6 +1122,7 @@ def test_a_files_own_owed_seat_is_filtered_and_named():
     owed = {"linux": {"native": "the linux leg of this journey is not built yet"}}
     assert sync_seats.seat_sets_for_platform("linux", unbuilt=owed) == (("tui", "tui"),)
     assert sync_seats.seat_sets_for_platform("win32", unbuilt=owed) == (
+        ("tui", "tui"),
         ("native", "native"),
     )
     assert ("native", "native") in sync_seats.seat_sets_for_platform("linux")
@@ -976,14 +1132,13 @@ def test_a_files_own_owed_seat_is_filtered_and_named():
 
 
 def test_the_device_to_device_journey_runs_each_platforms_own_seats():
-    """windows runs its native pair (tui drives no agent there); linux runs
-    the tui pair and its native pair; macOS runs the tui pair until its native
-    leg lands, and each owed leg says what is missing."""
+    """windows, linux and macOS each run the tui pair and their native pair; an
+    owed leg says what is missing."""
     import tests.test_device_to_device_file_transfer as d2d
 
-    assert d2d.seat_pairs("win32") == (("native", "native"),)
+    assert d2d.seat_pairs("win32") == (("tui", "tui"), ("native", "native"))
     assert d2d.seat_pairs("linux") == (("tui", "tui"), ("native", "native"))
-    assert d2d.seat_pairs("darwin") == (("tui", "tui"),)
+    assert d2d.seat_pairs("darwin") == (("tui", "tui"), ("native", "native"))
     for platform, modes in d2d.OWED_SEATS.items():
         for mode, reason in modes.items():
             assert mode in sync_seats.SEAT_MODES, (platform, mode)
@@ -1153,6 +1308,9 @@ class _FakeBackups:
 
     def folder_title(self, i: int) -> str:
         return self._titles[i]
+
+    folder_titles = BackupsActions.folder_titles
+    folder_index = BackupsActions.folder_index
 
 
 def test_the_set_name_override_is_additive_like_the_run_id_one():
@@ -1516,3 +1674,137 @@ def test_a_seat_refusing_the_writers_act_fails_with_every_seats_diagnostics(tmp_
     assert "[a] create: the act failed on this seat" in message
     assert "Invalid argument" in message
     assert "seat a: fake" in message and "seat b: fake" in message
+
+
+# ── the macOS application firewall note (helpers/macos_firewall.py) ──────────
+
+_LISTAPPS = """Total number of apps = 3
+1 : /w/mac-2/target/debug/fauna-sync-agent
+             (Allow incoming connections)
+2 : /w/mac/target/debug/fauna-nest-e2e-1
+             (Block incoming connections)
+3 : /w/mac-3/target/debug/fauna-tui
+             (Allow incoming connections)
+"""
+
+
+def test_firewall_listing_reads_each_path_with_its_verdict():
+    from helpers.macos_firewall import listed_apps
+
+    assert listed_apps(_LISTAPPS) == {
+        "/w/mac-2/target/debug/fauna-sync-agent": "Allow incoming connections",
+        "/w/mac/target/debug/fauna-nest-e2e-1": "Block incoming connections",
+        "/w/mac-3/target/debug/fauna-tui": "Allow incoming connections",
+    }
+
+
+def test_firewall_note_names_an_unlisted_agent_and_a_blocked_one(monkeypatch):
+    """An unlisted binary is the 2026-10-29 shape: its inbound flows are held for
+    a prompt, while `--getappblocked` would still call it permitted."""
+    from helpers import macos_firewall as fw
+
+    replies = {
+        "--getglobalstate": "Firewall is enabled. (State = 1)\n",
+        "--listapps": _LISTAPPS,
+    }
+    monkeypatch.setattr(fw.sys, "platform", "darwin")
+    monkeypatch.setattr(fw, "_run", lambda *args: replies[args[0]])
+    monkeypatch.setattr(fw, "_flow_log", lambda window: "")
+    note = fw.firewall_note(
+        [
+            "/w/mac-3/target/debug/fauna-sync-agent",
+            "/w/mac/target/debug/fauna-nest-e2e-1",
+            "/w/mac-3/target/debug/fauna-tui",
+        ]
+    )
+    assert f"{os.path.realpath('/w/mac-3/target/debug/fauna-sync-agent')} is NOT on its list" in note
+    assert "fauna-nest-e2e-1 is listed as 'Block incoming connections'" in note
+    assert "fauna-tui" not in note
+    assert "needs root" in note
+
+
+def test_firewall_note_trusts_the_logged_verdict_over_a_missing_path(monkeypatch):
+    """A dialog-made entry matches by signing identifier first, the same in every
+    checkout, so an agent missing from `--listapps` by path may still be let
+    through. The log's own
+    verdict decides: measured 2026-11-03, macOS's unlisted agent's flows read
+    `return known verdict: 1` while the note blamed the firewall for a red that
+    was a stale bearer."""
+    from helpers import macos_firewall as fw
+
+    replies = {
+        "--getglobalstate": "Firewall is enabled. (State = 1)\n",
+        "--listapps": _LISTAPPS,
+    }
+    monkeypatch.setattr(fw.sys, "platform", "darwin")
+    monkeypatch.setattr(fw, "_run", lambda *args: replies[args[0]])
+    allowed = (
+        "2026-11-03 06:12:01.0 Df socketfilterfw[277:1] [com.apple.ALF] KNOWN APP FLOW: "
+        "file:///w/mac-3/target/debug/fauna-sync-agent, return known verdict: 1"
+    )
+    monkeypatch.setattr(fw, "_flow_log", lambda window: allowed)
+    assert fw.firewall_note(["/w/mac-3/target/debug/fauna-sync-agent"]) is None
+
+    held = (
+        "2026-11-03 06:12:01.0 Df socketfilterfw[277:1] [com.apple.ALF] Enqueuing new "
+        "inbound flow for fauna-sync-agent with identifier 9"
+    )
+    monkeypatch.setattr(fw, "_flow_log", lambda window: held)
+    assert "is NOT on its list" in fw.firewall_note(["/w/mac-3/target/debug/fauna-sync-agent"])
+
+
+def test_firewall_note_reads_a_symlinked_launch_path_by_its_target(monkeypatch, tmp_path):
+    """The macOS seat launches `.build/debug/FaunaMacOS`, a symlink; the firewall
+    lists the binary under the path it resolved to, so the note must look that
+    up — else an allowed binary reads as unlisted, and an unlisted one is named by
+    a path the user cannot find on the list."""
+    from helpers import macos_firewall as fw
+
+    target = tmp_path / "out" / "Products" / "Debug" / "FaunaMacOS"
+    target.parent.mkdir(parents=True)
+    target.write_text("")
+    link_dir = tmp_path / "debug"
+    link_dir.symlink_to(target.parent)
+    real = str(target.resolve())
+    listing = f"Total number of apps = 1\n1 : {real}\n             (Allow incoming connections)\n"
+    replies = {"--getglobalstate": "Firewall is enabled. (State = 1)\n", "--listapps": listing}
+    monkeypatch.setattr(fw.sys, "platform", "darwin")
+    monkeypatch.setattr(fw, "_run", lambda *args: replies[args[0]])
+    monkeypatch.setattr(fw, "_flow_log", lambda window: "")
+    assert fw.firewall_note([str(link_dir / "FaunaMacOS")]) is None
+
+    replies["--listapps"] = "Total number of apps = 0\n"
+    note = fw.firewall_note([str(link_dir / "FaunaMacOS")])
+    assert f"{real} is NOT on its list" in note
+
+
+def test_seat_binaries_reads_the_app_and_its_agent_off_the_launch_config():
+    from types import SimpleNamespace
+
+    from helpers.macos_firewall import seat_binaries
+
+    driver = SimpleNamespace(
+        _launch_config={
+            "app_path": "/w/mac-3/apps/fauna-apple/.build/debug/FaunaMacOS",
+            "environment": {"FAUNA_E2E_SYNC_AGENT_BIN": "/w/mac-3/target/debug/fauna-sync-agent"},
+        }
+    )
+    assert seat_binaries(driver) == [
+        "/w/mac-3/apps/fauna-apple/.build/debug/FaunaMacOS",
+        "/w/mac-3/target/debug/fauna-sync-agent",
+    ]
+    assert seat_binaries(SimpleNamespace()) == []
+
+
+def test_firewall_note_is_silent_when_the_firewall_is_off_or_all_allowed(monkeypatch):
+    from helpers import macos_firewall as fw
+
+    monkeypatch.setattr(fw.sys, "platform", "darwin")
+    monkeypatch.setattr(fw, "_run", lambda *args: "Firewall is disabled. (State = 0)\n")
+    assert fw.firewall_note(["/w/mac-3/target/debug/fauna-sync-agent"]) is None
+    replies = {
+        "--getglobalstate": "Firewall is enabled. (State = 1)\n",
+        "--listapps": _LISTAPPS,
+    }
+    monkeypatch.setattr(fw, "_run", lambda *args: replies[args[0]])
+    assert fw.firewall_note(["/w/mac-3/target/debug/fauna-tui"]) is None

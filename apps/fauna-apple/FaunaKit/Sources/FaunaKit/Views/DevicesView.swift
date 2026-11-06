@@ -40,5 +40,6 @@ public struct DevicesView: View {
                 }
             }
             .onStoreChange { await vm.resyncStore() }
+            .onDevicesStale { await vm.devicesStale() }
     }
 }

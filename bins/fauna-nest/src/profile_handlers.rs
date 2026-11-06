@@ -227,6 +227,7 @@ fn profile_get_remote_handler() -> RpcHandler {
             .await
             {
                 Ok(Ok(reply)) => {
+                    let profile = bind_relayed_profile(reply.profile, &target)?;
                     // The identity `originate` just dialed the channel as
                     // (cached, so no second dial) — this nest's verified
                     // knowledge of the home, never the home's own word and
@@ -243,7 +244,7 @@ fn profile_get_remote_handler() -> RpcHandler {
                         .ok()
                         .map(hex::encode);
                     encode_reply(&ProfileGetReply {
-                        body: serde_bytes::ByteBuf::from(reply.profile),
+                        body: serde_bytes::ByteBuf::from(profile),
                         home_nest_actor_id,
                         ..Default::default()
                     })
@@ -262,6 +263,28 @@ fn profile_get_remote_handler() -> RpcHandler {
             }
         })
     })
+}
+
+/// The home's bytes, kept only when they are the asked-for actor's signed
+/// profile (`profile.md` § Where logic lives → *The remote read*): a home that
+/// answers `fauna.federation.profile.get { X }` with another actor's validly
+/// signed profile, or with bytes that do not verify, has served no profile of
+/// X, so the reader gets the `fauna.profile.not_found` an opted-out actor's
+/// home gives — never another key's face on X's header. The twin
+/// of `fauna-feed`'s byline check, which refuses a post paired with another
+/// actor's name.
+fn bind_relayed_profile(bytes: Vec<u8>, target: &[u8; 32]) -> Result<Vec<u8>, RpcError> {
+    match fauna_core::encoding::decode_profile(&bytes) {
+        Ok((profile, _)) if profile.actor_id.0 == *target => Ok(bytes),
+        Ok(_) => {
+            tracing::warn!("profile relay: the home served another actor's profile");
+            Err(not_found("profile not served by its home nest"))
+        }
+        Err(e) => {
+            tracing::warn!("profile relay: the home's profile does not verify: {e}");
+            Err(not_found("profile not served by its home nest"))
+        }
+    }
 }
 
 /// The latest stored `schema = 'profile'` content row for `actor`, verbatim —
@@ -319,36 +342,93 @@ pub(crate) fn latest_profile_payloads(
 /// The base of a nest-side read-modify-write edit of `actor`'s profile: the
 /// latest stored one, decoded through the shared verify, or — for an account
 /// that has published none — a fresh one with nothing to preserve, so its
-/// empty fields are the honest starting state, not a loss. The two nest-side
-/// editors share it: the ATProto profile round-trip
-/// (`bridge_atproto_handlers::round_trip_profile_update`) and the oracle's
-/// profile custodian (`profile_author_oracle`).
-pub(crate) async fn current_or_fresh_profile(
+/// empty fields are the honest starting state, not a loss — with the content
+/// row it was read from (`None` for the fresh one), which the write that
+/// follows requires to still be the latest ([`write_delegated_profile`], the
+/// one nest-side editor that reads it).
+async fn current_or_fresh_profile(
     state: &Arc<AppState>,
     actor: &[u8; 32],
-) -> Result<Profile, RpcError> {
+) -> Result<(Profile, Option<[u8; 32]>), RpcError> {
     Ok(match latest_profile_bytes(state, actor).await? {
-        Some(bytes) => {
+        Some(bytes) => (
             fauna_core::encoding::decode_profile(&bytes)
                 .map_err(|e| internal(format!("stored profile does not decode: {e}")))?
-                .0
-        }
-        None => Profile {
-            actor_id: fauna_core::identity::ActorId(*actor),
-            display_name: None,
-            bio: None,
-            avatar: None,
-            banner: None,
-            links: Vec::new(),
-            nests: Vec::new(),
-            admin_nests: Vec::new(),
-            load_hint: None,
-            inbox_mode: fauna_core::data::InboxMode::Open,
-            recovery_head: None,
-            audience: fauna_core::data::ProfileAudience::ThisNest,
-            updated_at: fauna_core::data::Timestamp::now(),
-        },
+                .0,
+            // Content-addressed: the row id is `blake3(body)`, as the door
+            // stores it.
+            Some(*blake3::hash(&bytes).as_bytes()),
+        ),
+        None => (
+            Profile {
+                actor_id: fauna_core::identity::ActorId(*actor),
+                display_name: None,
+                bio: None,
+                avatar: None,
+                banner: None,
+                links: Vec::new(),
+                nests: Vec::new(),
+                admin_nests: Vec::new(),
+                load_hint: None,
+                inbox_mode: fauna_core::data::InboxMode::Open,
+                recovery_head: None,
+                audience: fauna_core::data::ProfileAudience::ThisNest,
+                updated_at: fauna_core::data::Timestamp::now(),
+            },
+            None,
+        ),
     })
+}
+
+/// How many times [`write_delegated_profile`] re-reads a base that moved
+/// under it before giving up. A move needs a concurrent write of the same
+/// account's profile landing inside one edit's few milliseconds, so a second
+/// attempt all but always stores.
+const DELEGATED_WRITE_ATTEMPTS: usize = 4;
+
+/// A nest-side delegated edit of `actor`'s profile — the external-app
+/// round-trip (`bridge_atproto_handlers::round_trip_profile_update`) and the
+/// oracle's profile custodian (`profile_author_oracle`) both write through
+/// here: read the base, let `edit` set the fields its writer can express,
+/// sign with the delegated sub-key `signer` under `cert`, and store through
+/// the one write door — **only while the base is still the latest row**.
+///
+/// Every field `edit` does not set (`audience`, `nests`, `admin_nests`,
+/// `recovery_head`, `inbox_mode`, `load_hint`, and whatever else its writer
+/// cannot express) is carried from the base. A base read outside the write
+/// would let an identity-signed write landing in between — the owner closing
+/// the profile to `ThisNest` — be overwritten by a delegated row still
+/// carrying the old values, served to other nests as the latest. So
+/// the door compares the base's row with the latest inside its own
+/// transaction and refuses a moved one, and this loop re-reads, re-edits and
+/// re-signs over the new base (`profile.md` § Where logic lives → *Profile
+/// publish/edit* → *One write door*). Returns the stored wire.
+pub(crate) async fn write_delegated_profile(
+    state: &Arc<AppState>,
+    actor: &[u8; 32],
+    signer: &fauna_core::identity::ActorKeypair,
+    cert: &EmbedAsBytes,
+    mut edit: impl FnMut(&mut Profile),
+) -> Result<Vec<u8>, RpcError> {
+    use fauna_core::encoding::{canonical_encode, sign_envelope};
+    for _ in 0..DELEGATED_WRITE_ATTEMPTS {
+        let (mut profile, base_row) = current_or_fresh_profile(state, actor).await?;
+        edit(&mut profile);
+        profile.actor_id = fauna_core::identity::ActorId(*actor);
+        profile.updated_at = fauna_core::data::Timestamp::now();
+        let (bytes, env) = sign_envelope(signer, &profile)
+            .map_err(|e| internal(format!("sign delegated profile: {e}")))?;
+        let wire =
+            canonical_encode(&EmbedAsBytes::from_signed(bytes, env).with_signer_auth(cert.clone()))
+                .map_err(|e| internal(format!("encode delegated profile: {e}")))?;
+        match ingest_profile_write(state, *actor, &wire, Some(base_row)).await? {
+            Ingested::Stored => return Ok(wire),
+            Ingested::BaseMoved => continue,
+        }
+    }
+    Err(internal(
+        "the profile kept changing under a delegated edit; try again",
+    ))
 }
 
 // ── fauna.profile.set ──────────────────────────────────────────
@@ -377,6 +457,31 @@ pub(crate) async fn ingest_profile_core(
     actor_id: [u8; 32],
     body: &[u8],
 ) -> Result<(), RpcError> {
+    match ingest_profile_write(state, actor_id, body, None).await? {
+        Ingested::Stored => Ok(()),
+        // Unreachable: no base was named, so none can have moved.
+        Ingested::BaseMoved => Err(internal("profile base moved without a base")),
+    }
+}
+
+/// What [`ingest_profile_write`] did with a verified profile.
+enum Ingested {
+    Stored,
+    /// The write named a base row that is no longer the latest: nothing was
+    /// stored ([`write_delegated_profile`] re-reads and retries).
+    BaseMoved,
+}
+
+/// [`ingest_profile_core`] with the delegated editors' base check:
+/// `expect_base = Some(row)` stores only while `row` (`None` = no profile at
+/// all) is still `actor_id`'s latest profile row, decided inside the write's
+/// own transaction.
+async fn ingest_profile_write(
+    state: &Arc<AppState>,
+    actor_id: [u8; 32],
+    body: &[u8],
+    expect_base: Option<Option<[u8; 32]>>,
+) -> Result<Ingested, RpcError> {
     let wire = canonical_decode::<EmbedAsBytes>(body)
         .map_err(|e| invalid_request(&format!("not a signed profile envelope: {e}")))?;
     let signer_auth = wire.signer_auth.clone();
@@ -426,6 +531,24 @@ pub(crate) async fn ingest_profile_core(
         let tx = conn
             .unchecked_transaction()
             .map_err(|e| internal(format!("begin profile.set tx: {e}")))?;
+        // The base check, in the insert's own transaction: a delegated edit's
+        // base still being the latest row is what makes the fields it carried
+        // from that base the owner's current word.
+        if let Some(expected) = expect_base {
+            use rusqlite::OptionalExtension as _;
+            let latest: Option<Vec<u8>> = tx
+                .query_row(
+                    "SELECT id FROM content WHERE author = ?1 AND schema = 'profile'
+                      ORDER BY created_at DESC LIMIT 1",
+                    rusqlite::params![actor_id.as_slice()],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(|e| internal(format!("read the latest profile row: {e}")))?;
+            if latest.as_deref() != expected.as_ref().map(|r| r.as_slice()) {
+                return Ok(Ingested::BaseMoved);
+            }
+        }
         let newest: Option<i64> = tx
             .query_row(
                 "SELECT MAX(created_at) FROM content WHERE author = ?1 AND schema = 'profile'",
@@ -475,7 +598,7 @@ pub(crate) async fn ingest_profile_core(
     crate::bridge_atproto_handlers::notify_bridges_atproto_projection_ready(state, Some(actor_id))
         .await;
 
-    Ok(())
+    Ok(Ingested::Stored)
 }
 
 fn profile_set_handler() -> RpcHandler {
@@ -527,4 +650,156 @@ pub fn register_profile_handlers(b: &mut RpcRouterBuilder) {
             handler: profile_set_handler(),
         },
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use fauna_core::data::{DeviceAuthorization, InboxMode, ProfileAudience, Timestamp};
+    use fauna_core::encoding::{sign_and_pack, sign_envelope};
+    use fauna_core::identity::{ActorId, ActorKeypair};
+
+    fn signed_profile(kp: &ActorKeypair, name: &str) -> Vec<u8> {
+        let profile = Profile {
+            actor_id: kp.actor_id(),
+            display_name: Some(name.into()),
+            bio: None,
+            avatar: None,
+            banner: None,
+            links: vec![],
+            nests: vec![],
+            admin_nests: vec![],
+            load_hint: None,
+            inbox_mode: InboxMode::Open,
+            recovery_head: None,
+            audience: ProfileAudience::Everyone,
+            updated_at: Timestamp(0),
+        };
+        sign_and_pack(kp, &profile).expect("sign")
+    }
+
+    /// A home answering for X with V's validly signed profile served no
+    /// profile of X: the relay answers `not_found`, never V's face.
+    #[test]
+    fn a_relayed_profile_signed_for_another_actor_is_not_found() {
+        let x = ActorKeypair::from_secret([21u8; 32]);
+        let v = ActorKeypair::from_secret([22u8; 32]);
+        let err = bind_relayed_profile(signed_profile(&v, "Not X"), &x.actor_id().0)
+            .expect_err("another actor's profile is refused");
+        assert_eq!(err.code, RpcError::CODE_PROFILE_NOT_FOUND);
+    }
+
+    #[test]
+    fn a_relayed_profile_that_does_not_verify_is_not_found() {
+        let x = ActorKeypair::from_secret([21u8; 32]);
+        let err = bind_relayed_profile(vec![1, 2, 3], &x.actor_id().0)
+            .expect_err("bytes that do not verify are refused");
+        assert_eq!(err.code, RpcError::CODE_PROFILE_NOT_FOUND);
+    }
+
+    #[test]
+    fn the_asked_for_actors_profile_passes_through_verbatim() {
+        let x = ActorKeypair::from_secret([21u8; 32]);
+        let bytes = signed_profile(&x, "X");
+        assert_eq!(
+            bind_relayed_profile(bytes.clone(), &x.actor_id().0).expect("bound"),
+            bytes
+        );
+    }
+
+    /// A hosted account, its identity key, and a delegated sub-key `K` with an
+    /// identity-signed cert granting `UpdateProfile` — the two signers a
+    /// profile's rows come from.
+    async fn seeded() -> (Arc<AppState>, ActorKeypair, ActorKeypair, EmbedAsBytes) {
+        let db = Arc::new(crate::db::CacheDb::open_in_memory().unwrap());
+        let state = Arc::new(AppState::for_test(db));
+        let identity = ActorKeypair::from_secret([11u8; 32]);
+        state
+            .db
+            .create_user(&identity.actor_id().0, "free", "test")
+            .await
+            .unwrap();
+        let k = ActorKeypair::from_secret([22u8; 32]);
+        let da = DeviceAuthorization {
+            actor_id: identity.actor_id(),
+            device_key: k.actor_id().0,
+            capabilities: vec![Capability::UpdateProfile],
+            created_at: Timestamp(1),
+            expires_at: None,
+        };
+        let (b, e) = sign_envelope(&identity, &da).unwrap();
+        (state, identity, k, EmbedAsBytes::from_signed(b, e))
+    }
+
+    fn profile(actor: [u8; 32], audience: ProfileAudience) -> Profile {
+        Profile {
+            actor_id: ActorId(actor),
+            display_name: Some("Alice".into()),
+            bio: None,
+            avatar: None,
+            banner: None,
+            links: vec![],
+            nests: vec![],
+            admin_nests: vec![],
+            load_hint: None,
+            inbox_mode: InboxMode::Open,
+            recovery_head: None,
+            audience,
+            updated_at: Timestamp::now(),
+        }
+    }
+
+    /// Whether this nest serves `actor`'s profile to another nest — the
+    /// federation read itself, the decision the race used to break.
+    async fn served_to_other_nests(state: &Arc<AppState>, actor: [u8; 32]) -> bool {
+        let req = crate::federation_handlers::FedProfileGetRequest {
+            actor_id: hex::encode(actor),
+        };
+        let payload = bytes::Bytes::from(fauna_protocol::encode_canonical(&req).unwrap().to_vec());
+        crate::federation_handlers::profile_get_handler()(state.clone(), [9u8; 32], payload)
+            .await
+            .is_ok()
+    }
+
+    /// A delegated edit reads its base; the owner's identity-signed close to
+    /// `ThisNest` lands before the edit stores. The edit must not commit the
+    /// base's old `Everyone` on top: the federation read refuses, and the
+    /// edit's own field still lands, over the owner's new word.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_owner_close_landing_inside_a_delegated_edit_is_kept() {
+        let (state, identity, k, cert) = seeded().await;
+        let actor = identity.actor_id().0;
+        let open = sign_and_pack(&identity, &profile(actor, ProfileAudience::Everyone)).unwrap();
+        ingest_profile_core(&state, actor, &open).await.unwrap();
+        assert!(served_to_other_nests(&state, actor).await);
+
+        let mut closed_once = false;
+        write_delegated_profile(&state, &actor, &k, &cert, |p| {
+            if !closed_once {
+                // The owner's close, landing between the base read and the
+                // delegated write.
+                closed_once = true;
+                let close = profile(actor, ProfileAudience::ThisNest);
+                let body = sign_and_pack(&identity, &close).unwrap();
+                tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current()
+                        .block_on(ingest_profile_core(&state, actor, &body))
+                })
+                .unwrap();
+            }
+            p.bio = Some("bio from another app".into());
+        })
+        .await
+        .expect("the delegated edit stores");
+
+        assert!(
+            !served_to_other_nests(&state, actor).await,
+            "the owner closed the profile; a delegated edit read before the close \
+             must not reopen it to other nests"
+        );
+        let latest = latest_profile_bytes(&state, &actor).await.unwrap().unwrap();
+        let (stored, _) = fauna_core::encoding::decode_profile(&latest).unwrap();
+        assert_eq!(stored.audience, ProfileAudience::ThisNest);
+        assert_eq!(stored.bio.as_deref(), Some("bio from another app"));
+    }
 }

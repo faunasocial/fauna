@@ -36,7 +36,8 @@ from i18n.strings import S
 # `--client ios` (2026-06-17, in-process driver). iOS
 # renders web-settings as its own NavigationStack screen (not the macOS nested
 # PreferencesView), so the toggle is directly reachable. Both functions share the
-# same client set, so the markers live module-level (android is the remaining lift).
+# same client set; the markers are per test (see the warning below), and android
+# carries them on the tests whose ids its web-settings screen paints.
 # `tui` added 2026-07-29 with the two pages themselves (`admin/web.rs` +
 # `settings/web.rs`) — the last app owing `admin-web` per `admin.md` § 7 Web.
 # ⚠ The app markers are PER TEST, not module-level, and that is load-bearing:
@@ -87,6 +88,25 @@ def test_user_subdomain_toggle_round_trip(logged_in_app, nest_instance):
     })
     app.driver.wait_for("web-settings-subdomain-toggle", timeout=15.0)
 
+    def _page_error() -> str:
+        try:
+            return app.driver.get_text("error-message") or "<empty>"
+        except Exception:  # noqa: BLE001 — absent is the common, healthy case
+            return "<absent>"
+
+    # The toggle registers before the page has read the nest: until the hydrate
+    # lands its "off" is no reading at all, and a click then has nothing
+    # confirmed to flip from. Wait for the control to go live — a state read, not
+    # a delay (convention 14); apps that never paint it disabled pass at once.
+    wait_until(
+        lambda: app.driver.is_enabled("web-settings-subdomain-toggle"),
+        RPC_ROUNDTRIP_S,
+        diagnose=lambda: (
+            "subdomain toggle never went live — the web-settings hydrate did not "
+            f"land; error-message: {_page_error()}"
+        ),
+    )
+
     # Default OFF.
     assert app.driver.get_attr("web-settings-subdomain-toggle", "state") == "off", (
         "subdomain toggle should default OFF"
@@ -97,7 +117,10 @@ def test_user_subdomain_toggle_round_trip(logged_in_app, nest_instance):
     wait_until(
         lambda: app.driver.get_attr("web-settings-subdomain-toggle", "state") == "on",
         RPC_ROUNDTRIP_S,
-        diagnose=lambda: "subdomain toggle did not reflect ON after the nest round-trip",
+        diagnose=lambda: (
+            "subdomain toggle did not reflect ON after the nest round-trip; "
+            f"error-message: {_page_error()}"
+        ),
     )
 
     # Turn it back OFF (leave the actor as found).
@@ -105,7 +128,10 @@ def test_user_subdomain_toggle_round_trip(logged_in_app, nest_instance):
     wait_until(
         lambda: app.driver.get_attr("web-settings-subdomain-toggle", "state") == "off",
         RPC_ROUNDTRIP_S,
-        diagnose=lambda: "subdomain toggle did not reflect OFF after the nest round-trip",
+        diagnose=lambda: (
+            "subdomain toggle did not reflect OFF after the nest round-trip; "
+            f"error-message: {_page_error()}"
+        ),
     )
 
 
@@ -237,11 +263,8 @@ def test_admin_front_page_opens_on_who_is_the_front_page_now(admin_app, nest_ins
 # Authoring + publishing are PRECONDITION setup here — the E2E rules'
 # fixture-setup carve-out — while every mutation *under test* (the origin
 # opt-in, both copies, the takedown) is driven through the app UI exactly as a
-# user would. `test_a_copied_paywall_link_serves_the_full_body` additionally
-# seeds the web-serve holder's capability grant over the wire — there is no
-# client UI for it yet (`fauna_capability_build_post_grant` is the Python e2e
-# twin of a production surface that does not exist), the same carve-out
-# `test_gated_post_compose.py` uses for the subscriber-side KeyBlob grant.
+# user would. `test_a_copied_paywall_link_serves_the_full_body` is the exception
+# and goes through the UI end to end, grant included: see its docstring.
 
 
 def _user_client(nest, user):
@@ -287,52 +310,6 @@ def _get_with_host(nest_url, url, extra_query=""):
         return resp.status, resp.read().decode("utf-8", "replace")
     except urllib.error.HTTPError as e:
         return e.code, e.read().decode("utf-8", "replace")
-
-
-def _upload_sealed_blob(port: int, token: str, data: bytes) -> str:
-    """`POST /api/v1/blob` (multipart `sidecar` + `bytes`) for an AEAD-sealed
-    period-restricted-post blob — the shape `fauna_ffi.build_gated_post`
-    produces and the strict blob verifier expects (sealed class ⇒ sidecar MIME
-    is octet-stream; the real MIME rides inside the seal). Returns the hex
-    hash. Mirrors `tests/api/test_web_paywall.py::_upload_sealed_blob`."""
-    import json
-    import cbor2
-    import urllib.request
-
-    from common.auth import port_base_url
-
-    sidecar = cbor2.dumps(
-        {
-            "class": "PeriodRestrictedPost",
-            "mime": "application/octet-stream",
-            "has_c2pa": False,
-            "thumbnail_hash": None,
-        },
-        canonical=True,
-    )
-    boundary = "faunapaywalltestboundary"
-    body = b"".join(
-        [
-            f"--{boundary}\r\n".encode(),
-            b'Content-Disposition: form-data; name="sidecar"\r\n\r\n',
-            sidecar,
-            f"\r\n--{boundary}\r\n".encode(),
-            b'Content-Disposition: form-data; name="bytes"\r\n\r\n',
-            data,
-            f"\r\n--{boundary}--\r\n".encode(),
-        ]
-    )
-    req = urllib.request.Request(
-        f"{port_base_url(port)}/api/v1/blob",
-        data=body,
-        headers={
-            "Authorization": f"Bearer {token}",
-            "Content-Type": f"multipart/form-data; boundary={boundary}",
-        },
-        method="POST",
-    )
-    resp = urllib.request.urlopen(req)
-    return json.loads(resp.read())["hash"]
 
 
 @pytest.mark.tier_3
@@ -436,6 +413,7 @@ def test_published_post_management_section(web_hosting_app, web_hosting_nest):
 @pytest.mark.windows
 @pytest.mark.macos
 @pytest.mark.ios
+@pytest.mark.android
 @pytest.mark.feature("personal-website")
 def test_a_site_the_nest_took_dark_tells_its_author(web_hosting_app, web_hosting_nest):
     """A site the nest cleared after a failed render says so on `web-settings`,
@@ -601,76 +579,85 @@ def test_a_copied_paywall_link_serves_the_full_body(web_hosting_app, web_hosting
 
     Only the public/teaser link was proven to serve before this (the
     step 5 residual); this was the one path still unassertable.
+
+    **The tier, the post, the publish and the grant all go through the app, and
+    that is load-bearing.** A grant minted over the wire has no `Mint` event in
+    the account's signed grant log, so the signed-in app's reconcile sweep
+    revokes it at its next full pump pass, by design (`ui/nests.md` § Trust facet
+    — grants → *Reconcile*), and the revoke's render drops the sealed page. That
+    made this test a race against the pump: a press landing after the sweep read
+    `fauna.web.not_paywalled` for as long as the test kept asking. The Nests page mint records the event before it deposits, and the
+    app holds the tier's period key because the Tiers tab created it. The grant
+    comes after the publish on purpose: the mint's own render is what seals a
+    page already published.
     """
     app = web_hosting_app
     nest = web_hosting_nest
-    user = nest["user"]
     web = app.web_settings
+    feed = app.feed
+    subs = app.subscriptions
 
     import uuid
 
-    from tests.api import ws_api
-    import fauna_ffi
-
     tier = f"paywall-e2e-{uuid.uuid4().hex[:8]}"
-    tier_rank = 2
     preview = "A gated post worth paying for"
     full_marker = "the-tokened-link-full-body-marker"
     full_body = f"{preview}\n\nHere is {full_marker}, for token holders only."
-    period_key = bytes(range(32))
-    key_blob_ref = b"\x22" * 32
-    secret = bytes(user["signing_key"])
 
-    with _user_client(nest, user) as ws:
-        ws.call(
-            "fauna.subscriptions.tiers.create",
-            {
-                "name": tier,
-                "rank": tier_rank,
-                "description": None,
-                "price_hint": "5 EUR / month",
-                "payment_url": "https://pay.example/gold",
-                "auto_approve": False,
-                # The required birth KeyBlob (empty roster).
-                "encrypted_upload": fauna_ffi.build_tier_birth_upload(secret, tier, period_key),
-            },
-        )
+    web.navigate()
+    web.wait_for_published_posts_section()
+    web.set_subdomain_enabled(True)
+    baseline = set(web.published_slugs())
 
-    post_bytes, encrypted_blob = fauna_ffi.build_gated_post(
-        secret, preview, full_body, tier, tier_rank, key_blob_ref, period_key
+    subs.navigate()
+    subs.open_tiers_tab()
+    subs.create_tier(tier, rank=2, price_hint="5 EUR / month")
+    assert subs.wait_for_tier(tier), (
+        f"created tier {tier!r} should appear in My tiers; error={subs.error_text()!r}"
     )
-    blob_hash = _upload_sealed_blob(_port(nest), user["token"], encrypted_blob)
-    assert len(blob_hash) == 64
 
-    post_id = ws_api.create_post(_port(nest), user, post_bytes)
-    slug = _publish(nest, user, post_id, f"gated-{uuid.uuid4().hex[:8]}")
+    app.driver.navigate_to("feed")
+    feed.create_gated_post(full_body, preview, tier)
+    assert feed.wait_for_first_post_text(preview.split()[0]), (
+        f"the gated post never landed in the feed; error={app.error_text()!r}"
+    )
+    feed.publish_post_to_web(index=0)
 
-    # ── Grant the web-serve holder the tier's period key — fixture setup, per
-    # the module docstring above: no client UI mints this grant yet. ──
-    now = int(time.time())
-    with _user_client(nest, user) as ws:
-        holder = ws.call(
-            "fauna.bridges.fetch_bridge_pubkey",
-            {"bridge_role": "content-processor", "bridge_id": "web-serve"},
-        )
-        holder_x25519 = bytes(holder["x25519_pubkey"])
-        holder_ek = bytes(holder["mlkem_ek"]) if holder.get("mlkem_ek") else None
-        grant_blob = fauna_ffi.build_post_grant(
-            bytes(user["actor_id_bytes"]),
-            uuid.uuid4().bytes,
-            holder_x25519,
-            holder_ek,
-            now,
-            now + 3600,
-            tier,
-            period_key,
-        )
-        mint = ws.call("fauna.capabilities.mint", {"grant_blob": grant_blob})
-        assert mint.get("ok") is True, mint
+    web.navigate()
+    added = wait_until(
+        lambda: (set(web.published_slugs()) - baseline) or None,
+        web.PAGE_READY_BUDGET_S,
+        diagnose=lambda: (
+            "the gated post never reached the web-settings section; "
+            f"rows={web.published_slugs()} baseline={sorted(baseline)} "
+            f"error={app.error_text()!r}"
+        ),
+    )
+    assert len(added) == 1, f"one publish must add exactly one row, got {added}"
+    slug = added.pop()
+
+    # ── Let the nest's web-serve holder open this tier: the Nests page mint. ──
+    trust = app.nest_trust
+    app.linked_nests.navigate()
+    assert app.linked_nests.is_page_visible(), (
+        f"Nests page not reachable. error: {app.error_text()!r}"
+    )
+    assert trust.mint_button_present(), (
+        f"no mint button despite the web-serve holder and a held tier; "
+        f"error={app.error_text()!r}"
+    )
+    # Relative, not zero: a combined multi-app run shares this module's actor.
+    held = trust.grant_count()
+    trust.open_mint()
+    trust.select_scope(trust.paywalled_label(tier))
+    trust.confirm_mint()
+    assert trust.wait_for_grant_count(held + 1), (
+        f"the minted grant never rendered in the Now lens; error={app.error_text()!r}"
+    )
 
     # ── The mutation under test: the UI mints the tokened link over the wire. ──
     web.navigate()
-    web.set_subdomain_enabled(True)
+    web.wait_for_published_posts_section()
     index = web.wait_for_slug(slug)
     assert web.gated_tier(index) == tier, (
         f"the published row must advertise its gating tier; error={app.error_text()!r}"

@@ -711,7 +711,25 @@ tracked internally, Spec Y2 slice 4). Load-bearing shape (further mechanics trac
 - **Keepalive / reconnect / TLS.** Reuse the native 30s Ping / 60s dead-link
   detection and the backoff supervisor; reconnect re-runs the
   handshake. Peer URL is **TLS-only** (loopback only for tests), as
-  `federation_channel::validate_peer_url` enforces.
+  `federation_channel::validate_peer_url` enforces. An address a peer
+  **declares** — the home URL a relayed delivery names, an obligation
+  issuer's address, a discovery referral's nest, a relayed room invitation's
+  invitee node — is recorded or dialled only as an origin-form
+  `https://host[:port]`, and never as loopback on a production nest: the
+  dials that read it run unattended at a stranger's word, so the refusal sits
+  before the address directory's write, not at the dial
+  (`ssrf::peer_declared_origin`, 2026-11-04). The e2e
+  harness's `test-hooks` nest build, never shipped, counts as test state:
+  its tier_3 nests serve on loopback literals, so that build carries the
+  loopback client the in-process test state does (`harness_peer_fetch_loopback`,
+  pinned by a unit test that fails the moment either build arm changes).
+  **Ruled 2026-11-04: the boundary is the compile-time
+  feature and nothing else** — convention 15's outer boundary
+  (`e2e-automation-surface-gating.md`), never a knob or an env seed, and never
+  an inference from the nest's own authority: a shipped nest served at a
+  loopback authority exists (the desktop machine-service nest,
+  `desktop_serve.rs`, in-process on loopback), and it is exactly the nest a
+  stranger's loopback declaration would turn against its co-located services.
 - **Two byte fetches stay off the channel (decided 2026-10-19).** A video
   segment's cache-on-fetch (`GET /api/v1/video/segments/<hash>`,
   `video_routes.rs`) and a follow-delivered room post's sealed body

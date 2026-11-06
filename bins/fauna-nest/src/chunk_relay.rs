@@ -141,6 +141,14 @@ pub const FOREIGN_SEAT_LEASE: std::time::Duration = std::time::Duration::from_se
 /// than [`RELAY_MAX_CANDIDATE_SEATS`] seats in total anyway.
 const FOREIGN_SEATS_PER_FOLDER: usize = RELAY_MAX_CANDIDATE_SEATS;
 
+/// The most live foreign seats one member holds in one folder — a person's
+/// devices, with room to spare. The seat key carries a device id the member's
+/// nest names, so without a per-member share one member's nest could fill the
+/// folder's [`FOREIGN_SEATS_PER_FOLDER`] with made-up devices, refusing every
+/// other member's seat and making each store miss wait through dead seats
+/// (`federation-shared-folders.md` § … → *Relay serving across nests*).
+pub const FOREIGN_SEATS_PER_MEMBER: usize = 4;
+
 /// The most foreign seats this nest holds at once, across every folder. The
 /// table is in memory, so it is bounded whole: a lease past it is refused
 /// until some lapse.
@@ -171,6 +179,9 @@ pub struct ForeignSeat {
 pub enum LeaseRefused {
     /// The folder already holds [`FOREIGN_SEATS_PER_FOLDER`] live seats.
     FolderFull,
+    /// The member already holds [`FOREIGN_SEATS_PER_MEMBER`] live seats in
+    /// the folder.
+    MemberFull,
     /// This nest already holds [`FOREIGN_SEATS_MAX`] live seats.
     TableFull,
 }
@@ -204,6 +215,13 @@ impl ForeignSeats {
             let in_folder = seats.keys().filter(|k| k.0 == seat.folder_id).count();
             if in_folder >= FOREIGN_SEATS_PER_FOLDER {
                 return Err(LeaseRefused::FolderFull);
+            }
+            let of_member = seats
+                .keys()
+                .filter(|k| k.0 == seat.folder_id && k.1 == seat.member)
+                .count();
+            if of_member >= FOREIGN_SEATS_PER_MEMBER {
+                return Err(LeaseRefused::MemberFull);
             }
         }
         seats.insert(key, (seat, now + FOREIGN_SEAT_LEASE));
@@ -1413,23 +1431,23 @@ mod tests {
         let seats = ForeignSeats::default();
         for i in 0..FOREIGN_SEATS_PER_FOLDER {
             seats
-                .lease_at(foreign_seat(5, [0x71; 32], [i as u8; 32]), t0)
+                .lease_at(foreign_seat(5, [i as u8; 32], [i as u8; 32]), t0)
                 .unwrap();
         }
         assert_eq!(
-            seats.lease_at(foreign_seat(5, [0x72; 32], [0xff; 32]), t0),
+            seats.lease_at(foreign_seat(5, [0xf2; 32], [0xff; 32]), t0),
             Err(LeaseRefused::FolderFull)
         );
         seats
-            .lease_at(foreign_seat(5, [0x71; 32], [0; 32]), t0)
+            .lease_at(foreign_seat(5, [0; 32], [0; 32]), t0)
             .expect("a held seat always renews");
         seats
-            .lease_at(foreign_seat(6, [0x72; 32], [0xff; 32]), t0)
+            .lease_at(foreign_seat(6, [0xf2; 32], [0xff; 32]), t0)
             .expect("another folder has room");
         assert!(
             seats
                 .lease_at(
-                    foreign_seat(5, [0x72; 32], [0xff; 32]),
+                    foreign_seat(5, [0xf2; 32], [0xff; 32]),
                     t0 + FOREIGN_SEAT_LEASE
                 )
                 .is_ok(),
@@ -1446,6 +1464,35 @@ mod tests {
             seats.lease_at(foreign_seat(-1, [0x71; 32], [0xf6; 32]), t0),
             Err(LeaseRefused::TableFull)
         );
+    }
+
+    /// One member's nest cannot fill a folder with made-up devices:
+    /// the member's N+1th live seat is refused while another member's seat is
+    /// admitted, and a held seat of the full member still renews.
+    #[test]
+    fn one_member_holds_at_most_its_share_of_a_folders_seats() {
+        let seats = ForeignSeats::default();
+        let t0 = std::time::Instant::now();
+        for i in 0..FOREIGN_SEATS_PER_MEMBER {
+            seats
+                .lease_at(foreign_seat(5, [0x71; 32], [i as u8; 32]), t0)
+                .unwrap();
+        }
+        assert_eq!(
+            seats.lease_at(foreign_seat(5, [0x71; 32], [0xee; 32]), t0),
+            Err(LeaseRefused::MemberFull),
+            "the member's N+1th device is refused"
+        );
+        seats
+            .lease_at(foreign_seat(5, [0x72; 32], [0xee; 32]), t0)
+            .expect("another member's seat is admitted");
+        seats
+            .lease_at(foreign_seat(5, [0x71; 32], [0; 32]), t0)
+            .expect("a held seat of the full member still renews");
+        seats
+            .lease_at(foreign_seat(6, [0x71; 32], [0xee; 32]), t0)
+            .expect("the share is per folder");
+        const { assert!(FOREIGN_SEATS_PER_MEMBER < FOREIGN_SEATS_PER_FOLDER) };
     }
 
     /// A forwarded seat that reports *not pushed* refills the window at once:

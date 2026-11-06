@@ -60,8 +60,8 @@ public struct AdminMailView: View {
                     }
                     MailSpamPolicySection(policy: snap.spam, reloadToken: vm.snapshotVersion,
                                           isBusy: vm.isBusy, baselineResult: snap.baselinePublishResult,
-                                          baselineState: snap.baselineState,
-                                          onPublish: { await vm.publishSpamBaseline() },
+                                          baselineState: snap.baselineState, armed: snap.armed,
+                                          onPublish: { await vm.press(.publishSpamBaseline) },
                                           onSetStanding: { await vm.setBaselineStandingPublish($0) }) { await vm.saveSpam($0) }
                     MailAuthPolicySection(policy: snap.auth, reloadToken: vm.snapshotVersion,
                                           isBusy: vm.isBusy) { await vm.saveAuth($0) }
@@ -73,6 +73,16 @@ public struct AdminMailView: View {
                                               isBusy: vm.isBusy) { await vm.saveOutbound($0) }
                     MailAliasPolicySection(policy: snap.alias, reloadToken: vm.snapshotVersion,
                                            isBusy: vm.isBusy) { await vm.saveAlias($0) }
+                    MailDmarcPolicySection(policy: snap.dmarc, reloadToken: vm.snapshotVersion,
+                                           isBusy: vm.isBusy) { await vm.saveDmarc($0) }
+                    MailMicrosoftRegistrationSection(registration: snap.microsoftRegistration,
+                                                     reloadToken: vm.snapshotVersion,
+                                                     isBusy: vm.isBusy) { clientId, tenant in
+                        await vm.saveMicrosoftRegistration(clientId: clientId, tenant: tenant)
+                    }
+                    // At the page's foot (mail-mass-mailing.md § Secret rotation).
+                    MailSecretsSection(armed: snap.armed, rotation: snap.secretRotation,
+                                       isBusy: vm.isBusy) { await vm.press($0) }
                 } else {
                     ProgressView().frame(maxWidth: .infinity)
                 }
@@ -95,18 +105,37 @@ public struct AdminMailView: View {
                     get: { snap.mailEnabled },
                     set: { on in Task { await vm.setMailEnabled(on) } }
                 ))
+                // A box that cannot enable mail (no content scanners): disabled with
+                // state `unavailable`, the notice directly under it. Where mail is
+                // already on, the toggle stays live so it can be turned off.
+                .disabled(!snap.mailEnabled && snap.mailUnavailableHere)
                 .accessibilityIdentifier(Ids.adminMailEnabledToggle)
                 // Read the LIVE snapshot (not the captured `snap`) and flip via the
                 // SAME VM dispatch the Toggle's setter runs.
                 .automationActivate(
                     Ids.adminMailEnabledToggle,
-                    value: { (vm.snapshot?.mailEnabled ?? false) ? "on" : "off" }
+                    isEnabled: {
+                        let s = vm.snapshot
+                        return (s?.mailEnabled ?? false) || !(s?.mailUnavailableHere ?? false)
+                    },
+                    value: {
+                        let s = vm.snapshot
+                        if s?.mailEnabled ?? false { return "on" }
+                        return (s?.mailUnavailableHere ?? false) ? "unavailable" : "off"
+                    }
                 ) {
                     let next = !(vm.snapshot?.mailEnabled ?? false)
                     Task { await vm.setMailEnabled(next) }
                 }
                 // Dispatch-on-change (no Save), so the toggle itself is the write.
                 .faunaGate("fauna.bridges.set_mail_enabled")
+                if !snap.mailEnabled && snap.mailUnavailableHere {
+                    Text(L.mailSettings.unavailableNotice)
+                        .font(.caption).foregroundStyle(.secondary)
+                        .accessibilityIdentifier(Ids.adminMailUnavailableNotice)
+                        .automationValue(Ids.adminMailUnavailableNotice,
+                                         text: { L.mailSettings.unavailableNotice })
+                }
                 Text(L.admin.mailPage.enabledSubtitle)
                     .font(.caption).foregroundStyle(.secondary)
 
@@ -292,6 +321,7 @@ private struct MailHealthSection: View {
                         if let u = URL(string: url) { openURL(u) }
                     }
                 }
+                senderDashboards
                 HStack {
                     Button(L.admin.mailPage.healthRecheck) { Task { await onRecheck() } }
                         .disabled(isBusy)
@@ -319,6 +349,31 @@ private struct MailHealthSection: View {
     }
 
     /// One row: a scoped container (its index is the row's) holding the three leaves.
+    /// The static sender-dashboard note and one link per receiver, in the
+    /// shared order (`senderDashboardLinks()` — URLs and label keys are shared
+    /// Rust, nothing copied). Each link opens its URL and publishes it as its
+    /// `href`, as the delist link does.
+    @ViewBuilder
+    private var senderDashboards: some View {
+        automationText(Ids.adminMailHealthSenderDashboardsNote,
+                       L.lookup("admin.mail_page.health_sender_dashboards_note"))
+            .frame(maxWidth: .infinity, alignment: .leading)
+        HStack {
+            ForEach(Array(senderDashboardLinks().enumerated()), id: \.offset) { _, link in
+                let label = L.lookup(link.labelKey)
+                Button(label) {
+                    if let u = URL(string: link.url) { openURL(u) }
+                }
+                .accessibilityIdentifier(Ids.adminMailHealthSenderDashboardLink)
+                .automationActivate(Ids.adminMailHealthSenderDashboardLink,
+                                    text: { label },
+                                    attributes: { ["href": link.url] }) {
+                    if let u = URL(string: link.url) { openURL(u) }
+                }
+            }
+        }
+    }
+
     private func checkRow(_ index: Int, _ check: MailHealthCheckView) -> some View {
         let label = L.lookup(check.labelKey)
         let state = renderLocalizedText(mailHealthCheckStateLabel(state: check.state))
@@ -349,6 +404,8 @@ private struct MailSpamPolicySection: View {
     let baselineResult: BaselinePublishView?
     // The served baseline's current state + the standing-publish switch.
     let baselineState: BaselineStateView?
+    // Which confirm the shared machine has armed (`snapshot.armed`).
+    let armed: MailPolicyConfirm?
     let onPublish: () async -> Void
     let onSetStanding: (Bool) async -> Void
 
@@ -372,6 +429,7 @@ private struct MailSpamPolicySection: View {
 
     init(policy: SpamPolicyView, reloadToken: Int, isBusy: Bool,
          baselineResult: BaselinePublishView?, baselineState: BaselineStateView?,
+         armed: MailPolicyConfirm?,
          onPublish: @escaping () async -> Void, onSetStanding: @escaping (Bool) async -> Void,
          onSave: @escaping (SpamPolicyView) async -> Void) {
         self.policy = policy
@@ -379,6 +437,7 @@ private struct MailSpamPolicySection: View {
         self.isBusy = isBusy
         self.baselineResult = baselineResult
         self.baselineState = baselineState
+        self.armed = armed
         self.onPublish = onPublish
         self.onSetStanding = onSetStanding
         self.onSave = onSave
@@ -476,13 +535,21 @@ private struct MailSpamPolicySection: View {
                         $unlistedRecipientPenalty, subtitle: L.admin.mailPage.unlistedRecipientPenaltySubtitle)
             // ── Deployment baseline (admin opt-in aggregate; publish_spam_baseline) ──
             Divider()
-            Button(L.admin.mailPage.publishSpamBaselineButton) { Task { await onPublish() } }
+            // Same-button two-press over the shared arm (mail-spam.md § Cold start
+            // step 1): the first press arms and relabels, the second publishes.
+            let publishLabel = armed == .publishSpamBaseline
+                ? L.admin.mailPage.publishSpamBaselineConfirm : L.admin.mailPage.publishSpamBaselineButton
+            Button(publishLabel) { Task { await onPublish() } }
                 .disabled(isBusy)
                 .accessibilityIdentifier(Ids.adminMailPublishSpamBaselineButton)
-                .automationActivate(Ids.adminMailPublishSpamBaselineButton, isEnabled: { !isBusy }) {
+                .automationActivate(Ids.adminMailPublishSpamBaselineButton, isEnabled: { !isBusy },
+                                    text: { publishLabel }) {
                     Task { await onPublish() }
                 }
                 .faunaGate("fauna.bridges.publish_spam_baseline")
+                // The label changes on arm: re-identify so the registered `text:`
+                // closure re-captures the CURRENT label.
+                .id("admin-mail-publish-spam-baseline-button:\(publishLabel)")
             Text(L.admin.mailPage.publishSpamBaselineSubtitle).font(.caption).foregroundStyle(.secondary)
                 .frame(maxWidth: .infinity, alignment: .leading)
             automationText(Ids.adminMailPublishSpamBaselineResult, baselineResultMessage)
@@ -870,6 +937,184 @@ private struct MailAliasPolicySection: View {
         // An empty box clears the reservation (full-PUT — distinct from "default").
         p.reservedLocalParts = parseLines(reserved)
         return p
+    }
+}
+
+// MARK: - DMARC reports (put_dmarc_policy)
+
+/// The DMARC-reports group (`dmarc-reporting.md` § Forensic-report receive): five
+/// edited fields over the persisted catalog; every other record tag (`p`, `sp`,
+/// `pct`, `adkim`, `aspf`, `rua`, the `ruf` destination, `ri`) rides through the
+/// copied persisted view. A retention past its ceiling is sent as typed — the nest
+/// refuses it onto the error banner, never clamped here.
+private struct MailDmarcPolicySection: View {
+    let policy: DmarcPolicyView
+    let reloadToken: Int
+    let isBusy: Bool
+    let onSave: (DmarcPolicyView) async -> Void
+
+    @State private var draft: DmarcPolicyView
+    @State private var aggregateRetention = ""
+    @State private var forensicRetention = ""
+
+    init(policy: DmarcPolicyView, reloadToken: Int, isBusy: Bool,
+         onSave: @escaping (DmarcPolicyView) async -> Void) {
+        self.policy = policy
+        self.reloadToken = reloadToken
+        self.isBusy = isBusy
+        self.onSave = onSave
+        _draft = State(initialValue: policy)
+    }
+
+    var body: some View {
+        policyGroup(title: L.admin.mailPage.dmarcGroupTitle, desc: L.admin.mailPage.dmarcGroupDesc,
+                    saveLabel: L.admin.mailPage.dmarcSave, saveId: Ids.adminMailDmarcSaveButton,
+                    saveKind: "fauna.bridges.put_dmarc_policy",
+                    isBusy: isBusy, onSave: { Task { await onSave(gather()) } }) {
+            policyToggle(L.admin.mailPage.dmarcRufPublishLabel, Ids.adminMailDmarcRufPublishToggle,
+                         $draft.rufPublish)
+            // Always rendered: the PII notice is the point of the opt-in.
+            automationText(Ids.adminMailDmarcRufWarning, L.admin.mailPage.dmarcRufWarning)
+                .font(.caption).foregroundStyle(.secondary)
+            Picker(L.admin.mailPage.dmarcFoModeLabel, selection: $draft.foMode) {
+                // Value set + order from the shared Rust catalog (`fo=` tags).
+                ForEach(dmarcForensicModeOptions(), id: \.value) { option in
+                    Text(renderLocalizedText(option.label)).tag(option.value)
+                }
+            }
+            .accessibilityIdentifier(Ids.adminMailDmarcFoModeSelect)
+            .automationSelect(Ids.adminMailDmarcFoModeSelect,
+                              value: { $draft.foMode.wrappedValue },
+                              options: { dmarcForensicModeOptions().map { $0.value } }) { $draft.foMode.wrappedValue = $0 }
+            EditableFieldRow(L.admin.mailPage.dmarcAggregateRetentionLabel,
+                        Ids.adminMailDmarcAggregateRetentionInput, $aggregateRetention)
+            EditableFieldRow(L.admin.mailPage.dmarcForensicRetentionLabel,
+                        Ids.adminMailDmarcForensicRetentionInput, $forensicRetention)
+            // The > 30-day decision is the shared Rust fn, never restated here.
+            if let days = parseCount(input: forensicRetention), dmarcForensicRetentionWarns(days: days) {
+                Text(L.admin.mailPage.dmarcForensicRetentionWarning)
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            // Outbound aggregate-report sender switch (`dmarc-reporting.md` § Generation
+            // is on by default): last row before Save, saved with the group.
+            policyToggle(L.admin.mailPage.dmarcOutboundAggregateLabel,
+                         Ids.adminMailDmarcOutboundAggregateToggle, $draft.outboundAggregateEnabled)
+        }
+        .task(id: reloadToken) { seed() }
+    }
+
+    private func seed() {
+        draft = policy
+        aggregateRetention = String(policy.aggregateRetentionDays)
+        forensicRetention = String(policy.forensicRetentionDays)
+    }
+
+    private func gather() -> DmarcPolicyView {
+        var p = policy
+        p.rufPublish = draft.rufPublish
+        p.foMode = draft.foMode
+        p.outboundAggregateEnabled = draft.outboundAggregateEnabled
+        p.aggregateRetentionDays = parseU32(aggregateRetention, policy.aggregateRetentionDays)
+        p.forensicRetentionDays = parseU32(forensicRetention, policy.forensicRetentionDays)
+        return p
+    }
+}
+
+// MARK: - Microsoft sign-in registration (set_microsoft_registration)
+
+/// The deployment's own Microsoft app registration for the Outlook import
+/// (`mailbox-migration.md` § Microsoft sign-in, *An admin-supplied registration*).
+/// The two drafts go out as typed; the shared machine checks them (both blank
+/// clears) and refuses a bad pair onto the error banner before any round trip.
+private struct MailMicrosoftRegistrationSection: View {
+    let registration: MicrosoftRegistrationView
+    let reloadToken: Int
+    let isBusy: Bool
+    let onSave: (String, String) async -> Void
+
+    @State private var clientId = ""
+    @State private var tenant = ""
+
+    var body: some View {
+        policyGroup(title: L.admin.mailPage.microsoftGroupTitle, desc: L.admin.mailPage.microsoftGroupDesc,
+                    saveLabel: L.admin.mailPage.microsoftSave, saveId: Ids.adminMailMicrosoftSaveButton,
+                    saveKind: "fauna.bridges.set_microsoft_registration",
+                    isBusy: isBusy, onSave: { Task { await onSave(clientId, tenant) } }) {
+            Text(L.admin.mailPage.microsoftRequirements)
+                .font(.caption).foregroundStyle(.secondary)
+            Text(registration.isDefault ? L.admin.mailPage.microsoftUsingDefault
+                                        : L.admin.mailPage.microsoftUsingOwn)
+                .font(.caption).foregroundStyle(.secondary)
+            EditableFieldRow(L.admin.mailPage.microsoftClientIdLabel,
+                        Ids.adminMailMicrosoftClientIdInput, $clientId)
+            EditableFieldRow(L.admin.mailPage.microsoftTenantLabel,
+                        Ids.adminMailMicrosoftTenantInput, $tenant,
+                        subtitle: L.admin.mailPage.microsoftTenantSubtitle)
+        }
+        .task(id: reloadToken) {
+            clientId = registration.clientId
+            tenant = registration.tenant
+        }
+    }
+}
+
+// MARK: - Secrets (rotate_list_unsubscribe_secret / rotate_srs_secret)
+
+/// The two deployment-wide secret rotations (`mail-mass-mailing.md` § Secret
+/// rotation, `mail-forwarding.md` § SRS scheme). Each button is the shared
+/// machine's same-button two-click: every press is `MailPolicyAction.press`, and
+/// the button relabels to its confirm sentence while `armed` names it. The last
+/// rotation's outcome is shared Rust (`secretRotationText`), plain `Text`.
+private struct MailSecretsSection: View {
+    let armed: MailPolicyConfirm?
+    let rotation: SecretRotationView?
+    let isBusy: Bool
+    let onPress: (MailPolicyConfirm) async -> Void
+
+    var body: some View {
+        let unsubscribeLabel = armed == .rotateListUnsubscribeSecret
+            ? L.admin.mailPage.listUnsubscribeSecretRotateConfirm
+            : L.admin.mailPage.listUnsubscribeSecretRotate
+        let srsLabel = armed == .rotateSrsSecret
+            ? L.admin.mailPage.forwardSrsSecretRotateConfirm
+            : L.admin.mailPage.forwardSrsSecretRotate
+        GroupBox(L.admin.mailPage.secretsGroupTitle) {
+            VStack(alignment: .leading, spacing: 10) {
+                Text(L.admin.mailPage.secretsGroupDesc)
+                    .font(.caption).foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                HStack {
+                    Button(unsubscribeLabel) {
+                        Task { await onPress(.rotateListUnsubscribeSecret) }
+                    }
+                    .disabled(isBusy)
+                    .accessibilityIdentifier(Ids.adminMailListUnsubscribeSecretRotateButton)
+                    .automationActivate(Ids.adminMailListUnsubscribeSecretRotateButton,
+                                        isEnabled: { !isBusy }, text: { unsubscribeLabel }) {
+                        Task { await onPress(.rotateListUnsubscribeSecret) }
+                    }
+                    .faunaGate("fauna.bridges.rotate_list_unsubscribe_secret")
+                    // The label changes on arm: re-identify so the registered
+                    // `text:` closure re-captures the CURRENT label.
+                    .id("admin-mail-list-unsubscribe-secret-rotate-button:\(unsubscribeLabel)")
+                    Button(srsLabel) { Task { await onPress(.rotateSrsSecret) } }
+                        .disabled(isBusy)
+                        .accessibilityIdentifier(Ids.adminMailForwardSrsSecretRotateButton)
+                        .automationActivate(Ids.adminMailForwardSrsSecretRotateButton,
+                                            isEnabled: { !isBusy }, text: { srsLabel }) {
+                            Task { await onPress(.rotateSrsSecret) }
+                        }
+                        .faunaGate("fauna.bridges.rotate_srs_secret")
+                        .id("admin-mail-forward-srs-secret-rotate-button:\(srsLabel)")
+                }
+                if let rotation {
+                    Text(renderLocalizedText(secretRotationText(view: rotation)))
+                        .font(.caption).foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
     }
 }
 #endif // !FAUNA_KIDS

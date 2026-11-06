@@ -18,7 +18,8 @@ public struct PushSectionState: Equatable, Sendable {
     /// platform's own notification settings (apple's `platform_elements` pair).
     public let showsDenied: Bool
     /// The inline failure line, when the last toggle failed. On a build that
-    /// cannot register at all — no `aps-environment` entitlement yet, or the
+    /// cannot register at all — no `aps-environment` entitlement (macOS,
+    /// unsigned iOS), or the
     /// bare debug binary with no notification centre — this line is the
     /// specified behaviour and the user's only witness that the gate is shut.
     public let error: String?

@@ -34,6 +34,8 @@ protocol LocationControlChannel: AnyObject, Sendable {
     func unbindLocation(path: String) async throws
     func listLocations() async throws -> [FfiAgentLocation]
     func applyHeldDeletes(folder: String) async throws -> FfiHeldDeletesApplied
+    func refreshSetConflicts(model: FfiLocationBindingsModel) async -> Bool
+    func restoreRetainedVersion(folderId: String, conflictId: Int64) async throws
 }
 
 extension FfiSyncAgentProvisioner: LocationControlChannel {}
@@ -85,6 +87,19 @@ final class LocationsModel {
     private var model: FfiLocationBindingsModel
 
     private(set) var mappings: [LocationBinding] = []
+
+    /// Moves when a group set's review list does: the rows live in `model`, and
+    /// reading this in `setReviewRows` is what repaints the page.
+    private var setConflictsRevision = 0
+
+    /// Bumped each time the agent confirms a bind, on whichever path pushed it
+    /// (the gesture's own reconcile, `attach`, or `agentBecameReachable`). The
+    /// agent enrols this device's place before it answers (`file-sync.md` § 4 —
+    /// a local presence writes the place it needs), so an expanded row re-reads
+    /// its `folder-place-row` roster on this edge — the peer of windows'
+    /// `OnBindingsChanged` → `LoadPlaceRowsAsync`. A pending row renders the
+    /// same as a confirmed one, so `mappings` alone cannot carry this edge.
+    private(set) var confirmedBinds = 0
 
     /// Folder names whose binding the agent has PARKED — the owner withdrew
     /// this actor's write grant mid-life (`FfiAgentLocation.accessRevoked`,
@@ -259,6 +274,33 @@ final class LocationsModel {
         render()
     }
 
+    /// Re-read every bound group set's review list — called from
+    /// `SyncAgentHealthModel.onSetConflictsTick`, the same 10 s tick as
+    /// `foldEngineHolds` and for the same reason: the fold records a row inside
+    /// the agent, so no gesture here produces it (`group-set.md` § Build design
+    /// — the group set, decision 9). A no-op while injected.
+    func refreshSetConflicts() async {
+        guard !isInjected, let provisioner else { return }
+        if await provisioner.refreshSetConflicts(model: model) {
+            setConflictsRevision += 1
+        }
+    }
+
+    /// The group set `folderId`'s review rows as last read, under `setLabel`.
+    func setReviewRows(folderId: String, setLabel: String) -> [ConflictSummary] {
+        _ = setConflictsRevision
+        return model.setReviewRows(folderId: folderId, setLabel: setLabel)
+    }
+
+    /// *Use the other version* on a group set's row, then re-read the lists so
+    /// the used row goes without waiting for the tick. A throw is the agent's
+    /// refusal: the row stands and the caller shows it.
+    func useRetainedVersion(folderId: String, conflictId: Int64) async throws {
+        guard let provisioner else { return }
+        try await provisioner.restoreRetainedVersion(folderId: folderId, conflictId: conflictId)
+        await refreshSetConflicts()
+    }
+
     /// The user confirmed the mass-delete floor's hold on `folder`
     /// (`folder-location-apply-deletes-button`). Deliberately non-optimistic —
     /// unlike `add`/`remove` above, nothing here updates state before the
@@ -337,6 +379,7 @@ final class LocationsModel {
                 try await provisioner.bindLocation(
                     path: bind.path, folder: bind.folder, folderId: bind.folderId)
                 model.confirmBind(path: bind.path)
+                confirmedBinds += 1
             } catch {
                 logMessage(level: .warn, target: "fauna.sync",
                            message: "bindLocation \(bind.folder) (reconcile) failed: \(error)")

@@ -148,12 +148,26 @@ def test_web_onboarding_generate_identity(fresh_app):
     """Generate identity and verify we reach the handle-entry screen.
 
     Handle-first onboarding (onboarding.md § The pages): identity_created's
-    Continue lands on handle_entry — the old nest_choice / nest_connect manual
+    Continue goes through the recovery-kit screen (§ 1 Identity, changed
+    2026-08-01) to handle_entry — the old nest_choice / nest_connect manual
     node-URL screens were eliminated (§ Pages that do not exist)."""
+    from helpers.waiting import wait_until
+
+    driver = fresh_app.driver
     fresh_app.onboarding.navigate_to_status()
     fresh_app.onboarding.generate_identity()
-    fresh_app.driver.click("identity-continue-button")
-    fresh_app.driver.wait_for("handle-input", timeout=15)
+    driver.click("identity-continue-button")
+    wait_until(
+        lambda: driver.is_visible("recovery-kit-skip-button")
+        or driver.is_visible("handle-input"),
+        15,
+        diagnose=lambda: (
+            f"{driver.diagnose('handle-input')} error={fresh_app.error_text()!r}"
+        ),
+    )
+    if driver.is_visible("recovery-kit-skip-button"):
+        fresh_app.onboarding.skip_recovery_kit()
+    driver.wait_for("handle-input", timeout=15)
     assert fresh_app.driver.is_visible("handle-input"), (
         "web identity Continue should land on handle_entry (handle-input): "
         f"{fresh_app.driver.diagnose('handle-input')} error={fresh_app.error_text()!r}"

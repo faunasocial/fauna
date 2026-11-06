@@ -73,6 +73,7 @@ _POSTS = [
 @pytest.mark.macos
 @pytest.mark.ios  # verified green (`--client ios`): shared fix
 @pytest.mark.tui  # M3 slice G close-out: title/description/domain + reveal-gated image, off the same shared ResolvedLinkPreview projection
+@pytest.mark.android  # FeedLinkPreviewCards paints the card; feed_inject_posts forwards link_previews verbatim to the shared seam
 @pytest.mark.feature("link-previews")
 def test_link_preview_card_paints_for_a_resolved_preview(logged_in_app):
     """The ``link-preview-card`` (title / description / domain) renders on the post
@@ -174,6 +175,7 @@ _TWO_PREVIEW_POST = [
 @pytest.mark.macos
 @pytest.mark.ios
 @pytest.mark.tui
+@pytest.mark.android
 @pytest.mark.feature("link-previews")
 def test_two_bare_urls_paint_a_card_each(logged_in_app):
     """A two-bare-url body paints TWO ``link-preview-card``s under the one bare id,

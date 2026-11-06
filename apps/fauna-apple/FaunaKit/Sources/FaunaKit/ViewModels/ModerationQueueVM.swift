@@ -183,6 +183,7 @@ public final class ModerationQueueVM {
             guard self.api === api else { return }
             errorMessage = DisplayError.message(error)
         }
+        openPendingAppeal()
         // The reporter's ledger rides every Moderation entry beside the queue —
         // its own failure never hides the queue rows above.
         await loadReports()
@@ -286,6 +287,17 @@ public final class ModerationQueueVM {
         appealFormView(contentId: appealContentId ?? "", reason: appealReason)
     }
 
+    /// Open the appeal a `dm-message-withheld-badge` tap asked for
+    /// (``PendingAppealStore``), on the loaded row it names — behind the same
+    /// `rowIsAppealable` gate as the row's own `appeal-button`. A row the queue no
+    /// longer carries opens nothing.
+    func openPendingAppeal() {
+        guard let contentId = PendingAppealStore.consume(),
+              let row = rows.first(where: { $0.contentId == contentId }),
+              Self.isAppealable(row) else { return }
+        openAppeal(row: row)
+    }
+
     /// `appeal-button`: open the form on `row`, capturing its `content_id` now.
     public func openAppeal(row: QueueRow) {
         appealContentId = row.contentId
@@ -339,11 +351,15 @@ public final class ModerationQueueVM {
     /// The queue row's `content-label-badge` automation facts (moderation.md
     /// § Element IDs → *Queue row facts*): `confidence`, the whole percent with its
     /// `%` exactly as the row paints it, and `action`, the resolved action label —
-    /// absent on a local detection, which carries none. The shared category key
-    /// the badge styles from rides with them, the fleet-uniform fact set windows
-    /// and android pack into one carrier.
+    /// absent on a local detection, which carries none — and `issuer`, the deciding
+    /// nest's domain on a row another nest delivered (`QueueRow.issuerNest`, from
+    /// the shared fold; absent on this nest's own decision and on a local
+    /// detection — moderation.md § Legal takedown → *The author homed on another
+    /// nest*). The shared category key the badge styles from rides with them, the
+    /// fleet-uniform fact set windows and android pack into one carrier.
     public nonisolated static func badgeFacts(
-        category: String, confidencePerMille: UInt16, action: UInt8?
+        category: String, confidencePerMille: UInt16, action: UInt8?,
+        issuerNest: String? = nil
     ) -> [String: String] {
         var facts = [
             "category": category,
@@ -352,7 +368,21 @@ public final class ModerationQueueVM {
         if let action {
             facts["action"] = renderLocalizedText(obligationActionLabel(action: action))
         }
+        if let issuerNest {
+            facts["issuer"] = issuerNest
+        }
         return facts
+    }
+
+    /// The row's action line: the resolved action label, then — on a row another
+    /// nest delivered — the shared `issued_by` suffix (`"{label} · {issued_by}"`,
+    /// as tui paints it). The wording is the shared fold's `issued_by`, never
+    /// derived here from `issuer_nest`. `nil` for a local detection (no action).
+    public nonisolated static func actionLine(action: UInt8?, issuedBy: LocalizedText?) -> String? {
+        guard let action else { return nil }
+        let label = renderLocalizedText(obligationActionLabel(action: action))
+        guard let issuedBy else { return label }
+        return "\(label) · \(renderLocalizedText(issuedBy))"
     }
 }
 

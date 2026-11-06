@@ -12,7 +12,7 @@ There is nothing to choose to get this: once mail is on, the nest runs a real ma
 from anywhere reaches your inbox, mail you send leaves signed so the big providers
 accept it, a sender that was told to try again does deliver on the retry, a failed
 delivery comes back to you and never to a stranger, and an upgrade never loses a
-mailbox. The signing keys are minted and rotated by the nest itself. A domain that
+mailbox. The signing keys are created and rotated by the nest itself. A domain that
 asks for a daily report on the mail sent in its name, or on how encrypted delivery
 to it went, is sent one. How strict the server is with incoming mail, and whether it
 sends those reports, is the admin's to tune in the admin area; the defaults need no
@@ -157,7 +157,7 @@ Stamped 2026-10-11 at 29b0959751.
 | 4 | nest | `tests/e2e-unified/tests/test_mail_bridge_mta.py::test_scheduled_rotation_mints_new_selector_nestside` | nest (linux): passed |
 | 5 | nest | `tests/e2e-unified/tests/test_mail_bridge_mta.py::test_outbound_bounce_on_bad_external_recipient` | nest (linux): passed |
 | 5 | nest | `tests/e2e-unified/tests/test_mail_bridge_mta.py::test_outbound_delay_warning_emitted_once` | nest (linux): passed |
-| 5 | nest | `tests/e2e-unified/tests/test_mail_bridge_mta.py::test_forwarded_permfail_seals_dsn_to_forwarder_inbox_no_relay` | nest (linux): passed |
+| 5 | nest | `tests/e2e-unified/tests/test_mail_bridge_mta.py::test_forwarded_permfail_seals_dsn_to_forwarder_inbox_no_relay` | nest (linux): passed, nest (macos): passed |
 | 5 | nest | `tests/e2e-unified/tests/platform/docker/test_mail_deploy_forwarder_ndr.py::test_mail_deploy_forwarder_ndr_seals_locally_no_hairpin` | nest (linux): passed |
 | 6 | nest | `tests/e2e-unified/tests/test_mail_bridge_mta.py::test_outbound_mta_sts_enforce_refuses_mismatched_mx` | nest (linux): passed |
 | 6 | nest | `tests/e2e-unified/tests/test_mail_bridge_mta.py::test_outbound_mta_sts_enforce_requires_starttls` | nest (linux): passed |
@@ -177,7 +177,7 @@ Stamped 2026-10-11 at 29b0959751.
 | 14 | nest | `tests/e2e-unified/tests/test_mail_bridge_mta.py::test_mail_to_a_member_who_never_turned_mail_on_is_refused_for_that_recipient_alone` | nest (linux): passed |
 | 15 | nest | `tests/e2e-unified/tests/test_mail_bridge_mta.py::test_mail_to_an_account_just_passed_to_a_successor_is_put_off_until_it_signs_in` | nest (linux): passed |
 | 16 | nest | `tests/e2e-unified/tests/test_mail_bridge_mta.py::test_outbound_retries_each_recipient_on_its_own_for_five_days_then_bounces` | nest (linux): passed |
-| 17 | nest | `tests/e2e-unified/tests/test_mail_bridge_mua_submission.py::test_a_bounce_names_the_recipient_and_reason_and_carries_headers_not_body` | nest (linux): passed |
+| 17 | nest | `tests/e2e-unified/tests/test_mail_bridge_mua_submission.py::test_a_bounce_names_the_recipient_and_reason_and_carries_headers_not_body` | nest (linux): passed, nest (macos): passed |
 | 18 | nest | `tests/e2e-unified/tests/test_mail_bridge_mta.py::test_inbound_bounce_to_a_forwarding_user_produces_no_bounce` | nest (linux): passed |
 | 19 | nest | `tests/e2e-unified/tests/test_mail_bridge_mta.py::test_outbound_no_mx_goes_to_the_domain_but_a_failed_lookup_waits` | nest (linux): passed |
 | 20 | nest | `tests/e2e-unified/tests/test_mail_bridge_mta.py::test_outbound_unreachable_preferred_mx_delivers_through_the_next` | nest (linux): passed |
@@ -191,20 +191,20 @@ Stamped 2026-10-11 at 29b0959751.
 | 27 | nest | `tests/e2e-unified/tests/test_mail_bridge_mta.py::test_scheduled_flip_waits_for_publication` | nest (linux): passed |
 | 28 | nest | `tests/e2e-unified/tests/test_mail_bridge_mta.py::test_force_rotate_dkim_flips_active_selector_live` | nest (linux): passed |
 | 29 | nest | `tests/e2e-unified/tests/test_mail_bridge_mta.py::test_the_nest_keeps_signing_with_the_same_key_across_a_restart` | nest (linux): passed |
-| 30 | nest | `tests/e2e-unified/tests/test_mail_bridge_rekey.py::test_mail_flows_after_the_mta_is_re_keyed` | nest (linux): passed |
+| 30 | nest | `tests/e2e-unified/tests/test_mail_bridge_rekey.py::test_mail_flows_after_the_mta_is_re_keyed` | nest (linux): passed, nest (macos): passed |
 | 31 | nest | `tests/e2e-unified/tests/test_mail_bridge_mta.py::test_mail_started_before_its_certificate_offers_encryption_without_a_restart` | nest (linux): passed |
-| 32 | nest | `tests/e2e-unified/tests/test_mail_bridge_mua_submission.py::test_mail_over_the_warmup_allowance_is_accepted_and_delivered_the_next_day` | nest (linux): passed |
-| 33 | nest | `tests/e2e-unified/tests/test_mail_bridge_mua_submission.py::test_bounces_auto_replies_and_invitations_leave_with_the_warmup_spent` | nest (linux): passed |
+| 32 | nest | `tests/e2e-unified/tests/test_mail_bridge_mua_submission.py::test_mail_over_the_warmup_allowance_is_accepted_and_delivered_the_next_day` | nest (linux): passed, nest (macos): passed |
+| 33 | nest | `tests/e2e-unified/tests/test_mail_bridge_mua_submission.py::test_bounces_auto_replies_and_invitations_leave_with_the_warmup_spent` | nest (linux): passed, nest (macos): passed |
 | 34 | nest | `tests/e2e-unified/tests/test_mail_bridge_mta.py::test_a_blocklist_listing_never_stops_outbound_delivery` | nest (linux): passed |
 | 35 | nest | `tests/e2e-unified/tests/platform/docker/test_mail_relay_two_nest_smtp.py::test_two_party_external_smtp_round_trip_and_reply` | nest (linux): passed |
-| 36 | nest | `tests/e2e-unified/tests/test_mail_bridge_mta.py::test_submission_dkim_signature_verifies` | nest (linux): passed |
+| 36 | nest | `tests/e2e-unified/tests/test_mail_bridge_mta.py::test_submission_dkim_signature_verifies` | nest (linux): passed, nest (macos): passed |
 | 36 | nest | `tests/e2e-unified/tests/test_mail_bridge_mta.py::test_submission_multipart_dkim_verifies` | nest (linux): passed |
-| 36 | nest | `tests/e2e-unified/tests/test_mail_bridge_mua_submission.py::test_an_app_send_to_an_outside_recipient_arrives_dkim_signed` | nest (linux): passed |
+| 36 | nest | `tests/e2e-unified/tests/test_mail_bridge_mua_submission.py::test_an_app_send_to_an_outside_recipient_arrives_dkim_signed` | nest (linux): passed, nest (macos): passed |
 | 36 | nest | `tests/e2e-unified/tests/test_mail_bridge_mta.py::test_submission_dkim_per_domain_from_selects_second_domain_key` | nest (linux): passed |
 | 37 | nest | `tests/e2e-unified/tests/api/test_mail_deliverability.py::test_admin_reads_warmup_status` | nest (linux): passed |
 | 38 | nest | `tests/e2e-unified/tests/api/test_mail_health.py::test_the_allowance_grows_along_the_ramp_and_lifts_after_thirty_days` | nest (linux): passed |
 | 39 | nest | `tests/e2e-unified/tests/api/test_mail_health.py::test_a_nest_restart_leaves_the_ramp_where_it_was` | nest (linux): passed |
 | 40 | nest | `tests/e2e-unified/tests/api/test_mail_deliverability.py::test_warmup_held_list_send_reads_back_held_on_sent` | nest (linux): passed |
-| 40 | nest | `tests/e2e-unified/tests/test_mail_bridge_mua_submission.py::test_mail_app_send_wider_than_the_warmup_allowance_reads_back_held_on_sent` | nest (linux): passed |
-| 41 | nest | `tests/e2e-unified/tests/test_mail_dmarc_reports.py::test_peer_publishing_a_mailto_rua_receives_our_aggregate_report` | nest (linux): passed |
+| 40 | nest | `tests/e2e-unified/tests/test_mail_bridge_mua_submission.py::test_mail_app_send_wider_than_the_warmup_allowance_reads_back_held_on_sent` | nest (linux): passed, nest (macos): passed |
+| 41 | nest | `tests/e2e-unified/tests/test_mail_dmarc_reports.py::test_peer_publishing_a_mailto_rua_receives_our_aggregate_report` | nest (linux): passed, nest (macos): passed |
 <!-- features-render:end -->

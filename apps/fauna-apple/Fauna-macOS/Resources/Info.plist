@@ -26,7 +26,7 @@
   <key>CFBundleVersion</key>
   <string>1</string>
   <key>CFBundleShortVersionString</key>
-  <string>0.1.5</string>
+  <string>0.1.6</string>
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <!-- App icon (2026-07-20): Fauna's one brand mark (sites/fauna-social/public/
@@ -48,17 +48,20 @@
   <key>NSPhotoLibraryUsageDescription</key>
   <string>Fauna backs up your photos and videos to your personal nest.</string>
 
-  <!-- Export compliance: Fauna ships its own encryption (MLS, sealed-at-rest),
-       not merely OS-provided facilities, so ITSAppUsesNonExemptEncryption is
-       YES under Apple's own exemption test. Posture ratified 2026-08-23,
-       publicly-available-source route (no BIS filing owed) —
-       docs/goal/architecture/export-compliance.md § What each store form
-       answers; effective-date stamp pending publication (§ Implementation
-       status today). This app is not Mac-App-Store-distributed today
-       (.dmg/.pkg), so the key has no live ASC effect yet, but is set
-       here for documentary consistency should that ever change. -->
+  <!-- Export compliance: NO. Apple's rule ("Complying with Encryption Export
+       Regulations"): set NO when the app uses only encryption that is exempt
+       from export compliance documentation requirements. Fauna implements only
+       standard, published algorithms and is not distributed in France; on
+       2026-11-06 the organisation's representative answered App Store Connect's
+       encryption questionnaire so, and App Store Connect replied that no
+       documents are needed. So no ITSEncryptionExportComplianceCode exists or
+       is owed. The US export posture (publicly available source, not subject
+       to the EAR) is a separate question:
+       docs/goal/architecture/export-compliance.md § What each store form answers.
+       This app is not Mac-App-Store-distributed today (.dmg/.pkg); the key
+       is set to match the iOS app should that ever change. -->
   <key>ITSAppUsesNonExemptEncryption</key>
-  <true/>
+  <false/>
 
   <!-- URL scheme for deep links -->
   <key>CFBundleURLTypes</key>

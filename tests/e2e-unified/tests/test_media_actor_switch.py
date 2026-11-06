@@ -136,7 +136,7 @@ def test_actor_switch_on_the_media_route_rebinds_the_page(
     # ── Precondition: seed actor B's own media FIRST (fixture setup, point 8(b)) ──
     # A separate login on the SAME app/driver, reset before and after — actor A's
     # baseline (below) must not observe B's session.
-    _login_app_as(app, request, nest_instance, actor_b)
+    _login_app_as(app, request, nest_instance, actor_b, verify_live_actor=True)
     app.media.navigate()
     pre_b = app.media.wait_for_item_count(1)
     assert pre_b == 1, (
@@ -156,7 +156,7 @@ def test_actor_switch_on_the_media_route_rebinds_the_page(
 
     # ── Baseline: actor A logs in on /app/media, own item + thumbnail render. ──
     # A red here is a broken baseline, never the regression under test (convention 6).
-    _login_app_as(app, request, nest_instance, actor_a)
+    _login_app_as(app, request, nest_instance, actor_a, verify_live_actor=True)
     app.media.navigate()
     pre_a = app.media.wait_for_item_count(1)
     assert pre_a == 1, (

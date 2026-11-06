@@ -362,7 +362,7 @@ class LinkedNestsContentTest {
             ),
         )
         composeTestRule.onNodeWithTag("nests-item-capabilities")
-            .assertTextContains("sealed copy of your account settings", substring = true)
+            .assertTextContains("encrypted copy of your account settings", substring = true)
         composeTestRule.onAllNodesWithText("account_replica", substring = true).assertCountEquals(0)
     }
 

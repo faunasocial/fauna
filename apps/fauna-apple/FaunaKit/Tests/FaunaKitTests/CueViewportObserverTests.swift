@@ -97,8 +97,8 @@ private func frame(y: CGFloat, height: CGFloat) -> CGRect {
 }
 
 @Test func mediaPlayedPmIsAlwaysNil() {
-    // No playback surface on apple yet (`AsyncImage` stills only, no AVPlayer
-    // anywhere in the feed) — see `CueViewportObserver.emit`'s comment.
+    // The player notes its progress into the shared tracker, which takes the
+    // peak itself — the probe never carries one (`CueViewportObserver.emit`).
     let rows = CueViewportObserver.buildRows(
         frames: ["a": frame(y: 0, height: 50)], postsWindow: ["a": true])
     #expect(rows[0].mediaPlayedPm == nil)

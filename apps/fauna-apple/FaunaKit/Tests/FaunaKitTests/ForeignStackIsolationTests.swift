@@ -30,7 +30,7 @@ import Testing
 //     `Task {}` in its `static func run` inherits **no** isolation, lands on the
 //     cooperative pool, and **crashed**.
 //   * `FaunaClient` is `@MainActor`, so the `Task {}` in its fire-and-forget
-//     statics (`refreshMailEpochSchedule`, `runSealBackfill`) inherits main-actor
+//     statics (`publishSubscriberEncapsKey`, `runSealBackfill`) inherits main-actor
 //     isolation and gets the big stack.
 //
 // That second clause is the load-bearing one, and it is a *language* guarantee
@@ -90,7 +90,7 @@ struct ForeignStackIsolationTests {
             """
             A `Task {}` inside a static member of a @MainActor type left the main \
             thread. That breaks the safety argument for FaunaClient's \
-            fire-and-forget passes (refreshMailEpochSchedule runs on EVERY \
+            fire-and-forget passes (publishSubscriberEncapsKey runs on EVERY \
             authenticated start and reaches fauna_pq_kem::derive_keypair): they \
             would now be driving ML-KEM-768 on a 544 KB cooperative-pool stack. \
             See native-async-execution.md § The rule — the remedy is a Rust-side \

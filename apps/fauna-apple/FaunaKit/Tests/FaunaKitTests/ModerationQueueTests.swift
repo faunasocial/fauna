@@ -115,3 +115,34 @@ import Foundation
     #expect(facts["confidence"] == "88%")
     #expect(facts["category"] == "spam")
 }
+
+@Test func badgeFactsOfADeliveredRowNameTheIssuer() {
+    let facts = ModerationQueueVM.badgeFacts(
+        category: "spam", confidencePerMille: 900, action: 1, issuerNest: "issuer.example")
+    #expect(facts["issuer"] == "issuer.example")
+    let own = ModerationQueueVM.badgeFacts(category: "spam", confidencePerMille: 900, action: 1)
+    #expect(own["issuer"] == nil)
+}
+
+@Test func actionLineAppendsTheSharedIssuedBySuffix() {
+    let issuedBy = LocalizedText(key: "moderation.queue.issued_by", args: ["nest": "issuer.example"])
+    #expect(ModerationQueueVM.actionLine(action: 1, issuedBy: issuedBy)
+        == "Quarantined · decided by issuer.example")
+    #expect(ModerationQueueVM.actionLine(action: 1, issuedBy: nil) == "Quarantined")
+    #expect(ModerationQueueVM.actionLine(action: nil, issuedBy: issuedBy) == nil)
+}
+
+// MARK: - Post-detail content-label badge (`PostDetailContentLabelBadge`, shared by the
+// iOS + macOS opened-post detail — feed-read-model.md § the room's labels on the opened post).
+
+@Test func postDetailPaintsOneBadgeForALabelledPost() {
+    let labels = [
+        ContentLabelEntry(category: "spam", confidencePerMille: 400),
+        ContentLabelEntry(category: "nsfw", confidencePerMille: 900),
+    ]
+    #expect(PostDetailContentLabelBadge.paintedCategory(labels: labels) == "nsfw")
+}
+
+@Test func postDetailPaintsNoBadgeForAnUnlabelledPost() {
+    #expect(PostDetailContentLabelBadge.paintedCategory(labels: []) == nil)
+}

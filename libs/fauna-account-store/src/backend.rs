@@ -228,6 +228,15 @@ pub trait StoreBackend {
         local_writer: Option<&WriterId>,
     ) -> Result<InsertOutcome>;
 
+    /// Upsert the group-plane `entry` with NO journal row — the cache write
+    /// of a fold the reader re-derives from rows it already accounted
+    /// (`group-set.md` decision 5, rule (ii): a writer-checked cell is the
+    /// fold of its item's relay rows, and the merged entry is that fold's
+    /// cache). The version check is [`Self::group_state_put_with_row`]'s:
+    /// `EntryMoved` when `entry.entry_version` is not the stored version plus
+    /// one, `Inserted` otherwise.
+    async fn group_state_cache_put(&self, entry: &StateEntry) -> Result<InsertOutcome>;
+
     /// Read the current group-plane entry for `(scope, kind, key)`.
     async fn group_state_get(
         &self,

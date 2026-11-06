@@ -3,29 +3,11 @@ import uuid
 
 import pytest
 
-from helpers.app_surface import app_name, skip_if_no_local_search_arm, skip_unbuilt
+from helpers.app_surface import skip_if_no_local_search_arm
 from helpers.search_journeys import LOCAL_INDEX_S, reset_search_page
 from helpers.waiting import wait_until
 
 pytestmark = [pytest.mark.tier2, pytest.mark.tier_3]
-
-# tui led (2026-08-10); linux/android/web landed 2026-08-14/15; macOS/iOS joined 2026-08-25. windows closes the set — last of 7 apps.
-#
-# ⚠ This tuple answers "does this app ACT on a search result's navigation
-# target?" — nothing more. Two of the three legs below additionally need a
-# *result of that class to exist*, which is a different question with a
-# different answer on web, on the phone seats, and on windows (no local search
-# arm registered yet — see `skip_if_no_local_search_arm`).
-#
-# The former `_SEARCH_NAV_POST_APPS` split is RETIRED (2026-08-25). It existed
-# because apple's Contact/File legs timed out at zero results while Post was
-# green, which read as a local-search-index content-coverage gap. The real
-# cause was neither the index nor the routing: apple's e2e login builds no
-# `ConversationsSession` — and therefore registers no index arm and no builder
-# — unless a selected test carries `real_conversations` (see the two marked
-# tests below). Post was green throughout because posts come from the nest arm
-# (`content_fts`), never the local index.
-_SEARCH_NAV_APPS = ("tui", "linux", "android", "web", "macos", "ios", "windows")
 
 
 def test_navigate_to_search(logged_in_app):
@@ -152,14 +134,6 @@ def test_activating_a_post_search_result_navigates_to_its_post_detail(
     from tests.api import ws_api
     from tests.api.bare import sign_and_encode_post
 
-    if app_name(logged_in_app.driver) not in _SEARCH_NAV_APPS:
-        skip_unbuilt(
-            logged_in_app.driver,
-            surface="search-result-item activation (SearchNav)",
-            detail="no app but tui/linux/android/web/macos/ios acts on a result row's navigation target yet",
-            tracked="",
-        )
-
     signing_key = test_user["signing_key"]
     port = nest_instance["port"]
 
@@ -279,13 +253,6 @@ def test_activating_a_contact_search_result_navigates_to_its_card(
     """
     from tests.test_addressbook import _seed_mda_sealed_card
 
-    if app_name(app.driver) not in _SEARCH_NAV_APPS:
-        skip_unbuilt(
-            app.driver,
-            surface="search-result-item activation (SearchNav::Contact)",
-            detail="no app but tui/linux/android/web/macos/ios acts on a Contact search result's navigation target yet",
-            tracked="",
-        )
     skip_if_no_local_search_arm(app.driver, content_class="Contact")
 
     handle = dedicated_mail_nest
@@ -367,13 +334,6 @@ def test_activating_a_contact_search_result_for_a_deleted_card_surfaces_error(
     """
     from tests.test_addressbook import _seed_mda_sealed_card
 
-    if app_name(app.driver) not in _SEARCH_NAV_APPS:
-        skip_unbuilt(
-            app.driver,
-            surface="search-result-item activation (SearchNav::Contact)",
-            detail="no app but tui/linux/android/web/macos/ios acts on a Contact search result's navigation target yet",
-            tracked="",
-        )
     skip_if_no_local_search_arm(app.driver, content_class="Contact")
 
     handle = dedicated_mail_nest
@@ -458,13 +418,6 @@ def test_activating_a_file_search_result_navigates_to_its_media_detail(
 
     app, plan = seeded_media_app
 
-    if app_name(app.driver) not in _SEARCH_NAV_APPS:
-        skip_unbuilt(
-            app.driver,
-            surface="search-result-item activation (SearchNav::File)",
-            detail="no app but tui/linux/android/web/macos/ios acts on a File search result's navigation target yet",
-            tracked="",
-        )
     # Red on web for the identical structural reason as the Contact leg above —
     # found by the same read, before anyone spent a run discovering it.
     skip_if_no_local_search_arm(app.driver, content_class="File")

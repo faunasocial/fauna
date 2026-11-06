@@ -185,7 +185,7 @@ use fauna_core::generation::{
 };
 use fauna_protocol::account_state::ItemClass;
 use fauna_protocol::merge_policy::{
-    KIND_DEVICE_REACH, KIND_DEVICE_SET, KIND_ESCROW_RECEIPT, KIND_ESCROW_WRAP,
+    KIND_DEVICE_REACH, KIND_DEVICE_SET, KIND_ESCROW_RECEIPT, KIND_ESCROW_TARGET, KIND_ESCROW_WRAP,
     KIND_GENERATION_CLOSED, KIND_GENERATION_MINT, KIND_GENERATION_SHRED, KIND_GENERATION_UNKEYABLE,
     KIND_GENERATION_WRAP, LwwStamp, TipRowScope, TipSealedKind, retired_with_its_writer,
 };
@@ -379,6 +379,18 @@ where
                 .forget_dead_item(store, KIND_DEVICE_REACH, &reach_cell_key(&id), Some(&id))
                 .await?;
         }
+    }
+
+    // ── 4b. Departed writers' escrow-target copies ──────────────────────────
+    // Clause (3)(i). Every seed-holding device publishes its own copy of the
+    // identity's `Immutable` target, so each target item carries one entry per
+    // writer; a departed writer's copy is retired behind this device's own,
+    // never before it is published as this pass saw it.
+    for entry in live_rows(store, KIND_ESCROW_TARGET).await? {
+        crate::pass_breath::pass_breath().await;
+        retirer
+            .retire_departed_copies(KIND_ESCROW_TARGET, &entry)
+            .await?;
     }
 
     // The tip, and the generations it supersedes — one value for the re-seal
@@ -1100,6 +1112,51 @@ where
             RetireOutcome::Unsupported => self.pass.unsupported = true,
         }
         Ok(outcome)
+    }
+
+    /// Clause (3)(i): retire every copy of the gen-0 account-level item
+    /// `merged` that a writer who is no longer a verified member holds — once
+    /// this device's own copy carries the merged value and is published as
+    /// this pass saw it (`account-sync-plane.md` § The bind leg, ruling 1(d)),
+    /// so the nest never serves the item to no one. A live sibling's copy is
+    /// its own business, and this device's own copy is never named. A retired
+    /// copy is forgotten from the relay plane; merged state keeps the item.
+    async fn retire_departed_copies(&mut self, kind: &str, merged: &StateEntry) -> Result<()> {
+        let Some(item_key) = self.fleet.gen0_item_key(kind, &merged.key) else {
+            return Ok(());
+        };
+        let rows = self.fleet.relay_rows_at(&item_key).await?;
+        let Some(own) = rows.iter().find(|r| r.writer.0 == self.me) else {
+            return Ok(());
+        };
+        if !self
+            .fleet
+            .listed_at_or_above(&own.writer, &item_key, own.writer_seq)
+        {
+            return Ok(());
+        }
+        let carries = self
+            .fleet
+            .open_relay_row(own)
+            .await?
+            .is_some_and(|p| p.value.as_slice() == merged.value.as_slice());
+        if !carries {
+            return Ok(());
+        }
+        let departed: Vec<(WriterId, u64, Option<u64>)> = rows
+            .iter()
+            .filter(|r| r.writer.0 != self.me && !self.view.is_verified_member(&r.writer.0))
+            .map(|r| (r.writer, r.writer_seq, r.feed_seq))
+            .collect();
+        for (writer, seq, feed_seq) in departed {
+            if let RetireOutcome::Retired | RetireOutcome::Gone = self
+                .retire(&item_key, &writer, seq, feed_seq, Belt::None)
+                .await?
+            {
+                self.fleet.relay_forget(&writer, &item_key).await?;
+            }
+        }
+        Ok(())
     }
 
     /// Clause (3d): a removed device's rows — its `Enrolled` rows, its reach
@@ -2744,6 +2801,154 @@ mod tests {
         );
         let opened = own_opened_under(&f, &p, &k2, &key).await.unwrap();
         assert_eq!(opened.value.as_slice(), key.value.as_slice());
+    }
+
+    /// **A departed writer's copy of the escrow target is retired behind this
+    /// device's own published copy** (`fleet-scope-reclamation.md` § *Fleet-scope
+    /// reclamation*, clause (3)(i)). Every seed-holding device publishes its own
+    /// copy of the identity's `Immutable` target at bootstrap, and the cap
+    /// counts one entry per (item, writer); before this arm a signed-out or
+    /// removed device's copy stayed live for good, one entry per machine that
+    /// ever enrolled — measured 2026-10-30 as the whole residue a whole-suite
+    /// sweep's session account carried to `scope_full`. THEM (no member) and a
+    /// live sibling each hold a copy: nothing is retired until US's own copy
+    /// is published as the pass saw it, then THEM's alone — never the
+    /// sibling's, never US's own.
+    #[tokio::test]
+    async fn a_departed_writers_escrow_target_copy_is_retired_behind_this_devices_own() {
+        let f = fixture().await;
+        f.put(enrollment_row(US)).await;
+        let sib = lower_seed();
+        walked_row(&f, sib, 1, &enrollment_row(sib)).await;
+        let target = crate::generation_mint::escrow_target_entry(&ESCROW_SEED).unwrap();
+        // Walked copies merged under their WRITERS' coordinates — never
+        // through `put_state`, which would journal one as this device's own.
+        for seed in [THEM, sib] {
+            let journal = fauna_account_store::types::JournalRow {
+                writer: WriterId(device_id_of(seed)),
+                seq: 2,
+                scope: ACCOUNT_STATE_FLEET_SCOPE.into(),
+                op: fauna_account_store::types::JournalOp::StatePut,
+                item: fauna_account_store::types::ItemRef::StateKey {
+                    kind: target.kind.clone(),
+                    key: target.key.clone(),
+                    entry_version: 0,
+                },
+            };
+            f.store
+                .ingest_state(&journal, target.clone())
+                .await
+                .unwrap();
+            let keys = kind_keys(&f.schedule, &target.kind).unwrap();
+            let writer_key = device_key(seed);
+            let sealed = seal_entry(
+                &keys,
+                &EntryCoordinates {
+                    writer_id: device_id_of(seed),
+                    writer_seq: 2,
+                    scope: ACCOUNT_STATE_FLEET_SCOPE,
+                },
+                &EntryPlaintext {
+                    kind: target.kind.clone(),
+                    key: target.key.clone(),
+                    merge_meta: None,
+                    value: target.value.clone().into(),
+                    tombstone: false,
+                },
+                &writer_key,
+            )
+            .unwrap();
+            f.store
+                .record_relay_row(&RelayRow {
+                    scope: ACCOUNT_STATE_FLEET_SCOPE.into(),
+                    item_class: "state-entry".into(),
+                    writer: WriterId(device_id_of(seed)),
+                    writer_seq: 2,
+                    item_key: sealed.item_key.to_vec(),
+                    op: "state-put".into(),
+                    entry: Some(sealed.envelope),
+                    feed_seq: None,
+                })
+                .await
+                .unwrap();
+        }
+        let nest = Recorder::default();
+        let p = plane(&f, &nest);
+        let target_key = p.gen0_item_key(KIND_ESCROW_TARGET, &target.key).unwrap();
+        let named = |nest: &Recorder| -> Vec<([u8; 32], u64)> {
+            nest.0
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(k, _, _)| *k == target_key)
+                .map(|(_, w, s)| (*w, *s))
+                .collect()
+        };
+
+        // No copy of our own: nothing here carries the item, so the departed
+        // copy stays.
+        ensure_reclaimed(&f.store, &p, &f.trust, &f.writer_key)
+            .await
+            .unwrap();
+        assert!(
+            named(&nest).is_empty(),
+            "nothing retired: {:?}",
+            named(&nest)
+        );
+
+        // Our own copy, published — the bootstrap's write-if-absent, here put
+        // through the door. Our frontier slot now says published, but that
+        // names no nest, and a pass with no listing of the bound one retires
+        // nothing on it (ruling 1(d)).
+        p.put(
+            &ItemId {
+                kind: KIND_ESCROW_TARGET.into(),
+                key: target.key.clone(),
+            },
+            target.value.clone(),
+            None,
+        )
+        .await
+        .unwrap();
+        p.publish_pending().await.unwrap();
+        ensure_reclaimed(&f.store, &p, &f.trust, &f.writer_key)
+            .await
+            .unwrap();
+        assert!(
+            named(&nest).is_empty(),
+            "no retire rests on an own copy this pass has not seen published"
+        );
+
+        // Seen published: THEM's copy is retired, once, and forgotten locally.
+        reconciled(&f, &p).await;
+        for _ in 0..2 {
+            ensure_reclaimed(&f.store, &p, &f.trust, &f.writer_key)
+                .await
+                .unwrap();
+        }
+        assert_eq!(
+            named(&nest),
+            vec![(device_id_of(THEM), 2)],
+            "THEM's copy alone is retired — never the live sibling's, never ours"
+        );
+        let writers: Vec<[u8; 32]> = f
+            .store
+            .relay_rows_at(ACCOUNT_STATE_FLEET_SCOPE, "state-entry", &target_key)
+            .await
+            .unwrap()
+            .iter()
+            .map(|r| r.writer.0)
+            .collect();
+        assert!(!writers.contains(&device_id_of(THEM)), "{writers:?}");
+        assert!(writers.contains(&device_id_of(sib)) && writers.contains(&device_id_of(US)));
+        assert!(
+            f.store
+                .state(KIND_ESCROW_TARGET, &target.key)
+                .await
+                .unwrap()
+                .is_some(),
+            "the account keeps its escrow target"
+        );
     }
 
     /// **Another member's covering row licenses nothing.** The same hand-over,

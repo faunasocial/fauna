@@ -32,15 +32,27 @@
           FontStyle="Italic"
           Opacity="0.6"
           FontSize="12" />
-      <!-- Legal-takedown tombstone placeholder (moderation.md § Categories & enforcement
-           item 1). Shown iff the nest took this message down under a legal obligation
+      <!-- Legal-takedown tombstone placeholder (takedown-and-block.md § Legal takedown →
+           App render). Shown iff the nest took this message down under a legal obligation
            (MessageSnapshot.legalTakedownRef set); Bind() sets its Text to the shared
            localized tombstone and collapses the body/attachments/actions/pills like the
-           deleted tombstone, returning early. Presentation-only (no ui.yaml id — the paint
-           lives inside the existing bubble scope, like the post quoted-post tombstone),
-           mirroring web's `message-legal-takedown` div + linux message_bubble.rs. -->
+           deleted tombstone, returning early. Carries the ui.yaml id
+           dm-message-legal-takedown (the twin of dm-message-deleted). -->
       <TextBlock
           x:Name="LegalTakedownPlaceholder"
+          AutomationProperties.AutomationId="{x:Bind ids:Ids.DmMessageLegalTakedown}"
+          Visibility="Collapsed"
+          FontStyle="Italic"
+          Opacity="0.6"
+          FontSize="12"
+          TextWrapping="Wrap" />
+      <!-- Admin-block notice IN PLACE (takedown-and-block.md § Admin block of a reported
+           item, decision 4): the nest withheld this record after its admin blocked it.
+           Bind() sets its Text (and Name) to the shared admin_block_notice and collapses
+           the live surfaces like the tombstone above. No dedicated ui.yaml id — the
+           notice rides the bubble, as on tui and FaunaKit. -->
+      <TextBlock
+          x:Name="AdminBlockNoticeText"
           Visibility="Collapsed"
           FontStyle="Italic"
           Opacity="0.6"
@@ -88,15 +100,57 @@
             FontSize="12"
             Click="RegionRevealButton_Click" />
       </StackPanel>
+      <!-- NEST placeholder (nest-rules.md § The nest source in the engine; § Element
+           IDs): a rule of the nest this message was read through withholds it. The
+           app's frame naming the nest (its `verdict` attribute on HelpText), the
+           nest's domain and the admin's reason VERBATIM, in place of the body; a
+           `collapse` adds the reveal (the content-policy reveal set, shared), a
+           `block` has none. The region placeholder's twin, painted right after it in
+           Bind() (SocialRenderGate's NestWithheld); Bind() sets each Name beside its
+           AutomationId so FlaUI realizes the peers. -->
+      <StackPanel
+          x:Name="NestPlaceholderPanel"
+          Visibility="Collapsed"
+          Spacing="2">
+        <TextBlock
+            x:Name="NestNoticeText"
+            AutomationProperties.AutomationId="{x:Bind ids:Ids.NestBlockedNotice}"
+            FontStyle="Italic"
+            Opacity="0.6"
+            FontSize="12"
+            TextWrapping="Wrap" />
+        <TextBlock
+            x:Name="NestDomainText"
+            AutomationProperties.AutomationId="{x:Bind ids:Ids.NestBlockedDomain}"
+            Opacity="0.6"
+            FontSize="12"
+            TextWrapping="Wrap" />
+        <TextBlock
+            x:Name="NestReasonText"
+            AutomationProperties.AutomationId="{x:Bind ids:Ids.NestBlockedReason}"
+            Opacity="0.6"
+            FontSize="12"
+            TextWrapping="Wrap" />
+        <Button
+            x:Name="NestRevealButton"
+            AutomationProperties.AutomationId="{x:Bind ids:Ids.NestCollapsedRevealButton}"
+            Content="{loc:Localize Key=nest_rules/reveal_button}"
+            Visibility="Collapsed"
+            HorizontalAlignment="Left"
+            Margin="0,2,0,0"
+            Padding="8,2"
+            FontSize="12"
+            Click="NestRevealButton_Click" />
+      </StackPanel>
       <!-- Content-policy BLOCK placeholder (family-safety.md § Content policy).
            Shown iff the shared render verdict for this message's post-decrypt
-           labels is `block` — the guardian's per-category floor. Bind() collapses
+           labels is `block` — a guardian rule. Bind() collapses
            the body/attachments/actions/pills like the tombstones above and returns
            early. NO reveal button accompanies it: SocialRenderGate resolves `block`
            ahead of the muted arm AND ahead of every reveal set, so a blocked message
            can never be revealed past the floor. It NAMES the policy rather than
-           silently disappearing, and `content-policy-blocked-notice` is the one
-           ui.yaml id this pillar renders (mirrors linux message_bubble.rs + web
+           silently disappearing, as `content-policy-blocked-notice` in
+           `state="blocked"` (HelpText; mirrors linux message_bubble.rs + web
            `+page.svelte`'s content-blocked div + android's ConversationDetailScreen).
            Name is set alongside AutomationId so FlaUI realizes the peer
            (reference_winui_flaui_datatemplate_name). -->
@@ -104,6 +158,7 @@
           x:Name="ContentBlockedPlaceholder"
           AutomationProperties.AutomationId="{x:Bind ids:Ids.ContentPolicyBlockedNotice}"
           AutomationProperties.Name="{loc:Localize Key=family/content_blocked_notice}"
+          AutomationProperties.HelpText="blocked"
           Text="{loc:Localize Key=family/content_blocked_notice}"
           Visibility="Collapsed"
           FontStyle="Italic"
@@ -113,19 +168,37 @@
       <!-- Content-policy COLLAPSE placeholder + reveal (family-safety.md § Content
            policy). The revealable twin of the block above: same collapse, but a
            one-tap session-local "show anyway" (ContentPolicyCache's id-keyed set —
-           its OWN set, not the muted arm's). Presentation-only, no ui.yaml id — the
-           linux leg's shape (v1 e2e drives the `block` case; the collapse reveal is
-           a user affordance). -->
+           its OWN set, not the muted arm's). The placeholder is the block arm's
+           `content-policy-blocked-notice` in `state="collapsed"` (HelpText), beside
+           `content-policy-collapsed-reveal-button` (ids user-approved 2026-10-16;
+           tui leads, linux message_bubble.rs is the twin). -->
       <TextBlock
           x:Name="ContentCollapsedPlaceholder"
+          AutomationProperties.AutomationId="{x:Bind ids:Ids.ContentPolicyBlockedNotice}"
+          AutomationProperties.Name="{loc:Localize Key=family/content_collapsed_notice}"
+          AutomationProperties.HelpText="collapsed"
           Text="{loc:Localize Key=family/content_collapsed_notice}"
           Visibility="Collapsed"
           FontStyle="Italic"
           Opacity="0.6"
           FontSize="12"
           TextWrapping="Wrap" />
+      <!-- The guardian rule's reason VERBATIM beside whichever family-policy frame is
+           up — the block's or the collapse's (`content-policy-blocked-reason`,
+           nest-rules.md § The shared rule editor → The reason is the member's to
+           read). One element serves both arms: it sits after both notices, which are
+           never shown together. Absent when a floor, the viewer's own threshold or a
+           report drove the verdict; Bind() sets its Name beside its Text. -->
+      <TextBlock
+          x:Name="GuardianReasonText"
+          AutomationProperties.AutomationId="{x:Bind ids:Ids.ContentPolicyBlockedReason}"
+          Visibility="Collapsed"
+          Opacity="0.6"
+          FontSize="12"
+          TextWrapping="Wrap" />
       <Button
           x:Name="ContentRevealButton"
+          AutomationProperties.AutomationId="{x:Bind ids:Ids.ContentPolicyCollapsedRevealButton}"
           Content="{loc:Localize Key=family/content_reveal_button}"
           Visibility="Collapsed"
           HorizontalAlignment="Left"
@@ -145,7 +218,7 @@
       <TextBlock
           x:Name="MutedPlaceholder"
           AutomationProperties.AutomationId="{x:Bind ids:Ids.DmMessageMuted}"
-          Text="{loc:Localize Key=conversations/detail/muted_word}"
+          Text="{loc:Localize Key=muted_words/collapsed}"
           Visibility="Collapsed"
           FontStyle="Italic"
           Opacity="0.6"
@@ -153,7 +226,7 @@
       <Button
           x:Name="MutedRevealButton"
           AutomationProperties.AutomationId="{x:Bind ids:Ids.DmMessageMutedRevealButton}"
-          Content="{loc:Localize Key=conversations/detail/muted_reveal}"
+          Content="{loc:Localize Key=muted_words/reveal}"
           Visibility="Collapsed"
           HorizontalAlignment="Left"
           Margin="0,2,0,0"
@@ -248,6 +321,30 @@
         <controls:DocumentBodyView
             x:Name="BodyView"
             AutomationProperties.AutomationId="{x:Bind ids:Ids.DmMessageText}" />
+        <!-- The admin-block notice BESIDE the author's own kept body (decision 4's second
+             shape): painted right after the body by RenderAdminBlockBeside, no new id. -->
+        <TextBlock
+            x:Name="AdminBlockBesideText"
+            Visibility="Collapsed"
+            FontStyle="Italic"
+            Opacity="0.6"
+            FontSize="12"
+            TextWrapping="Wrap" />
+        <!-- The viewer's OWN message the nest withholds, matched to their queue row
+             (takedown-and-block.md § Legal takedown → App render, the fourth surface):
+             the shared MessageSnapshot.withheld lines side by side, filled by
+             RenderWithheldBadge; a tap opens that row's appeal on the Moderation page.
+             On a Blocked ground it IS the block notice, so the beside-body notice above
+             paints nothing. Collapsed otherwise so the e2e counts 0. Name set per bind. -->
+        <Button
+            x:Name="WithheldBadgeButton"
+            AutomationProperties.AutomationId="{x:Bind ids:Ids.DmMessageWithheldBadge}"
+            Visibility="Collapsed"
+            HorizontalAlignment="Left"
+            Margin="0,2,0,0"
+            Padding="8,2"
+            FontSize="12"
+            Click="WithheldBadgeButton_Click" />
         <!-- Body remote images (render-model.md § D3 + § Implementation status; apps/tui.md
              § Rendering): one `doc-remote-image` per RenderBlock::RemoteImage, painted just
              under the body — the SAME "own element ID ⇒ painted by the page" rule
@@ -299,6 +396,34 @@
                 <TextBlock x:Name="ContentLabelText" FontSize="10" VerticalAlignment="Center" />
             </StackPanel>
         </Border>
+        <!-- The alias a received mail message arrived on (mail-aliases.md § Label): the
+             shared MessageSnapshot.deliveredTo text, filled by RenderDeliveredTo; collapsed
+             when there is none so the e2e counts 0. Directly above the scan row (tui's order,
+             this bubble has no warm-up row). Name set per bind beside the id. -->
+        <TextBlock
+            x:Name="DeliveredToText"
+            AutomationProperties.AutomationId="{x:Bind ids:Ids.DmMessageDeliveredToAlias}"
+            FontSize="11"
+            Opacity="0.75"
+            TextWrapping="Wrap"
+            IsTextSelectionEnabled="True"
+            HorizontalAlignment="Left"
+            Margin="0,2,0,0"
+            Visibility="Collapsed" />
+        <!-- Received mail message's own scan verdict (mail-content-scanning.md § User sees
+             their own message's row): ONE dm-message-scan-result element carrying the shared
+             scanResultLines in order, filled by RenderScanResult; collapsed when there are no
+             lines so the e2e counts 0. Name set per bind beside the id. -->
+        <TextBlock
+            x:Name="ScanResultText"
+            AutomationProperties.AutomationId="{x:Bind ids:Ids.DmMessageScanResult}"
+            FontSize="11"
+            Opacity="0.75"
+            TextWrapping="Wrap"
+            IsTextSelectionEnabled="True"
+            HorizontalAlignment="Left"
+            Margin="0,2,0,0"
+            Visibility="Collapsed" />
         <!-- Attachments — one indexed dm-attachment-image[i] / dm-attachment-file[i]
              per first-class Attachment block the manager folded into
              MessageSnapshot.document after the body (render-model.md § D2), built
@@ -307,6 +432,41 @@
              Non-virtualizing StackPanel so the e2e count-all over the indexed ids is
              bounded (conversations.md § Attachments; reference_winui_flaui_datatemplate_name). -->
         <StackPanel x:Name="AttachmentsList" Spacing="6" HorizontalAlignment="Left" />
+        <!-- A Sent message the bridge never took (conversations.md § A bridged room no
+             bridge serves, and a Sent message the bridge never took): the body stays in
+             view and this one indexed line says it did not go out — no resend. Painted from
+             the shared MessageSnapshot.undelivered by RenderUndelivered; after attachments
+             and link previews, before reactions (tui/web/linux/android placement).
+             Collapsed otherwise so the e2e counts 0. Name set per bind beside the id. -->
+        <TextBlock
+            x:Name="UndeliveredText"
+            AutomationProperties.AutomationId="{x:Bind ids:Ids.DmMessageUndelivered}"
+            FontSize="11"
+            FontStyle="Italic"
+            Opacity="0.75"
+            TextWrapping="Wrap"
+            IsTextSelectionEnabled="True"
+            HorizontalAlignment="Left"
+            Margin="0,2,0,0"
+            Visibility="Collapsed" />
+        <!-- The user's own sent mail the fresh-IP warm-up holds (mail-deliverability.md
+             § Enforcement at submission time, the deferred-state bullet): one indexed line
+             right after dm-message-undelivered, worded by the shared
+             fauna_conversations::message::warmup_deferred_text (the release time in the
+             viewer's clock and the queue position; nothing once the release has passed).
+             Painted by RenderWarmupDeferred; Collapsed otherwise so the e2e counts 0.
+             Name set per bind beside the id. -->
+        <TextBlock
+            x:Name="WarmupDeferredText"
+            AutomationProperties.AutomationId="{x:Bind ids:Ids.DmMessageWarmupDeferred}"
+            FontSize="11"
+            FontStyle="Italic"
+            Opacity="0.75"
+            TextWrapping="Wrap"
+            IsTextSelectionEnabled="True"
+            HorizontalAlignment="Left"
+            Margin="0,2,0,0"
+            Visibility="Collapsed" />
         <!-- Reaction pills (conversations.md § Reactions & message delete) — one
              dm-reaction-pill per ReactionGroup the manager folded onto the snapshot
              (emoji + count, own/reactedByMe highlighted), tap-to-toggle. Built

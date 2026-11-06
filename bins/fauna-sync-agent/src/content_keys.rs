@@ -35,7 +35,10 @@
 //! `SyncEngine::seal_hold`), never sealed under the older generation.
 //!
 //! **Fail closed.** A list that cannot be read keeps the resolution the agent
-//! holds (the engines' own floor hold guards their seals); custody that cannot be
+//! holds for every nest-listed set (the engines' own floor hold guards their
+//! seals) — but still re-names the bound group sets from their mounted rings,
+//! because no nest row names a group set and its engine has no nest leg
+//! ([`with_fresh_group_sets`]); custody that cannot be
 //! read resolves against empty custody, so every bound set builds **keyless** and
 //! fails closed per operation, every served-but-keyless set is withheld, and no
 //! cross-nest set is named — until an edge re-reads it. A set the resolution does
@@ -173,12 +176,12 @@ impl ResolvedContentKeys {
     }
 
     /// The basis `folder_ref`'s keys were resolved from — its row's, or the
-    /// default for a cross-nest set (no row on this nest).
+    /// default for a cross-nest set or a group set (no row on this nest).
     #[must_use]
     pub fn basis_for(&self, folder_ref: FolderRef) -> BindingBasis {
         match folder_ref {
             FolderRef::Local(id) => self.bases.get(&id).cloned().unwrap_or_default(),
-            FolderRef::Foreign(_) => BindingBasis::default(),
+            FolderRef::Foreign(_) | FolderRef::Group(_) => BindingBasis::default(),
         }
     }
 
@@ -187,6 +190,11 @@ impl ResolvedContentKeys {
     /// that resolved keyless (custody unread, or the generation not in custody).
     #[must_use]
     pub fn keys_pending_for(&self, folder_ref: FolderRef) -> bool {
+        // A bound group set the resolution does not name holds no tip it can
+        // seal under yet — it waits on a generation it is wrapped for.
+        if matches!(folder_ref, FolderRef::Group(_)) {
+            return self.keys_for(folder_ref).is_none();
+        }
         let Some(keys) = self.keys_for(folder_ref) else {
             return false;
         };
@@ -228,9 +236,12 @@ impl ResolvedContentKeys {
 }
 
 /// Resolve every set's keys now: the folder list over the agent's own bearer
-/// connection, custody through the mounted store. `None` = nothing could be resolved (no
-/// capability, no connection, or the folder list failed) — the caller keeps
-/// what it holds.
+/// connection, custody through the mounted store. With no list to read (no
+/// connection, or the list failed) the nest-listed sets keep what is held and
+/// only the bound group sets are re-named ([`with_fresh_group_sets`]): no nest
+/// row names a group set, so a nest that cannot be reached never withholds
+/// one's engine. `None` = nothing to publish (no capability, or no list and
+/// nothing held or named) — the caller keeps what it holds.
 async fn resolve(state: &SyncServiceState) -> Option<ResolvedContentKeys> {
     let actor_id = {
         let cap = state.capability.read().await;
@@ -239,8 +250,11 @@ async fn resolve(state: &SyncServiceState) -> Option<ResolvedContentKeys> {
     let nest = match state.nest_rpc_client().await {
         Ok(nest) => nest,
         Err(e) => {
-            tracing::warn!(error = %e, "content keys: no nest connection to resolve over");
-            return None;
+            tracing::warn!(
+                error = %e,
+                "content keys: no nest connection to resolve over; keeping what is held"
+            );
+            return with_fresh_group_sets(state, actor_id).await;
         }
     };
     let rows = match tokio::time::timeout(
@@ -252,13 +266,26 @@ async fn resolve(state: &SyncServiceState) -> Option<ResolvedContentKeys> {
         Ok(Ok(reply)) => reply.folders,
         Ok(Err(e)) => {
             tracing::warn!(error = %e, "content keys: folder list failed; keeping what is held");
-            return None;
+            return with_fresh_group_sets(state, actor_id).await;
         }
         Err(_) => {
             tracing::warn!("content keys: folder list timed out; keeping what is held");
-            return None;
+            return with_fresh_group_sets(state, actor_id).await;
         }
     };
+    // The e2e custody hold (test harness only, compile-gated): keep the custody
+    // reading held, against the list just read — the state a removal's rotation
+    // leaves an agent in until its walk lands the new generation.
+    if custody_reread_held() {
+        let held = state.content_keys.read().await.clone();
+        if let Some(held) = held.filter(|h| h.is_for(actor_id) && h.custody_read) {
+            tracing::info!(
+                "content keys: custody re-read held by the e2e custody hold; keeping the held \
+                 keys against the fresh folder list"
+            );
+            return Some(held_custody_against_rows(held, &rows));
+        }
+    }
     // The gated read: a mounted store that has not listed custody yet — a
     // successor's, the moment the account switch mounts it — is refused as not
     // ready rather than read as an account that owns no set, and the edge
@@ -295,7 +322,7 @@ async fn resolve(state: &SyncServiceState) -> Option<ResolvedContentKeys> {
     } else {
         Vec::new()
     };
-    let keys = match fauna_client_folders::engine_keys_from(
+    let mut keys = match fauna_client_folders::engine_keys_from(
         &cfg,
         fauna_core::identity::ActorId(actor_id),
         &rows,
@@ -310,6 +337,9 @@ async fn resolve(state: &SyncServiceState) -> Option<ResolvedContentKeys> {
             Vec::new()
         }
     };
+    // The bound group sets, each named only once its ring — read through the
+    // same mount — holds a tip.
+    keys.extend(named_group_sets(&bound_group_scopes(state).await, &*state.folder_keys).await);
     Some(ResolvedContentKeys {
         actor_id: Some(actor_id),
         keys,
@@ -318,6 +348,146 @@ async fn resolve(state: &SyncServiceState) -> Option<ResolvedContentKeys> {
         #[cfg(test)]
         owner_only_for_unnamed: false,
     })
+}
+
+/// The e2e custody hold: `true` while the file `FAUNA_E2E_CUSTODY_HOLD_FILE`
+/// names exists. While it holds, a resolve keeps the custody reading it holds
+/// and takes only the fresh folder list ([`held_custody_against_rows`]), so a
+/// test can observe *Keys pending* between a removal's rotation (which raises
+/// the row's floor) and the agent catching up — a window a live agent closes
+/// within one walk, too fast to assert on. Deleting the file releases it: the
+/// next edge (the resident tick's row read finds the floor still ahead of the
+/// generation held) re-reads custody for real. A stopped agent cannot stand in
+/// — *Not running* outranks *Keys pending* (`sync-agent.md` § Local agent
+/// health), and a restart re-reads custody at once. Compile-gated outer, env
+/// inner (`testing.md` convention 15): a production release build never reads
+/// the variable, and the harness sets it per launch (`drivers/tui.py`,
+/// `drivers/linux.py`) pointing at a file that does not exist until a test
+/// holds (`helpers/sync_seats.py`, `hold_custody_reread`).
+#[cfg(any(debug_assertions, feature = "e2e-agent"))]
+fn custody_reread_held() -> bool {
+    std::env::var_os("FAUNA_E2E_CUSTODY_HOLD_FILE")
+        .is_some_and(|path| !path.is_empty() && std::path::Path::new(&path).exists())
+}
+
+#[cfg(not(any(debug_assertions, feature = "e2e-agent")))]
+fn custody_reread_held() -> bool {
+    false
+}
+
+/// [`custody_reread_held`]'s pure half: `held`'s keys and custody reading, with
+/// every nest-listed row's basis replaced by the one `rows` carries (a
+/// cross-nest set's basis comes from custody, so it stays as held).
+fn held_custody_against_rows(
+    mut held: ResolvedContentKeys,
+    rows: &[fauna_protocol::folders::FolderSummary],
+) -> ResolvedContentKeys {
+    held.bases
+        .extend(rows.iter().map(|r| (r.id, BindingBasis::of(r))));
+    held
+}
+
+/// The resolution to publish when the nest's folder list cannot be read: the
+/// held resolution's nest-listed sets as they are (fail closed — the module
+/// docs), its group sets re-named from the mounted rings. A group set's engine
+/// has no nest leg, so its naming never waits on the nest: a seat that binds
+/// one, or an agent that starts, while the nest is unreachable still runs it
+/// (`group-set.md` § Build design — the group set). `None` when nothing is held
+/// for this account and no group set is named — nothing to publish.
+async fn with_fresh_group_sets(
+    state: &SyncServiceState,
+    actor_id: [u8; 32],
+) -> Option<ResolvedContentKeys> {
+    let groups = named_group_sets(&bound_group_scopes(state).await, &*state.folder_keys).await;
+    let held = state
+        .content_keys
+        .read()
+        .await
+        .clone()
+        .filter(|held| held.is_for(actor_id));
+    held_with_group_sets(held, actor_id, groups)
+}
+
+/// [`with_fresh_group_sets`]' pure half: replace `held`'s group sets with
+/// `groups`, keeping every other entry, its bases and its custody reading.
+/// With nothing held, a resolution naming only `groups` — custody unread, so
+/// every nest-listed set stays unnamed until a list is read.
+fn held_with_group_sets(
+    held: Option<ResolvedContentKeys>,
+    actor_id: [u8; 32],
+    groups: Vec<FolderEngineKeys>,
+) -> Option<ResolvedContentKeys> {
+    let mut resolved = match held {
+        Some(held) => held,
+        None if groups.is_empty() => return None,
+        None => ResolvedContentKeys {
+            actor_id: Some(actor_id),
+            ..ResolvedContentKeys::default()
+        },
+    };
+    resolved
+        .keys
+        .retain(|k| !matches!(FolderRef::parse(&k.folder_id), Some(FolderRef::Group(_))));
+    resolved.keys.extend(groups);
+    Some(resolved)
+}
+
+/// Every group scope a binding names (`group-set.md` § Build design — the
+/// group set, decision 7): no nest row names a group set, so the bindings do.
+async fn bound_group_scopes(state: &SyncServiceState) -> Vec<[u8; 32]> {
+    let config = state.config.read().await;
+    crate::engine_driver::plan_engines(&config)
+        .into_iter()
+        .filter_map(|m| match m.folder_ref {
+            FolderRef::Group(scope) => Some(scope),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Name the bound group sets whose ring holds a tip — one entry per scope,
+/// carrying the tip's id ([`FolderEngineKeys::group_tip`]) so a new tip moves
+/// the engine's stamp and rebuilds it. **Fail closed:** a scope whose ring is
+/// unreadable, absent (a source with no group plane), or tipless is not named,
+/// so it gets no engine — the build itself re-reads the ring and refuses the
+/// same way (`engine_lifecycle::build_engine`'s group arm).
+pub(crate) async fn named_group_sets(
+    scopes: &[[u8; 32]],
+    reader: &dyn fauna_client_folders::FolderKeyReader,
+) -> Vec<FolderEngineKeys> {
+    let mut named = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for scope in scopes.iter().filter(|s| seen.insert(**s)) {
+        let wire = FolderRef::Group(*scope).to_wire();
+        match tokio::time::timeout(RESOLVE_TIMEOUT, reader.group_set_keys(scope)).await {
+            Ok(Ok(Some(ring))) => match ring.tip() {
+                Some((tip, _)) => named.push(FolderEngineKeys {
+                    folder: wire.clone(),
+                    folder_id: wire,
+                    group_tip: Some(tip),
+                    ..FolderEngineKeys::default()
+                }),
+                None => tracing::info!(
+                    folder_id = %wire,
+                    "content keys: the group ring holds no tip yet; no engine"
+                ),
+            },
+            Ok(Ok(None)) => tracing::warn!(
+                folder_id = %wire,
+                "content keys: no group plane is mounted; no engine for the group set"
+            ),
+            Ok(Err(e)) => tracing::warn!(
+                folder_id = %wire,
+                error = %format!("{e:#}"),
+                "content keys: the group ring is unreadable; no engine"
+            ),
+            Err(_) => tracing::warn!(
+                folder_id = %wire,
+                "content keys: the group ring read timed out; no engine"
+            ),
+        }
+    }
+    named
 }
 
 /// Re-resolve and publish. `true` when the published resolution changed — the
@@ -704,6 +874,25 @@ mod tests {
         );
     }
 
+    /// The e2e custody hold's pure half: the held keys meet the fresh list, so
+    /// a floor the rotation raised reads *Keys pending* until custody is re-read.
+    #[test]
+    fn a_held_custody_reading_against_a_raised_floor_is_pending() {
+        let held =
+            ResolvedContentKeys::for_tests(vec![bound(1, Some(1))], &[row(1, Some("aa"), Some(1))]);
+        assert!(
+            !held.keys_pending_for(FolderRef::Local(1)),
+            "at the floor before"
+        );
+        let after = held_custody_against_rows(held.clone(), &[row(1, Some("aa"), Some(2))]);
+        assert!(
+            after.keys_pending_for(FolderRef::Local(1)),
+            "the raised floor against the held generation"
+        );
+        assert_eq!(after.keys, held.keys, "the custody reading is kept as held");
+        assert_eq!(after.custody_read, held.custody_read);
+    }
+
     #[test]
     fn a_set_the_resolution_does_not_name_gets_no_keys() {
         let resolved = ResolvedContentKeys::for_tests(vec![bound(1, Some(1))], &[]);
@@ -762,6 +951,106 @@ mod tests {
             resolved.keys_for(FolderRef::Local(999)).is_none(),
             "an entry whose ref does not parse matches nothing, whatever its name"
         );
+    }
+
+    /// A key reader holding one answer per group scope — what the mounted
+    /// store's group plane would say.
+    struct GroupRings(
+        HashMap<[u8; 32], anyhow::Result<Option<fauna_core::group_content::GroupContentKeys>>>,
+    );
+
+    #[async_trait::async_trait]
+    impl fauna_client_folders::FolderKeyReader for GroupRings {
+        async fn load(&self) -> anyhow::Result<fauna_core::data::FoldersConfig> {
+            Ok(Default::default())
+        }
+        async fn group_set_keys(
+            &self,
+            scope_id: &[u8; 32],
+        ) -> anyhow::Result<Option<fauna_core::group_content::GroupContentKeys>> {
+            match self.0.get(scope_id) {
+                Some(Ok(ring)) => Ok(ring.clone()),
+                Some(Err(e)) => Err(anyhow::anyhow!("{e}")),
+                None => Ok(None),
+            }
+        }
+    }
+
+    /// The agent names a bound group set — so it gets an engine — only when
+    /// its ring holds a tip, and carries that tip so a new one rebuilds the
+    /// engine (`p2p-shared-set-build.md` § Build design — the group set,
+    /// decision 7). No ring, a tipless ring, an unreadable one: not named, no
+    /// engine, and the set reads as keys-pending.
+    #[tokio::test]
+    async fn a_bound_group_set_is_named_only_with_a_tipped_ring() {
+        let (keyed, tipless, absent, unreadable) = ([1u8; 32], [2u8; 32], [3u8; 32], [4u8; 32]);
+        let tip = [0x7a; 32];
+        let key = fauna_core::crypto::GenerationKey::from_bytes([0x11; 32]);
+        let ring = |tip| {
+            fauna_core::group_content::GroupContentKeys::from_generation_keys(
+                tip,
+                [(&[0x7a; 32], &key)],
+            )
+        };
+        let reader = GroupRings(HashMap::from([
+            (keyed, Ok(Some(ring(Some(tip))))),
+            (tipless, Ok(Some(ring(None)))),
+            (unreadable, Err(anyhow::anyhow!("store gone"))),
+        ]));
+        let named = named_group_sets(&[keyed, tipless, absent, unreadable, keyed], &reader).await;
+        assert_eq!(named.len(), 1, "one entry, once: {named:?}");
+        assert_eq!(named[0].group_tip, Some(tip));
+
+        let resolved = ResolvedContentKeys::for_tests(named, &[]);
+        assert!(resolved.keys_for(FolderRef::Group(keyed)).is_some());
+        assert!(!resolved.keys_pending_for(FolderRef::Group(keyed)));
+        for scope in [tipless, absent, unreadable] {
+            assert!(resolved.keys_for(FolderRef::Group(scope)).is_none());
+            assert!(resolved.keys_pending_for(FolderRef::Group(scope)));
+        }
+    }
+
+    /// With the nest's list unreadable, the nest-listed sets keep what is held
+    /// while the group sets are re-named — a group set bound, or an agent
+    /// started, with the nest unreachable still gets its engine
+    /// (`group-set.md` § Build design — the group set). Nothing held and no
+    /// group set named is nothing to publish.
+    #[test]
+    fn an_unreadable_list_keeps_the_held_nest_sets_and_re_names_the_group_sets() {
+        let actor = [0xAC; 32];
+        let (stale, fresh) = ([0x51; 32], [0x52; 32]);
+        let group = |scope: [u8; 32]| {
+            let wire = FolderRef::Group(scope).to_wire();
+            FolderEngineKeys {
+                folder: wire.clone(),
+                folder_id: wire,
+                group_tip: Some([0x7a; 32]),
+                ..FolderEngineKeys::default()
+            }
+        };
+        let held = ResolvedContentKeys::for_tests(vec![bound(7, Some(1)), group(stale)], &[]);
+
+        let kept = held_with_group_sets(Some(held.clone()), actor, vec![group(fresh)])
+            .expect("a held resolution is always republished");
+        assert_eq!(
+            kept.keys_for(FolderRef::Local(7)),
+            held.keys_for(FolderRef::Local(7))
+        );
+        assert_eq!(kept.custody_read, held.custody_read);
+        assert!(
+            kept.keys_for(FolderRef::Group(stale)).is_none(),
+            "an unbound or untipped group set is dropped"
+        );
+        assert!(kept.keys_for(FolderRef::Group(fresh)).is_some());
+
+        let groups_only = held_with_group_sets(None, actor, vec![group(fresh)])
+            .expect("a named group set is published with nothing held");
+        assert!(groups_only.is_for(actor) && !groups_only.is_for([0; 32]));
+        assert!(groups_only.keys_for(FolderRef::Group(fresh)).is_some());
+        assert!(groups_only.keys_for(FolderRef::Local(7)).is_none());
+        assert!(!groups_only.custody_read);
+
+        assert_eq!(held_with_group_sets(None, actor, Vec::new()), None);
     }
 
     #[test]

@@ -34,8 +34,9 @@ SSRF guard forbids loopback, rightly), so the witness is the slot and its
 address; the bytes-to-art half is pinned headlessly
 (``a_bridged_proxied_image_paints_in_post_image_through_the_nest``).
 
-**Two more journeys, tui first** (the lead app; the six-app lift of the
-label is its own row):
+**Two more journeys, tui first** (the lead app; the custom feed is on linux,
+web, the apple apps and windows too, android follows in its own queue; the
+six-app lift of the label is its own row):
 
 * a post served only by a **custom feed generator** the user subscribed to in
   the app arrives — and did not before the subscription (§ Unified feed
@@ -216,6 +217,7 @@ def _card_author(app, post_id: str) -> str:
 @pytest.mark.linux
 @pytest.mark.web
 @pytest.mark.windows
+@pytest.mark.android
 @pytest.mark.feature("atproto")
 def test_a_followed_bluesky_post_arrives_in_the_feed_and_a_reply_threads_under_it(
     request, app, bluesky_feed_nest, atproto_far_end,
@@ -340,6 +342,11 @@ def test_a_followed_bluesky_post_arrives_in_the_feed_and_a_reply_threads_under_i
 
 
 @pytest.mark.tui
+@pytest.mark.linux
+@pytest.mark.web
+@pytest.mark.macos
+@pytest.mark.ios
+@pytest.mark.windows
 @pytest.mark.feature("atproto")
 def test_posts_from_a_subscribed_bluesky_custom_feed_arrive_in_the_feed(
     request, app, bluesky_feed_nest, atproto_far_end,
@@ -400,7 +407,10 @@ def test_posts_from_a_subscribed_bluesky_custom_feed_arrive_in_the_feed(
     )
     post_id = wire[0]["post_id"]
 
-    app.feed.navigate()
+    # The subscription was made on the Feed page itself, and a feed re-pulls
+    # only when navigation ENTERS the page — tapping its tab while it is
+    # current is a no-op on web and the apple apps.
+    app.feed.reenter()
     index = _await_card(app, post_id)
     card_text = app.feed.post_text(index).strip()
     assert card_text == text, (

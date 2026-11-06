@@ -486,6 +486,27 @@ impl Post {
         })
     }
 
+    /// The 32-byte content id and emoji of the first *reacted* post — the
+    /// [`Reference::React`] twin of [`reposted_post_id`](Self::reposted_post_id),
+    /// keying the actor-keyed `content_links link_type='react'` projection the
+    /// per-emoji tally is read from (`ui/feed.md` § Layout & flow → *Reaction
+    /// posts count and paint*, ruling 2). Shared so the nest indexer and the
+    /// client decode paths cannot drift on how the CID is stripped. `None` for
+    /// a non-reacting post, for a malformed reference whose CID is too
+    /// short to carry a digest, and for an emoji that fails
+    /// [`is_reaction_emoji`] — such a post mints no `react` link and joins no
+    /// tally (ruling 2's bound on the emoji).
+    pub fn react_reference(&self) -> Option<([u8; 32], &str)> {
+        self.references.iter().find_map(|r| match r {
+            Reference::React { post_id, emoji } if is_reaction_emoji(emoji) => post_id
+                .as_bytes()
+                .get(4..36)
+                .and_then(|d| d.try_into().ok())
+                .map(|d| (d, emoji.as_str())),
+            _ => None,
+        })
+    }
+
     /// Every blob-store content address a nest can see from this post's
     /// envelope: the plaintext body's [`PostBody::blob_refs`] (a public post's
     /// media; a gated post's preview media) plus, for a gated post, the sealed
@@ -554,7 +575,8 @@ mod shared_media_proxy_url_tests {
 #[cfg(test)]
 mod post_index_facts_tests {
     use super::{
-        ActorId, ContentHash, Facet, FacetFeature, MediaItem, Post, PostBody, Reference, Timestamp,
+        ActorId, ContentHash, Facet, FacetFeature, MediaItem, Post, PostBody,
+        REACTION_EMOJI_MAX_BYTES, Reference, Timestamp, is_reaction_emoji,
     };
 
     fn post_with(body: PostBody, references: Vec<Reference>) -> Post {
@@ -822,6 +844,184 @@ mod post_index_facts_tests {
         );
         assert_eq!(quoting.quoted_post_id(), Some(hash.digest()));
     }
+
+    /// Ruling 2's bound on the emoji: one emoji-shaped cluster or a
+    /// `:shortcode:`, at most `REACTION_EMOJI_MAX_BYTES` bytes — text, a
+    /// second emoji or an oversized string never counts.
+    #[test]
+    fn a_reaction_emoji_is_one_cluster_or_a_shortcode_within_the_byte_bound() {
+        for ok in [
+            "❤️",
+            "🔥",
+            "+",
+            "-",
+            "👍🏽",
+            "👨‍👩‍👧‍👦",
+            "🇳🇴",
+            "1️⃣",
+            "🏴󠁧󠁢󠁳󠁣󠁴󠁿",
+            "🤙",
+            ":blobcat:",
+            ":party_parrot:",
+            "é",
+        ] {
+            assert!(is_reaction_emoji(ok), "{ok:?} is one reaction");
+        }
+        let at_bound = format!(":{}:", "a".repeat(REACTION_EMOJI_MAX_BYTES - 2));
+        assert_eq!(at_bound.len(), REACTION_EMOJI_MAX_BYTES);
+        assert!(is_reaction_emoji(&at_bound));
+        let over = format!(":{}:", "a".repeat(REACTION_EMOJI_MAX_BYTES - 1));
+        assert!(!is_reaction_emoji(&over), "one byte over the bound");
+        // A ZWJ chain of the cluster shape fails on bytes alone.
+        let chain = vec!["👩"; 20].join("\u{200D}");
+        assert!(chain.len() > REACTION_EMOJI_MAX_BYTES);
+        assert!(!is_reaction_emoji(&chain), "the byte bound holds alone");
+        for bad in [
+            "",
+            "nice",
+            "❤️❤️",
+            "🔥🔥",
+            "a b",
+            " ",
+            "\n",
+            "❤️ ",
+            "::",
+            ":a b:",
+            ":blob",
+            "\u{200D}",
+            "👩\u{200D}",
+            "\u{FE0F}",
+            "🇳🇴🇸",
+            "x\u{0}",
+        ] {
+            assert!(!is_reaction_emoji(bad), "{bad:?} is not one reaction");
+        }
+    }
+
+    /// An emoji that fails the rule yields no `react` key at all, so the
+    /// nest's index never records it.
+    #[test]
+    fn react_reference_drops_an_emoji_that_fails_the_rule() {
+        let hash = ContentHash::of_raw(b"reacted");
+        let text = || PostBody::Text {
+            content: String::new(),
+            facets: vec![],
+        };
+        for bad in ["a whole paragraph of text".to_string(), "x".repeat(65)] {
+            let post = post_with(
+                text(),
+                vec![Reference::React {
+                    post_id: hash,
+                    emoji: bad,
+                }],
+            );
+            assert_eq!(post.react_reference(), None);
+        }
+    }
+
+    /// The `react` link's key — the `React` twin of the quote accessor above:
+    /// the digest the indexer keys the link on, beside the emoji it records.
+    #[test]
+    fn react_reference_strips_the_cid_prefix_and_carries_the_emoji() {
+        let hash = ContentHash::of_raw(b"reacted");
+        let text = || PostBody::Text {
+            content: String::new(),
+            facets: vec![],
+        };
+        assert_eq!(post_with(text(), vec![]).react_reference(), None);
+        assert_eq!(
+            post_with(text(), vec![Reference::Upvote { post_id: hash }]).react_reference(),
+            None
+        );
+        let reacting = post_with(
+            text(),
+            vec![Reference::React {
+                post_id: hash,
+                emoji: "❤️".into(),
+            }],
+        );
+        assert_eq!(reacting.react_reference(), Some((hash.digest(), "❤️")));
+    }
+}
+
+/// The most bytes a reaction's emoji may carry and still count
+/// (`ui/feed.md` § Layout & flow → *Reaction posts count and paint*, ruling
+/// 2): room for the longest emoji ZWJ and tag sequences, far short of a
+/// sentence.
+pub const REACTION_EMOJI_MAX_BYTES: usize = 64;
+
+/// Whether `emoji` is a reaction the index counts — the one rule the nest's
+/// `react` link and every bridge's reaction parse share (`ui/feed.md` §
+/// Layout & flow → *Reaction posts count and paint*, ruling 2): at most
+/// [`REACTION_EMOJI_MAX_BYTES`] bytes, and either a `:shortcode:` (ASCII
+/// letters, digits, `_`, `+`, `-` between two colons — the custom-emoji
+/// spelling of Mastodon and nostr NIP-30) or ONE emoji-shaped cluster: a
+/// single base character, followed only by the marks that extend a cluster
+/// (variation selectors, skin-tone modifiers, combining marks, the keycap,
+/// tag characters), a second regional indicator (a flag), or a zero-width
+/// joiner and the base it joins. No whitespace and no control character
+/// anywhere. Text such as `nice`, two emoji or a paragraph fails, so one
+/// actor cannot mint an arbitrary string per reaction.
+pub fn is_reaction_emoji(emoji: &str) -> bool {
+    const ZWJ: char = '\u{200D}';
+    fn is_extender(c: char) -> bool {
+        matches!(c as u32,
+            0x0300..=0x036F      // combining diacritical marks
+            | 0x1AB0..=0x1AFF    // combining diacritical marks extended
+            | 0x1DC0..=0x1DFF    // combining diacritical marks supplement
+            | 0x20D0..=0x20FF    // combining marks for symbols (keycap U+20E3)
+            | 0xFE00..=0xFE0F    // variation selectors
+            | 0xFE20..=0xFE2F    // combining half marks
+            | 0x1F3FB..=0x1F3FF  // skin-tone modifiers
+            | 0xE0020..=0xE007F  // tag characters (subdivision flags)
+            | 0xE0100..=0xE01EF) // variation selectors supplement
+    }
+    fn is_regional_indicator(c: char) -> bool {
+        (0x1F1E6..=0x1F1FF).contains(&(c as u32))
+    }
+    if emoji.is_empty() || emoji.len() > REACTION_EMOJI_MAX_BYTES {
+        return false;
+    }
+    if let Some(name) = emoji
+        .strip_prefix(':')
+        .and_then(|rest| rest.strip_suffix(':'))
+    {
+        return !name.is_empty()
+            && name
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'+' | b'-'));
+    }
+    let mut chars = emoji.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if first.is_whitespace() || first.is_control() || is_extender(first) || first == ZWJ {
+        return false;
+    }
+    let mut prev = first;
+    let mut flag_paired = false;
+    for c in chars {
+        if c.is_whitespace() || c.is_control() {
+            return false;
+        }
+        let joins = if is_extender(c) || c == ZWJ {
+            prev != ZWJ
+        } else if prev == ZWJ {
+            // The base a zero-width joiner joins into the same cluster.
+            true
+        } else if is_regional_indicator(first) && is_regional_indicator(c) && !flag_paired {
+            // A flag: exactly two regional indicators.
+            flag_paired = true;
+            true
+        } else {
+            false
+        };
+        if !joins {
+            return false;
+        }
+        prev = c;
+    }
+    prev != ZWJ
 }
 
 /// The content of a post.
@@ -2972,8 +3172,8 @@ impl<'de> Deserialize<'de> for UnattestedVerdict {
 ///
 /// ⚠ **Serialized as a plain string, with unknown values preserved verbatim in
 /// [`Self::Other`]** — deliberately *not* the `#[serde(other)] Unknown` shape
-/// [`crate::obligation::ContentFloor`] uses. That shape is safe there because
-/// its write path never serializes the catch-all back; here **every
+/// a closed knob uses when its write path never serializes the catch-all
+/// back; here **every
 /// re-write of the record writes every field back**, so a lossy catch-all would let an older
 /// build silently rewrite a newer build's reason. Round-tripping the raw string
 /// is what keeps this field additive-everywhere per
@@ -4337,18 +4537,16 @@ mod url_host_tests {
 
 // ── Tier-1 user-moderation sub-record ──
 //
-// The `fauna.state.moderation` entry's typed contents. Lives here so the
-// at-rest dag-cbor encoding boundary stays in one place;
-// normalization + merge live in `libs/fauna-client-config`. Authority for the
+// The `fauna.state.moderation` kind's typed contents: `MutedKeyword` is a
+// `keyword/` row's value, and `ModerationConfig` the READ fold over the
+// kind's rows (`crate::moderation_rows` owns the key grammar, the fold and
+// the write diff). Lives here so the at-rest dag-cbor encoding boundary stays
+// in one place; normalization lives in `libs/fauna-client-config`. Authority for the
 // kind's shape is `docs/goal/architecture/config-dissolution.md`; authority for behavior
 // is `docs/goal/architecture/content-moderation-and-ranking.md`
 // § Resolved design decisions Q3 (+ `docs/goal/behavior/moderation.md`
 // § Muted keywords).
 
-/// Per-actor tier-1 moderation preferences. `ModerationConfig::default()`
-/// is the no-prefs state (empty muted list) — every field is
-/// `#[serde(default)]` so a stored record written before this field
-/// existed decodes unchanged (additive-everywhere, `version-compatibility.md`).
 /// User-global file-sync preferences (`fauna.state.sync-prefs`). Additive:
 /// `#[serde(default)]` so a stored record written before this field existed
 /// decodes unchanged (additive-everywhere, `version-compatibility.md`).
@@ -4507,6 +4705,10 @@ impl From<&str> for MutedKeyword {
     }
 }
 
+/// The user's muted words and hidden report subjects — the fold of the
+/// `fauna.state.moderation` rows ([`ModerationConfig::fold`]), each list in
+/// the order its entries were added. `ModerationConfig::default()` is the
+/// no-prefs state (empty lists).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModerationConfig {
     /// The user-global **muted-keywords** list (frame Q3): one
@@ -4527,10 +4729,10 @@ pub struct ModerationConfig {
     /// post's cid or a message's record cid, both lowercase hex, or an account's
     /// actor id, which hides everything that account authored. The shared
     /// render verdict reads it as a `Block` with the "you reported this"
-    /// placeholder (`obligation::render_verdict_for_item`). Normalized and
-    /// bounded on write by `fauna_client_config::preference_records::
-    /// hide_reported_content`; sealed like the rest of this record, so the nest
-    /// never learns what a user hid.
+    /// placeholder (`obligation::render_verdict_for_item`). Normalized
+    /// on write by `fauna_client_config::preference_records::
+    /// hide_reported_content`; each id is its own sealed `hidden/` row, so
+    /// the nest never learns what a user hid.
     #[serde(default)]
     pub hidden_content: Vec<String>,
 }
@@ -4679,23 +4881,6 @@ pub struct MailConfig {
     /// written flag.
     #[serde(default)]
     pub mail_enabled: Option<bool>,
-    /// Whether **CalDAV** (calendar) is enabled for this actor. Independent of
-    /// [`Self::mail_enabled`] — both ride the one shared `msek` + `default`
-    /// credential. `#[serde(default)]` ⇒ `false` for a fresh config (nothing has
-    /// enabled CalDAV yet). Set `true` by "Enable
-    /// CalDAV"; gates whether "Disable mail" preserves the shared `msek` (it
-    /// must, when CalDAV still needs it).
-    #[serde(default)]
-    pub caldav_enabled: bool,
-    /// Whether **CardDAV** (contacts / address book) is enabled for this actor.
-    /// The contacts sibling of [`Self::caldav_enabled`] — same shared `msek` +
-    /// `default` credential, same independence from [`Self::mail_enabled`]
-    /// (`docs/goal/behavior/carddav-server.md` § Independent enablement).
-    /// `#[serde(default)]` ⇒ `false` for a fresh config. Set `true` by "Enable
-    /// CardDAV"; like `caldav_enabled` it gates whether "Disable mail" preserves
-    /// the shared `msek` (the address-book store still seals under it).
-    #[serde(default)]
-    pub carddav_enabled: bool,
     /// Retirement instants for the [`Self::prior_mseks`] generations, **keyed
     /// by the prior MSEK value itself — never positional**: the mail
     /// merge unions, dedups, and reorders `prior_mseks`, so a parallel vec
@@ -4887,8 +5072,8 @@ impl MailConfig {
         // * `prior_mseks` (every retired generation — `MailConfig::prior_mseks`,
         //   uncapped) is **unioned** (dedup, the winning `msek` excluded, ordered
         //   by retirement) so a peer's retained generation is never dropped.
-        // * The rest (`credentials`, `pending_rotation`, `mail_enabled`,
-        //   `caldav_enabled`) is recreatable/idempotent, so it stays whole-record
+        // * The rest (`credentials`, `pending_rotation`, `mail_enabled`) is
+        //   recreatable/idempotent, so it stays whole-record
         //   latest-wins from the side with the newer of `self_at` / `other_at` —
         //   except that `mail_enabled` is **present-wins** beside the `msek`: a
         //   device that never wrote the flag must not blank one written beside
@@ -4943,24 +5128,16 @@ impl MailConfig {
             merge_succession_burns(&self.succession_burns, &other.succession_burns);
         // The recreatable half moves as ONE record (a credential list and the
         // rotation it belongs to must not come from different devices), so it takes
-        // a single whole-record decision over the five fields together. (The
-        // state row decides over FOUR — the credentials ride their own rows
+        // a single whole-record decision over the three fields together. (The
+        // state row decides over TWO — the credentials ride their own rows
         // there.)
         let (recreatable_mail, other_mail) = if crate::latest_wins::theirs_wins(
-            &(
-                &self.credentials,
-                &self.pending_rotation,
-                self.mail_enabled,
-                self.caldav_enabled,
-                self.carddav_enabled,
-            ),
+            &(&self.credentials, &self.pending_rotation, self.mail_enabled),
             self_at,
             &(
                 &other.credentials,
                 &other.pending_rotation,
                 other.mail_enabled,
-                other.caldav_enabled,
-                other.carddav_enabled,
             ),
             other_at,
         ) {
@@ -4977,8 +5154,6 @@ impl MailConfig {
             // Present-wins, the record's own value first: a `None` is a device
             // that never wrote the flag (every enable/disable writes `Some`).
             mail_enabled: recreatable_mail.mail_enabled.or(other_mail.mail_enabled),
-            caldav_enabled: recreatable_mail.caldav_enabled,
-            carddav_enabled: recreatable_mail.carddav_enabled,
             succession_burns: mail_succession_burns,
         }
     }
@@ -10319,7 +10494,6 @@ mod account_record_tests {
         let caldav_only = MailConfig {
             msek: Some([1u8; 32].into()),
             mail_enabled: Some(false),
-            caldav_enabled: true,
             ..MailConfig::default()
         };
         assert!(!caldav_only.is_mail_enabled());

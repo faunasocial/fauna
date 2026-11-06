@@ -5,12 +5,6 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
-[build-dependencies]
-# The one derivation of `FAUNA_BUILD_COMMIT` (`src/build_identity.rs` reads it;
-# the apps' Status pages stamp theirs the same way — `ui/status.md` § State &
-# data shape, the build leg).
-fauna-build-commit = { path = "../../libs/fauna-build-commit" }
-
 [features]
 # The excised flavor is a COMPLEMENT feature, never a command-line list
 # (`dynamic-features.md` § The cargo feature spine): the store-safe build is
@@ -83,7 +77,18 @@ activitypub = ["fauna-bridge-activitypub"]
 # fauna-bridge-atproto/test-helpers: `build_oauth_client_with_origin_override`,
 # which the `FAUNA_TEST_ATPROTO_FAR_END` seam (`state.rs`) routes a running
 # nest's consume-side Bluesky OAuth client through to the e2e fake far end.
-test-hooks = ["fauna-mls/test-helpers", "fauna-bridge-atproto/test-helpers"]
+# fauna-core/test-helpers: `authoritative_dns::send_txt_updates_by_zone`, the
+# UPDATE sender `fauna.dns.e2e_mirror_txt` calls (`e2e-gated-seeds.md` § The
+# ACME directory seed → *The web order*) — a debug build has it already, a
+# release-profile `test-hooks` nest needs the forward.
+test-hooks = [
+  # The `fake` payment provider every tier_3 payments suite drives — compiled
+  # out of a production nest (`fauna-payments` src/lib.rs, the module gate).
+  "fauna-payments?/test-helpers",
+  "fauna-mls/test-helpers",
+  "fauna-bridge-atproto/test-helpers",
+  "fauna-core/test-helpers",
+]
 # `src/test_support.rs` — in-process test-NEST CONSTRUCTION lent to another
 # crate's tests (`fauna-sync-agent`'s `tier3-nest` harnesses). Deliberately NOT
 # `test-hooks`: that one makes the *running nest* serve the `/api/v1/test/*`
@@ -100,6 +105,11 @@ test-hooks = ["fauna-mls/test-helpers", "fauna-bridge-atproto/test-helpers"]
 test-helpers = []
 
 [dependencies]
+# The one derivation of `FAUNA_BUILD_COMMIT`, the `commit!()` macro — expanded
+# in `src/main.rs` only and handed to the library (`build_identity::stamp`), so
+# the library never tracks `HEAD` (`ui/status.md` § State & data shape, the
+# build leg).
+fauna-build-commit = { path = "../../libs/fauna-build-commit" }
 # `sqlite-schema-meta`: the shared `schema_meta` single-row SQL
 # `db/migrations.rs` delegates to for the two-number at-rest schema-version
 # scheme — not an excisable flavor (nest's SQLite cache DB is unconditional),
@@ -361,6 +371,8 @@ zeroize.workspace = true
 rustix = { version = "1", features = ["fs"] }
 
 [dev-dependencies]
+# The counting allocator `tests/segment_serve_memory.rs` installs.
+fauna-alloc-probe = { path = "../../libs/fauna-alloc-probe" }
 # `fauna_nest::test_support` — this crate lending its own integration tests the
 # in-process test-nest builders it also lends `fauna-sync-agent`. The module's
 # gate carries a `debug_assertions` arm, so a plain `cargo test -p fauna-nest`
@@ -638,8 +650,11 @@ fauna-client-capabilities = { path = "../../libs/fauna-client-capabilities" }
 # `conformance_ffi_stolen_ceremony_client.rs` the FFI stolen-identity driver
 # (`run_stolen_ceremony`) with the default-shipping link step, so the read-back
 # verdict and the predecessor link are pinned at the FFI face, not only the
-# shared composition. In-repo features only.
-fauna-ffi = { path = "../../libs/fauna-ffi", default-features = false, features = ["file-provider-host", "recovery-ceremony", "recovery-aftermath"] }
+# shared composition. In-repo features only. The CORE package of the fauna-ffi
+# split (its lib is still `fauna_ffi`, so the tests write `fauna_ffi::`) — the
+# thin `fauna-ffi` package only links the shipped artifacts
+# (build-target-layout-windows.md § The rlib + thin-cdylib split).
+fauna-ffi-core = { path = "../../libs/fauna-ffi", default-features = false, features = ["file-provider-host", "recovery-ceremony", "recovery-aftermath"] }
 # `test-helpers` exposes the MLS-2 attacker-simulation seam
 # `forge_key_package_bytes_for_test` so `conformance_conversations_keypackage.rs`
 # can prove the `keypackage.upload` handler rejects a forged-identity KeyPackage

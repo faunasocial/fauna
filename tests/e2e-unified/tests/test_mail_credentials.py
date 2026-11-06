@@ -312,6 +312,8 @@ def test_mail_settings_rotate_keys_completes(logged_in_app):
 
 
 @pytest.mark.tui
+@pytest.mark.ios
+@pytest.mark.android
 @pytest.mark.feature("turn-on-mail")
 def test_calendar_written_before_a_key_rotation_still_opens(app, request, nest_instance):
     """A rotation must not hide the user's own calendar (mail-credentials.md

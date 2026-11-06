@@ -10,19 +10,26 @@ import time
 
 import pytest
 
+from helpers.build_step import run_build_step
+from helpers.helper_bins import helper_bin
+from helpers.windows_installer import (
+    is_admin,
+    max_mtime,
+    msi_is_cached,
+    msi_paths,
+    release_ffi_dll,
+    require_release_test_flavor,
+    source_mtime,
+)
 
-def _is_admin():
-    """Check if the current process has admin privileges."""
-    if sys.platform != "win32":
-        return False
-    import ctypes
-    return ctypes.windll.shell32.IsUserAnAdmin() != 0
-
-
+# The publish and the WiX link below are this suite's subject and stay in
+# `msi_path`, charged to the first test that asks (e2e-conventions.md point 9: a
+# subject build stays in its test, on a 3600 s clock). Everything they consume is
+# a collection-time prebuild (`conftest.py::_prebuild_jobs`).
 pytestmark = [pytest.mark.skipif(sys.platform != "win32", reason="Windows-only"), pytest.mark.skipif(
-        sys.platform == "win32" and not _is_admin(),
+        sys.platform == "win32" and not is_admin(),
         reason="Requires admin privileges",
-    ), pytest.mark.tier_3]
+    ), pytest.mark.tier_3, pytest.mark.timeout(3600)]
 
 INSTALL_DIR = os.path.join(
     os.environ.get("ProgramFiles", r"C:\Program Files"), "Fauna",
@@ -47,75 +54,6 @@ def _get_repo_root():
     return os.path.normpath(path)
 
 
-def _git_ignored(paths):
-    """The subset of `paths` git ignores — this tree's one definition of build output."""
-    if not paths:
-        return set()
-    # -z: NUL-separated in and out. Without it git C-quotes every path holding a
-    # backslash ("D:\\src\\…"), so no Windows path would ever match.
-    r = subprocess.run(
-        ["git", "check-ignore", "-z", "--stdin"], input="\0".join(paths) + "\0",
-        capture_output=True, text=True, cwd=os.path.dirname(os.path.abspath(__file__)),
-    )
-    return {os.path.normcase(os.path.normpath(p)) for p in r.stdout.split("\0") if p}
-
-
-def _max_mtime(patterns):
-    """Return the maximum mtime across all files matching the glob patterns.
-
-    Gitignored files are build OUTPUT and never count as input: `bin/`/`obj/`
-    (the WinUI publish writes generated *.cs there), `Generated/uniffi/` and the
-    test fakes step 1c regenerates. All of these are written AFTER `msi_path`
-    takes the stamp, so counting them made its cache miss on every run following
-    a build. (Tracked generated files such as `Generated/UiIds.cs` stay inputs.)
-    """
-    paths = [p for pattern in patterns for p in glob.glob(pattern, recursive=True)]
-    ignored = _git_ignored(paths)
-    best = 0.0
-    for path in paths:
-        if os.path.normcase(os.path.normpath(path)) in ignored:
-            continue
-        try:
-            best = max(best, os.path.getmtime(path))
-        except OSError:
-            pass
-    return best
-
-
-def _run_build_step(cmd, what, cwd=None):
-    """Run one installer build step to completion; `pytest.fail` with its tail on error.
-
-    No wall-clock bound, the same shape as conftest's `_build_via_just`. Every
-    step here is a compile or a link, and on Windows, which runs several build
-    slots at once by design, a cold one legitimately outlasts any fixed bound.
-    The old `subprocess.run(timeout=3600)` failed a build that was merely busy,
-    and on Windows it could not even do that promptly: it kills only the
-    immediate child, then blocks draining the pipe until the grandchild cargo
-    exits. Measured 2026-09-26/27: TimeoutExpired raised at 6789 s, 7723 s and
-    4257 s, with each build's result thrown away. Convention 9 is kept by `reap_descendants_of`: the whole tree dies
-    with the run if pytest is reaped. `drain_pipes` keeps the pipe read for
-    the child's life (convention 13) and holds the tail this failure quotes.
-    """
-    from drivers.port_util import (
-        drain_pipes,
-        popen_group_kwargs,
-        reap_descendants_of,
-        wait_pipes_drained,
-    )
-
-    print(f"[installer-build] {what}", flush=True)
-    proc = subprocess.Popen(
-        cmd, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-        text=True, bufsize=1, **popen_group_kwargs(),
-    )
-    reap_descendants_of(proc.pid)
-    recent = drain_pipes(proc, maxlen=400)
-    rc = proc.wait()
-    if rc != 0:
-        wait_pipes_drained(proc, timeout=10.0)
-        pytest.fail(f"{what} failed (rc={rc}):\n" + "\n".join(recent))
-
-
 def _build_msi(repo):
     """Build the MSI installer from source. Returns the MSI path."""
     build_dir = os.path.join(repo, "build", "installer")
@@ -127,7 +65,6 @@ def _build_msi(repo):
     os.makedirs(os.path.join(stage_dir, "app"), exist_ok=True)
 
     ws_dir = os.path.join(repo, "apps", "fauna-windows")
-    cargo_cmd = os.path.join(repo, "scripts", "cargo-win.cmd")
 
     # 0. Ensure WiX extensions are installed (version must match WiX v6)
     wix_ver = subprocess.run(
@@ -152,86 +89,11 @@ def _build_msi(repo):
     if ext_errors:
         pytest.fail(f"WiX extension install failed:\n" + "\n".join(ext_errors))
 
-    # 1. Build Rust binaries
-    #
-    # The sync agent first, in a cargo invocation of its OWN: it is the
-    # cross-platform `fauna-sync-agent` package (the windows-only wrapper crate
-    # that used to produce this exe is retired), and one invocation naming several
-    # packages unifies their features — beside `-p fauna-tui` the agent's shared
-    # dependencies would be compiled with tui's wider feature set, which is not
-    # the binary release.yml ships (it builds each crate separately too). The
-    # second invocation selects no package that owns this bin, so it leaves the
-    # exe built here in place.
-    _run_build_step(
-        ["cmd", "/c", cargo_cmd, "build", "--release", "-p", "fauna-sync-agent"],
-        "Rust build (release sync agent, alone)",
-    )
-    _run_build_step(
-        [
-            "cmd", "/c", cargo_cmd,
-            "build", "--release",
-            # NO --manifest-path: the apps/fauna-windows sub-workspace was unified
-            # into the ROOT workspace 2026-07-22 (apps/windows.md § …; merge-gates.md
-            # records the retired manifest gate), so apps/fauna-windows/Cargo.toml no
-            # longer exists and passing it dies with "manifest path does not exist".
-            # These crates are plain root-workspace members now.
-            "-p", "fauna-nest-service",
-            "-p", "fauna-bridge-service",
-            "-p", "fauna-shell-ext",
-            # The TerminalApp feature (TerminalApp.wxs, $(var.TuiBin) and
-            # $(var.CliBin)) ships the terminal app and the cli app's device
-            # shell beside the agent — the same binaries release.yml builds.
-            "-p", "fauna-tui",
-            "-p", "fauna-cli-device",
-        ],
-        # Cold win-arm64 builds are slow: these crates (fauna-nest-service pulls in
-        # the whole nest) build the full dep graph from scratch on the throwaway VM
-        # this test targets. Unbounded on purpose (_run_build_step).
-        "Rust build (release service crates + fauna-tui + fauna-cli)",
-    )
+    # The prebuild staged this flavor last; anything else here would package the
+    # wrong core without a word.
+    require_release_test_flavor(repo)
 
-    # 1b. Build the Go mail-bridge MDA (cgo, gnullvm) — the Bridge feature SHIPS it.
-    # Since the Track-2 wiring, ServiceBridge.wxs references $(var.MailBridgeBin) /
-    # $(var.MailBridgeFfiDll) / $(var.MailBridgeLibunwindDll), so `wix build`
-    # preprocesses those vars (every *.wxs is preprocessed regardless of which
-    # Feature links it) and FAILS unless all three are defined. `just
-    # windows-mail-bridge-build` (arm64 default, matching this arm64-only builder)
-    # emits target/fauna-mail-bridge.exe + a SEPARATE gnullvm target/fauna_ffi.dll +
-    # target/libunwind.dll in the ROOT target/ (installer/README.md § clean-checkout
-    # step 6). Needs Go + llvm-mingw on the build box. The
-    # recipe uses BARE cargo (gnullvm linker, not the MSVC link.exe the Git-Bash
-    # shadow breaks), so no cargo-win.cmd wrapper here.
-    # Cold: this rebuilds the gnullvm fauna-ffi + the Go cgo MDA.
-    _run_build_step(
-        ["just", "windows-mail-bridge-build"],
-        "Go mail-bridge MDA build (just windows-mail-bridge-build)", cwd=repo,
-    )
-
-    # 1c. Regenerate the C# UniFFI bindings (FaunaApp.Core/Generated/uniffi/*.cs).
-    # This MSI path publishes the WinUI app via MSBuild -t:Publish DIRECTLY, which —
-    # unlike `just windows-debug`/`-release` — does NOT regenerate the bindings (the
-    # csproj deliberately has no in-build regen target: it would need bash/just, only
-    # on the Git-Bash PATH; see FaunaApp.Core.csproj). The Generated/ dir is gitignored,
-    # so on a cold box (the throwaway VM this test targets) it's absent and the publish
-    # fails with CS0246 "type could not be found" (IFfiWebClient, ProvisioningSnapshot,
-    # …). `just windows-ffi-test` builds fauna-ffi (MSVC) + runs uniffi-bindgen-cs;
-    # it's incremental (build-if-stale-gated) so it no-ops cheaply when already fresh.
-    #
-    # ⚠ The TEST flavor at the `release` profile, not the production `windows-ffi`
-    # (testing.md convention 15, recipe split 2026-08-01). This test installs a
-    # Release-published product and then DRIVES it through the e2e agent, so the
-    # publish below sets `-p:FaunaE2eAgent=true` to compile the automation surface
-    # into a Release build — and that surface calls the `*ForTest` UniFFI seams,
-    # which only the test flavor's bindings export. The two must agree or the
-    # publish fails to compile. This is windows' twin of a linux `--release
-    # --features e2e-agent` build; the SHIPPED MSI (release.yml) sets neither.
-    # Cold: builds the MSVC fauna-ffi from scratch before bindgen.
-    _run_build_step(
-        ["just", "windows-ffi-test", "release"],
-        "windows-ffi-test release (C# UniFFI binding regen)", cwd=repo,
-    )
-
-    # 2. Publish the .NET app self-contained (skip if publish output already exists).
+    # 1. Publish the .NET app self-contained (skip if publish output already exists).
     # Two requirements for the bare-VM install target (installer/README.md steps 3-4):
     #   - Publish with MSBuild `-t:Publish`, NOT `dotnet publish` — on win-arm64 the
     #     latter crashes the WinUI XAML compiler under x86 emulation (see _MSBUILD).
@@ -250,11 +112,11 @@ def _build_msi(repo):
     # publish merely because it exists, or a cached-MSI rebuild after a C#/XAML
     # change (or a fauna-ffi rebuild, whose MSVC DLL the publish bundles) ships
     # the OLD app and the journey tests witness it.
-    # _max_mtime skips gitignored output (bin/, obj/, the regenerated bindings);
+    # max_mtime skips gitignored output (bin/, obj/, the regenerated bindings);
     # the MSVC DLL lives in the gitignored target/, so it is read on its own.
-    ffi_dll = os.path.join(repo, "target", "release", "fauna_ffi.dll")
+    ffi_dll = release_ffi_dll(repo)
     publish_inputs_mtime = max(
-        _max_mtime([
+        max_mtime([
             os.path.join(ws_dir, "FaunaApp", "**", "*.cs"),
             os.path.join(ws_dir, "FaunaApp", "**", "*.xaml"),
             os.path.join(ws_dir, "FaunaApp", "**", "*.csproj"),
@@ -286,27 +148,14 @@ def _build_msi(repo):
         # Cold self-contained WinUI publish (restore + XAML compile + bundle the
         # Windows App SDK self-contained runtime).
         tool = "MSBuild -t:Publish" if os.path.exists(_MSBUILD) else "dotnet publish"
-        _run_build_step(publish_cmd, f"WinUI self-contained publish ({tool})")
+        run_build_step(publish_cmd, f"WinUI self-contained publish ({tool})")
 
-    # 3. Stage binaries
-    # Root target/, not apps/fauna-windows/target/ — same 2026-07-22 unification as
-    # the --manifest-path removal above; the nested target dir is never written now.
-    target_dir = os.path.join(repo, "target", "release")
-    for name, src_name in [
-        ("fauna-sync-agent.exe", "fauna-sync-agent.exe"),
-        ("fauna-nest-svc.exe", "fauna-nest-svc.exe"),
-        ("fauna-bridge-svc.exe", "fauna-bridge-svc.exe"),
-        # The shell-ext crate overrides [lib] name = "fauna_shell" (shell-ext/Cargo.toml),
-        # so the built artifact is fauna_shell.dll — NOT the package-name default
-        # fauna_shell_ext.dll. (name, src_name): stage the built fauna_shell.dll as-is.
-        ("fauna_shell.dll", "fauna_shell.dll"),
-        ("fauna-tui.exe", "fauna-tui.exe"),
-        ("fauna-cli.exe", "fauna-cli.exe"),
-    ]:
-        src = os.path.join(target_dir, src_name)
-        if not os.path.exists(src):
-            pytest.fail(f"Expected build artifact missing: {src}")
-        shutil.copy2(src, os.path.join(stage_dir, name))
+    # 2. Stage binaries — each one the collection-time prebuild built
+    # (`helpers/helper_bins.py`), replayed here and never built.
+    for name in ["fauna-sync-agent", "fauna-nest-svc", "fauna-bridge-svc", "fauna_shell",
+                 "fauna-tui", "fauna-cli"]:
+        src = helper_bin(name)
+        shutil.copy2(src, os.path.join(stage_dir, src.name))
 
     # Stage the Go MDA + its gnullvm runtime DLLs (built into the ROOT target/, NOT
     # the apps/fauna-windows workspace target). They ship beside fauna-bridge-svc.exe
@@ -354,7 +203,7 @@ def _build_msi(repo):
         shutil.rmtree(app_dest)
         shutil.copytree(app_publish, app_dest)
 
-    # 3b. The ShellExt feature ships Fauna-Sparse.msix as a component
+    # 2b. The ShellExt feature ships Fauna-Sparse.msix as a component
     # (ShellExt.wxs's $(var.SparsePackage)). It is ProcessorArchitecture="neutral" —
     # built ONCE and shared by every arch — by a dedicated dev-fleet packaging script
     # that is deliberately not in this tree (installer/README.md § 2. Build the sparse
@@ -371,14 +220,14 @@ def _build_msi(repo):
             "not part of this tree; copy the artifact in rather than rebuilding it here."
         )
 
-    # 4. Build MSI
+    # 3. Build MSI
     installer_dir = os.path.join(ws_dir, "installer")
     wxs_files = glob.glob(os.path.join(installer_dir, "*.wxs"))
     wxl_files = glob.glob(os.path.join(installer_dir, "*.wxl"))
     loc_args = []
     for wxl in wxl_files:
         loc_args.extend(["-loc", wxl])
-    _run_build_step(
+    run_build_step(
         [
             "wix", "build", "-arch", "arm64",
             "-ext", "WixToolset.Util.wixext",
@@ -405,60 +254,31 @@ def _build_msi(repo):
         # The link compresses a ~310 MB staged payload (the self-contained WinUI
         # publish) into a ~180 MB MSI: 71 s on an idle Windows host, far longer under the
         # box's ordinary multi-slot contention, which once blew a 300 s bound and
-        # read as a broken installer. Unbounded like every step (_run_build_step).
+        # read as a broken installer. Unbounded like every step (run_build_step).
         "WiX build (wix build -arch arm64)", cwd=installer_dir,
     )
 
     return msi_path
 
 
-SOURCE_PATTERNS = [
-    "apps/fauna-windows/installer/*.wxs",
-    "apps/fauna-windows/*/Cargo.toml",
-    "apps/fauna-windows/*/src/**/*.rs",
-    "apps/fauna-windows/FaunaApp/FaunaApp/*.csproj",
-    "apps/fauna-windows/FaunaApp/**/*.cs",
-    "apps/fauna-windows/FaunaApp/**/*.xaml",
-    "apps/fauna-windows/shell-ext/src/icons/*.ico",
-    # The Go MDA the Bridge feature ships (built by `just windows-mail-bridge-build`)
-    # + the gnullvm fauna_ffi.dll it links, so a change to either rebuilds the MSI.
-    "bins/fauna-bridges/**/*.go",
-    "libs/fauna-ffi/src/**/*.rs",
-    # The terminal app the TerminalApp feature ships, and the cli app's device
-    # shell beside it (the catalog crate is its whole surface).
-    "apps/fauna-tui/src/**/*.rs",
-    "apps/fauna-cli/src/**/*.rs",
-    "libs/fauna-cli/src/**/*.rs",
-]
-
-
 @pytest.fixture(scope="session")
-def msi_path():
-    """Build or return cached MSI installer."""
+def msi_path(request):
+    """Build or return cached MSI installer. The publish and the link run here;
+    their inputs were built at collection time, for a run that owes this build
+    (`helpers/windows_installer.py::msi_build_owed`, the same two answers read
+    below), so a cache hit needs none of them."""
     repo = _get_repo_root()
-    build_dir = os.path.join(repo, "build", "installer")
-    msi = os.path.join(build_dir, "Fauna-Setup-arm64.msi")
-    stamp = os.path.join(build_dir, "build.stamp")
-
-    # Compute max source mtime
-    full_patterns = [os.path.join(repo, p) for p in SOURCE_PATTERNS]
-    current_mtime = _max_mtime(full_patterns)
-
-    # Check cache
-    if os.path.exists(msi) and os.path.exists(stamp):
-        try:
-            with open(stamp) as f:
-                cached_mtime = float(f.read().strip())
-            if cached_mtime >= current_mtime:
-                return msi
-        except (ValueError, OSError):
-            pass
+    msi, stamp = msi_paths(repo)
+    current_mtime = source_mtime(repo)
+    if msi_is_cached(repo, current_mtime):
+        return msi
 
     # Cache miss — build
+    request.getfixturevalue("mail_bridge_binary")
     result = _build_msi(repo)
 
     # Write stamp
-    os.makedirs(build_dir, exist_ok=True)
+    os.makedirs(os.path.dirname(stamp), exist_ok=True)
     with open(stamp, "w") as f:
         f.write(str(current_mtime))
 
@@ -476,7 +296,7 @@ def _cleanup_stale_install(msi_path):
         capture_output=True,  # unbounded: see _MSIEXEC_UNBOUNDED
     )
     # Force-remove any stale services that survived a bad uninstall
-    for svc in ["FaunaSync", "FaunaNest", "FaunaBridge"]:
+    for svc in ["FaunaNest", "FaunaBridge"]:
         subprocess.run(["sc", "stop", svc], capture_output=True)
         subprocess.run(["sc", "delete", svc], capture_output=True)
     # Remove install directory to clear orphaned files from old installs
@@ -510,8 +330,12 @@ def msi_install(msi, features=None, log_suffix=""):
     return result.returncode, log_path
 
 
-def msi_uninstall(msi, remove_data=False, log_suffix=""):
-    """Uninstall the MSI and clean up residual files/services."""
+def msi_uninstall(msi, remove_data=False, log_suffix="", scrub=True):
+    """Uninstall the MSI and clean up residual files/services.
+
+    `scrub=False` leaves %ProgramFiles%\\Fauna as msiexec left it, for a test
+    whose subject is what the uninstall itself removes; it then calls
+    `scrub_install_dir()` once it has looked."""
     cmd = ["msiexec", "/x", msi, "/qn", "/norestart"]
     if remove_data:
         cmd.append("REMOVE_USER_DATA=1")
@@ -519,14 +343,19 @@ def msi_uninstall(msi, remove_data=False, log_suffix=""):
     cmd.extend(["/l*v", log_path])
     result = subprocess.run(cmd, capture_output=True)  # see _MSIEXEC_UNBOUNDED
     # Force-stop and deregister services (msiexec may leave them)
-    for svc in ["FaunaSync", "FaunaNest", "FaunaBridge"]:
+    for svc in ["FaunaNest", "FaunaBridge"]:
         subprocess.run(["sc", "stop", svc], capture_output=True)
         subprocess.run(["sc", "delete", svc], capture_output=True)
-    # Remove install directory (auto-harvested files may persist)
+    if scrub:
+        scrub_install_dir()
+    return result.returncode, log_path
+
+
+def scrub_install_dir():
+    """Remove the install directory (auto-harvested files may persist)."""
     if os.path.isdir(INSTALL_DIR):
         shutil.rmtree(INSTALL_DIR, ignore_errors=True)
     time.sleep(2)
-    return result.returncode, log_path
 
 
 def is_service_installed(service_name):
@@ -555,12 +384,41 @@ def file_installed(relative_path):
     return os.path.exists(os.path.join(INSTALL_DIR, relative_path))
 
 
+#: The Sync feature's per-user logon launch (`ServiceSync.wxs`; installers/windows.md
+#: § Feature Tree): an HKLM `…\Run` value that starts the agent in each user's session
+#: under their standard token. There is no `FaunaSync` machine service to query.
+_SYNC_RUN_KEY = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Run"
+_SYNC_RUN_VALUE = "Fauna Sync"
+
+
+def sync_run_value():
+    """The installed "Fauna Sync" logon-launch command, or None when it is absent."""
+    import winreg
+    try:
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, _SYNC_RUN_KEY, 0,
+                            winreg.KEY_READ | winreg.KEY_WOW64_64KEY) as key:
+            value, _kind = winreg.QueryValueEx(key, _SYNC_RUN_VALUE)
+    except FileNotFoundError:
+        return None
+    return value
+
+
+def assert_sync_logon_launch_registered():
+    """The Sync feature is in: its Run value names the installed agent, and no
+    `FaunaSync` machine service exists beside it."""
+    expected = os.path.join(INSTALL_DIR, "fauna-sync-agent.exe")
+    value = sync_run_value()
+    assert value is not None, f"HKLM Run value {_SYNC_RUN_VALUE!r} missing after install"
+    assert os.path.normcase(value) == os.path.normcase(expected), \
+        f"HKLM Run value {_SYNC_RUN_VALUE!r} is {value!r}, expected {expected!r}"
+    assert not is_service_installed("FaunaSync"), \
+        "a FaunaSync machine service exists; the agent is a per-user logon launch"
+
+
 def shell_dll_installed():
     """True if a version-stamped shell DLL (fauna_shell_<ver>.dll) is installed under
     %ProgramFiles%\\Fauna. Path 1 (installers/windows.md § Shell Extension) installs the
-    DLL under a version-stamped @Name, so the bare fauna_shell.dll never exists on disk.
-    NOTE: this test is otherwise stale pre-Step-E (it expects a FaunaSync service, and omits -ext WixToolset.Firewall.wixext) — a broader refresh is
-    out of scope for the Path 1 slice; only the shell-DLL name was reconciled here."""
+    DLL under a version-stamped @Name, so the bare fauna_shell.dll never exists on disk."""
     import glob as _glob
     return bool(_glob.glob(os.path.join(INSTALL_DIR, "fauna_shell_*.dll")))
 
@@ -577,9 +435,9 @@ class TestWinUIOnly:
             assert file_installed(os.path.join("App", "FaunaApp.exe")), \
                 "FaunaApp.exe missing"
 
-            # No services should exist
-            assert not is_service_installed("FaunaSync"), \
-                "FaunaSync should not be installed"
+            # No machine services and no sync logon launch
+            assert sync_run_value() is None, \
+                "the Sync logon launch should not be registered"
             assert not is_service_installed("FaunaNest"), \
                 "FaunaNest should not be installed"
             assert not is_service_installed("FaunaBridge"), \
@@ -623,11 +481,11 @@ class TestNestOnly:
             # fauna-ctl is deleted (installers/windows.md § Feature Tree)
             assert not file_installed("fauna-ctl.exe"), "fauna-ctl.exe should not exist"
 
-            # No other services
-            assert not is_service_installed("FaunaSync"), \
-                "FaunaSync should not be installed"
+            # No other service and no sync logon launch
             assert not is_service_installed("FaunaBridge"), \
                 "FaunaBridge should not be installed"
+            assert sync_run_value() is None, \
+                "the Sync logon launch should not be registered"
 
             # No sync, app, or shell extension
             assert not file_installed("fauna-sync-agent.exe"), \
@@ -649,20 +507,17 @@ class TestNestOnly:
 
 
 class TestSyncOnly:
-    """Install only the sync service — no nest, no app, no shell extension."""
+    """Install only the sync agent — no nest, no app, no shell extension."""
 
     def test_install_sync_only(self, msi_path):
         rc, log = msi_install(msi_path, features=["Sync"], log_suffix="_sync")
         assert rc == 0, f"Install failed (rc={rc}). See {log}"
 
         try:
-            # Sync service should be installed and running
-            assert is_service_installed("FaunaSync"), \
-                "FaunaSync not found after install"
+            # The agent and its per-user logon launch
             assert file_installed("fauna-sync-agent.exe"), \
                 "fauna-sync-agent.exe missing"
-            assert wait_for_service("FaunaSync"), \
-                "FaunaSync not running after install"
+            assert_sync_logon_launch_registered()
 
             # fauna-ctl is deleted (installers/windows.md § Feature Tree)
             assert not file_installed("fauna-ctl.exe"), "fauna-ctl.exe should not exist"
@@ -684,8 +539,8 @@ class TestSyncOnly:
             assert rc == 0, f"Uninstall failed (rc={rc}). See {log}"
 
         # Verify cleanup
-        assert not is_service_installed("FaunaSync"), \
-            "FaunaSync still exists after uninstall"
+        assert sync_run_value() is None, \
+            "the Sync logon launch is still registered after uninstall"
         assert not file_installed("fauna-sync-agent.exe"), \
             "fauna-sync-agent.exe still exists after uninstall"
 
@@ -696,19 +551,23 @@ class TestAllFeatures:
     def test_install_all_features(self, msi_path):
         rc, log = msi_install(
             msi_path,
-            features=["Sync", "ShellExt", "Nest", "Bridge", "DesktopApp"],
+            features=["Sync", "ShellExt", "TerminalApp", "Nest", "Bridge", "DesktopApp"],
             log_suffix="_all",
         )
         assert rc == 0, f"Install failed (rc={rc}). See {log}"
 
         try:
-            # All three services should be installed and running
-            for svc in ["FaunaSync", "FaunaNest", "FaunaBridge"]:
+            # Both machine services installed and running, the sync agent's
+            # logon launch registered
+            for svc in ["FaunaNest", "FaunaBridge"]:
                 assert is_service_installed(svc), f"{svc} not found"
                 assert wait_for_service(svc), f"{svc} not running"
+            assert_sync_logon_launch_registered()
 
             # All binaries should be present
             assert file_installed("fauna-sync-agent.exe"), "fauna-sync-agent.exe missing"
+            assert file_installed("fauna-tui.exe"), "fauna-tui.exe missing"
+            assert file_installed("fauna-cli.exe"), "fauna-cli.exe missing"
             assert file_installed("fauna-nest-svc.exe"), "fauna-nest-svc.exe missing"
             assert file_installed("fauna-bridge-svc.exe"), "fauna-bridge-svc.exe missing"
             assert not file_installed("fauna-ctl.exe"), "fauna-ctl.exe should not exist"
@@ -725,10 +584,127 @@ class TestAllFeatures:
             assert rc == 0, f"Uninstall failed (rc={rc}). See {log}"
 
         # Verify cleanup
-        for svc in ["FaunaSync", "FaunaNest", "FaunaBridge"]:
+        for svc in ["FaunaNest", "FaunaBridge"]:
             assert not is_service_installed(svc), f"{svc} still exists after uninstall"
+        assert sync_run_value() is None, \
+            "the Sync logon launch is still registered after uninstall"
         assert not file_installed("fauna-sync-agent.exe"), \
             "fauna-sync-agent.exe still exists after uninstall"
+
+
+_MACHINE_ENV_KEY = r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment"
+
+
+def _machine_path_entries():
+    """The machine `Path` as a NEW shell reads it: HKLM, expanded.
+
+    Never os.environ: this process's PATH was fixed when it started, before the
+    install, so it can neither see the entry the install writes nor lose it on
+    uninstall — a check against it proves nothing either way."""
+    import winreg
+    with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, _MACHINE_ENV_KEY) as key:
+        raw, _ = winreg.QueryValueEx(key, "Path")
+    return [os.path.expandvars(p) for p in raw.split(";") if p]
+
+
+def _same_dir(a, b):
+    """normpath drops the trailing separator `[INSTALLFOLDER]` carries."""
+    return os.path.normcase(os.path.normpath(a)) == os.path.normcase(os.path.normpath(b))
+
+
+def _fresh_shell(command, path):
+    """Run `command` in cmd.exe with PATH set to `path`: the resolution a user's
+    new shell does after the install, not this process's stale one."""
+    env = dict(os.environ)
+    env["PATH"] = path
+    cmd_exe = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32", "cmd.exe")
+    return subprocess.run(
+        [cmd_exe, "/d", "/c", command], env=env,
+        capture_output=True, text=True, timeout=120,
+    )
+
+
+class TestTerminalAppOnly:
+    """Install only the terminal app: fauna-tui.exe + fauna-cli.exe on the machine PATH.
+
+    The feature's promises (TerminalApp.wxs; installers/windows.md § Feature
+    Tree; installers/tui.md § Decisions, decision 4): both binaries land in
+    INSTALLFOLDER — the directory the Sync feature puts the agent in
+    (ServiceSync.wxs), where the terminal app resolves it as a sibling; the one
+    machine `Path` entry for that directory makes both typeable in any new
+    shell; the uninstall removes the files and the entry.
+
+    TerminalApp alone, without Sync: a TerminalApp-only install is legal
+    (TerminalApp.wxs), and Sync's uninstall runs `CleanSyncRoots`, which
+    unregisters EVERY Fauna sync root on the machine, sibling sessions' included.
+    fauna-tui is only resolved, never launched: it has no headless invocation.
+    """
+
+    def test_install_terminal_app_only(self, msi_path):
+        assert not any(_same_dir(p, INSTALL_DIR) for p in _machine_path_entries()), (
+            f"the machine Path holds {INSTALL_DIR} BEFORE the install (a leftover "
+            "from an earlier run?), so the uninstall half could not tell removal "
+            "from survival"
+        )
+        rc, log = msi_install(msi_path, features=["TerminalApp"], log_suffix="_terminal")
+        assert rc == 0, f"Install failed (rc={rc}). See {log}"
+
+        try:
+            for exe in ("fauna-tui.exe", "fauna-cli.exe"):
+                assert file_installed(exe), f"{exe} missing from {INSTALL_DIR}"
+            assert not file_installed("fauna-sync-agent.exe"), \
+                "fauna-sync-agent.exe should not exist (Sync was not selected)"
+            assert not file_installed(os.path.join("App", "FaunaApp.exe")), \
+                "FaunaApp.exe should not exist"
+
+            entries = _machine_path_entries()
+            assert any(_same_dir(p, INSTALL_DIR) for p in entries), (
+                f"the machine Path does not hold {INSTALL_DIR} after the install: "
+                f"{entries}"
+            )
+            fresh = os.pathsep.join(entries)
+            for name in ("fauna-tui", "fauna-cli"):
+                found = shutil.which(name, path=fresh)
+                assert found and _same_dir(os.path.dirname(found), INSTALL_DIR), (
+                    f"{name} resolves to {found!r} through the fresh machine Path, "
+                    f"expected {INSTALL_DIR}"
+                )
+
+            # A shell started after the install finds both by bare name.
+            where = _fresh_shell("where fauna-tui", fresh)
+            assert where.returncode == 0, (
+                f"a fresh shell cannot find fauna-tui (rc={where.returncode}):\n"
+                f"{where.stdout}{where.stderr}"
+            )
+            first = where.stdout.splitlines()[0]
+            assert _same_dir(os.path.dirname(first), INSTALL_DIR), where.stdout
+            # `--help` needs no host, account or store (the argv shell's
+            # overview, libs/fauna-cli/src/argv.rs), and the launch catches a
+            # binary that lands but does not start.
+            cli = _fresh_shell("fauna-cli --help", fresh)
+            assert cli.returncode == 0, (
+                f"`fauna-cli --help` in a fresh shell exited {cli.returncode}:\n"
+                f"stdout:\n{cli.stdout}\nstderr:\n{cli.stderr}"
+            )
+            assert "commands:" in cli.stdout and "mcp" in cli.stdout, (
+                f"`fauna-cli --help` printed something other than the device "
+                f"shell's overview:\n{cli.stdout}"
+            )
+        finally:
+            # scrub=False: what the uninstall itself removes is under test.
+            rc, log = msi_uninstall(msi_path, log_suffix="_terminal", scrub=False)
+
+        try:
+            assert rc == 0, f"Uninstall failed (rc={rc}). See {log}"
+            for exe in ("fauna-tui.exe", "fauna-cli.exe"):
+                assert not file_installed(exe), f"{exe} survived the uninstall"
+            entries = _machine_path_entries()
+            assert not any(_same_dir(p, INSTALL_DIR) for p in entries), (
+                f"the machine Path still holds {INSTALL_DIR} after the uninstall: "
+                f"{entries}"
+            )
+        finally:
+            scrub_install_dir()
 
 
 class TestUninstallPreservesData:
@@ -769,7 +745,13 @@ class TestUninstallPreservesData:
 # skipif(not admin) gate + installers/windows.md § Testing).
 
 # Fixed ports of the installed deployment (no ephemeral allocation — a solo box).
-INSTALLED_NEST_PORT = 7450      # fauna-nest-service SCM bind (service.rs run_as_service)
+# The SCM service binds the external 0.0.0.0:443 AND the fixed same-box TLS
+# loopback 127.0.0.1:3000 (`fauna_protocol::node_policy::
+# CANONICAL_INTERNAL_LOOPBACK_PORT`, service.rs `internal_loopback_port`) — the
+# one a co-located client dials (nest/common.md § Same-box reach), so the test
+# dials it too, over TLS pinned to the floor. 7450 is only `--foreground`'s
+# `--port` default (main.rs); the service never binds it.
+INSTALLED_NEST_PORT = 3000
 INSTALLED_CALDAV_PORT = 8443    # fauna_mda_supervisor::CALDAV_LISTEN → operator-hatch
 INSTALLED_IMAPS_PORT = 993      # MDA default imap_listen_implicit_tls (config.go)
 # The admin-changed CalDAV port the supervisor must rebind the MDA to. Fixed (not
@@ -820,12 +802,12 @@ class TestCalDAVImapServingAfterInstall:
     rebinds CalDAV to an admin-changed port via the FaunaBridge supervisor.
 
     Install the MSI's Nest + Bridge features → the FaunaNest + FaunaBridge SCM
-    services start → claim + commit storage + enable CalDAV over WS-RPC + mint a
+    services start → claim + enable mail and CalDAV over WS-RPC + mint a
     known-password MUA credential (the headless equivalents of the client UI's
     claim + app-password flow, via the test-only seal-helper) → the
     FaunaBridge-supervised MDA child auto-enrolls on loopback (AUTO-APPROVED because
-    CalDAV is enabled — bins/fauna-nest/src/bridge_blob_handlers.rs request_enrollment
-    auto-approve, BridgeRole::Mda => mail_enabled || caldav_enabled) and
+    mail/CalDAV is enabled — bins/fauna-nest/src/bridge_blob_handlers.rs
+    request_enrollment auto-approve, BridgeRole::Mda => any mail/DAV enable) and
     self-provisions its x25519 (register_service_user → upsert_bridge_x25519), so the
     test does **no** manual register/approve/x25519-poke — the standalone engine's
     Stage C is the SCM service's job here. The MDA fetches the self-signed floor cert
@@ -838,12 +820,22 @@ class TestCalDAVImapServingAfterInstall:
     "installed-service function" coverage installers/windows.md § Testing § Coverage
     gaps flagged as missing.
 
-    Caveat — IMAP binds because fetch_config defaults mail_enabled to true for an
-    approved bridge (`bridge_routing_handlers.rs assemble_fetch_config_reply:
-    get_mail_enabled().unwrap_or(true)`), so CalDAV-only enable still serves IMAP
-    (matching the proven test_caldav_imap_serving.py). If/when the Stage-5
-    "default-off" flip lands (unwrap_or(false)), this test and its binaries twin must
-    additionally call fauna.bridges.set_mail_enabled to serve IMAP.
+    Transport — the NEST leg (claim, WS-RPC admin calls, credential mint, the port
+    rebind) rides ``https``/``wss`` to the service's same-box loopback
+    ``127.0.0.1:3000`` with that authority pinned to the floor cert's SPKI, read
+    off ``<data dir>\\acme\\fullchain.pem`` (the engine's ``serve_tls``; its
+    non-installed rehearsal is test_caldav_imap_serving.py::
+    test_windows_nest_provisions_over_its_pinned_tls_floor) — no plain-HTTP or
+    verification-off path to the installed nest. OUT OF SCOPE of that rule: the
+    MUA legs (``verify=False`` / ``CERT_NONE`` to the MDA's CalDAV and IMAP
+    listeners), which stand for third-party MUAs clicking through the floor by
+    their own UX — the product's posture for them, not the harness's choice.
+
+    IMAP binds because the engine enables mail explicitly beside CalDAV
+    (`fauna.bridges.set_mail_enabled`): mail reads OFF on an unset toggle
+    (mail-bridge-lifecycle.md § Default-off on first claim) and the MDA builds its
+    IMAP listeners only when the snapshot says mail is on — the same call its
+    binaries twin makes.
     """
 
     def test_installed_nest_serves_caldav_and_imap(self, msi_path):
@@ -872,6 +864,7 @@ class TestCalDAVImapServingAfterInstall:
         rc, log = msi_install(msi_path, features=["Nest", "Bridge"], log_suffix="_caldav")
         assert rc == 0, f"Install (Nest+Bridge) failed (rc={rc}). See {log}"
 
+        prov = None
         try:
             # The SCM services start on install (ServiceControl Start="install").
             assert wait_for_service("FaunaNest", timeout=30), \
@@ -879,14 +872,16 @@ class TestCalDAVImapServingAfterInstall:
             assert wait_for_service("FaunaBridge", timeout=30), \
                 "FaunaBridge service not running after install"
 
-            # Claim + commit-storage + enable-CalDAV + mint a known-password MUA
-            # credential against the INSTALLED nest (port 7450, %ProgramData% data
-            # dir). nest_proc=None: the FaunaNest SCM service owns the process, so the
+            # Claim + enable-CalDAV + mint a known-password MUA credential against
+            # the INSTALLED nest (its same-box TLS loopback :3000, %ProgramData%
+            # data dir), every call pinned to the floor's SPKI (serve_tls).
+            # nest_proc=None: the FaunaNest SCM service owns the process, so the
             # engine reads <data-dir>/claim-code rather than tracking a Popen.
             prov = eng.provision_caldav_on_running_nest(
                 port=INSTALLED_NEST_PORT,
                 nest_data_dir=_installed_nest_data_dir(),
                 nest_proc=None,
+                serve_tls=True,
             )
 
             # set_caldav_enabled (above) wrote the `caldav-enabled` flag into the nest
@@ -986,8 +981,12 @@ class TestCalDAVImapServingAfterInstall:
                 f"{INSTALLED_CALDAV_PORT_REBOUND} never became visible after the rebind"
             )
         finally:
-            # Throwaway-VM teardown: REMOVE_USER_DATA=1 deletes %ProgramData%\Fauna so
-            # a re-run claims fresh (the claimed nest would otherwise block re-claim).
+            # Drop the :3000 pin with the nest it named (the SCM owns the process;
+            # cleanup() stops nothing here). Throwaway-VM teardown: REMOVE_USER_DATA=1
+            # deletes %ProgramData%\Fauna so a re-run claims fresh (the claimed nest
+            # would otherwise block re-claim).
+            if prov is not None:
+                prov.cleanup()
             msi_uninstall(msi_path, remove_data=True, log_suffix="_caldav")
 
 

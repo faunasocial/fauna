@@ -2,6 +2,11 @@
 //! `layout` locates members, `json` decodes them, one module per category
 //! turns records into model entities; this file is the `ArchiveParser` glue
 //! and the per-member streaming iterator the category modules share.
+//!
+//! Meta writes the Instagram export with the same JSON writer (the same
+//! byte-wise mojibake, the same media objects, the same Messenger thread
+//! files), so `crate::instagram` reuses `json`'s helpers, `layout`'s path
+//! helpers, `threads` and [`MemberStream`] rather than copying them.
 
 pub mod json;
 pub mod layout;
@@ -244,6 +249,7 @@ impl ArchiveParser for FacebookParser {
             Category::Threads | Category::Messages => {
                 let owner = self.owner(reader, &layout);
                 Box::new(threads::ThreadStream::new(
+                    Platform::Facebook,
                     reader,
                     layout.threads.clone(),
                     category,

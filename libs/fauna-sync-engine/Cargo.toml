@@ -253,7 +253,13 @@ fauna-transport = { workspace = true, optional = true }
 rustix = { version = "1", features = ["fs"], optional = true }
 
 [dev-dependencies]
+# The counting allocators the memory-bound tests install.
+fauna-alloc-probe = { path = "../fauna-alloc-probe" }
 tokio = { workspace = true, features = ["test-util"] }
+# Test builds never reach the live OS keyring (apps/common.md § Credential
+# storage): without `no-live-keyring` this crate's `--all-features` tests probed
+# the real Secret Service, so the headless-arm test resolved the keyring arm.
+fauna-credential-store = { workspace = true, features = ["no-live-keyring"] }
 # `PlaneFolderKeys` — the production re-fetch-request seam the two-mount pin
 # (`a_refetch_request_stamped_through_one_mount_is_read_through_a_second`)
 # drives over each mount's handle. Test-only; the seams crate never depends

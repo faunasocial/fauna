@@ -43,10 +43,12 @@ import time
 import pytest
 
 from actions.media import MediaActions
-from helpers.app_surface import app_name, skip_environment, skip_unbuilt
+from helpers.app_surface import skip_environment, require_surface
 from helpers.folder_content import atomic_write, bind_location_under_set
 
-pytestmark = [pytest.mark.tier_3, pytest.mark.linux, pytest.mark.tui, pytest.mark.macos, pytest.mark.windows]
+# The app marks sit on each test, not here: the on-demand leg is a windows cfapi
+# root and must not speak for the linux column (a module mark can only add apps).
+pytestmark = [pytest.mark.tier_3]
 
 # The bind starts the engine and the watcher drives the uploads; the 60 s scan
 # cadence is the backstop for both. The hold budget covers a full missed cadence
@@ -120,11 +122,11 @@ def _reopen(app, set_name: str) -> int:
     b = app.backups
     b.navigate_folders()
     app.driver.wait_for("folder-add-button", timeout=30)
-    for i in range(b.folder_count()):
-        if set_name in b.folder_title(i):
-            if not app.driver.is_visible("folder-location-path-input"):
-                b.expand_folder(i)
-            return i
+    i = b.folder_index(set_name)
+    if i is not None:
+        if not app.driver.is_visible("folder-location-path-input"):
+            b.expand_folder(i)
+        return i
     raise AssertionError(f"folder {set_name!r} not found among the rows")
 
 
@@ -225,6 +227,10 @@ def _unreadable_text(app, idx: int) -> str | None:
     return app.driver.get_text("folder-location-unreadable", scope=scope)
 
 
+@pytest.mark.linux
+@pytest.mark.tui
+@pytest.mark.macos
+@pytest.mark.windows
 @pytest.mark.real_sync_agent
 # BOTH real-agent markers, never just one (conftest `_apply_isolated_sync_agent_env`:
 # "a real-agent UI test needs BOTH markers"; the same pairing at
@@ -314,6 +320,10 @@ def test_a_vanished_folder_is_held_surfaced_and_propagated_only_on_confirm(
     )
 
 
+@pytest.mark.linux
+@pytest.mark.tui
+@pytest.mark.macos
+@pytest.mark.windows
 @pytest.mark.real_sync_agent
 @pytest.mark.isolated_sync_agent
 @pytest.mark.feature("local-folder-sync")
@@ -336,13 +346,7 @@ def test_an_unreadable_subtree_is_surfaced_and_nothing_is_deleted(logged_in_app,
       the line goes away on its own.
     """
     app = logged_in_app
-    if app_name(app.driver) not in ("tui", "macos", "windows", "linux"):
-        skip_unbuilt(
-            app.driver,
-            surface="folder-location-unreadable",
-            detail="the count reaches this app's binding rows via the shared fold; the render is owed",
-            tracked="delete-propagation.md § Unreadable is not absent (the Surface note names the owed renders)",
-        )
+    require_surface(app.driver, "folder-location-unreadable")
     if os.name != "posix":
         skip_environment("mode bits cannot make a directory unreadable on this OS")
     if os.geteuid() == 0:
@@ -497,6 +501,8 @@ def _vanish_disconnected_root(pipe: str, bound, tmp_path) -> None:
     )
 
 
+@pytest.mark.tui
+@pytest.mark.windows
 @pytest.mark.real_sync_agent
 @pytest.mark.isolated_sync_agent
 @pytest.mark.feature("local-folder-sync")

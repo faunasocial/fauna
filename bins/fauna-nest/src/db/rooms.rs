@@ -2143,6 +2143,17 @@ impl CacheDb {
         Ok(())
     }
 
+    /// Whether any room holds a derived view of this post (`room_post_views`).
+    pub async fn room_post_view_exists(&self, post_id: &[u8; 32]) -> Result<bool> {
+        let conn = self.conn.lock().await;
+        let exists: i64 = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM room_post_views WHERE post_id = ?1)",
+            [post_id.as_slice()],
+            |row| row.get(0),
+        )?;
+        Ok(exists != 0)
+    }
+
     /// How many post-view rows this room's derived view holds — the half a
     /// search cannot see, for the same reason as
     /// [`Self::count_room_message_views`].

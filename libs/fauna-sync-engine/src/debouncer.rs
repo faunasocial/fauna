@@ -120,10 +120,21 @@ mod tests {
         std::thread::sleep(Duration::from_millis(60));
         // Re-touch to reset timer
         debouncer.touch("a.txt");
+        let retouched = Instant::now();
 
         std::thread::sleep(Duration::from_millis(60));
-        // Should not be ready yet (only 60ms since last touch)
-        assert!(debouncer.drain_ready().is_empty());
+        // Not ready yet — unless a loaded box slept past the delay since the
+        // re-touch. Measured AFTER the drain, so `since_retouch < delay`
+        // proves the drain ran inside the window: no wall-clock upper bound
+        // for the scheduler to break (a 748 s loaded gate run once did).
+        let early = debouncer.drain_ready();
+        if retouched.elapsed() < Duration::from_millis(100) {
+            assert!(early.is_empty());
+        } else {
+            // Oversleep: the timer legitimately expired; nothing left to wait for.
+            assert_eq!(early.len(), 1);
+            return;
+        }
 
         std::thread::sleep(Duration::from_millis(50));
         // Now it should be ready

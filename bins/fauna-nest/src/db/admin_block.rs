@@ -1,6 +1,6 @@
 //! The admin's block of one reported item — the store side.
 //!
-//! Owner: `docs/goal/behavior/moderation.md` § Admin block of a reported item.
+//! Owner: `docs/goal/behavior/takedown-and-block.md` § Admin block.
 //! The block is the legal takedown's withhold with a second **ground**: a
 //! nullable flag beside `legal_takedown_ref` on the same two rows —
 //! `content_meta.admin_block_report_id` for a post,
@@ -28,12 +28,20 @@ use std::collections::HashSet;
 pub enum AdminBlockTarget {
     /// A post this nest stores or projects; `author` keys the obligation row.
     Post { post_id: [u8; 32], author: [u8; 32] },
-    /// A conversation record, by the record cid the mirror keys on. Its
-    /// obligation row is keyed by the record's nest-attested author
-    /// (`conv_record_authors`), read inside the block's own transaction; a
-    /// record no attestation names writes none, and its appeal stays any
-    /// holder's (the takedown's conversation half, the same rule).
-    Conversation { record_cid: fauna_cbor::Cid },
+    /// A conversation record, by the record cid the mirror keys on, in the
+    /// channel the report names. One cid can name copies in several channels
+    /// (the channel is not in a conv record's hash), so a report's
+    /// `subject_channel` keys the block to that channel's copy, asserted to
+    /// one row (2026-11-03); a report naming no readable channel falls back to the
+    /// takedown's rule — every copy, at least one row. Its obligation row is
+    /// keyed by that copy's nest-attested author (`conv_record_authors`), read
+    /// inside the block's own transaction; a record no attestation names
+    /// writes none, and its appeal stays any holder's (the takedown's
+    /// conversation half, the same rule).
+    Conversation {
+        record_cid: fauna_cbor::Cid,
+        channel: Option<[u8; 32]>,
+    },
 }
 
 impl AdminBlockTarget {
@@ -48,9 +56,29 @@ impl AdminBlockTarget {
                 .optional()
                 .context("read content_meta.admin_block_report_id")?
                 .flatten()),
-            AdminBlockTarget::Conversation { record_cid } => {
-                crate::segments::records_db::conv_admin_block_report(conn, record_cid)
-            }
+            AdminBlockTarget::Conversation {
+                record_cid,
+                channel,
+            } => crate::segments::records_db::conv_admin_block_report(
+                conn,
+                record_cid,
+                channel.as_ref(),
+            ),
+        }
+    }
+
+    /// Is the item blocked under `report_id`? For a conversation record with
+    /// no channel any copy carrying it counts: a later per-channel block can
+    /// overwrite one copy while another stays blocked under this report.
+    fn blocked_under(&self, conn: &rusqlite::Connection, report_id: &str) -> Result<bool> {
+        match self {
+            AdminBlockTarget::Conversation {
+                record_cid,
+                channel: None,
+            } => crate::segments::records_db::conv_carries_admin_block(
+                conn, record_cid, None, report_id,
+            ),
+            _ => Ok(self.read_flag(conn)?.as_deref() == Some(report_id)),
         }
     }
 
@@ -77,11 +105,26 @@ impl AdminBlockTarget {
                 .context("write content_meta.admin_block_report_id")?;
                 Ok(n)
             }
-            AdminBlockTarget::Conversation { record_cid } => {
-                crate::segments::records_db::set_conv_admin_block(
-                    conn, record_cid, report_id, only_if,
-                )
-            }
+            AdminBlockTarget::Conversation {
+                record_cid,
+                channel,
+            } => crate::segments::records_db::set_conv_admin_block(
+                conn,
+                record_cid,
+                channel.as_ref(),
+                report_id,
+                only_if,
+            ),
+        }
+    }
+
+    /// Did a flag write of `n` rows land on exactly what this target names?
+    /// A post, or a conversation record in its reported channel, is one row;
+    /// a conversation record with no channel is every copy, at least one.
+    fn landed(&self, n: usize) -> bool {
+        match self {
+            AdminBlockTarget::Conversation { channel: None, .. } => n >= 1,
+            _ => n == 1,
         }
     }
 }
@@ -149,7 +192,7 @@ impl CacheDb {
         if report.status != "open" {
             let replay = report.status == "resolved"
                 && report.outcome.as_deref() == Some("acted")
-                && target.read_flag(&conn)?.as_deref() == Some(report_id);
+                && target.blocked_under(&conn, report_id)?;
             return Ok(if replay {
                 AdminBlockWrite::AlreadyBlocked
             } else {
@@ -160,11 +203,11 @@ impl CacheDb {
             .unchecked_transaction()
             .context("begin admin-block tx")?;
         let n = target.write_flag(&tx, Some(report_id), None)?;
-        if n != 1 {
+        if !target.landed(n) {
             // Dropping `tx` rolls back: no audit, obligation or resolution row
             // can claim a block whose flag did not land.
             anyhow::bail!(
-                "admin-block flag write matched {n} rows for {content_id_hex} (want exactly 1); rolled back"
+                "admin-block flag write matched {n} rows for {content_id_hex}; rolled back"
             );
         }
         // The author-queue row (`fauna.moderation.actions`) — the appeal
@@ -177,8 +220,11 @@ impl CacheDb {
                 super::web::mark_web_render_owed_for_post(&tx, post_id)?;
                 Some(("post", *author))
             }
-            AdminBlockTarget::Conversation { record_cid } => {
-                crate::segments::records_db::conv_record_author(&tx, record_cid)?
+            AdminBlockTarget::Conversation {
+                record_cid,
+                channel,
+            } => {
+                crate::segments::records_db::conv_record_author(&tx, record_cid, channel.as_ref())?
                     .map(|author| ("conversation", author))
             }
         };
@@ -237,27 +283,26 @@ impl CacheDb {
         audit_detail: &str,
     ) -> Result<AdminUnblockWrite> {
         let conn = self.conn.lock().await;
-        match target.read_flag(&conn)? {
-            Some(current) if current == report_id => {}
-            Some(_) => return Ok(AdminUnblockWrite::NotBlockedByThisReport),
-            None => {
-                let acted = abuse_report_by_id(&conn, report_id)
-                    .context("admin_unblock_txn: read report")?
-                    .is_some_and(|r| r.outcome.as_deref() == Some("acted"));
-                return Ok(if acted {
-                    AdminUnblockWrite::AlreadyRestored
-                } else {
-                    AdminUnblockWrite::NotBlockedByThisReport
-                });
+        if !target.blocked_under(&conn, report_id)? {
+            if target.read_flag(&conn)?.is_some() {
+                return Ok(AdminUnblockWrite::NotBlockedByThisReport);
             }
+            let acted = abuse_report_by_id(&conn, report_id)
+                .context("admin_unblock_txn: read report")?
+                .is_some_and(|r| r.outcome.as_deref() == Some("acted"));
+            return Ok(if acted {
+                AdminUnblockWrite::AlreadyRestored
+            } else {
+                AdminUnblockWrite::NotBlockedByThisReport
+            });
         }
         let tx = conn
             .unchecked_transaction()
             .context("begin admin-unblock tx")?;
         let n = target.write_flag(&tx, None, Some(report_id))?;
-        if n != 1 {
+        if !target.landed(n) {
             anyhow::bail!(
-                "admin-unblock flag write matched {n} rows for {content_id_hex} (want exactly 1); rolled back"
+                "admin-unblock flag write matched {n} rows for {content_id_hex}; rolled back"
             );
         }
         super::admin::audit_on_conn(
@@ -304,7 +349,8 @@ impl CacheDb {
                          WHERE admin_block_report_id IS NOT NULL
                         UNION
                         SELECT admin_block_report_id FROM segment_records
-                         WHERE kind = 'conv' AND admin_block_report_id IS NOT NULL)
+                         WHERE kind = 'conv' AND tombstoned = 0
+                           AND admin_block_report_id IS NOT NULL)
                   ORDER BY resolved_at DESC, id"
             ))
             .context("prepare list_admin_blocks")?;
@@ -365,6 +411,6 @@ impl CacheDb {
         report_id: Option<&str>,
     ) -> Result<usize> {
         let conn = self.conn.lock().await;
-        crate::segments::records_db::set_conv_admin_block(&conn, record_cid, report_id, None)
+        crate::segments::records_db::set_conv_admin_block(&conn, record_cid, None, report_id, None)
     }
 }

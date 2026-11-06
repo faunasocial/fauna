@@ -57,6 +57,24 @@ def _hands_key_over(drv) -> bool:
     return drv.is_web() or drv.is_mobile()
 
 
+def _ssh_keygen() -> str | None:
+    """The ``ssh-keygen`` that reads a door key back. On Windows it is the system
+    OpenSSH's own — the client ``ssh <domain>`` runs — and it is REQUIRED: there a
+    file has no mode bits, and that ``ssh-keygen`` is the owner-only witness, since it
+    refuses a private key any principal other than the owner, SYSTEM or
+    Administrators can read (measured 2026-11-05: an ``Everyone:R`` grant reads back
+    "UNPROTECTED PRIVATE KEY FILE"). Git Bash's msys ``ssh-keygen``, first on its PATH,
+    checks no ACL at all."""
+    if os.name == "nt":
+        system = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32/OpenSSH/ssh-keygen.exe"
+        assert system.is_file(), (
+            f"no system OpenSSH ssh-keygen at {system}: the Windows OpenSSH client is the one "
+            "the door's `ssh <domain>` runs, and its ssh-keygen is the key's owner-only witness"
+        )
+        return str(system)
+    return shutil.which("ssh-keygen")
+
+
 def _created_user_data(fake_cloud) -> str:
     """The cloud-init of the one ``POST /servers`` the fake provider received."""
     creates = [
@@ -148,17 +166,22 @@ def test_the_door_on_reaches_the_cloud_init_and_the_key_lands_in_dot_ssh(
     assert f"ssh {readout['domain']}" in shown and key_path in shown, shown
     assert address in shown, shown
 
-    # The key on disk is the private half of exactly the key the box admits.
-    assert stat.S_IMODE(os.stat(key_path).st_mode) == 0o600
+    # The key on disk is the private half of exactly the key the box admits, and
+    # only its owner reads it: mode 0600 on unix; on Windows the ACL the key
+    # inherits from the profile, which the system ssh-keygen's read-back checks
+    # (`_ssh_keygen`).
+    if os.name != "nt":
+        assert stat.S_IMODE(os.stat(key_path).st_mode) == 0o600
     config = (ssh_dir / "config").read_text()
     assert f"Host {readout['domain']}\n    User root\n" in config, config
     private = open(key_path).read()
     body = next(ln for ln in private.splitlines() if not ln.startswith("-----"))
     assert body not in user_data, "the private key must never reach the provider"
-    if shutil.which("ssh-keygen"):
-        derived = subprocess.run(
-            ["ssh-keygen", "-y", "-f", key_path], capture_output=True, text=True, check=True
-        ).stdout.split()
+    keygen = _ssh_keygen()
+    if keygen:
+        read_back = subprocess.run([keygen, "-y", "-f", key_path], capture_output=True, text=True)
+        assert read_back.returncode == 0, f"{keygen} refused the key: {read_back.stderr!r}"
+        derived = read_back.stdout.split()
         assert derived[:2] == authorized.split()[:2], (derived, authorized)
 
 

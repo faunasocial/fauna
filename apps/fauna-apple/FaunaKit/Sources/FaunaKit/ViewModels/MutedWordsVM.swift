@@ -1,3 +1,4 @@
+import FaunaFFISwift
 import SwiftUI
 
 /// The "Muted words" Settings sub-page's thin CRUD glue over the shared sealed
@@ -18,6 +19,8 @@ import SwiftUI
 public final class MutedWordsVM {
     public private(set) var page = MutedWordsSnapshot(keywords: [], loaded: false)
     public var errorMessage: String?
+    /// A level change is in flight — the picker and add/remove are disabled.
+    public private(set) var busy = false
 
     /// The persisted terms — the `muted-word-item` rows (each entry's term; its
     /// weight stays on `page.keywords`).
@@ -70,6 +73,28 @@ public final class MutedWordsVM {
         guard !trimmed.isEmpty else { return }
         do {
             page = try await api.mutedKeywordsAdd(word: trimmed)
+            errorMessage = nil
+        } catch {
+            errorMessage = DisplayError.message(error)
+        }
+    }
+
+    /// The level of the term at `index` — the shared classification of its
+    /// stored weight (`mutedKeywordLevel(weight:)`), never a local compare.
+    public func level(at index: Int) -> MutedKeywordLevel? {
+        guard page.keywords.indices.contains(index) else { return nil }
+        return mutedKeywordLevel(weight: page.keywords[index].weight)
+    }
+
+    /// Set the level of the term at `index`, saved at once and re-rendered
+    /// from the returned record. `busy` holds the picker and the add/remove
+    /// buttons disabled for the round trip.
+    public func setLevel(at index: Int, to level: MutedKeywordLevel) async {
+        guard let api, !busy, words.indices.contains(index) else { return }
+        busy = true
+        defer { busy = false }
+        do {
+            page = try await api.mutedKeywordsSetLevel(word: words[index], level: level)
             errorMessage = nil
         } catch {
             errorMessage = DisplayError.message(error)

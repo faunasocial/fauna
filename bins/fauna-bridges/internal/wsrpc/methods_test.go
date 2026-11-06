@@ -871,6 +871,35 @@ func TestMethodWrappers(t *testing.T) {
 		}
 	})
 
+	t.Run("FetchRecipientKeyRow_CarriesTheCalendarAndCardKeys", func(t *testing.T) {
+		mail, cal, card := bytes32(0x44), bytes32(0x45), bytes32(0x46)
+		ek := wsrpctest.RecipientMlkemEk()
+		caller := &recordingCaller{replyBody: fetchRecipientMLSPubkeyReply{
+			Key:         &recipientSealKeyHalves{MLSPubkey: mail[:], MlkemEk: ek},
+			CalendarKey: &recipientSealKeyHalves{MLSPubkey: cal[:], MlkemEk: ek},
+			CardKey:     &recipientSealKeyHalves{MLSPubkey: card[:], MlkemEk: ek},
+		}}
+		actor := bytes32(0x33)
+		row, err := FetchRecipientKeyRow(ctx, caller, actor[:], false)
+		if err != nil {
+			t.Fatalf("FetchRecipientKeyRow: %v", err)
+		}
+		if row.Mail == nil || row.Calendar == nil || row.Card == nil {
+			t.Fatalf("want all three keys, got %+v", row)
+		}
+		if !bytes.Equal(row.Calendar.Pubkey, cal[:]) || !bytes.Equal(row.Card.Pubkey, card[:]) {
+			t.Fatal("the calendar and card pubkeys must be the reply's")
+		}
+
+		half := &recordingCaller{replyBody: fetchRecipientMLSPubkeyReply{
+			Key:         &recipientSealKeyHalves{MLSPubkey: mail[:], MlkemEk: ek},
+			CalendarKey: &recipientSealKeyHalves{MLSPubkey: cal[:]},
+		}}
+		if _, err := FetchRecipientKeyRow(ctx, half, actor[:], false); err == nil {
+			t.Fatal("a calendar key without its ML-KEM half must be refused")
+		}
+	})
+
 	t.Run("FetchRecipientMLSPubkeyHybrid_ReturnsBothHalves", func(t *testing.T) {
 		pk := bytes32(0x44)
 		ek := wsrpctest.RecipientMlkemEk()
@@ -3595,6 +3624,8 @@ func TestMethodWrappers(t *testing.T) {
 		id, err := ForwardMessage(
 			ctx, caller, actor[:], "<msg-1@src>", "alice@example.org",
 			"bob@example.com", raw, "forward-all", ForwardCopyModeCopy,
+			&AuthVerdicts{Spf: SpfVerdict{Kind: "fail"}, Dmarc: DmarcVerdict{Kind: "none"},
+				Dkim: DkimVerdict{Kind: "none"}, Arc: ArcVerdict{Kind: "none"}},
 		)
 		if err != nil {
 			t.Fatalf("ForwardMessage: %v", err)
@@ -3610,6 +3641,11 @@ func TestMethodWrappers(t *testing.T) {
 			RawMessage         []byte `cbor:"raw_message"`
 			RuleIDOrForwardAll string `cbor:"rule_id_or_forward_all"`
 			CopyMode           string `cbor:"copy_mode"`
+			AuthResults        *struct {
+				Spf struct {
+					Kind string `cbor:"kind"`
+				} `cbor:"spf"`
+			} `cbor:"auth_results"`
 		}
 		if err := cbor.Unmarshal(caller.gotBody, &body); err != nil {
 			t.Fatalf("decode body: %v", err)
@@ -3628,6 +3664,9 @@ func TestMethodWrappers(t *testing.T) {
 		if body.CopyMode != "copy" {
 			t.Errorf("copy_mode: got %q, want \"copy\"", body.CopyMode)
 		}
+		if body.AuthResults == nil || body.AuthResults.Spf.Kind != "fail" {
+			t.Errorf("auth_results: got %+v, want spf fail", body.AuthResults)
+		}
 		if id != 4242 {
 			t.Errorf("reply id: got %d, want 4242", id)
 		}
@@ -3638,7 +3677,7 @@ func TestMethodWrappers(t *testing.T) {
 		actor := bytes32(0xF1)
 		_, err := ForwardMessage(
 			ctx, caller, actor[:], "<m@s>", "a@b.org", "c@d.com",
-			[]byte("x"), "forward-all", ForwardCopyModeCopy,
+			[]byte("x"), "forward-all", ForwardCopyModeCopy, nil,
 		)
 		if err == nil || !strings.Contains(err.Error(), "synthetic-forward-fail") {
 			t.Fatalf("err: %v", err)

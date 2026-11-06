@@ -47,10 +47,10 @@ use fauna_account_store::sqlite::SqliteBackend;
 use fauna_account_store::store::{AccountStore, rotate_writer_identity, stamped_writer};
 use fauna_account_store::types::WriterId;
 use fauna_core::crypto::{AccountStateKeySchedule, BackupKey};
-use fauna_core::data::ModerationConfig;
+use fauna_core::data::SyncPrefsConfig;
 use fauna_core::identity::ActorKeypair;
 use fauna_protocol::account_state::{ACCOUNT_STATE_SCOPE, ItemClass};
-use fauna_protocol::merge_policy::{KIND_MODERATION, KIND_SEEN_SET, LwwStamp, MODERATION_KEY};
+use fauna_protocol::merge_policy::{KIND_SEEN_SET, KIND_SYNC_PREFS, LwwStamp, PREFERENCE_KEY};
 use fauna_protocol::sync::{SyncChange, SyncChangesListReply, SyncChangesListRequest};
 use fauna_protocol::{decode_strict, encode_canonical};
 use fauna_sync_engine::account_state_plane::{AccountStatePlane, ItemId};
@@ -257,9 +257,8 @@ async fn fenced_replica(
                         kind: (*kind).into(),
                         key: (*key).into(),
                     },
-                    encode_canonical(&ModerationConfig {
-                        muted_keywords: vec!["authored-by-the-successor".into()],
-                        ..Default::default()
+                    encode_canonical(&SyncPrefsConfig {
+                        default_conflict_policy: Some("authored-by-the-successor".into()),
                     })
                     .unwrap()
                     .to_vec(),
@@ -300,7 +299,7 @@ async fn fenced_replica(
 async fn a_peers_echo_must_not_move_the_successors_publish_watermark() {
     let dir = tempfile::tempdir().unwrap();
     let (stale, successor) =
-        fenced_replica(dir.path(), &[(1_000, KIND_MODERATION, MODERATION_KEY)]).await;
+        fenced_replica(dir.path(), &[(1_000, KIND_SYNC_PREFS, PREFERENCE_KEY)]).await;
 
     let peer = echo_of(&successor, ACCOUNT_STATE_SCOPE).await;
     let sk = signing_key(A);
@@ -342,7 +341,7 @@ async fn a_stale_handles_walk_does_not_abort_on_its_own_stores_history() {
     let (stale, successor) = fenced_replica(
         dir.path(),
         &[
-            (1_000, KIND_MODERATION, MODERATION_KEY),
+            (1_000, KIND_SYNC_PREFS, PREFERENCE_KEY),
             (2_000, KIND_SEEN_SET, "inbox"),
         ],
     )

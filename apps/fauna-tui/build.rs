@@ -33,11 +33,10 @@
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
-    // The commit this binary is built from, for the Status page's
-    // `status-build-sha` (`ui/status.md` § State & data shape, the build leg) —
-    // the shared derivation, so the terminal app, the nest and every later
-    // native app agree on what "the build you are running" means.
-    fauna_build_commit::emit();
+    // The build commit is NOT stamped here: a build script that tracks `HEAD`
+    // stales every target of the package at every commit, so it is the
+    // `fauna_build_commit::commit!()` macro in the code that reads it
+    // (`ui/status.md` § State & data shape, the build leg).
     let is_windows_msvc = std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows")
         && std::env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc");
     if is_windows_msvc {

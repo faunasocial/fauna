@@ -168,8 +168,8 @@ pub fn keyring_probe() -> bool {
 /// keychain (the same opt-in shape as fauna-linux's `live-secret-service`).
 ///
 /// MANUAL: no gate runs this (real unlocked macOS login keychain needed) —
-/// run by hand with `cargo test -p fauna-credential-store --features
-/// live-keychain` on macOS before touching keychain read/write
+/// run by hand with `FAUNA_LIVE_KEYRING_SUITE=1 cargo test -p
+/// fauna-credential-store --features live-keychain` on macOS before touching keychain read/write
 /// logic.
 #[cfg(all(test, feature = "live-keychain"))]
 mod live_tests {

@@ -404,6 +404,18 @@ pub fn contact_status_label(status: String) -> LocalizedText {
     fauna_core::format::contact_status_label(&status)
 }
 
+/// `fauna_core::format::contact_roster_group_order` → the roster's status
+/// groups in paint order for the statuses its contacts carry (one entry per
+/// contact): the canonical confirmed → accepted → pending → blocked order for
+/// the statuses present, then any other status in first-seen order, so a status
+/// this build does not name keeps its rows. Replaces the per-app hard-coded
+/// four-status lists (android, apple). See contacts.md § Where logic lives →
+/// Roster status grouping.
+#[uniffi::export]
+pub fn contact_roster_group_order(statuses: Vec<String>) -> Vec<String> {
+    fauna_core::format::contact_roster_group_order(&statuses)
+}
+
 /// `fauna_core::format::thread_label_display` → a `LocalizedText` `{ key, args }`
 /// for a conversation thread's display label: a blank/whitespace-only label carries
 /// the canonical `conversations.detail.no_subject` key (`"(no subject)"`), a non-empty

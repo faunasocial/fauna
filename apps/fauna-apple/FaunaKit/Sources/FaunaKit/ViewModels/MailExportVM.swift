@@ -57,23 +57,59 @@ public final class MailExportVM: MachineBackedVM {
     /// Guards against a second drive loop when `Resume` is pressed while one is
     /// already running (linux's `ticking` cell).
     private var driving = false
+    /// The two drive loops (`runExport` and the Progress tick), held as one set:
+    /// `reset()` cancels it, and so does the VM's release at the page's unmount
+    /// (`DriveLoops`; account-scoping.md § the in-memory corollary: the loops
+    /// that write state are retired with it).
+    enum Loop: CaseIterable, Sendable { case tick, run }
+    @ObservationIgnored let loops = DriveLoops<Loop>()
 
     public init() {}
+
+    /// A failed export is a record on Progress: no Pause / Resume / Cancel, one
+    /// Dismiss (mail-export.md § A failed export is a record the wizard shows
+    /// until the user moves on). Whether a session is adopted at all is the
+    /// shared machine's rule; this only names how the snapshot paints.
+    nonisolated static func isFailedExport(_ state: ExportSessionState?) -> Bool {
+        state == .errored
+    }
+
+    /// Retire the drive loops and drop the machine. A page-owned VM is on no
+    /// `ActorScope` list (`ActorScope.swift` § State a *view* owns): this runs when
+    /// `configure` meets a different `APIClient` and when the page disappears, and
+    /// the page's unmount releases the VM, whose `loops` cancel themselves then
+    /// too. A Paused or Errored session stays on Progress, so the step alone never
+    /// ends the repaint loop.
+    public func reset() {
+        loops.cancelAll()
+        driving = false
+        machine = nil
+        configuredApi = nil
+        snapshot = nil
+        errorMessage = nil
+        isLoading = false
+    }
 
     /// Vend the machine from APIClient and load the first snapshot. Idempotent.
     public func configure(api: APIClient, handle: @escaping () -> String) async {
         currentHandle = handle
+        if machine != nil, configuredApi !== api { reset() }
         guard machine == nil || configuredApi !== api else { return }
         do {
-            let m = try await api.mailExportMachine(handle: handle())
-            configuredApi = api
-            machine = m
-            snapshot = m.snapshot()
+            adopt(try await api.mailExportMachine(handle: handle()), from: api)
         } catch {
             errorMessage = DisplayError.message(error)
             return
         }
         await hydrate()
+    }
+
+    /// Hold `m`, built from `api`, as this VM's machine — `configure`'s landing,
+    /// and the seam a test uses to seed a machine without hydrating it.
+    func adopt(_ m: MailExportMachine, from api: APIClient) {
+        configuredApi = api
+        machine = m
+        snapshot = m.snapshot()
     }
 
     /// Load the source-mailbox list + any in-flight session from the nest.
@@ -105,25 +141,37 @@ public final class MailExportVM: MachineBackedVM {
     /// cooperating tasks: `runExport` suspends for the whole export, so the tick
     /// cannot live inside it. A failure lands on the snapshot's `error` (and the
     /// session is failed nest-side), which the final re-read surfaces.
-    private func driveExport() {
+    ///
+    /// Every body holds the VM weakly, so a live loop never keeps the VM — and
+    /// with it the custody machine — alive past the page's unmount.
+    func driveExport() {
         guard let machine, !driving else { return }
         driving = true
         // Repaint until the wizard leaves the Progress screen — the machine moves
         // to `Done` itself once the session completes, and a Cancel unwinds it
         // the same way, so this needs no other stop condition.
-        Task { @MainActor in
-            while snapshot?.step == .progress {
-                try? await Task.sleep(for: .milliseconds(Self.progressTickMs))
-                readBack(machine)
-            }
-        }
-        Task { @MainActor in
-            defer { driving = false }
+        spawnTick(onProgress: { [weak self] in self?.snapshot?.step == .progress },
+                  read: { [weak self] in self?.readBack(machine) })
+        loops.spawn(.run) { [weak self] in
+            defer { self?.driving = false }
             do { try await machine.runExport() }
-            catch { errorMessage = DisplayError.message(error) }
-            readBack(machine)
+            catch {
+                if Task.isCancelled { return }
+                self?.errorMessage = DisplayError.message(error)
+            }
+            if Task.isCancelled { return }
+            self?.readBack(machine)
         }
     }
+
+    /// The Progress repaint loop; ends on leaving Progress or on cancellation.
+    func spawnTick(onProgress: @escaping @MainActor () -> Bool,
+                   read: @escaping @MainActor () -> Void) {
+        loops.spawnTick(.tick, everyMs: Self.progressTickMs, while: onProgress, read: read)
+    }
+
+    /// Test seam: whether the repaint loop's task is live.
+    var tickIsRunning: Bool { loops.isRunning(.tick) }
 
     private func readBack(_ machine: MailExportMachine) {
         let snap = machine.snapshot()

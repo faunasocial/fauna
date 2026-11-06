@@ -84,11 +84,15 @@ plaintext column is gone).
 row; the exemption's ground is publication, so a web-mode path *refused before it enters
 `web_files`* — e.g. a rejected server-side extension — is NOT covered and redacts like any
 other path);
-coordinator-synthetic destination custody names; **both machine-authored device labels** —
-the nest-authored `"WebDAV"` pseudo-device and the `"fauna"` self-heal placeholder a
-never-registered device writes before its real registration supersedes it (frozen constants,
+coordinator-synthetic destination custody names; **the machine-authored device labels** —
+the nest-authored `"WebDAV"` pseudo-device, the `"fauna"` self-heal placeholder a
+never-registered device writes before its real registration supersedes it, and — ratified
+2026-10-29, [`devices.md`](devices.md) § Device names, built the same day — the six app defaults
+(`fauna-tui` … `fauna-android`) every register leg of a machine passes (frozen constants,
 identical on every deployment and every account, so sealing them protects nothing and costs every
-reader a key; refused centrally in `fauna_core::label_custody::is_synthetic_device_label`, never
+reader a key — and for the app defaults the plaintext is what lets the nest keep a user-chosen
+name over a machine-authored one; refused centrally in
+`fauna_core::label_custody::is_synthetic_device_label`, never
 at the five call sites — one of which is nest-side and reaches no client helper at all);
 IMAP mailbox-name import cursors (mailbox structure is floor). The share filename seals
 at rest for the author's list only — the recipient-serving path keeps reading the URL-presented
@@ -878,9 +882,9 @@ register upsert writes `String::new()` for any non-synthetic label, `db/sync_sto
 scrub and flip-inventory (b) cleared the back-catalogue, `db/migrations.rs`), and the invariant is
 pinned at-rest by `conformance_at_rest_byte_scan.rs`'s
 `after_the_write_flip_no_sealed_plane_plaintext_ever_rests`, which drives the production writer and
-byte-scans the resting DB. Only the two machine-authored synthetic labels
+byte-scans the resting DB. Only the machine-authored synthetic labels
 (`is_synthetic_device_label`) rest readable, and those are constants, not user data. So a foreign
-device row renders with an **empty** label, identified by `device_id` alone — flip-completeness,
+device row its owner named renders with an **empty** label (an unrenamed one, its plaintext app default), identified by `device_id` alone — flip-completeness,
 exactly as this section's lead-in says, and the reason the ratified direction below is about giving
 that row an identity rather than plugging a leak. Two narrower facts worth keeping: `folder_members`
 cannot hold a device its folder's owner has not registered through any door (both seat doors,
@@ -1119,9 +1123,9 @@ no set, so a blanked name can never address, or be written through, another blan
 it through the one predicate `SyncChangedPayload::names_set` (the hash when present, else the
 name; FFI `sync_changed_names_set`), and the apps relay the hash on the agent's `PullFolderNow`,
 which resolves the binding whose name hashes to it — so a sealed set's nudge still reaches its
-engine once its name is blank. linux and tui gate their expanded-row refresh through the
-predicate; the apple and windows row gates (and apple's File Provider domain signal) still
-compare the name. The chunk relay's folder hint carries the address too: the engine sends
+engine once its name is blank. linux, tui and windows gate their expanded-row refresh through
+the predicate; the apple row gate (and apple's File Provider domain signal) still compare the
+name. The chunk relay's folder hint carries the address too: the engine sends
 `?folder_hash=<hex>` (`FOLDER_HASH_HINT_PARAM`) beside `?folder=`, the route resolves the hash
 first (a malformed one is the unreadable-folder `404`, never a fall back to the name), and the
 relay attributes a seat's answer to the hinted row's id, not its name. A bulk-byte token's

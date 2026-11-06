@@ -150,7 +150,8 @@ import pytest
 from actions import ActionLayer
 from actions.media import MediaActions
 from common.auth import UNBINDING_MAX_DEVICES, create_actor_and_register, set_tier_caps
-from conftest import _E2E_LOGIN_DEVICE_ID, _seeded_environment, get_available_apps
+from conftest import _seeded_environment, get_available_apps
+from helpers.e2e_session import e2e_login_device_id
 from drivers import create_driver
 from helpers.folder_content import agent_diagnosis, atomic_write, bind_location_under_set
 
@@ -261,9 +262,8 @@ def _adopt_set(app, set_name: str) -> None:
     while time.monotonic() < deadline:
         b.navigate_folders()
         app.driver.wait_for("folder-add-button", timeout=30)
-        for i in range(b.folder_count()):
-            if set_name in b.folder_title(i):
-                return
+        if b.folder_index(set_name) is not None:
+            return
         time.sleep(1.0)  # sleep-ok: poll cadence of a deadline poll, not a settle wait
     pytest.fail(f"folder {set_name!r} never appeared in the second launch's list")
 
@@ -318,7 +318,7 @@ def test_fresh_bind_onto_tombstoned_history_preserves_local_file(
     folder_a = tmp_path / "history-writer"
     folder_a.mkdir()
     app1 = _launch_signed_in(
-        sync_app, app_path, nest_instance, actor, request, device_id=_E2E_LOGIN_DEVICE_ID
+        sync_app, app_path, nest_instance, actor, request, device_id=e2e_login_device_id(sync_app)
     )
     try:
         b = app1.backups
@@ -468,7 +468,7 @@ def test_fresh_bind_onto_a_same_named_never_deleted_file_keeps_syncing(
     folder_a = tmp_path / "peer"
     folder_a.mkdir()
     app1 = _launch_signed_in(
-        sync_app, app_path, nest_instance, actor, request, device_id=_E2E_LOGIN_DEVICE_ID
+        sync_app, app_path, nest_instance, actor, request, device_id=e2e_login_device_id(sync_app)
     )
     try:
         b = app1.backups

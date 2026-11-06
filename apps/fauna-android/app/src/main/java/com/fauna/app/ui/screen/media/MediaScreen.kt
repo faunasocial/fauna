@@ -43,6 +43,7 @@ import androidx.navigation.NavController
 import com.fauna.app.BuildConfig
 import com.fauna.app.R
 import com.fauna.app.ui.components.DisabledControlReasonText
+import com.fauna.app.ui.components.TokenSelect
 import com.fauna.app.ui.navigation.LocalAppMessages
 import com.fauna.app.ui.util.ValueFormat
 import com.fauna.app.ui.util.faunaGate
@@ -56,6 +57,7 @@ import com.fauna.ffi.shareLinkStateLabel
 import com.fauna.ffi.syncDisplayStateLabel
 import kotlinx.coroutines.launch
 import uniffi.fauna_core.SyncDisplayState
+import uniffi.fauna_core.LocalizedText
 import uniffi.fauna_media_machine.FileVersionSummary
 import uniffi.fauna_media_machine.FollowedScopeOption
 import uniffi.fauna_media_machine.MediaFolderOption
@@ -103,6 +105,7 @@ fun MediaScreen(
     val detailActions = remember(vm, context) {
         MediaDetailActions(
             loadVersions = vm::loadVersions,
+            versionAuthor = vm::versionAuthor,
             onRestoreVersion = vm::restoreVersion,
             onDeleteItem = vm::deleteItem,
             onUndeleteVersion = vm::undeleteVersion,
@@ -173,6 +176,7 @@ fun MediaScreen(
             actions = MediaActions(
                 onToggleView = vm::toggleView,
                 onSetSort = vm::setSort,
+                onSetDescending = vm::setDescending,
                 onSetFilter = vm::setFilter,
                 onSelectFollowed = vm::selectFollowed,
                 onPickFile = { picker.launch("*/*") },
@@ -231,6 +235,7 @@ fun MediaScreen(
 data class MediaActions(
     val onToggleView: () -> Unit = {},
     val onSetSort: (String) -> Unit = {},
+    val onSetDescending: (Boolean) -> Unit = {},
     val onSetFilter: (String?) -> Unit = {},
     /** A followed option picked in `media-folder-filter` — its opaque value,
      *  handed back verbatim to the shared `select_followed_scope` gesture
@@ -256,6 +261,10 @@ data class MediaActions(
 data class MediaDetailActions(
     val loadVersions: suspend (folder: String, path: String, includePruned: Boolean) -> List<FileVersionSummary> =
         { _, _, _ -> emptyList() },
+    /** A version row's `file-version-author` line, composed by the shared
+     *  connected-apps machine (`folder-deposit.md` ruling 3: "<app> via
+     *  <owner>" on a deposited version); `null` paints the plain wording. */
+    val versionAuthor: (FileVersionSummary) -> LocalizedText? = { null },
     val onRestoreVersion: suspend (folder: String, path: String, version: FileVersionSummary) -> Boolean =
         { _, _, _ -> false },
     /** Delete the opened file. `filterValue` is the item's [MediaItemSummary.filterValue]
@@ -399,6 +408,7 @@ private fun MediaToolbar(
 ) {
     val grid = snapshot?.viewGrid ?: false
     val sort = snapshot?.sort ?: "name"
+    val descending = snapshot?.descending ?: false
     val filterLabel = snapshot?.filterLabel
     val options = snapshot?.folderOptions.orEmpty()
     val followed = snapshot?.followed.orEmpty()
@@ -419,6 +429,7 @@ private fun MediaToolbar(
             Text(stringResource(if (grid) R.string.media_view_grid else R.string.media_view_list))
         }
         SortSelect(sort, actions.onSetSort, Modifier.weight(1f))
+        SortDirectionSelect(descending, actions.onSetDescending, Modifier.weight(1f))
     }
 
     // Row 2: per-set filter (all-media default + one-set scope + followed scopes).
@@ -485,84 +496,84 @@ private fun MediaToolbar(
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun SortSelect(current: String, onSelect: (String) -> Unit, modifier: Modifier = Modifier) {
-    var expanded by remember { mutableStateOf(false) }
+internal fun SortSelect(current: String, onSelect: (String) -> Unit, modifier: Modifier = Modifier) {
     // Stable sort keys the machine understands (`media-sort-select` values); the
     // label is the shared `fauna_core::format::media_sort_label` decision
-    // (priority #2), not a per-app key → resource map.
-    val keys = listOf("name", "size", "date")
-    val currentLabel = localized(com.fauna.ffi.mediaSortLabel(current)) ?: current
-    ExposedDropdownMenuBox(
-        expanded = expanded,
-        onExpandedChange = { expanded = !expanded },
-        modifier = modifier,
-    ) {
-        OutlinedTextField(
-            value = currentLabel,
-            onValueChange = {},
-            readOnly = true,
-            trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded) },
-            modifier = Modifier.fillMaxWidth().menuAnchor().testTag(Ids.MEDIA_SORT_SELECT),
-        )
-        ExposedDropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
-            keys.forEach { key ->
-                DropdownMenuItem(
-                    text = { Text(localized(com.fauna.ffi.mediaSortLabel(key)) ?: key) },
-                    onClick = { expanded = false; onSelect(key) },
-                )
-            }
-        }
+    // (priority #2), not a per-app key → resource map. A `TokenSelect`, so the
+    // driver picks and reads back the KEY while the human sees the label.
+    val options = listOf("name", "size", "date").map { key ->
+        key to (localized(com.fauna.ffi.mediaSortLabel(key)) ?: key)
     }
+    TokenSelect(
+        testTagValue = Ids.MEDIA_SORT_SELECT,
+        selected = current,
+        options = options,
+        onSelect = onSelect,
+        modifier = modifier,
+    )
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
+/**
+ * `media-sort-direction`: stable option values `ascending` (default) /
+ * `descending`, applied by the machine to the active sort key; labels are the
+ * shared `fauna_core::format::media_sort_direction_label` decision.
+ */
 @Composable
-private fun FilterSelect(
+internal fun SortDirectionSelect(descending: Boolean, onSelect: (Boolean) -> Unit, modifier: Modifier = Modifier) {
+    val options = listOf("ascending" to false, "descending" to true).map { (key, desc) ->
+        key to (localized(com.fauna.ffi.mediaSortDirectionLabel(desc)) ?: key)
+    }
+    TokenSelect(
+        testTagValue = Ids.MEDIA_SORT_DIRECTION,
+        selected = if (descending) "descending" else "ascending",
+        options = options,
+        onSelect = { token -> onSelect(token == "descending") },
+        modifier = modifier,
+    )
+}
+
+/** The all-media sentinel token `media-folder-filter` round-trips (`actions/media.py::MEDIA_FILTER_ALL`). */
+private const val FILTER_ALL_TOKEN = "__all__"
+
+@Composable
+internal fun FilterSelect(
     currentFilterLabel: String?,
     options: List<MediaFolderOption>,
     followed: List<FollowedScopeOption>,
     onSelect: (String?) -> Unit,
     onSelectFollowed: (String) -> Unit,
 ) {
-    var expanded by remember { mutableStateOf(false) }
     val allLabel = stringResource(R.string.media_filter_all)
     // null label = the all-media default; else the shared-Rust-minted label of
     // the active option (a set's name, a shared set's `<name> (<owner>)`, a
-    // followed scope's label) — never re-derived here, and the opaque value is
-    // never shown (media.md § Encryption at rest → *The filter and the upload
-    // target address the row*; § Followed public folders).
-    val currentLabel = currentFilterLabel ?: allLabel
-    ExposedDropdownMenuBox(expanded = expanded, onExpandedChange = { expanded = !expanded }) {
-        OutlinedTextField(
-            value = currentLabel,
-            onValueChange = {},
-            readOnly = true,
-            trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded) },
-            modifier = Modifier.fillMaxWidth().menuAnchor().testTag(Ids.MEDIA_FOLDER_FILTER),
-        )
-        ExposedDropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
-            DropdownMenuItem(text = { Text(allLabel) }, onClick = { expanded = false; onSelect(null) })
-            // One entry per offered set: the label paints, the minted value
-            // goes back to the filter gesture verbatim — a same-named pair is
-            // two entries.
-            options.forEach { opt ->
-                DropdownMenuItem(
-                    text = { Text(opt.label) },
-                    onClick = { expanded = false; onSelect(opt.value) },
-                )
-            }
-            // Followed scopes append after the own-set options; the value goes
-            // back to the shared gesture verbatim, never parsed here.
-            followed.forEach { opt ->
-                DropdownMenuItem(
-                    text = { Text(opt.label) },
-                    onClick = { expanded = false; onSelectFollowed(opt.value) },
-                )
-            }
-        }
+    // followed scope's label) — never re-derived here. The token a driver
+    // picks is the minted opaque value (the label never leaves the screen as a
+    // value); the all-media default is the `__all__` sentinel (media.md §
+    // Encryption at rest → *The filter and the upload target address the row*;
+    // § Followed public folders).
+    val own = options.map { it.value to it.label }
+    val fol = followed.map { it.value to it.label }
+    val all = listOf(FILTER_ALL_TOKEN to allLabel) + own + fol
+    val selected = if (currentFilterLabel == null) {
+        FILTER_ALL_TOKEN
+    } else {
+        all.firstOrNull { it.second == currentFilterLabel }?.first ?: currentFilterLabel
     }
+    val followedTokens = fol.map { it.first }.toSet()
+    TokenSelect(
+        testTagValue = Ids.MEDIA_FOLDER_FILTER,
+        selected = selected,
+        options = all,
+        onSelect = { token ->
+            when {
+                token == FILTER_ALL_TOKEN -> onSelect(null)
+                token in followedTokens -> onSelectFollowed(token)
+                else -> onSelect(token)
+            }
+        },
+        modifier = Modifier.fillMaxWidth(),
+    )
 }
 
 // ── Items ──────────────────────────────────────────────────────────────────
@@ -724,6 +735,7 @@ private fun MediaItemDetail(
                             v.forEach { version ->
                                 FileVersionRow(
                                     version = version,
+                                    author = detailActions.versionAuthor(version),
                                     formatSize = formatSize,
                                     formatTimestamp = formatVersionTimestamp,
                                     onRestore = { restoreTarget = version },
@@ -948,27 +960,16 @@ private fun ShareExpirySelect(
     enabled: Boolean,
     onSelect: (String) -> Unit,
 ) {
-    var expanded by remember { mutableStateOf(false) }
-    val labels = (options + current).distinct().associateWith { localized(shareLinkExpiryLabel(it)) ?: it }
-    ExposedDropdownMenuBox(expanded = expanded, onExpandedChange = { if (enabled) expanded = it }) {
-        OutlinedTextField(
-            value = labels.getValue(current),
-            onValueChange = {},
-            readOnly = true,
-            enabled = enabled,
-            label = { Text(stringResource(R.string.share_link_expiry_label)) },
-            trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded) },
-            modifier = Modifier.fillMaxWidth().menuAnchor().testTag(Ids.SHARE_LINK_EXPIRY_SELECT),
-        )
-        ExposedDropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
-            options.forEach { value ->
-                DropdownMenuItem(
-                    text = { Text(labels.getValue(value)) },
-                    onClick = { expanded = false; onSelect(value) },
-                )
-            }
-        }
-    }
+    // `TokenSelect`: the anchor answers the token ("7d") to a driver while the
+    // label stays the localized length, the shape every app's select shares.
+    TokenSelect(
+        testTagValue = Ids.SHARE_LINK_EXPIRY_SELECT,
+        selected = current,
+        options = options.map { it to (localized(shareLinkExpiryLabel(it)) ?: it) },
+        onSelect = onSelect,
+        modifier = Modifier.fillMaxWidth(),
+        enabled = enabled,
+    )
 }
 
 /**
@@ -1093,6 +1094,7 @@ private fun ShareLinkRow(row: ShareLinkSummary, actions: MediaShareActions, onCo
 @Composable
 private fun FileVersionRow(
     version: FileVersionSummary,
+    author: LocalizedText?,
     formatSize: (Long) -> String,
     formatTimestamp: (Long) -> String,
     onRestore: () -> Unit,
@@ -1115,7 +1117,11 @@ private fun FileVersionRow(
             modifier = Modifier.testTag(Ids.FILE_VERSION_SIZE),
         )
         Text(
-            stringResourceFmt(R.string.media_version_author, version.authorDisplay),
+            localized(author) ?: if (version.depositedBy != null) {
+                stringResourceFmt(R.string.media_version_author_deposited_unknown, version.authorDisplay)
+            } else {
+                stringResourceFmt(R.string.media_version_author, version.authorDisplay)
+            },
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier.testTag(Ids.FILE_VERSION_AUTHOR),

@@ -72,7 +72,7 @@ _DOMAIN_FRAGMENT = "is being withdrawn"
 # (`recovery-replacement-pending:<actor_id>`), which is what the account-switch
 # arm needs: a deployment-scoped alarm would be re-raised for the incoming
 # account too and could not tell a survivor from a fresh post.
-_REPLACEMENT_FRAGMENT = "replacement of your account recovery key"
+_REPLACEMENT_FRAGMENT = "replacement of your recovery kit"
 
 
 def _seed_domain_record(nest_url: str, *, statuses: list[str], expires_in_days: int) -> None:

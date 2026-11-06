@@ -4,6 +4,7 @@ using System.Threading.Tasks;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Controls.Primitives;
 using Microsoft.UI.Xaml.Navigation;
 using FaunaApp.Core.Services;
 using FaunaApp.Core.ViewModels;
@@ -49,6 +50,26 @@ public sealed partial class SettingsPrivacyPage : Page, IAsyncLoadedPage
     public SettingsPrivacyPage()
     {
         this.InitializeComponent();
+        PaintSpamThresholdBand();
+    }
+
+    private void SpamThresholdSlider_ValueChanged(object sender, RangeBaseValueChangedEventArgs e)
+        => PaintSpamThresholdBand();
+
+    /// <summary>
+    /// The spam slider's value in words (<c>settings.md</c> § Spam threshold slider
+    /// labels): Aggressive / Moderate / Permissive. The band is shared Rust's
+    /// (<c>spam_threshold_band</c> over the per-mille the save sends), localized
+    /// through the shared <c>status/spam/*</c> strings, so every app buckets alike.
+    /// The slider raises ValueChanged while XAML is still building the page, before
+    /// the label exists, so the constructor paints again once it does.
+    /// </summary>
+    private void PaintSpamThresholdBand()
+    {
+        if (SpamThresholdBandText is null || SpamThresholdSlider is null) return;
+        var key = FaunaFfiMethods.SpamThresholdBand(
+            FaunaFfiMethods.ProbabilityToPerMille(SpamThresholdSlider.Value));
+        SpamThresholdBandText.Text = Strings.Get($"status/spam/{key}");
     }
 
     protected override void OnNavigatedTo(NavigationEventArgs e)
@@ -197,7 +218,11 @@ public sealed partial class SettingsPrivacyPage : Page, IAsyncLoadedPage
             // 0.0–1.0 sliders → per-mille u16 via the shared
             // fauna_protocol::spam::probability_to_per_mille (half-away-from-zero, the
             // single rule every app + the nest share; nest re-clamps to [0,1000]).
-            await _rpc.SpamSetPreferencesAsync(
+            // The save also binds the pair the nest echoes into the content-policy
+            // render at once (family-client-enforcement.md § Content policy), so the
+            // next conversation or feed paint composes the new threshold — not the
+            // one read at login.
+            await new ContentPolicyPreloader(_rpc).SaveOwnThresholdsAsync(
                 FaunaFfiMethods.ProbabilityToPerMille(SpamThresholdSlider.Value),
                 FaunaFfiMethods.ProbabilityToPerMille(PhishingThresholdSlider.Value));
             // Scroll the save button back into the viewport. The spam-preferences

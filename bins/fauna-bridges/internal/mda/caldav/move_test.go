@@ -10,7 +10,6 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/faunasocial/fauna/bins/fauna-bridges/internal/mailfauna"
 	"github.com/faunasocial/fauna/bins/fauna-bridges/internal/wsrpc"
 	faunaFfi "github.com/faunasocial/fauna/libs/fauna-mail-go/fauna_ffi"
 	"github.com/fxamacker/cbor/v2"
@@ -36,7 +35,7 @@ var moveKey = sync.OnceValues(func() (reportFixture, []byte) {
 	if err != nil {
 		panic(err)
 	}
-	body, err := mailfauna.EncryptToRecipient([]byte("event-body"), leaf.Pubkey)
+	body, err := sealCalendarRecord([]byte("event-body"), fixtureCalendarPubkey())
 	if err != nil {
 		panic(err)
 	}

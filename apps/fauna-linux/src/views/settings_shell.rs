@@ -5,9 +5,9 @@ use std::sync::Arc;
 use crate::client::FaunaClient;
 use crate::i18n::strings::settings::member_review_page as member_review;
 use crate::i18n::strings::{
-    atproto_settings, common, devices, folders, labeler_catalog, linked_nests, logs, mail_aliases,
-    mail_export, mail_import, mail_lists, mail_settings, mail_spam, muted_words, nostr,
-    personalization, settings, status, subscriptions, web_settings,
+    archive_import, atproto_settings, common, devices, folders, labeler_catalog, linked_nests,
+    logs, mail_aliases, mail_export, mail_import, mail_lists, mail_settings, mail_spam,
+    muted_words, nostr, personalization, settings, status, subscriptions, web_settings,
 };
 use crate::views::status::StatusHandles;
 
@@ -260,6 +260,14 @@ pub fn build_settings_shell(
         Some("mail-import"),
         mail_import::TITLE,
     );
+    // Import from other services follows Import mailbox (`settings.md`
+    // § Navigation model, the slot added 2026-09-08) — the second import wizard
+    // beside the first.
+    stack.add_titled(
+        &crate::settings::archive_import::build_archive_import_page(),
+        Some("archive-import"),
+        archive_import::TITLE,
+    );
     // Lists + Members share one shared-machine-per-row navigation, mirroring
     // Personalization's `on_navigate_to_muted_words` callback pattern: Members
     // is built first so its `select` closure exists, then composed with a
@@ -335,6 +343,7 @@ pub fn build_settings_shell(
     // edge live in `settings::stolen_hold`. A fresh shell starts a fresh visit.
     crate::settings::reset_account_visit();
     let knock_list_client = Rc::clone(client);
+    let quota_client = Rc::clone(client);
     let devices_machine = Arc::clone(&devices_folders_handles.devices_machine);
     let devices_runtime = client.runtime_handle();
     // The Devices/Folders pages' `DevicesMachine` re-read: their map hook covers
@@ -343,20 +352,28 @@ pub fn build_settings_shell(
     // enrolled while the Devices page was open never reached the roster, nor
     // the folder wizard seeded from it.
     let devices_nav_refresh = Rc::clone(&devices_folders_handles.devices_nav_refresh);
+    let devices_resync: Rc<dyn Fn()> = {
+        let machine = Arc::clone(&devices_machine);
+        let runtime = devices_runtime.clone();
+        Rc::new(move || {
+            let machine = Arc::clone(&machine);
+            runtime.spawn(async move { machine.resync().await });
+        })
+    };
     let devices_refresh: Rc<dyn Fn()> = Rc::new(move || {
         let machine = Arc::clone(&devices_machine);
         devices_runtime.spawn(async move { machine.refresh().await });
     });
     // The store-change notice's re-drives (`crate::store_surfaces`): each
     // store-backed sub-page's own load, exactly what re-selecting the page
-    // already showing runs below — reload semantics, no new render path. The
-    // match is exhaustive on purpose: a new store-backed surface must say here
-    // how it is re-driven.
+    // already showing runs below — reload semantics, no new render path, but
+    // through the machine's `resync`, so a gesture's error stays on the page.
+    // The match is exhaustive on purpose: a new store-backed surface must say
+    // here how it is re-driven.
     let store_resync: Rc<dyn Fn(crate::store_surfaces::StoreSurface)> = {
         use crate::store_surfaces::StoreSurface;
         let muted_words_refresh = Rc::clone(&muted_words_refresh);
         let linked_nests_refresh = Rc::clone(&linked_nests_refresh);
-        let devices_refresh = Rc::clone(&devices_refresh);
         let devices_nav_refresh = Rc::clone(&devices_nav_refresh);
         let folders_serve_refresh = Rc::clone(&devices_folders_handles.folders_serve_refresh);
         let privacy_refresh = Rc::clone(&privacy_refresh);
@@ -365,14 +382,14 @@ pub fn build_settings_shell(
         Rc::new(move |surface| match surface {
             StoreSurface::MutedWords => muted_words_refresh(),
             StoreSurface::TaskDelegation => task_delegation_refresh(),
-            // Followed folders and foreign sets ride the machine's refresh;
+            // Followed folders and foreign sets ride the machine's resync;
             // the WebDAV serve capability is the page's own read.
             StoreSurface::Folders => {
-                devices_refresh();
+                devices_resync();
                 folders_serve_refresh();
             }
             StoreSurface::Devices => {
-                devices_refresh();
+                devices_resync();
                 devices_nav_refresh();
             }
             StoreSurface::Nests => linked_nests_refresh(),
@@ -409,6 +426,13 @@ pub fn build_settings_shell(
             }
             Some("subscription-settings") => subscriptions_refresh(),
             Some("general") => general_refresh(),
+            // The storage allowance is nest state read on every visit, tui's
+            // per-visit `spawn_quota_refresh`: a folder filled since sign-in (an
+            // archive import, a large upload) must move the figure without a
+            // re-login. The login-time read alone left it frozen at sign-in.
+            Some("status") => quota_client.fetch_quota(),
+            // The starter-key count is nest state read on every visit.
+            Some("encryption") => crate::settings::encryption::refresh_on_visit(),
             Some("nests") => linked_nests_refresh(),
             // The Connected apps roster is nest state read on every visit.
             Some("connected-apps") => connected_apps_refresh(),
@@ -478,7 +502,7 @@ pub fn build_settings_shell(
     // "all apps share the same strings"), the same style `views/admin.rs`
     // uses for the admin nav. The Mail sub-page consts already carry the
     // prefix-less group form (Aliases / Spam / Export mailbox / Lists / Members).
-    let nav: [(&'static str, &'static str, &'static str, bool); 27] = [
+    let nav: [(&'static str, &'static str, &'static str, bool); 28] = [
         ("status", common::STATUS, "emblem-system-symbolic", false),
         ("account", common::ACCOUNT, "avatar-default-symbolic", false),
         (
@@ -579,6 +603,12 @@ pub fn build_settings_shell(
             "mail-send-receive-symbolic",
             true,
         ),
+        (
+            "archive-import",
+            archive_import::TITLE,
+            "document-open-symbolic",
+            false,
+        ),
         ("mail-lists", mail_lists::TITLE, "view-list-symbolic", true),
         (
             "mail-list-members",
@@ -613,22 +643,22 @@ pub fn build_settings_shell(
         ),
     ];
     // Row ids are `settings-nav-row[<page key>]`. Three child names differ from
-    // their ui.yaml page keys; the Account row stays untagged (its
-    // `account-settings-link` lives on the Status page — a second one here
-    // would duplicate the id, as on web).
+    // their ui.yaml page keys; the Account row keeps its older
+    // `account-settings-link` (ui.yaml `navigation.sub_page_nav_rows.settings`).
     let settings_sidebar = crate::views::nav_rail::build_nav_rail(
         &nav_back,
         &nav,
         &stack,
         fauna_ui_ids::SETTINGS_NAV_ROW,
         |child| {
-            Some(match child {
-                "account" => return None,
+            use crate::views::nav_rail::RailRowId;
+            Some(RailRowId::PageKey(match child {
+                "account" => return Some(RailRowId::Own(fauna_ui_ids::ACCOUNT_SETTINGS_LINK)),
                 "member-review" => "member_review",
                 "web" => "web-settings",
                 "logs" => "settings-logs",
                 other => nav.iter().map(|e| e.0).find(|n| *n == other)?,
-            })
+            }))
         },
     );
 

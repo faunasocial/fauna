@@ -230,6 +230,47 @@ def test_plain_target_mode_is_unchanged(tmp_path):
     assert ran.exists(), "stale target, no stamp: must run (historical mode)"
 
 
+def _warmth_cmd(tmp_path):
+    """A command that records the FAUNA_BUILD_WARMTH it was handed."""
+    seen = tmp_path / "warmth.txt"
+    code = f"import os; open({str(seen)!r}, 'w').write(os.environ.get('FAUNA_BUILD_WARMTH', '-'))"
+    return seen, [sys.executable, "-c", code]
+
+
+@pytest.mark.parametrize("case,expected", [
+    ("missing-target", "cold"),
+    ("stale-target", "warm"),
+    ("stamp-lost-targets-present", "warm"),
+    ("stamp-only-missing", "cold"),
+    ("stale-stamp", "warm"),
+])
+def test_the_gate_hands_its_warmth_to_the_command(tmp_path, case, expected):
+    """The verdict the gate already reached travels to the command in
+    FAUNA_BUILD_WARMTH (module docstring § Warmth) for build-slot.py's grant
+    line: an absent artifact is `cold`, a present-but-stale one `warm`."""
+    src = _touch(tmp_path / "src" / "lib.rs", _NEW)
+    target = tmp_path / "out.so"
+    stamp = tmp_path / "out.stamp"
+    seen, cmd = _warmth_cmd(tmp_path)
+    if case == "missing-target":
+        r = _run_gate(tmp_path, stamp=stamp, targets=[target], sources=[src], cmd=cmd)
+    elif case == "stale-target":
+        _touch(target, _OLD)
+        argv = [sys.executable, _SCRIPT, "--target", str(target), "--source", str(src), "--", *cmd]
+        r = subprocess.run(argv, capture_output=True, text=True, cwd=tmp_path)
+    elif case == "stamp-lost-targets-present":
+        _touch(target, _OLD)
+        r = _run_gate(tmp_path, stamp=stamp, targets=[target], sources=[src], cmd=cmd)
+    elif case == "stamp-only-missing":
+        r = _run_gate(tmp_path, stamp=stamp, sources=[src], cmd=cmd)
+    else:
+        _touch(target, _OLD)
+        _touch(stamp, _OLD)
+        r = _run_gate(tmp_path, stamp=stamp, targets=[target], sources=[src], cmd=cmd)
+    assert r.returncode == 0, r.stderr
+    assert seen.read_text() == expected
+
+
 # ── The generate-then-validate hazard ────────────────
 #
 # Non-stamp mode is safe for a command whose ONLY effect is producing its

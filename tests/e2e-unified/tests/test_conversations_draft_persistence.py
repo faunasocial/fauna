@@ -44,6 +44,7 @@ gap" does NOT reproduce — the pushed ``NewThreadComposeView`` fields
 to the macOS control), so the compose chokepoint this test drives works on iOS.
 """
 
+import secrets
 import time
 
 import pytest
@@ -67,6 +68,33 @@ pytestmark = [
     # recording this as a product red.
     pytest.mark.drafts_production_window,
 ]
+
+
+@pytest.fixture
+def drafts_actor(request, app, nest_instance):
+    """``(app, user)`` logged in as a DEDICATED fresh actor, whose ``__drafts``
+    plane is empty by construction.
+
+    Both tests type into the new-thread composer and compare its body with what
+    they typed, so a new-thread draft already resting on the actor is restored
+    under the typing and the body comes back with it in front. On the shared
+    session ``test_user`` that is not hypothetical: a tui run of the
+    ``drafts-survive`` selection failed both preconditions reading
+    ``"device B's half-written new messagedraft that must survive..."`` — the
+    draft ``test_conversations_across_own_devices.py`` writes from its second
+    device, restored here — and the second test then inherited the first's body
+    too, because a failed test never reaches its own discard. Order decided
+    green or red. A fresh actor makes the empty starting composer this module
+    asserts against locally true, whatever any other test leaves behind, present
+    or future (the same trade ``ungranted_app`` makes in conftest).
+    """
+    from conftest import _login_app_as, _make_user
+
+    user = _make_user(nest_instance)
+    # `verify_live_actor=True` by the barrier's own rule: the premise is a
+    # dedicated actor, and a declined switch would type into the shared one's.
+    _login_app_as(app, request, nest_instance, user, verify_live_actor=True)
+    return app, user
 
 
 def _wait_compose_body(app, expected: str, timeout: float = 5.0) -> str:
@@ -105,8 +133,8 @@ def _wait_drafts_persisted(node_url, actor_id, signing_key, baseline_blob, timeo
 
 
 @pytest.mark.feature("drafts-survive")
-def test_new_thread_compose_draft_survives_app_restart(logged_in_app, nest_instance, test_user):
-    app = logged_in_app
+def test_new_thread_compose_draft_survives_app_restart(drafts_actor, nest_instance):
+    app, test_user = drafts_actor
     node_url = nest_instance["url"]
     actor_id = test_user["actor_id_bytes"]
     signing_key = bytes(test_user["signing_key"])
@@ -128,8 +156,10 @@ def test_new_thread_compose_draft_survives_app_restart(logged_in_app, nest_insta
     app.driver.click("new-conversation-button")
     app.driver.wait_for("dm-text-field", timeout=10.0)
     app.driver.type_text("dm-text-field", draft_body)
-    assert _wait_compose_body(app, draft_body) == draft_body, (
-        "precondition: the draft body must be typed into the composer before reload"
+    typed = _wait_compose_body(app, draft_body)
+    assert typed == draft_body, (
+        "precondition: the draft body must be typed into the composer before reload "
+        f"(got {typed!r}); error={app.error_text()!r}"
     )
 
     # 2. Wait for the debounced draft-save to actually land on the nest before we
@@ -171,10 +201,11 @@ def test_new_thread_compose_draft_survives_app_restart(logged_in_app, nest_insta
     )
 
     # 7. Discard the draft this test just proved is DURABLE — the cleanup is part
-    #    of the test, not an afterthought. `__drafts` is per-actor nest state on
-    #    the session-scoped `test_user`, so a draft left behind is restored into
-    #    the NEXT test's composer on every app that wires drafts. That is not
-    #    hypothetical: it broke `test_conversations_new_thread_cancel.py[tui]`,
+    #    of the test, not an afterthought. `__drafts` is per-actor nest state; this
+    #    module now runs on a dedicated actor (`drafts_actor`), but it ran on the
+    #    session-scoped `test_user` for months, and a draft left behind there is
+    #    restored into the NEXT test's composer on every app that wires drafts. That
+    #    was not hypothetical: it broke `test_conversations_new_thread_cancel.py[tui]`,
     #    whose composer came up holding *this* test's body with its own typed on
     #    the end ("...restart 4827half-written draft to discard 7731"). The leak
     #    was latent for web/macos/windows the whole time — they wire drafts too —
@@ -197,4 +228,79 @@ def test_new_thread_compose_draft_survives_app_restart(logged_in_app, nest_insta
         "assertion above already PASSED — the drafts feature works; this is the "
         "teardown failing, so look at new-conversation-cancel on this app, not at "
         "draft persistence."
+    )
+
+
+@pytest.mark.feature("drafts-survive")
+def test_a_restored_drafts_recipient_is_checked_again_without_retyping(
+    drafts_actor, nest_instance
+):
+    """``conversation-drafts.md`` § Persistence — *A restore that FILLS a
+    recipient picker owes it a probe*: the picker's typed address rests, its
+    probe cannot (it rests ``idle``), so the restore issues the probe itself.
+    Type an address (probed, never committed as a chip) and a body, let the
+    autosave land, restart; the reopened composer holds the address and its
+    ``recipient-resolve-status`` leaves ``idle`` for ``resolved`` with no
+    keystroke. A restore that skipped the probe leaves it ``idle`` for good —
+    the red arm. No settle sleep: the restore fills an untouched composer
+    whenever it lands, so the wait polls the picker itself (convention 14)."""
+    from clients.ws_rpc_admin_client import WsRpcAdminClient
+    from tests.api import conv_api
+
+    app, test_user = drafts_actor
+    conv = app.conversations
+    node_url = nest_instance["url"]
+    port = nest_instance["port"]
+    actor_id = test_user["actor_id_bytes"]
+    signing_key = bytes(test_user["signing_key"])
+    # A same-nest peer the Fauna rail claims, addressed as the nest echoes its
+    # handles (`test_recipient_picker.py::test_resolves_fauna_handle`'s recipe).
+    peer = conv_api.reachable_peer(
+        port, nest_instance["admin"]["signing_key"], test_user["actor_id_hex"]
+    )
+    served = conv_api.actor_by_handle(port, test_user, peer["handle"])
+    address = f"{peer['handle']}@{served['domain']}"
+    body = f"draft whose recipient is re-checked {secrets.token_hex(3)}"
+
+    with WsRpcAdminClient(node_url, actor_id=actor_id, signing_key=signing_key) as dev:
+        baseline_blob = dev.call("fauna.drafts.get", {"path": "conversations"}).get("blob")
+
+    state = conv.resolve_recipient(address)
+    assert state == "resolved", f"precondition: the typed address resolves live ({state!r})"
+    app.driver.type_text("dm-text-field", body)
+    typed = _wait_compose_body(app, body)
+    assert typed == body, f"precondition: the body is typed (got {typed!r}); error={app.error_text()!r}"
+    saved_blob = _wait_drafts_persisted(node_url, actor_id, signing_key, baseline_blob)
+    assert saved_blob is not None, (
+        "precondition: the debounced fauna.drafts.put must reach the nest before the restart"
+    )
+
+    app.driver.hard_reload()
+    conv.navigate()
+    app.driver.click("new-conversation-button")
+    app.driver.wait_for("recipient-picker-input", timeout=10.0)
+
+    def picker():
+        return (
+            app.driver.get_text("recipient-picker-input"),
+            app.driver.get_attr("recipient-resolve-status", "state"),
+        )
+
+    deadline = time.time() + 30.0
+    seen = picker()
+    while time.time() < deadline and seen != (address, "resolved"):
+        time.sleep(0.2)
+        seen = picker()
+    assert seen == (address, "resolved"), (
+        "the restored draft's recipient should come back and be probed again with "
+        f"no keystroke: (input, state) = {seen!r}; 'idle' with the address means "
+        f"the restore never issued the probe. body={conv.compose_body_text()!r} "
+        f"error={app.error_text()!r}"
+    )
+    assert _wait_compose_body(app, body) == body, "the body came back with it"
+
+    # Discard the durable draft (the module's cleanup rule — the test above, step 7).
+    app.driver.click("new-conversation-cancel")
+    assert _wait_drafts_persisted(node_url, actor_id, signing_key, saved_blob) is not None, (
+        "cleanup: the discarded draft must persist, or it leaks into the next test"
     )

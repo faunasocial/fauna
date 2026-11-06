@@ -33,10 +33,12 @@ account's identity over the nest's own upload kind. Every user gesture — openi
 the page, Refresh — goes through the app (convention 8). Latency-independent
 (convention 14): each assertion waits on state, never a clock.
 
-tui is the lead app and windows the second; the other five carry the ids in
-their trickle-down rows and join then. windows runs the two sign-in journeys
-in full; the three that open the page take a ``skip_unbuilt`` at the rail
-click until its Settings rail rows carry ``settings-nav-row[<key>]``.
+The module marks every app but web; each journey except outcome 10's adds
+``web`` itself (outcome 10's web witness is a nest-served twin — its docstring).
+
+tui is the lead app; windows, web, linux, macos, ios and android follow
+(android's ``EncryptionSettingsScreen`` carries the ids; not yet run on a
+device, the venue being a separate row).
 
 ``real_conversations``: the sign-in top-up (outcomes 1, 10 and 11, and every
 journey's opening ``_wait_signed_in_supply``) is published by the shared
@@ -54,8 +56,8 @@ import urllib.request
 
 import pytest
 
+from actions.settings import SettingsActions
 from clients.ws_rpc_admin_client import WsRpcAdminClient
-from helpers.app_surface import skip_unbuilt
 from helpers.waiting import wait_until
 from tests.api.conv_api import mint_key_packages
 
@@ -63,6 +65,10 @@ pytestmark = [
     pytest.mark.tier_3,
     pytest.mark.tui,
     pytest.mark.windows,
+    pytest.mark.linux,
+    pytest.mark.macos,
+    pytest.mark.ios,
+    pytest.mark.android,
     pytest.mark.real_conversations,
 ]
 
@@ -73,7 +79,6 @@ TARGET = 20
 #: Past the thirty-day expiry (`direct-messages.md` § Key Package Management).
 EXPIRED_SECS = 31 * 24 * 3600
 
-ROW = "settings-nav-row[encryption]"
 COUNT_ID = "encryption-keypackage-count"
 LOW_ID = "encryption-keypackage-low-warning"
 REFRESH_ID = "encryption-keypackage-refresh-button"
@@ -124,32 +129,18 @@ def _open_page(driver) -> None:
     """Reach Settings → Encryption the way a human does, from wherever the app
     is: leave the page if it is open (so this visit is a fresh one), then
     ``settings-tab`` and the rail row."""
-    if driver.is_windows():
-        skip_unbuilt(
-            driver,
-            surface=ROW,
-            detail="windows paints the Encryption page, but its Settings rail rows carry no "
-            "settings-nav-row[<key>] ids yet, so no click reaches it",
-            tracked="ui.yaml navigation.sub_page_nav_rows",
-        )
-    if driver.is_visible(COUNT_ID):
-        driver.click("settings-nav-back")
-    if not driver.is_visible(ROW):
-        driver.click("settings-tab")
-        driver.wait_for(ROW, timeout=BUDGET_S)
-    driver.click(ROW)
-    driver.wait_for(COUNT_ID, timeout=BUDGET_S)
+    SettingsActions(driver).open_encryption(timeout=BUDGET_S)
 
 
 def _page_count(driver) -> int:
     """The count the page states, once it has read one (it shows the loading
     copy before)."""
-    text = wait_until(
-        lambda: (t := driver.get_text(COUNT_ID).strip()).isdigit() and t,
+    settings = SettingsActions(driver)
+    return wait_until(
+        lambda: (n := settings.encryption_keypackage_count()) is not None and (n,),
         BUDGET_S,
         diagnose=lambda: driver.diagnose(COUNT_ID),
-    )
-    return int(text)
+    )[0]
 
 
 def _wait_signed_in_supply(nest, actor) -> None:
@@ -165,6 +156,7 @@ def _wait_signed_in_supply(nest, actor) -> None:
 # ── the journeys ─────────────────────────────────────────────────────────────
 
 
+@pytest.mark.web
 @pytest.mark.feature("encryption-settings")
 def test_the_page_shows_the_nests_count_and_calls_it_low_below_five(
     dedicated_actor_app, nest_instance
@@ -195,6 +187,7 @@ def test_the_page_shows_the_nests_count_and_calls_it_low_below_five(
     )
 
 
+@pytest.mark.web
 @pytest.mark.feature("encryption-settings")
 def test_opening_the_page_never_tops_up_and_refresh_does(dedicated_actor_app, nest_instance):
     """encryption-settings 9 and 4: an empty supply stays empty across two
@@ -221,7 +214,12 @@ def test_opening_the_page_never_tops_up_and_refresh_does(dedicated_actor_app, ne
     assert _nest_count(nest_instance, actor) == _page_count(driver), (
         "after Refresh the page states the nest's new count"
     )
-    assert driver.is_absent(LOW_ID), "a topped-up supply is not low"
+    # The card leaves on the render after the count lands: wait on the state.
+    wait_until(
+        lambda: driver.is_absent(LOW_ID),
+        BUDGET_S,
+        diagnose=lambda: f"a topped-up supply is not low: {driver.diagnose(LOW_ID)}",
+    )
 
 
 # ── sign-in publishes: outcomes 1 and 11 ─────────────────────────────────────
@@ -236,6 +234,7 @@ def _sign_in(app, request, nest, user, *, device_id=None) -> None:
     _login_app_as(app, request, nest, user, verify_live_actor=True, device_id=device_id)
 
 
+@pytest.mark.web
 @pytest.mark.feature("encryption-settings")
 def test_each_sign_in_tops_up_the_supply_so_a_peer_can_start_while_you_are_away(
     dedicated_actor_app, nest_instance, request
@@ -277,6 +276,7 @@ def test_each_sign_in_tops_up_the_supply_so_a_peer_can_start_while_you_are_away(
     )
 
 
+@pytest.mark.web
 @pytest.mark.feature("encryption-settings")
 def test_signing_in_on_another_device_publishes_fresh_keys_from_it(
     dedicated_actor_app, nest_instance, request
@@ -319,6 +319,7 @@ def unclaimed_nest(request, nest_mode, tmp_path_factory):
 
 
 @pytest.mark.feature("encryption-settings")
+@pytest.mark.requires_surface("admin-claim-onboarding-drive")
 def test_a_new_identity_is_reachable_as_soon_as_it_is_set_up(app, unclaimed_nest):
     """encryption-settings 10 (`direct-messages.md` § Key Package Management):
     the app publishes a new identity's first starter keys when it is set up, so
@@ -327,8 +328,15 @@ def test_a_new_identity_is_reachable_as_soon_as_it_is_set_up(app, unclaimed_nest
     Every step is the user's: Create Identity in the wizard, the handle, the
     claim code, the network choice; then Settings → Encryption, whose count is
     the nest's own (outcome 2). No other session ever held this identity, so
-    every key the nest counts for it was published by this app's set-up."""
-    from common.nest import CLAIM_CODE
+    every key the nest counts for it was published by this app's set-up.
+
+    Gated on the ``admin-claim-onboarding-drive`` harness surface: web's wizard
+    reaches a nest only when that nest serves the SPA itself
+    (``test_onboarding_localhost.py``), never this dedicated self-signed one, so
+    its witness of outcome 10 is a nest-served twin of its own. So this test is
+    MARKED for every app but web, not gated off web (`feature-catalog.md` §
+    Cell semantics, the 2026-09-26 marked-witness ruling): web's column reads
+    the twin, `test_onboarding_localhost.py::test_a_new_identity_is_reachable_as_soon_as_it_is_set_up`."""
     from conftest import _relaunch_trusting_nest
     from helpers.authenticated_shell import SHELL_MARKERS
 
@@ -353,7 +361,7 @@ def test_a_new_identity_is_reachable_as_soon_as_it_is_set_up(app, unclaimed_nest
     ob.run_handle_check(timeout=45)
     ob.submit_handle()
     driver.wait_for("claim-code-input", timeout=BUDGET_S)
-    driver.clear_and_type("claim-code-input", CLAIM_CODE)
+    driver.clear_and_type("claim-code-input", unclaimed_nest["claim_code"])
     driver.click("claim-code-submit-button")
 
     def landed() -> bool:

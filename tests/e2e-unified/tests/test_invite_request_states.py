@@ -126,22 +126,20 @@ def test_age_notice_follows_the_minted_nonces_platform_list(app, nest_instance):
     one (android while the Play Integrity keys are unset) the declared form.
     No bridge path bypasses the guard.
     """
-    from helpers.app_surface import app_name, skip_unbuilt
+    from helpers.app_surface import app_name, require_surface
 
     _skip_unless_store_app(app)
+    require_surface(app.driver, "machine-async-dispatch-bridge")
     platform = app_name(app.driver)
     app.driver.call_machine_method(
         "navigate_to_invite_request_for_known_nest",
         json.dumps([nest_instance["url"], "agekid"]),
     )
     raw = app.driver.call_machine_method("request_age_nonce", "")
-    if raw is None:
-        skip_unbuilt(
-            app.driver,
-            surface="request_age_nonce bridge reader",
-            detail="the bridge does not route the machine's async dispatcher",
-            tracked="family-safety.md § Implementation status today, the age-band row",
-        )
+    assert raw is not None, (
+        "the bridge routes no async machine dispatch on an app whose registry "
+        "entry lists `machine-async-dispatch-bridge`"
+    )
     minted = json.loads(raw) if isinstance(raw, str) else raw
     assert "Ok" in minted, f"the nonce mint must succeed: {minted!r}"
     nonce = minted["Ok"]
@@ -202,30 +200,17 @@ def test_submitting_locks_form(app):
     )
 
 
-@pytest.mark.feature("join-a-nest")
-def test_pending_review_shows_recheck_and_disables_continue(app):
-    """PendingReview offers recheck, and Continue is DEAD.
-
-    The Continue assertion flipped 2026-08-12: that button used to exit the
-    wizard via `submit_invite_request_continue()`, and the exit is retired —
-    this journey advances by polling (`onboarding.md` § The pending-invite
-    surface). A live Continue here would be a control with nothing behind it,
-    which is the failure `continue_enabled_for` exists to prevent.
-    """
-    set_invite_request_snapshot(app, _snapshot(
-        state={'PendingReview': {'request_id': 'req-pending', 'last_checked_ms': 0}},
-        continue_enabled=False,
-        recheck_visible=True,
-        message_key='onboarding.invite.pending_review',
-    ))
-    assert app.is_visible('invite-request-recheck-button'), (
-        "PendingReview should show the recheck button: "
-        f"{app.driver.diagnose('invite-request-recheck-button')} error={app.error_text()!r}"
-    )
-    assert not app.is_enabled('invite-request-continue-button'), (
-        "PendingReview must DISABLE Continue — the journey advances by polling: "
-        f"{app.driver.diagnose('invite-request-continue-button')} error={app.error_text()!r}"
-    )
+# ⚠ There is deliberately no injected `PendingReview` case either (retired
+# 2026-10-22). Injecting it arms the app's own pending-invite poll, whose first
+# tick fires at once on web, windows, android, macos and ios (§ The
+# pending-invite surface). The injected state carries no identity, so that
+# recheck correctly ends in the terminal "no identity" error, and the recheck
+# button is gone whenever the poll beats the test's read: red on ios, macos and
+# web; green on tui and linux only because their first tick waits a full
+# interval. A test whose verdict is which side of a timer the read lands on is
+# defunct (convention 14). Its two assertions now ride the real submit,
+# `test_invite_request_submit_roundtrip.py`, where the poll answers
+# a real pending row with PendingReview again.
 
 
 # ⚠ There is deliberately no `test_approved_*` case (retired 2026-08-12 with

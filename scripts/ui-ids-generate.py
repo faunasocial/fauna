@@ -293,8 +293,11 @@ KIDS_EXCISED_ID_PREFIXES = (
 # `android-kids-check` mirrors): android hand-gates its two retire renders and R8 strips
 # the unreferenced fields, while iOS has no retirement page yet (nest-retirement.md),
 # so gating the ids here makes the coming trickle-down a compile error in the kids
-# build rather than a silent leak.
-SWIFT_KIDS_ONLY_ID_PREFIXES = ("admin-nest-retire-", "launch-retire-button")
+# build rather than a silent leak. Photo backup's ids the same way: it is not in item
+# (4)'s *Kept* set, android hand-gates `PhotoBackupSection` under `BuildConfig.KIDS`, and
+# the kids iOS Info.plist carries no photo-library usage key, so a photo-backup render
+# reaching the kids build would be a PhotoKit request the OS terminates the app for.
+SWIFT_KIDS_ONLY_ID_PREFIXES = ("admin-nest-retire-", "launch-retire-button", "photo-backup-")
 # Apple's kids condition — POSITIVE, added only by the kids target and absent
 # everywhere else (family-safety.md § The account age band, the kids-app bullet,
 # item (5)), so the table's gate reads `#if !FAUNA_KIDS`.

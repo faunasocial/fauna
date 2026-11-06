@@ -254,25 +254,22 @@ internal static class DocumentRenderer
     /// precedence tui's <c>proxied_post_image</c> and apple's <c>documentPostImage</c> keep).
     /// A path, never a hash: the feed fetches it from the user's own nest with the session
     /// bearer (<c>INestHttpClient.GetContentAsync</c>), with no sealed-media open and no
-    /// C2PA check, and paints it immediately — no reveal gate. Read off the shared Rust
-    /// <c>RenderDocument::proxied_images</c> via <c>render_document_proxied_images</c>, which
-    /// recurses like its siblings.</summary>
+    /// C2PA check, and paints it immediately — no reveal gate. **Single-sourced on the shared
+    /// Rust <c>RenderDocument::proxied_post_image_ref</c>** via
+    /// <c>render_document_proxied_post_image</c>, which owns the blob-image-wins precedence.</summary>
     internal static string? MediaProxiedPath(RenderDocument doc)
-        => MediaImageHash(doc) is null
-            ? uniffi.fauna_ffi.FaunaFfiMethods.RenderDocumentProxiedImages(doc).FirstOrDefault()?.path
-            : null;
+        => uniffi.fauna_ffi.FaunaFfiMethods.RenderDocumentProxiedPostImage(doc)?.path;
 
     /// <summary>The nest-relative path of a bridged post's video — its first folded
     /// <c>ProxiedVideo</c> — or <c>null</c> when the post carries none, or carries a blob
     /// <c>Video</c> (render-model.md § D6c → Proxied video; the exact twin of
     /// <see cref="MediaProxiedPath"/> for the <c>video-thumbnail</c> slot). The feed paints
     /// the path beside the play glyph where it paints the hash for a <c>Video</c>, and never
-    /// byte-loads it. Read off the shared Rust <c>RenderDocument::proxied_videos</c> via
-    /// <c>render_document_proxied_videos</c>.</summary>
+    /// byte-loads it. **Single-sourced on the shared Rust
+    /// <c>RenderDocument::proxied_post_video_ref</c>** via
+    /// <c>render_document_proxied_post_video</c>.</summary>
     internal static string? MediaProxiedVideoPath(RenderDocument doc)
-        => MediaVideoHash(doc) is null
-            ? uniffi.fauna_ffi.FaunaFfiMethods.RenderDocumentProxiedVideos(doc).FirstOrDefault()?.path
-            : null;
+        => uniffi.fauna_ffi.FaunaFfiMethods.RenderDocumentProxiedPostVideo(doc)?.path;
 
     /// <summary>The block the <c>video-thumbnail</c> slot plays — a blob <c>Video</c> by
     /// <see cref="MediaVideoHash"/>, else a bridged <c>ProxiedVideo</c> by

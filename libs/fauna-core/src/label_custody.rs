@@ -924,20 +924,41 @@ pub fn reseed_pseudo_device_id(actor_id: &[u8; 32]) -> [u8; 32] {
 /// it without `fauna-core` depending on a client crate.
 pub const SELF_REGISTER_LABEL: &str = "fauna";
 
+/// The six **app defaults** (`devices.md` § Device names, class (2)): the label
+/// each app's every register leg passes for its machine's row until the user
+/// names it — one frozen constant per app, held by the app itself (tui and
+/// linux `sync_agent.rs::DEVICE_LABEL`, windows `SyncAgentSession.DeviceLabel`,
+/// apple `FaunaClient.deviceLabel`, android `FfiOnDemandSource.DEVICE_LABEL`).
+/// Listed here only so [`is_synthetic_device_label`] can name them: they are
+/// machine-authored, identical on every deployment and every account, so they
+/// rest plaintext — which is also what lets the nest keep a user-chosen name
+/// over one of them (rule (b), `register_sync_device_capped`).
+pub const APP_DEVICE_LABELS: [&str; 6] = [
+    "fauna-tui",
+    "fauna-linux",
+    "fauna-windows",
+    "fauna-macos",
+    "fauna-ios",
+    "fauna-android",
+];
+
 /// Is this device label machine-authored rather than user-chosen?
 ///
 /// The *paths-are-content* ruling seals **user-chosen** labels
-/// (`encryption-at-rest.md` § Carve-outs); these two are constants some writer
-/// picked, identical across every deployment and every account, so sealing them
-/// would protect nothing and cost every reader a key. `file-sync.md` § Sealed
-/// names & paths names them in its *Deliberate non-seals* list.
+/// (`encryption-at-rest.md` § Carve-outs); the WebDAV pseudo-device label, the
+/// self-heal placeholder and the six [`APP_DEVICE_LABELS`] are constants some
+/// writer picked, identical across every deployment and every account, so
+/// sealing them would protect nothing and cost every reader a key.
+/// `path-sealing.md` § Sealed names & paths names them in its *Deliberate
+/// non-seals* list.
 ///
 /// The exact-match is deliberate — a user is free to name their laptop
 /// `"fauna"`, and if they do, that label seals under their own root like any
 /// other. What this predicate refuses is the *writer* class, and each of
-/// those two writers passes its own frozen constant.
+/// those writers passes its own frozen constant.
 pub fn is_synthetic_device_label(label: &str) -> bool {
     matches!(label, WEBDAV_PSEUDO_DEVICE_LABEL | SELF_REGISTER_LABEL)
+        || APP_DEVICE_LABELS.contains(&label)
 }
 
 /// Seal one **user-chosen device label** — the single place a client turns a
@@ -979,6 +1000,22 @@ pub fn seal_device_label(
     let sealed =
         path_crypto::seal_random(root, device_id, LabelField::DeviceLabel, label.as_bytes())?;
     Ok(Some(sealed.to_bytes()?))
+}
+
+/// [`seal_device_label`] from the owner's [`BackupKey`] and the wire's hex
+/// `device_id` — the **one seal site both device-label writers share**: the
+/// provisioner's register (`fauna_client_sync::register_this_machine`) and the
+/// Devices page's rename (`DevicesMachine::rename_device`, `devices.md`
+/// § Device names, rule (1)). Both name a row under the owner's root, salted
+/// by the row's own id, so a name either writes opens under the same render.
+/// `Ok(None)` is [`seal_device_label`]'s: the label is machine-authored.
+pub fn seal_owner_device_label(
+    owner: &BackupKey,
+    device_id_hex: &str,
+    label: &str,
+) -> anyhow::Result<Option<Vec<u8>>> {
+    let device_id = crate::hex32::decode(device_id_hex)?;
+    seal_device_label(&path_crypto::LabelRoot::owner_of(owner), &device_id, label)
 }
 
 /// Render one **device label** sealed-first — the seam every surface showing a
@@ -2554,6 +2591,29 @@ mod tests {
                 "{synthetic} is machine-authored and must not seal"
             );
         }
+        // The six app defaults (`devices.md` § Device names, class (2)) are
+        // machine-authored too: they rest plaintext and never seal.
+        assert_eq!(
+            APP_DEVICE_LABELS,
+            [
+                "fauna-tui",
+                "fauna-linux",
+                "fauna-windows",
+                "fauna-macos",
+                "fauna-ios",
+                "fauna-android"
+            ]
+        );
+        for app_default in APP_DEVICE_LABELS {
+            assert!(is_synthetic_device_label(app_default), "{app_default}");
+            assert_eq!(
+                seal_device_label(&owner_root(), &[4u8; 32], app_default).unwrap(),
+                None,
+                "{app_default} is an app default and must not seal"
+            );
+        }
+        // A user-chosen name is still user-chosen.
+        assert!(!is_synthetic_device_label("my-laptop"));
         // The retired backup coordinator's label is an ordinary user label now.
         assert!(!is_synthetic_device_label("fauna-backup-coordinator"));
         // A user-chosen label that merely *contains* one is still user-chosen.

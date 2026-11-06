@@ -25,10 +25,8 @@ until `execute_after` (a day away), so a cancelled action can never apply —
 no settle-sleep, nothing timing-dependent (convention 14).
 
 All 7 apps now build the section (tui led 2026-08-19; windows landed
-last, 2026-09-07). `skip_unbuilt` stays as the standing
-per-app guard (never a hand-maintained allowlist) — a client where the
-surface later regresses or where a fresh app never lands it reports through
-here rather than a silent false green.
+last, 2026-09-07). The section's wait is a plain
+assertion — a surface that later regresses reds here rather than skipping.
 """
 
 import uuid
@@ -36,7 +34,6 @@ import uuid
 import pytest
 
 from clients.ws_rpc_anon_client import RpcCallError, WsRpcAnonClient
-from helpers.app_surface import skip_unbuilt
 from helpers.budgets import RPC_ROUNDTRIP_S
 from helpers.waiting import wait_until
 from i18n.strings import S
@@ -60,18 +57,7 @@ def test_a_scheduled_handle_change_is_visible_and_cancellable(
 ):
     d = logged_in_app.driver
     logged_in_app.settings._navigate_subpage("account")
-    try:
-        d.wait_for("pending-actions-section", timeout=10)
-    except Exception:
-        skip_unbuilt(
-            d,
-            surface="pending-actions-section",
-            detail=(
-                "the standing pending-actions section (settings.md § Pending "
-                "actions) is not built on this app yet"
-            ),
-            tracked="",
-        )
+    d.wait_for("pending-actions-section", timeout=10)
 
     # (1) The nav-edge hydrate lands: the container's text leaves the bare
     # un-hydrated title for one of the two loaded readings. The shared user is
@@ -150,18 +136,7 @@ def test_a_queued_account_delete_is_visible_and_cancellable(logged_in_app):
     the test ends)."""
     d = logged_in_app.driver
     logged_in_app.settings._navigate_subpage("account")
-    try:
-        d.wait_for("pending-actions-section", timeout=10)
-    except Exception:
-        skip_unbuilt(
-            d,
-            surface="pending-actions-section",
-            detail=(
-                "the standing pending-actions section (settings.md § Pending "
-                "actions) is not built on this app yet"
-            ),
-            tracked="",
-        )
+    d.wait_for("pending-actions-section", timeout=10)
 
     delete_description = "Delete this account"
 
@@ -215,18 +190,7 @@ def test_a_scheduled_handle_change_is_not_shown_as_your_handle(
     d = logged_in_app.driver
     settings = logged_in_app.settings
     settings._navigate_subpage("account")
-    try:
-        d.wait_for("pending-actions-section", timeout=10)
-    except Exception:
-        skip_unbuilt(
-            d,
-            surface="pending-actions-section",
-            detail=(
-                "the standing pending-actions section (settings.md § Pending "
-                "actions) is not built on this app yet"
-            ),
-            tracked="",
-        )
+    d.wait_for("pending-actions-section", timeout=10)
 
     original = test_user["handle"]
     original_local = original.split("@")[0]
@@ -311,18 +275,7 @@ def test_an_admins_deletion_of_this_account_is_listed_and_cancellable(
 
     d = logged_in_app.driver
     logged_in_app.settings._navigate_subpage("account")
-    try:
-        d.wait_for("pending-actions-section", timeout=10)
-    except Exception:
-        skip_unbuilt(
-            d,
-            surface="pending-actions-section",
-            detail=(
-                "the standing pending-actions section (settings.md § Pending "
-                "actions) is not built on this app yet"
-            ),
-            tracked="",
-        )
+    d.wait_for("pending-actions-section", timeout=10)
 
     description = S.settings.pending_actions.admin_delete_user(
         target=test_user["actor_id_hex"]

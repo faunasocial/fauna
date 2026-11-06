@@ -12,6 +12,7 @@
   import { onMount, onDestroy } from 'svelte';
   import { connectionStatus, identity, onActorChange } from '#lib/store';
   import { registerActorScopedReset } from '#lib/actorScope';
+  import C2paImage from '#lib/components/C2paImage.svelte';
   import {
     ensureWasm,
     legalTakedownTombstone,
@@ -27,10 +28,11 @@
   import ReportHost from '#lib/components/ReportHost.svelte';
   import { reportMessageTarget, type ReportTarget } from '#lib/wasm';
   import { actorHex } from '#lib/hex';
-  import type { ContentRender, ItemPlaceholder as RegionPlaceholderValue } from '#lib/wasm';
+  import { regionSealedNote, type ContentRender, type ItemPlaceholder as RegionPlaceholderValue } from '#lib/wasm';
   import { notifyBuffer } from '#lib/familyNotify';
   import {
     getConversationsManager,
+    refreshArchiveThreadsIfReady,
     refreshConversations,
     conversationsSnapshot,
     scheduleDraftSave,
@@ -476,6 +478,8 @@
       try {
         manager = await getConversationsManager();
         refreshConversations();
+        // The `Archive` rail, re-read on every visit (`#lib/conversations`).
+        refreshArchiveThreadsIfReady();
         // A `SearchNav::Draft`/`SearchNav::Mail` deep-link left by the Search
         // page (`#lib/search`'s `consumePendingSearchNav`,
         // `../search/+page.svelte`'s `openResult`) — routed through the SAME
@@ -607,6 +611,19 @@
     const placeholder = msgRender(msg).placeholder;
     if (!placeholder) return null;
     return placeholder.verb === 'block' || !revealedContent.has(msg.message_id) ? placeholder : null;
+  }
+  // The sealed-item sentence after the region frame — an end-to-end thread's
+  // bubble only, never one Guardian Notify counted (`region-blocking.md`
+  // § Implementation status today), decided in shared Rust.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  function sealedNoteMsg(msg: any): boolean {
+    const r = msgRender(msg);
+    return regionSealedNote(
+      !!r.placeholder && 'region' in r.placeholder && !r.reported,
+      r.verdict,
+      detail?.capabilities?.encryption,
+      notifyBuffer.wouldCount(msg.labels),
+    );
   }
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   function isContentBlockedMsg(msg: any): boolean {
@@ -1649,7 +1666,7 @@
             }}
           />
           <button data-testid={IDS.ROOM_SEARCH_SUBMIT_BUTTON} class="hdr-btn" onclick={submitRoomSearch}>
-            {t.conversations.unified.room_search}
+            {t.common.search}
           </button>
         </div>
       {/if}
@@ -1725,6 +1742,7 @@
               <RegionPlaceholder
                 class="message-deleted"
                 placeholder={regionPlaceholderMsg(msg)!}
+                sealedNote={sealedNoteMsg(msg)}
                 onreveal={() => revealContent(msg.message_id)}
               />
             {:else if isContentBlockedMsg(msg)}
@@ -1791,7 +1809,7 @@
                    bubble timestamp and adds it where web/windows/android showed none
                    (render-model.md § D5-adjacent; priorities #1/#4). -->
               <span data-testid={IDS.DM_MESSAGE_TIMESTAMP} data-selected={detail.selected_message_id === msg.message_id ? 'true' : undefined} class="bubble-time">{conversationTimestamp(msg.timestamp_ms)}</span>
-              <button data-testid={IDS.DM_REPLY_BUTTON} class="reply-btn" onclick={() => replyTo(msg.message_id)}>{t.common.reply}</button>
+              <button data-testid={IDS.DM_REPLY_BUTTON} class="reply-btn" disabled={isGated(caps?.can_send)} onclick={() => replyTo(msg.message_id)}>{t.common.reply}</button>
               {#if caps?.supports_recipient_selection}
                 <button data-testid={IDS.DM_REPLY_ALL_BUTTON} class="reply-btn" onclick={() => replyAll(msg.message_id)}>{t.conversations.unified.reply_all}</button>
               {/if}
@@ -1948,7 +1966,10 @@
               {#if att.is_image}
                 {@const url = attachmentUrl(att)}
                 {#if url}
-                  <img data-testid={IDS.DM_ATTACHMENT_IMAGE} data-state="painted" class="dm-attachment dm-attachment-image" src={url} alt={att.filename} title={att.filename} />
+                  <!-- Provenance badge: web's own JS check over the DECRYPTED bytes
+                       (media.md § C2PA provenance), the same `C2paImage` the feed paints;
+                       `data-testid`/`data-state` ride `...rest` onto the <img>. -->
+                  <C2paImage data-testid={IDS.DM_ATTACHMENT_IMAGE} data-state="painted" class="dm-attachment dm-attachment-image" src={url} bytes={manager?.attachmentBytes(att.blob_hash)} mimeType={att.mime_type} alt={att.filename} title={att.filename} />
                 {:else}
                   <span data-testid={IDS.DM_ATTACHMENT_IMAGE} data-state="placeholder" class="dm-attachment dm-attachment-file" title={att.filename}>🖼 {att.filename} · {byteSize(att.size_bytes)}</span>
                 {/if}
@@ -2147,6 +2168,7 @@
             placeholder={t.conversations.compose.write_message}
             markdownEnabled={markdownEnabled}
             markersShown={composeMarkersShown}
+            disabled={isGated(caps?.can_send)}
           />
           <!-- List send (`mail-mass-mailing.md` § Composing a list message):
                present only while the compose's one mail recipient is one of the
@@ -2197,7 +2219,7 @@
                 onclick={send}>{t.common.send}</button
               >
             {:else}
-              <button data-testid={IDS.DM_SEND_BUTTON} class="action-btn primary" onclick={send}>{t.common.send}</button>
+              <button data-testid={IDS.DM_SEND_BUTTON} class="action-btn primary" class:disabled={isGated(caps?.can_send)} data-disabled={String(isGated(caps?.can_send))} disabled={isGated(caps?.can_send)} onclick={send}>{t.common.send}</button>
             {/if}
           </div>
         </div>

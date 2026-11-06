@@ -139,6 +139,64 @@ public class NestRpcPushDispatchTests
         Assert.Empty(agent.PulledNow);
     }
 
+    [Theory]
+    [InlineData("fauna.bridges.push.import_progress")]
+    [InlineData("fauna.bridges.push.import_error")]
+    [InlineData("fauna.bridges.push.import_complete")]
+    public async Task ImportPushes_RaiseMailImportPushChanged_AndNothingElse(string kind)
+    {
+        // mailbox-migration.md § A failed import is a record the wizard shows until the
+        // user moves on: the three import events arrive as `FfiPushEvent.Other`, and only
+        // the shared classifier's `mailImport` flag decides whether the open Import
+        // wizard re-reads. They must not cross-fire the spam twin or nudge the agent.
+        var (rpc, agent) = Subject();
+        int raised = 0, spamRaised = 0;
+        rpc.MailImportPushChanged += () => raised++;
+        rpc.MailSpamPushChanged += () => spamRaised++;
+
+        await rpc.DispatchPush(new FfiPushEvent.Other(kind));
+
+        Assert.Equal(1, raised);
+        Assert.Equal(0, spamRaised);
+        Assert.Empty(agent.PulledNow);
+    }
+
+    [Theory]
+    [InlineData("fauna.bridges.push.export_progress")]
+    [InlineData("fauna.bridges.push.export_error")]
+    [InlineData("fauna.bridges.push.export_complete")]
+    public async Task ExportPushes_RaiseMailExportPushChanged_AndNothingElse(string kind)
+    {
+        // mail-export.md § A failed export is a record the wizard shows until the user
+        // moves on: the three export events arrive as `FfiPushEvent.Other`, and only the
+        // shared classifier's `mailExport` flag decides whether the open Export wizard
+        // re-reads. They must not cross-fire the import or spam twins or nudge the agent.
+        var (rpc, agent) = Subject();
+        int raised = 0, importRaised = 0, spamRaised = 0;
+        rpc.MailExportPushChanged += () => raised++;
+        rpc.MailImportPushChanged += () => importRaised++;
+        rpc.MailSpamPushChanged += () => spamRaised++;
+
+        await rpc.DispatchPush(new FfiPushEvent.Other(kind));
+
+        Assert.Equal(1, raised);
+        Assert.Equal(0, importRaised);
+        Assert.Equal(0, spamRaised);
+        Assert.Empty(agent.PulledNow);
+    }
+
+    [Fact]
+    public async Task ImportPushes_DoNotRaiseTheExportTwin()
+    {
+        var (rpc, _) = Subject();
+        int exportRaised = 0;
+        rpc.MailExportPushChanged += () => exportRaised++;
+
+        await rpc.DispatchPush(new FfiPushEvent.Other("fauna.bridges.push.import_error"));
+
+        Assert.Equal(0, exportRaised);
+    }
+
     [Fact]
     public async Task SyncChanged_AlsoRaisesFolderChangedPushed()
     {
@@ -150,7 +208,7 @@ public class NestRpcPushDispatchTests
         // silently swallowed the raise for a kind it is supposed to allow.
         var (rpc, agent) = Subject();
         string? seenFolder = null;
-        rpc.FolderChangedPushed += f => seenFolder = f;
+        rpc.FolderChangedPushed += (f, _) => seenFolder = f;
 
         await rpc.DispatchPush(new FfiPushEvent.SyncChanged("docs", null));
 
@@ -158,6 +216,41 @@ public class NestRpcPushDispatchTests
         // The agent nudge is a side effect, not a staleness reaction — stays
         // unconditional regardless of the classifier gate on the UI raise.
         Assert.Equal(new[] { "docs" }, agent.PulledNow);
+    }
+
+    [Fact]
+    public async Task SealedSyncChanged_RaisesTheBlankFolderAndHashPair()
+    {
+        // A sealed set's nudge carries a blank `folder` and only `folderHash`
+        // (path-sealing.md § the set-name plane): the UI raise must hand both
+        // to the subscriber, whose gate matches through SyncChangedGate.
+        var (rpc, _) = Subject();
+        string? seenFolder = null;
+        byte[]? seenHash = null;
+        rpc.FolderChangedPushed += (f, h) => { seenFolder = f; seenHash = h; };
+        var hash = uniffi.fauna_ffi.FaunaFfiMethods.WebdavSetNameHash("docs");
+
+        await rpc.DispatchPush(new FfiPushEvent.SyncChanged("", hash));
+
+        Assert.Equal("", seenFolder);
+        Assert.Equal(hash, seenHash);
+    }
+
+    [Fact]
+    public void SyncChangedGate_MatchesByHash_WhenFolderIsBlank()
+    {
+        var hash = uniffi.fauna_ffi.FaunaFfiMethods.WebdavSetNameHash("docs");
+
+        Assert.True(SyncChangedGate.NamesSet("", hash, "docs"));
+        Assert.False(SyncChangedGate.NamesSet("", hash, "photos"));
+    }
+
+    [Fact]
+    public void SyncChangedGate_FallsBackToTheName_WithoutAHash()
+    {
+        Assert.True(SyncChangedGate.NamesSet("docs", null, "docs"));
+        Assert.False(SyncChangedGate.NamesSet("docs", null, "photos"));
+        Assert.False(SyncChangedGate.NamesSet("", null, "docs"));
     }
 
     [Fact]
@@ -172,6 +265,26 @@ public class NestRpcPushDispatchTests
 
         Assert.Equal(2, reconnects);
         Assert.Empty(agent.PulledNow);
+    }
+
+    [Fact]
+    public async Task OnlyResyncRequired_AndAReconnect_MarkTheDevicesSurfaceStale()
+    {
+        var (rpc, _) = Subject();
+        int stale = 0;
+        rpc.DevicesStale += () => stale++;
+
+        // A Notification fires Reconnected too, but says nothing about the folder rows.
+        await rpc.DispatchPush(AnyNotification());
+        Assert.Equal(0, stale);
+
+        await rpc.DispatchPush(new FfiPushEvent.ResyncRequired(3));
+        Assert.Equal(1, stale);
+
+        // The reconnect pump's per-reconnect step (transport.md: `devices` is
+        // reconnect-and-resync only).
+        rpc.OnReconnectObserved();
+        Assert.Equal(2, stale);
     }
 
     [Fact]

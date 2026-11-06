@@ -129,14 +129,7 @@ def listing_dir(request, logged_in_app) -> Path:
 
 
 def _require_capture(driver) -> None:
-    if type(driver).capture_window is PlatformDriver.capture_window:
-        app_surface.skip_unbuilt(
-            driver,
-            surface="capture_window (a sized capture of the app's own window)",
-            detail="built on windows (flaui-bridge /window/capture); the other "
-            "store apps each need their own capture",
-            tracked="docs/goal/architecture/installers/windows.md § Store distribution",
-        )
+    app_surface.require_surface(driver, "window-capture")
 
 
 def test_store_listing_feed(logged_in_app, listing_dir):

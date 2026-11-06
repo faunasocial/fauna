@@ -255,52 +255,60 @@ pub use fauna_protocol::dav_identity::uid_hash;
 pub use fauna_mls::wrapped_blob::dav_body::SealError;
 
 /// Seal `plaintext` (the canonical VEVENT `.ics` bytes, or the index-hint bytes)
-/// to the actor's own `credential_id="default"` recipient pubkey derived from
-/// `msek` (the `fauna.state.mail` MSEK), producing the `encrypted_body` wire bytes.
-///
-/// This is the EXACT scheme the MDA's CalDAV PUT uses
-/// (`internal/mda/caldav/put.go` → `mailfauna.EncryptToRecipient`): a single
-/// [`MailRecordEnvelope`](fauna_mls::wrapped_blob::MailRecordEnvelope) (HPKE `DHKEM(X25519,HKDF-SHA256)` + `HKDF-SHA256` +
-/// `ChaCha20-Poly1305`, AAD `for_mail_record()`) serialized canonical. Same
-/// `msek` ⇒ same recipient keypair, so the bytes are interchangeable.
-pub use fauna_mls::wrapped_blob::dav_body::seal_dav_body as seal_event_body;
+/// to the actor's own recipient-**calendar** pubkey derived from `msek` (the
+/// `fauna.state.mail` MSEK, through the calendar root), producing the
+/// `encrypted_body` wire bytes — a `calendar-record`
+/// [`MailRecordEnvelope`](fauna_mls::wrapped_blob::MailRecordEnvelope) (HPKE
+/// `DHKEM(X25519,HKDF-SHA256)` + `HKDF-SHA256` + `ChaCha20-Poly1305`, AAD
+/// `for_calendar_record()`) serialized canonical (`owner-key-material.md`
+/// § Path B-sibling-5). The MDA's CalDAV PUT seals the same way through the FFI,
+/// so the bytes are interchangeable. The calendar arm of
+/// [`seal_dav_body`](fauna_mls::wrapped_blob::dav_body::seal_dav_body).
+pub fn seal_event_body(plaintext: &[u8], msek: &[u8; 32]) -> Result<Vec<u8>, SealError> {
+    fauna_mls::wrapped_blob::dav_body::seal_dav_body(DavKind::Calendar, plaintext, msek)
+}
 
 /// Post-quantum (X-Wing, ML-KEM-768 ∥ X25519) sibling of [`seal_event_body`]
-/// (S3d leg D2c). Derives the actor's **own** X-Wing keypair from `msek` (the
-/// ML-KEM half via `fauna.mail.recipient-mlkem.v1`, the X25519 half reused from
-/// the classical recipient key) and seals the body to it. The produced
-/// [`MailRecordEnvelope`](fauna_mls::wrapped_blob::MailRecordEnvelope) self-describes its X-Wing suite, so the MDA and every
-/// Fauna app open it through the same suite-dispatching [`unseal_event_body`].
+/// (S3d leg D2c). Derives the actor's **own** recipient-calendar X-Wing keypair
+/// from `msek` (both halves from the calendar root) and seals the body to it.
+/// The produced [`MailRecordEnvelope`](fauna_mls::wrapped_blob::MailRecordEnvelope)
+/// self-describes its X-Wing suite, so the MDA and every Fauna app open it
+/// through the same suite-dispatching [`unseal_event_body`].
 ///
 /// [`CalDavClient::seal_and_put_event`] always seals new event bodies with it —
 /// no capability token gates the suite (`post-quantum.md` § Capability
 /// negotiation, the 2026-09-24 ruling); the classical [`seal_event_body`] stays
-/// for the index-hint and for the MDA-sealed bodies (the Go mail bridge's
-/// `EncryptToRecipient`). Because the
-/// key is derived locally from the actor's own MSEK it is always FIPS-203 valid,
-/// so there is no untrusted-published-ek seal-error to degrade from (PQ-4(b)'s
-/// self-DoS vector is vacuous here — an error would be a genuine bug and is
-/// surfaced loudly rather than silently degraded). The index-hint stays classical.
-pub use fauna_mls::wrapped_blob::dav_body::seal_dav_body_xwing as seal_event_body_xwing;
+/// for the index-hint and for the MDA-sealed bodies. Because the key is derived
+/// locally from the actor's own MSEK it is always FIPS-203 valid, so there is
+/// no untrusted-published-ek seal-error to degrade from (PQ-4(b)'s self-DoS
+/// vector is vacuous here — an error would be a genuine bug and is surfaced
+/// loudly rather than silently degraded). The index-hint stays classical.
+pub fn seal_event_body_xwing(plaintext: &[u8], msek: &[u8; 32]) -> Result<Vec<u8>, SealError> {
+    fauna_mls::wrapped_blob::dav_body::seal_dav_body_xwing(DavKind::Calendar, plaintext, msek)
+}
 
 /// Unseal an `encrypted_body` produced by [`seal_event_body`] **or by the MDA** —
-/// both derive the same recipient keypair from `msek`, so a Fauna app reads
-/// MDA-written events and vice versa. Returns the plaintext VEVENT bytes.
+/// both derive the same recipient-calendar keypair from `msek`, so a Fauna app
+/// reads MDA-written events and vice versa. Returns the plaintext VEVENT bytes;
+/// a record of any other kind is refused.
 ///
 /// A single-shot convenience — opening more than one body under the same
 /// `msek` (a calendar list, an event page)? Derive one [`DavRecipientKeys`]
 /// and call its `unseal` per item instead, or every item pays its own X-Wing
 /// keygen again .
-pub use fauna_mls::wrapped_blob::dav_body::unseal_dav_body as unseal_event_body;
+pub fn unseal_event_body(encrypted_body: &[u8], msek: &[u8; 32]) -> Result<Vec<u8>, SealError> {
+    fauna_mls::wrapped_blob::dav_body::unseal_dav_body(DavKind::Calendar, encrypted_body, msek)
+}
 
-/// The actor's own recipient keypair for this crate's sealed bodies (calendar
+/// The actor's own recipient key ring for this crate's sealed bodies (calendar
 /// metadata, event bodies, the Fauna-extension sidecar), derived once from
 /// `msek` and reused across a whole batch — [`unseal_calendar_metadata`],
 /// [`unseal_fauna_ext`], [`decode_event_entry`] and [`decode_event_entry_flat`]
 /// all take one of these instead of a bare `msek`, so `list_calendars` /
 /// `query_events` render N rows with a single keygen instead of N
-/// .
-pub use fauna_mls::wrapped_blob::dav_body::DavRecipientKeys;
+/// . Build it for [`DavKind::Calendar`]: a card ring refuses every
+/// calendar record.
+pub use fauna_mls::wrapped_blob::dav_body::{DavKind, DavRecipientKeys};
 
 // ── Fauna-extension sidecar (caldav-server.md § Event resources) ──────────────
 
@@ -383,14 +391,14 @@ impl FaunaEventExt {
 /// [`seal_event_body`]), producing the `encrypted_fauna_ext` wire bytes. The
 /// payload is canonical dag-CBOR so the bytes are deterministic.
 pub fn seal_fauna_ext(ext: &FaunaEventExt, msek: &[u8; 32]) -> Result<Vec<u8>, SealError> {
-    fauna_mls::wrapped_blob::dav_body::seal_dav_body_typed(ext, msek)
+    fauna_mls::wrapped_blob::dav_body::seal_dav_body_typed(DavKind::Calendar, ext, msek)
 }
 
 /// Post-quantum (X-Wing) sibling of [`seal_fauna_ext`] — the sidecar is standing-
 /// key body content that rides the event, so it follows the event body's suite
 /// selection (S3d leg D2c). [`unseal_fauna_ext`] opens either suite.
 pub fn seal_fauna_ext_xwing(ext: &FaunaEventExt, msek: &[u8; 32]) -> Result<Vec<u8>, SealError> {
-    fauna_mls::wrapped_blob::dav_body::seal_dav_body_typed_xwing(ext, msek)
+    fauna_mls::wrapped_blob::dav_body::seal_dav_body_typed_xwing(DavKind::Calendar, ext, msek)
 }
 
 /// Unseal an `encrypted_fauna_ext` produced by [`seal_fauna_ext`] back into a
@@ -429,7 +437,7 @@ pub fn seal_calendar_metadata(
     meta: &CalendarMetadata,
     msek: &[u8; 32],
 ) -> Result<Vec<u8>, SealError> {
-    fauna_mls::wrapped_blob::dav_body::seal_dav_body_typed(meta, msek)
+    fauna_mls::wrapped_blob::dav_body::seal_dav_body_typed(DavKind::Calendar, meta, msek)
 }
 
 /// Unseal a calendar's `encrypted_metadata` (written by a Fauna app or the
@@ -521,6 +529,15 @@ pub struct IcsImportOutcome {
     pub total: u32,
 }
 
+/// Outcome of [`CalDavClient::list_calendars_with_personal`]: the actor's
+/// calendars (sealed entries) and, when the lazy `Personal` provision was tried
+/// and failed, why — for the caller to log.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct CalendarsWithPersonal {
+    pub calendars: Vec<bridge_routing::CalendarEntry>,
+    pub personal_provision_error: Option<String>,
+}
+
 /// Typed `fauna.bridges.*` calendar call surface, generic over the WS-RPC
 /// transport (`R: RpcRequester`): native call sites pass `Arc<NestClient>`, the
 /// UniFFI wrapper the same, the wasm SPA its `WsRpcClient`. A Fauna app calls
@@ -554,6 +571,59 @@ impl<R: RpcRequester> CalDavClient<R> {
         req: ListCalendarsRequest,
     ) -> Result<ListCalendarsReply, R::Error> {
         self.nest.request("fauna.bridges.list_calendars", req).await
+    }
+
+    /// The Events page's calendar load: [`Self::list_calendars`], and — when
+    /// the actor has none — the app-side lazy `Personal` (sealed default
+    /// metadata at [`personal_calendar_id`], the row the MDA's first PROPFIND
+    /// would create — caldav-server.md § Lazy "Personal" calendar) followed by
+    /// a re-list, so a fresh or re-claimed actor always has a calendar to pick.
+    /// The one copy every app's load runs (it was four per-app copies, and the
+    /// tui load had none, so a just-enabled tui actor listed zero calendars).
+    ///
+    /// The provision is best-effort: its failure is returned beside the list
+    /// (never swallowed — a silent failure reads as "no calendars") and the
+    /// caller logs it; a list error is the call's error.
+    pub async fn list_calendars_with_personal(
+        &self,
+        actor_id: &[u8; 32],
+        msek: &[u8; 32],
+    ) -> Result<CalendarsWithPersonal, R::Error> {
+        let list = || {
+            self.list_calendars(ListCalendarsRequest {
+                actor_id: actor_id.to_vec(),
+            })
+        };
+        let calendars = list().await?.calendars;
+        if !calendars.is_empty() {
+            return Ok(CalendarsWithPersonal {
+                calendars,
+                personal_provision_error: None,
+            });
+        }
+        let provisioned = match seal_calendar_metadata(&default_personal_metadata(), msek) {
+            Ok(sealed) => self
+                .provision_calendar(ProvisionCalendarRequest {
+                    actor_id: actor_id.to_vec(),
+                    calendar_id: personal_calendar_id().to_vec(),
+                    encrypted_metadata: sealed,
+                    update_metadata: false,
+                })
+                .await
+                .map(|_| ())
+                .map_err(|e| format!("provision_calendar: {e}")),
+            Err(e) => Err(format!("seal Personal metadata: {e}")),
+        };
+        match provisioned {
+            Ok(()) => Ok(CalendarsWithPersonal {
+                calendars: list().await?.calendars,
+                personal_provision_error: None,
+            }),
+            Err(e) => Ok(CalendarsWithPersonal {
+                calendars,
+                personal_provision_error: Some(e),
+            }),
+        }
     }
 
     /// `fauna.bridges.query_events` — paginated REPORT (calendar-query /
@@ -2138,7 +2208,7 @@ impl<R: RpcRequester> CalDavClient<R> {
         prior_mseks: &[[u8; 32]],
         target: &[u8; 32],
     ) -> Result<Option<([u8; 32], FlatEvent)>, InboundScheduleError<R::Error>> {
-        let keys = DavRecipientKeys::from_mseks(msek, prior_mseks);
+        let keys = DavRecipientKeys::from_mseks(DavKind::Calendar, msek, prior_mseks);
         let listing = self
             .list_calendars(ListCalendarsRequest {
                 actor_id: actor_id.to_vec(),
@@ -3165,8 +3235,8 @@ mod tests {
             ..Default::default()
         };
         let sealed = seal_fauna_ext_xwing(&ext, &MSEK).expect("xwing seal ext");
-        let opened =
-            unseal_fauna_ext(&sealed, &DavRecipientKeys::derive(&MSEK)).expect("unseal ext");
+        let opened = unseal_fauna_ext(&sealed, &DavRecipientKeys::derive(DavKind::Calendar, &MSEK))
+            .expect("unseal ext");
         assert_eq!(opened, ext);
     }
 
@@ -3208,7 +3278,8 @@ mod tests {
         let sealed = seal_calendar_metadata(&meta, &MSEK).expect("seal");
         assert!(!sealed.is_empty());
         let opened =
-            unseal_calendar_metadata(&sealed, &DavRecipientKeys::derive(&MSEK)).expect("unseal");
+            unseal_calendar_metadata(&sealed, &DavRecipientKeys::derive(DavKind::Calendar, &MSEK))
+                .expect("unseal");
         assert_eq!(opened, meta);
     }
 
@@ -3224,7 +3295,8 @@ mod tests {
         };
         let sealed = seal_calendar_metadata(&meta, &MSEK).expect("seal");
         let opened =
-            unseal_calendar_metadata(&sealed, &DavRecipientKeys::derive(&MSEK)).expect("unseal");
+            unseal_calendar_metadata(&sealed, &DavRecipientKeys::derive(DavKind::Calendar, &MSEK))
+                .expect("unseal");
         assert_eq!(opened, meta);
         assert!(opened.description.is_empty());
     }
@@ -3233,7 +3305,8 @@ mod tests {
     fn calendar_metadata_empty_blob_is_default() {
         // Mirrors Go `UnsealCollectionMetadata` empty-ciphertext path.
         assert_eq!(
-            unseal_calendar_metadata(&[], &DavRecipientKeys::derive(&MSEK)).expect("empty"),
+            unseal_calendar_metadata(&[], &DavRecipientKeys::derive(DavKind::Calendar, &MSEK))
+                .expect("empty"),
             CalendarMetadata::default()
         );
     }
@@ -3345,7 +3418,8 @@ mod tests {
         };
 
         let flat =
-            decode_event_entry_flat(&entry, &DavRecipientKeys::derive(&MSEK)).expect("decode flat");
+            decode_event_entry_flat(&entry, &DavRecipientKeys::derive(DavKind::Calendar, &MSEK))
+                .expect("decode flat");
         assert_eq!(flat.event_id, vec![1u8; 32]);
         assert_eq!(flat.uid_hash, uid_hash(&fields.uid).to_vec());
         assert_eq!(flat.etag, "etag-1");
@@ -3396,7 +3470,8 @@ mod tests {
             ..Default::default()
         };
         let flat =
-            decode_event_entry_flat(&entry, &DavRecipientKeys::derive(&MSEK)).expect("decode");
+            decode_event_entry_flat(&entry, &DavRecipientKeys::derive(DavKind::Calendar, &MSEK))
+                .expect("decode");
         assert!(flat.fauna_ext.is_none());
         // No sidecar → bare wire TENTATIVE renders "tentative", never "interested".
         assert_eq!(flat.attendees[0].rsvp, "tentative");
@@ -3410,7 +3485,10 @@ mod tests {
             ..Default::default()
         };
         assert!(matches!(
-            decode_event_entry_flat(&entry, &DavRecipientKeys::derive(&[9u8; 32])),
+            decode_event_entry_flat(
+                &entry,
+                &DavRecipientKeys::derive(DavKind::Calendar, &[9u8; 32])
+            ),
             Err(DecodeEventError::Unseal(_))
         ));
     }
@@ -3430,15 +3508,20 @@ mod tests {
         };
         let sealed = seal_fauna_ext(&ext, &MSEK).expect("seal");
         assert_eq!(
-            unseal_fauna_ext(&sealed, &DavRecipientKeys::derive(&MSEK)).expect("unseal"),
+            unseal_fauna_ext(&sealed, &DavRecipientKeys::derive(DavKind::Calendar, &MSEK))
+                .expect("unseal"),
             ext
         );
         assert!(
-            unseal_fauna_ext(&sealed, &DavRecipientKeys::derive(&[0u8; 32])).is_err(),
+            unseal_fauna_ext(
+                &sealed,
+                &DavRecipientKeys::derive(DavKind::Calendar, &[0u8; 32])
+            )
+            .is_err(),
             "wrong key rejected"
         );
         assert!(
-            unseal_fauna_ext(&[], &DavRecipientKeys::derive(&MSEK)).is_err(),
+            unseal_fauna_ext(&[], &DavRecipientKeys::derive(DavKind::Calendar, &MSEK)).is_err(),
             "a zero-length sidecar ciphertext must not authenticate as a default sidecar \
              ( — the DAV-body dedup briefly made this an Ok(default))"
         );
@@ -3628,8 +3711,11 @@ mod tests {
             .encrypted_fauna_ext
             .expect("sidecar present on Fauna write");
         assert_eq!(
-            unseal_fauna_ext(&sealed_ext, &DavRecipientKeys::derive(&MSEK))
-                .expect("unseal sidecar"),
+            unseal_fauna_ext(
+                &sealed_ext,
+                &DavRecipientKeys::derive(DavKind::Calendar, &MSEK)
+            )
+            .expect("unseal sidecar"),
             ext
         );
     }
@@ -3752,8 +3838,11 @@ mod tests {
     #[test]
     fn decode_event_entry_unseals_and_parses() {
         let ics = lunch_ics();
-        let decoded = decode_event_entry(&sealed_entry(&ics), &DavRecipientKeys::derive(&MSEK))
-            .expect("decode");
+        let decoded = decode_event_entry(
+            &sealed_entry(&ics),
+            &DavRecipientKeys::derive(DavKind::Calendar, &MSEK),
+        )
+        .expect("decode");
         // Metadata carries through verbatim.
         assert_eq!(decoded.etag, "etag-x");
         assert_eq!(decoded.modseq, 5);
@@ -3775,7 +3864,9 @@ mod tests {
             ..Default::default()
         };
         let entry = sealed_entry_with_ext(&lunch_ics(), Some(&ext));
-        let decoded = decode_event_entry(&entry, &DavRecipientKeys::derive(&MSEK)).expect("decode");
+        let decoded =
+            decode_event_entry(&entry, &DavRecipientKeys::derive(DavKind::Calendar, &MSEK))
+                .expect("decode");
         let decoded_ext = decoded.fauna_ext.expect("sidecar decoded");
         assert_eq!(decoded_ext, ext);
         // The asymmetric projection over the decoded sidecar: Alice (TENTATIVE
@@ -3795,8 +3886,11 @@ mod tests {
     #[test]
     fn decode_event_entry_wrong_msek_is_unseal_error() {
         let entry = sealed_entry(&lunch_ics());
-        let err = decode_event_entry(&entry, &DavRecipientKeys::derive(&[0u8; 32]))
-            .expect_err("wrong key must fail");
+        let err = decode_event_entry(
+            &entry,
+            &DavRecipientKeys::derive(DavKind::Calendar, &[0u8; 32]),
+        )
+        .expect_err("wrong key must fail");
         assert!(matches!(err, DecodeEventError::Unseal(_)));
     }
 
@@ -3849,9 +3943,11 @@ mod tests {
                 more: false,
             },
         });
-        let page =
-            block_on(client.query_events_decoded(query_req(), &DavRecipientKeys::derive(&MSEK)))
-                .expect("decoded page");
+        let page = block_on(client.query_events_decoded(
+            query_req(),
+            &DavRecipientKeys::derive(DavKind::Calendar, &MSEK),
+        ))
+        .expect("decoded page");
         match page {
             DecodedEventsPage::Ok {
                 events,
@@ -3874,9 +3970,11 @@ mod tests {
         let client = CalDavClient::new(QueryRequester {
             reply: QueryEventsReply::CalendarNotFound,
         });
-        let page =
-            block_on(client.query_events_decoded(query_req(), &DavRecipientKeys::derive(&MSEK)))
-                .expect("ok result");
+        let page = block_on(client.query_events_decoded(
+            query_req(),
+            &DavRecipientKeys::derive(DavKind::Calendar, &MSEK),
+        ))
+        .expect("ok result");
         assert_eq!(page, DecodedEventsPage::CalendarNotFound);
     }
 
@@ -3906,7 +4004,7 @@ mod tests {
         let ics = block_on(client.export_calendar_ics(
             &[0xAAu8; 32],
             &[0xBBu8; 32],
-            &DavRecipientKeys::derive(&MSEK),
+            &DavRecipientKeys::derive(DavKind::Calendar, &MSEK),
         ))
         .expect("export");
         let reread: Vec<EventFields> = parse_ical_multi(&ics)
@@ -3928,7 +4026,7 @@ mod tests {
         let ics = block_on(client.export_calendar_ics(
             &[0xAAu8; 32],
             &[0xBBu8; 32],
-            &DavRecipientKeys::derive(&MSEK),
+            &DavRecipientKeys::derive(DavKind::Calendar, &MSEK),
         ))
         .expect("export");
         assert!(ics.contains("BEGIN:VCALENDAR"), "{ics}");
@@ -3982,7 +4080,7 @@ mod tests {
     #[test]
     fn a_newer_query_outcome_is_an_error_never_calendar_not_found() {
         let client = CalDavClient::new(NewerNest::new());
-        let keys = DavRecipientKeys::derive(&MSEK);
+        let keys = DavRecipientKeys::derive(DavKind::Calendar, &MSEK);
         let err = block_on(client.query_events_decoded(query_req(), &keys))
             .expect_err("an unknown outcome must not read as a page");
         assert!(matches!(err, ReadEventsError::UnknownOutcome), "{err:?}");
@@ -4001,7 +4099,7 @@ mod tests {
         let err = block_on(client.export_calendar_ics(
             &[0xAAu8; 32],
             &[0xBBu8; 32],
-            &DavRecipientKeys::derive(&MSEK),
+            &DavRecipientKeys::derive(DavKind::Calendar, &MSEK),
         ))
         .expect_err("export must fail");
         assert!(matches!(err, ReadEventsError::UnknownOutcome), "{err:?}");
@@ -5011,11 +5109,54 @@ mod tests {
             put.encrypted_fauna_ext
                 .as_deref()
                 .expect("a re-binding update writes the sidecar"),
-            &DavRecipientKeys::derive(&MSEK),
+            &DavRecipientKeys::derive(DavKind::Calendar, &MSEK),
         )
         .expect("unseal");
         assert_eq!(ext.organizer_actor_id.as_deref(), Some(SUCCESSOR_ACTOR));
         assert_eq!(ext.organizer_home_nest_url.as_deref(), Some(""));
+    }
+
+    /// An actor with no calendars gets the lazy `Personal` provisioned at its
+    /// deterministic id, then re-listed — the Events page's load on every app.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn list_calendars_with_personal_provisions_when_empty() {
+        let rec = std::sync::Arc::new(ScheduleRequester::new(vec![], Default::default()));
+        let client = CalDavClient::new(rec.clone());
+        let out = block_on(client.list_calendars_with_personal(&ACTOR, &MSEK)).expect("list");
+        assert_eq!(out.personal_provision_error, None);
+        assert_eq!(
+            rec.count("fauna.bridges.list_calendars"),
+            2,
+            "list, provision, re-list"
+        );
+        let provisions = rec.payloads("fauna.bridges.provision_calendar");
+        assert_eq!(provisions.len(), 1);
+        let req: ProvisionCalendarRequest =
+            fauna_protocol::decode_strict(&provisions[0]).expect("decode provision");
+        assert_eq!(req.calendar_id, personal_calendar_id().to_vec());
+        assert!(!req.update_metadata);
+        let meta = unseal_calendar_metadata(
+            &req.encrypted_metadata,
+            &DavRecipientKeys::derive(DavKind::Calendar, &MSEK),
+        )
+        .expect("unseal");
+        assert_eq!(meta, default_personal_metadata());
+    }
+
+    /// An actor that already has a calendar is listed once, nothing provisioned.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn list_calendars_with_personal_leaves_a_populated_list_alone() {
+        let rec = std::sync::Arc::new(ScheduleRequester::new(
+            vec![cal_entry(&[3u8; 32])],
+            Default::default(),
+        ));
+        let client = CalDavClient::new(rec.clone());
+        let out = block_on(client.list_calendars_with_personal(&ACTOR, &MSEK)).expect("list");
+        assert_eq!(out.calendars.len(), 1);
+        assert_eq!(rec.count("fauna.bridges.list_calendars"), 1);
+        assert_eq!(rec.count("fauna.bridges.provision_calendar"), 0);
     }
 
     /// Creation binds the event to its origin in the sealed sidecar — and a
@@ -5068,7 +5209,7 @@ mod tests {
             put.encrypted_fauna_ext
                 .as_deref()
                 .expect("binding sidecar written"),
-            &DavRecipientKeys::derive(&MSEK),
+            &DavRecipientKeys::derive(DavKind::Calendar, &MSEK),
         )
         .expect("unseal ext");
         assert_eq!(ext.organizer_actor_id.as_deref(), Some(ORGANIZER_ACTOR));

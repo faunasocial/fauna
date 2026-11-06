@@ -209,7 +209,15 @@ pub async fn resolve_pre_login(
             None => None,
             Some(url) => {
                 let nest = NestClient::new(url.clone(), ActorKeypair::from_secret(secret));
-                match nest.connect().await {
+                // The mint first: `connect()` alone is `Ok` over a dead box,
+                // its supervisor retrying, and every cold read would then wait
+                // out its request deadline instead of being skipped.
+                match async {
+                    nest.authenticate().await?;
+                    nest.connect().await
+                }
+                .await
+                {
                     Ok(()) => Some(nest),
                     Err(e) => {
                         // The saved nest may well be the dead box — the case

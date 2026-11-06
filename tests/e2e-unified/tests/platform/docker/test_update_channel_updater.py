@@ -55,6 +55,7 @@ check is due only hourly or on a channel change (`Checks::due`), and a fresh
 updater checks at once — the same thing a box's restart does.
 """
 
+import hashlib
 import json
 import secrets
 import ssl
@@ -67,6 +68,8 @@ from pathlib import Path
 import pytest
 
 from .helpers import (
+    BUILD_TIMEOUT,
+    SLOT_WAIT_TIMEOUT,
     admin_ws,
     authed_ws,
     claim_admin_api,
@@ -92,7 +95,7 @@ pytestmark = [
     pytest.mark.feature("admin-nest"),
 ]
 
-UPDATER_IMAGE = "fauna-updater-e2e:local"
+UPDATER_IMAGE_REPO = "fauna-updater-e2e"
 UPDATE_LABEL = "social.fauna.update"
 #: The bundles' `stop_grace_period`, which the successor must keep.
 STOP_TIMEOUT = 15
@@ -135,26 +138,54 @@ def _containerd_store() -> bool:
     return "io.containerd.snapshotter" in status
 
 
+#: The base image this process has already layered the updater onto.
+_updater_built_on: str | None = None
+
+
+def prebuild_images(base: str) -> None:
+    """The session prebuild's door (`conftest.py::pytest_collection_finish`),
+    which runs outside every test's timeout."""
+    _build_updater_image(base)
+
+
+def _updater_tag(base: str) -> str:
+    """The updater image's tag, keyed on the base image it is layered onto, so
+    two checkouts on one engine (each with its own keyed base) never overwrite
+    each other's build between its build and its `SavedImage`."""
+    return f"{UPDATER_IMAGE_REPO}:{hashlib.sha256(base.encode()).hexdigest()[:16]}"
+
+
+def _updater_image() -> str:
+    """The tag this process layered (`_build_updater_image` ran first)."""
+    assert _updater_built_on is not None, "the updater image is not built yet"
+    return _updater_tag(_updater_built_on)
+
+
 def _build_updater_image(base: str) -> str:
-    """Layer the `test-hooks` updater onto the built nest image. Only the
-    updater's crate graph compiles; held in a machine-wide build slot where the
-    fleet tooling exists, like every compile on a dev box."""
+    """Layer the `test-hooks` updater onto the built nest image, once per run.
+    Only the updater's crate graph compiles; held in a machine-wide build slot
+    where the fleet tooling exists, like every compile on a dev box."""
+    global _updater_built_on
+    if _updater_built_on == base:
+        return _updater_tag(base)
     repo = get_repo_root()
     dockerfile = Path(__file__).with_name("updater-e2e.Dockerfile")
     slot = repo / "scripts" / "build-slot.py"
     prefix = (
-        ["uv", "run", "--no-project", "python", str(slot), "--pool", "build", "--"]
+        ["uv", "run", "--no-project", "python", str(slot), "--pool", "build",
+         "--timeout", str(SLOT_WAIT_TIMEOUT), "--"]
         if slot.exists()
         else []
     )
     result = subprocess.run(
         [*prefix, "docker", "buildx", "build", "-f", str(dockerfile),
-         "--build-arg", f"BASE_IMAGE={base}", "-t", UPDATER_IMAGE, "--load", str(repo)],
-        capture_output=True, text=True, timeout=1800,
+         "--build-arg", f"BASE_IMAGE={base}", "-t", _updater_tag(base), "--load", str(repo)],
+        capture_output=True, text=True, timeout=SLOT_WAIT_TIMEOUT + BUILD_TIMEOUT,
     )
     if result.returncode != 0:
         raise RuntimeError(f"updater e2e image build failed:\n{result.stderr[-3000:]}")
-    return UPDATER_IMAGE
+    _updater_built_on = base
+    return _updater_tag(base)
 
 
 class Bench:
@@ -250,7 +281,7 @@ class Bench:
         """Run the updater; returns its container id. ``managed``: from the
         managed repository at the nest's own reference, restarted by the engine
         like the bundles' — the shape that hands itself off; otherwise from
-        ``UPDATER_IMAGE``, which the hand-off leaves alone."""
+        the layered updater image, which the hand-off leaves alone."""
         self.stop_updater()
         extra = [arg for k, v in (env or {}).items() for arg in ("-e", f"{k}={v}")]
         return _docker(
@@ -262,7 +293,7 @@ class Bench:
             *(arg for k, v in self.registry.env.items() for arg in ("-e", f"{k}={v}")),
             *extra,
             "--entrypoint", "/usr/local/bin/fauna-updater-e2e",
-            f"{self.repository}:test" if managed else UPDATER_IMAGE,
+            f"{self.repository}:test" if managed else _updater_image(),
         )
 
     def stop_updater(self) -> None:
@@ -398,6 +429,25 @@ def bench(tmp_path_factory):
     finally:
         b.cleanup()
         registry.stop()
+
+
+def test_a_stepped_aside_container_of_another_repository_is_left_alone(bench):
+    """A second updater on the engine, following another repository, is at work:
+    its nest is aside and stopped, as in the middle of a re-create. This updater's
+    start must not put it back — that answered the re-create's create with 409,
+    name already in use. The container here is the state alone, never started."""
+    aside = f"{bench.name}-foreign-fauna-updater-old"
+    _docker("create", "--name", aside, "--label", f"{UPDATE_LABEL}=true", _updater_image())
+    try:
+        bench.start_updater()
+        bench.await_log(f"{aside}: runs ")
+        bench.await_log(f"{bench.name}: current on test")
+        found = _inspect(aside)
+        assert found is not None, "the foreign container kept its name"
+        assert found["State"]["Status"] == "created", "and was never started"
+    finally:
+        bench.stop_updater()
+        remove_container(aside)
 
 
 def test_current_when_the_channel_head_is_the_running_build(bench):

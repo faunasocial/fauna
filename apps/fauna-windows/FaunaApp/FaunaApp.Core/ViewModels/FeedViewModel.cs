@@ -39,8 +39,10 @@ namespace FaunaApp.Core.ViewModels;
 /// </summary>
 internal partial class FeedViewModel : ViewModelBase
 {
-    /// <summary>Singleton accessor mirroring <c>ConversationsViewModel.Current</c>;
-    /// the E2E state bridge reads the live snapshot through it.</summary>
+    /// <summary>Singleton accessor mirroring <c>OnboardingViewModel.Current</c>; the
+    /// E2E state bridge reads the live snapshot through it, and so do production
+    /// paths (the Personalization page's manager, <c>FeedManagerHost</c>'s reconnect
+    /// wiring), so it is not e2e surface.</summary>
     internal static FeedViewModel? Current { get; private set; }
 
     private readonly FfiFeedManager _manager;
@@ -48,14 +50,46 @@ internal partial class FeedViewModel : ViewModelBase
     private readonly FeedSnapshotObserver _observer;
     private FeedSnapshot? _cachedSnapshot;
 
+    /// <summary><c>true</c> for a view model bound to an AUTHOR WINDOW
+    /// (<see cref="ForAuthorWindow"/>) rather than to the session's timeline. A window
+    /// is a READ of one author's posts — the profile page's Posts tab — so it never
+    /// becomes <see cref="Current"/>, and its re-read is the current feed alone (it has
+    /// no feed list, bridge feeds or composer of its own).</summary>
+    public bool IsAuthorWindow { get; }
+
     // `rpc` is no longer FIELDED: the last thing this VM held it for was the raw
     // posts.interact call, which now goes through the manager. It is still used
     // here, for the reconnect re-hydrate wiring below.
     public FeedViewModel(FfiFeedManager manager, FeedSnapshotObserver observer, INestRpcClient rpc)
+        : this(manager, observer, rpc, isAuthorWindow: false)
+    {
+    }
+
+    /// <summary>
+    /// A view model over ONE author's posts — the profile page's Posts tab
+    /// (`ui/profile.md` § Layout &amp; flow → <i>The Posts tab</i>). <paramref name="window"/>
+    /// is the timeline manager's <c>AuthorWindow(actorId)</c> (`ui/feed.md` § State &amp;
+    /// data shape → <i>The author window</i>), which shares the timeline's transport,
+    /// secret and installed seams, so every getter and verb the feed page's cards call
+    /// works here and acts on the window. The caller reads its first page
+    /// (<c>ReloadCommand</c>) and the next ones (<see cref="LoadMoreAsync"/>); a fresh
+    /// window per open of the tab, never cached (`ui/profile.md` § Persistence).
+    /// Mirrors apple's <c>FeedVM.authorWindow</c> and android's window-bound
+    /// <c>FeedVM</c>.
+    /// </summary>
+    public static FeedViewModel ForAuthorWindow(
+        FfiFeedManager window, FeedSnapshotObserver observer, INestRpcClient rpc)
+        => new(window, observer, rpc, isAuthorWindow: true);
+
+    private FeedViewModel(FfiFeedManager manager, FeedSnapshotObserver observer, INestRpcClient rpc, bool isAuthorWindow)
     {
         _manager = manager;
         _observer = observer;
-        Current = this;
+        IsAuthorWindow = isAuthorWindow;
+        // A window never stands in for the session's timeline: Current is what
+        // Personalization, the e2e state read and FeedManagerHost's off-page re-pull
+        // resolve the timeline through.
+        if (!isAuthorWindow) Current = this;
         // `manager` is FeedManagerHost's session-lifetime instance, published by
         // the host itself — this VM no longer sets it. It used to, back when the
         // manager was per-page-load and the newest VM's was by definition the
@@ -98,7 +132,8 @@ internal partial class FeedViewModel : ViewModelBase
         // by one on every navigation back to the feed, each dead one still
         // notified on every mutation. Exactly one Feed page is live at a time,
         // and this VM is windows' only feed-observer registrant, so clearing
-        // first is precisely "replace the page's observer".
+        // first is precisely "replace the page's observer". A window is its own
+        // manager, so the same clear touches only the window's list.
         _manager.ClearObservers();
         _manager.AddObserver(observer);
 
@@ -115,6 +150,45 @@ internal partial class FeedViewModel : ViewModelBase
         // re-ranks the OPEN feed. The page calls CleanupStoreChange on navigate-away
         // beside CleanupReconnect.
         WatchStoreChange(rpc, StoreResyncAsync);
+    }
+
+    private bool _detachedFromManager;
+
+    /// <summary>
+    /// Retire this VM's observer from the session's feed manager — the Feed page's
+    /// teardown, called from <c>FeedPage.OnNavigatedFrom</c> (<c>apps/windows.md</c>
+    /// § Client lifetime, the third rule). Idempotent.
+    ///
+    /// <para>The manager OUTLIVES the page (<see cref="FeedManagerHost"/>, one per
+    /// session), so without this the observer of a Feed page the user has left stays
+    /// registered and every later mutation — an engagement toggle on Personalization, a
+    /// push, the off-page reconnect re-pull — re-renders that dead page. Its render
+    /// writes the app-wide error mirror, so a left Feed page would blank an error the
+    /// page now on screen had just painted.</para>
+    ///
+    /// <para>Only while this VM is <see cref="Current"/>: a newer Feed page's VM has
+    /// already cleared the list and registered its own observer, which is not ours to
+    /// remove. <see cref="Current"/> itself stays set — Personalization and the e2e
+    /// commands resolve the session's manager through it.</para>
+    /// </summary>
+    internal void DetachFromManager()
+    {
+        if (_detachedFromManager) return;
+        _detachedFromManager = true;
+        // A window's manager is its own and is dropped with the tab, so its observer
+        // list is always this VM's to clear.
+        if (!IsAuthorWindow && !ReferenceEquals(Current, this)) return;
+        try
+        {
+            // This VM is windows' only feed-manager observer registrant (the
+            // constructor's own ClearObservers relies on the same fact).
+            _manager.ClearObservers();
+        }
+        catch (System.ObjectDisposedException)
+        {
+            // The manager went with an actor change before the page left: nothing
+            // is registered on a destroyed manager any more.
+        }
     }
 
     /// <summary>The store-change re-read: the same reload the reconnect arm runs,
@@ -222,13 +296,48 @@ internal partial class FeedViewModel : ViewModelBase
     [RelayCommand]
     private async Task ReloadAsync()
     {
+        // An author window re-reads its one author's posts and nothing else: the
+        // window's own read also loads the rooms its cards' labels derive from
+        // (`ui/feed.md` § The author window), and the feed list, bridge feeds and
+        // archive comments belong to the timeline (apple's `authorWindow`, tui's
+        // `profile::posts::open`).
+        if (IsAuthorWindow)
+        {
+            await _manager.RefreshCurrentFeed();
+            return;
+        }
         await _manager.RefreshFeeds();
         await _manager.RefreshBridgeFeeds();
         await _manager.RefreshAvailableBridges();
         await _manager.RefreshCurrentFeed();
+        // Archive comments fold under the owner's imported posts (archive-import.md
+        // § Placement under the owner's own post): re-read on every feed visit, in the
+        // background — the manager notifies its observer when the projection lands.
+        // A no-op when the factory was given no recording device.
+        _ = RefreshArchiveCommentsAsync();
+    }
+
+    private async Task RefreshArchiveCommentsAsync()
+    {
+        try { await _manager.RefreshArchiveComments(); }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"[feed] refresh archive comments failed: {ex.Message}");
+        }
     }
 
     public async Task SelectFeedAsync(string? feedId) => await _manager.SelectFeed(feedId);
+
+    /// <summary>The imported-posts selection's platform label (feed.md § The imported-posts
+    /// selection) — the shared <c>classifySources</c> label of <c>snapshot.imported_selected</c>;
+    /// null unless the selection is set.</summary>
+    public string? ImportedPlatformLabel =>
+        Snapshot.importedSelected is { } token
+            ? FaunaFfiMethods.ClassifySources(token, Snapshot.bridgeRoster).FirstOrDefault()?.label ?? token
+            : null;
+
+    /// <summary>Back to the selected feed's whole list (the notice's clear).</summary>
+    public async Task ClearImportedAsync() => await _manager.ClearImported();
 
     /// <summary>Select the built-in Trending virtual feed (`feed-trending-item`,
     /// trending.md § The Trending feed) — mirrors <see cref="SelectFeedAsync"/>.</summary>
@@ -453,6 +562,14 @@ internal partial class FeedViewModel : ViewModelBase
     /// nothing (matches linux's identical trigger).</summary>
     public async Task ResolvePostUnlockOfferAsync(string postId) => await _manager.ResolvePostUnlockOffer(postId);
 
+    /// <summary>Resolve a delivered remote post's author face (the opted-in display
+    /// name) through the shared manager. The manager writes an empty view on every
+    /// no-face outcome, so the caller's <c>authorDisplay is null</c> guard closes
+    /// after one attempt (feed.md § The read model → The remote author's byline).
+    /// Every flavor's: the byline is no payments surface, and
+    /// <see cref="FfiFeedManager.ResolveAuthorFace"/> is ungated.</summary>
+    public async Task ResolveAuthorFaceAsync(string postId) => await _manager.ResolveAuthorFace(postId);
+
 #if PAYMENTS
     /// <summary>Trigger resolution of a post's tip attribution (<c>monetization.md</c>
     /// § Tips). The manager folds a <c>TipView</c> into the matching
@@ -504,6 +621,13 @@ internal partial class FeedViewModel : ViewModelBase
     /// fold the nest's post-act counters into the snapshot either way (feed.md § Interaction
     /// bar → Repost, ratified 2026-08-10).</summary>
     public async Task LikeAsync(string postId) => await _manager.Like(postId);
+
+    /// <summary>Reaction-pill tap (<c>post-reaction-pill</c>) — through
+    /// <c>FfiFeedManager::react</c>: composes the viewer's <c>React</c> post for the emoji or
+    /// deletes the one they already have, and folds the nest's tally back into the snapshot
+    /// (feed.md § Layout &amp; flow → Reaction posts count and paint, ruling 4). A bridged
+    /// target is refused (<c>REACT_REFUSED_NOT_NATIVE</c>) and surfaces on error-message.</summary>
+    public async Task ReactAsync(string postId, string emoji) => await _manager.React(postId, emoji);
 
     /// <summary>Repost / un-repost toggle (<c>feed-repost-button</c>) — through
     /// <c>FfiFeedManager::repost</c>, NOT <c>InteractAsync(id, "repost")</c>: absent
@@ -596,6 +720,19 @@ public partial class FeedPostItem : ObservableObject
 {
     public string PostId { get; }
     public string AuthorHex { get; }
+
+    /// <summary>The nest the author is homed on when it is not the signed-in one
+    /// (<c>PostSummary.home_nest_url</c>) — carried into the profile opener so a
+    /// follow from the author's page reaches that home (federated-follow.md).</summary>
+    public string? HomeNestUrl { get; }
+
+    /// <summary>The remote author's resolved face (<c>PostSummary.author_display</c>):
+    /// <c>false</c> until a resolve has answered, then <c>true</c> — with empty names
+    /// when the author shows none. Reported as the post's <c>author_display</c> state
+    /// key so a test can wait for the answer before it reads the id fallback as final.</summary>
+    public bool HasAuthorFace { get; }
+    public string? AuthorFaceHandle { get; }
+    public string? AuthorFaceDisplayName { get; }
     public string BodyText { get; }
     /// <summary>
     /// Set iff THIS post — never the quoted embed (see
@@ -612,6 +749,17 @@ public partial class FeedPostItem : ObservableObject
     /// <summary>The shared tombstone text — see <see cref="IsLegalTakedown"/>.
     /// Empty when not taken down.</summary>
     public string LegalTakedownDisplayBody { get; }
+    /// <summary>The shared admin-block notice (<c>admin_block_notice(reason)</c>,
+    /// takedown-and-block.md § Admin block of a reported item) when THIS post was
+    /// blocked by the nest's admin after a report (<c>PostSummary.admin_block_reason</c>),
+    /// else <c>null</c>. Like <see cref="IsLegalTakedown"/>, only ever set on a post
+    /// reached through the <c>resolve_post</c> door — the feed query excludes a
+    /// blocked post.</summary>
+    public string? AdminBlockNotice { get; }
+    /// <summary>Whether <see cref="AdminBlockNotice"/> stands IN PLACE of the post
+    /// (the nest withheld the body — any viewer but the author) rather than beside
+    /// the author's own kept body.</summary>
+    public bool IsAdminBlockedInPlace { get; }
     /// <summary>Epoch-millis at the client boundary (the manager already divided
     /// the wire's micros by 1000 — do NOT divide again).</summary>
     public long Timestamp { get; }
@@ -621,6 +769,13 @@ public partial class FeedPostItem : ObservableObject
     public bool PlaysMedia { get; }
     public bool IsReplyPost { get; }
     public string MediaHashHex { get; }
+
+    /// <summary>The nest this post's own bytes rest on when it is not the signed-in one,
+    /// read off the post by the shared <c>post_blob_home</c> face (<c>feed.md</c> § The
+    /// read model → <i>A post homed on another nest</i>) — <c>null</c> for this nest. Handed
+    /// UNCHANGED to <see cref="FfiPostBlobHosts"/> with every blob hash; the app never
+    /// re-derives the host (<c>transport-trust.md</c> § The post arm).</summary>
+    internal FfiPostBlobHome? BlobHome { get; }
 
     /// <summary>The folded <c>Video</c> embed's content hash, or <c>""</c> when the post
     /// carries no video (render-model.md § Implementation status today — the D6b typed
@@ -691,7 +846,7 @@ public partial class FeedPostItem : ObservableObject
     // FeedViewModel.InteractAsync → FfiFeedManager.Interact, which folds the nest's
     // post-act counters back into that same snapshot, so a tapped count moves at once
     // (feed.md § User actions — interact IS a FeedManager method as of 2026-08-10). The count
-    // TextBlock is hidden when 0 (FeedPage.CountToVisibility) — a clean icon-only button
+    // TextBlock is hidden when 0 (PostCardBind.CountToVisibility) — a clean icon-only button
     // until the post has activity, uniform across all seven apps.
     public long LikeCount { get; }
     public long ReplyCount { get; }
@@ -710,7 +865,7 @@ public partial class FeedPostItem : ObservableObject
     public string QuoteButtonName => InteractionButtonName("feed/quote", QuoteCount);
 
     /// <summary>An interaction button's Name — the localized verb, plus the count when
-    /// the button shows one (<c>FeedPage.CountToVisibility</c>'s rule: above zero).</summary>
+    /// the button shows one (<c>PostCardBind.CountToVisibility</c>'s rule: above zero).</summary>
     internal static string InteractionButtonName(string verbKey, long count)
     {
         var verb = Strings.Get(verbKey);
@@ -719,8 +874,17 @@ public partial class FeedPostItem : ObservableObject
 
     /// <summary>The like button's toggle state (<c>PostSummary.viewer_liked</c>) — a lit
     /// <c>feed-like-button</c> means the next tap un-likes (feed.md § Interaction bar →
-    /// Repost, ratified 2026-08-10). Drives <c>FeedPage.LikedToButtonStyle</c>.</summary>
+    /// Repost, ratified 2026-08-10). Drives <c>PostCardBind.LikedToButtonStyle</c>.</summary>
     public bool ViewerLiked { get; }
+
+    /// <summary>One <c>post-reaction-pill</c> per emoji group of the shared tally
+    /// (<c>PostSummary.reactions</c>, nest first-added order), in order; empty on a repost
+    /// row and (from the shared fold) on a bluesky row. feed.md § Layout &amp; flow →
+    /// Reaction posts count and paint, ruling 4.</summary>
+    public IReadOnlyList<PostReactionPill> ReactionPills { get; }
+
+    /// <summary>Whether the pill row paints at all (any group present).</summary>
+    public bool HasReactionPills => ReactionPills.Count > 0;
 
     /// <summary>The <c>Reference::Repost</c> target this post reposts (hex id) — <c>Some</c>
     /// marks THIS card a REPOST ROW (<c>PostSummary.reposted_post_id</c>; feed.md
@@ -744,7 +908,7 @@ public partial class FeedPostItem : ObservableObject
     /// <summary>The connection actor's own live repost of THIS row's post
     /// (<c>PostSummary.viewer_repost_id</c>) — presence = "reposted by me", and the next
     /// <c>feed-repost-button</c> tap un-reposts it (it is exactly <c>unrepost</c>'s
-    /// argument). Drives <c>FeedPage.RepostedToButtonStyle</c>, the repost-toggle twin of
+    /// argument). Drives <c>PostCardBind.RepostedToButtonStyle</c>, the repost-toggle twin of
     /// <see cref="ViewerLiked"/>/<c>LikedToButtonStyle</c>, matching linux's <c>.reposted</c>
     /// CSS class and web's <c>viewer_reposted</c> lit state.</summary>
     public string? ViewerRepostId { get; }
@@ -766,8 +930,19 @@ public partial class FeedPostItem : ObservableObject
     /// the floor of (ui/feed.md § Encryption at rest → Room-restricted — the card, (b)).</summary>
     public string? RoomLabel { get; }
 
-    /// <summary>True iff this post is gated to a tier — shows the gated-post-badge.</summary>
-    public bool HasGatedBadge => GatedTier is { Length: > 0 };
+    /// <summary>The tier the card's gated-post-badge names — the shared
+    /// <c>fauna_feed::post_card_gate</c> pick: the row's own gate, else on a repost row the
+    /// repost TARGET's gate (restricted-posts.md ruling 3). Badge-only: <see cref="GatedTier"/>
+    /// stays the row's own, because the reply audience, the detail unseal and the unlock
+    /// offer read it, and a repost row's target gate must never fold into those.</summary>
+    public string? BadgeTier { get; }
+
+    /// <summary>The reader's room label for the badge (same pick as <see cref="BadgeTier"/>).</summary>
+    public string? BadgeRoomLabel { get; }
+
+    /// <summary>True iff the card shows a gated-post-badge — the row's own gate, or a
+    /// repost target's.</summary>
+    public bool HasGatedBadge => BadgeTier is { Length: > 0 };
 
     /// <summary>The publish-state twin of <see cref="GatedTier"/>
     /// (<c>FeedPostItem.web_slug</c> ← the <c>content_links</c> web-publish row;
@@ -787,17 +962,17 @@ public partial class FeedPostItem : ObservableObject
     /// The badge TEXT is the only thing that differs between a member and everyone else
     /// (ui/feed.md § Encryption at rest → Room-restricted — the card, (c)); mirrors
     /// linux's <c>post_list.rs</c> badge/tooltip match on <c>room_label</c>.</summary>
-    public string? GatedBadgeText => RoomLabel is { Length: > 0 } room
+    public string? GatedBadgeText => BadgeRoomLabel is { Length: > 0 } room
         ? Strings.Get("feed/post/gate_room").Replace("{room}", room)
-        : GatedTier;
+        : BadgeTier;
 
     /// <summary>Tooltip for the gated-post-badge — a member's own room label substituted
     /// into <c>feed/post/gated_badge_room_tooltip</c> ("Room members only: {room}"), else
     /// the tier substituted into the shared <c>feed/post/gated_badge_tooltip</c>
     /// ("Subscribers only: {tier}"), client-side (windows resw is flat).</summary>
-    public string GatedBadgeTooltip => RoomLabel is { Length: > 0 } room
+    public string GatedBadgeTooltip => BadgeRoomLabel is { Length: > 0 } room
         ? Strings.Get("feed/post/gated_badge_room_tooltip").Replace("{room}", room)
-        : GatedTier is { Length: > 0 } tier
+        : BadgeTier is { Length: > 0 } tier
             ? Strings.Get("feed/post/gated_badge_tooltip").Replace("{tier}", tier)
             : "";
 
@@ -812,6 +987,13 @@ public partial class FeedPostItem : ObservableObject
     public string UnlockOfferPriceText { get; }
     public string? UnlockOfferPaymentUrl { get; }
     public bool HasUnlockPaymentLink => !string.IsNullOrEmpty(UnlockOfferPaymentUrl);
+
+    // The completed-buy marker (monetization.md § Per-post pay-to-unlock, "a completed buy
+    // must not be re-offered"; paid-posts outcome 14): the viewer's buy is queued pending
+    // the author's approve, so the card paints the purchase-pending line instead of the buy
+    // affordance — iff no offer is shown and the post is not yet unlocked (tui's condition).
+    public bool UnlockPurchasePending { get; }
+    public bool ShowPurchasePending => UnlockPurchasePending && !HasUnlockOffer && !GatedUnlocked;
 
     // ── Tip display surface (monetization.md § Tips) — the post's tip attribution,
     //    folded by the shared FeedManager::resolve_post_tips into PostSummary.tips and
@@ -865,6 +1047,20 @@ public partial class FeedPostItem : ObservableObject
     /// <c>feed.post.post_not_found</c> exactly where <see cref="QuotedPostIsLegalTakedown"/>
     /// paints its tombstone, with the header omitted the same way (no envelope).</summary>
     public bool QuotedPostIsNotFound { get; }
+
+    /// <summary>True iff the nest's admin blocked the quoted post after a report and
+    /// withheld its body from this viewer (<c>RenderBlock.QuotedPost.adminBlockReason</c>
+    /// set, body empty; takedown-and-block.md § Admin block of a reported item): the card
+    /// paints the shared notice (<see cref="QuotedPostDisplayBody"/>) in place of author +
+    /// body, as <see cref="QuotedPostIsLegalTakedown"/> does. The author's own read keeps
+    /// the body, and the notice rides after it in <see cref="QuotedPostDisplayBody"/>.</summary>
+    public bool QuotedPostIsAdminBlocked { get; }
+
+    /// <summary>The shared admin-block notice for a reason token, resolved through the
+    /// nested lookup (its <c>{reason}</c> value is itself a key) — the one wording seam
+    /// the feed card, the post detail and the DM bubble share.</summary>
+    public static string AdminBlockNoticeText(string reasonToken) =>
+        Strings.ResolveNested(FaunaFfiMethods.AdminBlockNotice(reasonToken));
 
     /// <summary>The text the quoted-post card paints as its body: the shared localized
     /// legal-takedown tombstone (<c>legalTakedownTombstone(reference)</c> via the FFI face,
@@ -1026,7 +1222,23 @@ public partial class FeedPostItem : ObservableObject
     /// and is never revealable.</summary>
     public SocialRenderArm RenderArm =>
         SocialRenderGate.Decide(ContentVerdict, ContentRevealed, IsMuted && !Revealed,
-            regionVerb: Region?.Verb);
+            regionVerb: Region?.Verb, nestVerb: Nest?.Verb);
+
+    /// <summary>Which arm the post DETAIL paints — <see cref="RenderArm"/> without
+    /// the muted-keyword collapse, which is the card's (the viewer opened the post on
+    /// purpose). The content-policy arms compose here as on the card, so a
+    /// guardian-withheld post opened from its card paints the placeholder, never its
+    /// body (nest-rules.md § Implementation status today: web, linux, android and
+    /// apple each had to close the same hole).</summary>
+    public SocialRenderArm DetailArm =>
+        SocialRenderGate.Decide(ContentVerdict, ContentRevealed, muted: false,
+            regionVerb: Region?.Verb, nestVerb: Nest?.Verb);
+
+    /// <summary>Whether the post detail withholds the body — the gated-unlock fetch
+    /// is skipped then (nothing of the body is painted to repaint).</summary>
+    public bool DetailWithholdsBody => DetailArm is SocialRenderArm.RegionWithheld
+        or SocialRenderArm.NestWithheld or SocialRenderArm.ContentBlocked
+        or SocialRenderArm.ContentCollapsed;
 
     /// <summary>The region placeholder when the region content policy drove this
     /// post's verdict (region-blocking.md § The blocked render), else <c>null</c>.
@@ -1051,6 +1263,49 @@ public partial class FeedPostItem : ObservableObject
     public string RegionAccessibleNotice => ShowRegionPlaceholder ? RegionNoticeText : "";
     public string RegionAuthority => Region?.AuthorityName ?? "";
     public string RegionReason => Region?.Reason ?? "";
+
+    /// <summary>The nest placeholder when a rule of the nest this post was read
+    /// through drove its verdict (nest-rules.md § The nest source in the engine),
+    /// else <c>null</c>. Part of <see cref="ContentEquals"/>, like
+    /// <see cref="Region"/>: a change of the nest's rules re-reads the card.</summary>
+    public NestPlaceholderModel? Nest { get; }
+
+    /// <summary>Gate for the nest placeholder (<c>nest-blocked-notice</c> + domain +
+    /// reason) painted in place of the body.</summary>
+    public bool ShowNestPlaceholder => RenderArm == SocialRenderArm.NestWithheld;
+
+    /// <summary>Gate for the <c>nest-collapsed-reveal-button</c>: a nest
+    /// <c>collapse</c> is one reveal away; a <c>block</c> has none (never
+    /// loosenable).</summary>
+    public bool ShowNestReveal => ShowNestPlaceholder && Nest is { IsBlock: false };
+
+    /// <summary>Convention 17's nest twin: a nest rule BLOCKS this post.</summary>
+    public bool IsNestBlocked => Nest is { IsBlock: true };
+
+    public string NestNoticeText => Nest?.NoticeText ?? "";
+
+    /// The nest frame while the nest arm withholds the body, else empty — the
+    /// post-card's accessible Name must never carry the body it hides.
+    public string NestAccessibleNotice => ShowNestPlaceholder ? NestNoticeText : "";
+    public string NestDomain => Nest?.Domain ?? "";
+    public string NestReason => Nest?.Reason ?? "";
+
+    /// The nest placeholder's <c>verdict</c> attribute (<c>block</c> | <c>collapse</c>),
+    /// read through HelpText like the content-policy notice's <c>state</c>.
+    public string NestVerb => Nest?.Verb ?? "";
+
+    /// <summary>The guardian rule's reason, verbatim, painted beside the fixed
+    /// family-policy frame (<c>content-policy-blocked-reason</c>) on the block and
+    /// the collapse arm alike — <c>null</c> when a floor, the viewer's own threshold,
+    /// a report or any other source drove the verdict (nest-rules.md § The shared
+    /// rule editor → <i>The reason is the member's to read</i>). Part of
+    /// <see cref="ContentEquals"/>.</summary>
+    public string? GuardianReason { get; }
+
+    /// <summary>Gate for <c>content-policy-blocked-reason</c>; absent (Collapsed, no
+    /// UIA peer) when no guardian rule's reason applies.</summary>
+    public bool ShowGuardianReason => GuardianReason is { Length: > 0 };
+    public string GuardianReasonText => GuardianReason ?? "";
 
     /// <summary>Gate for the <c>content-policy-blocked-notice</c> painted in place
     /// of the body (family-safety.md § Content policy — a blocked item names the
@@ -1098,6 +1353,10 @@ public partial class FeedPostItem : ObservableObject
         OnPropertyChanged(nameof(RenderArm));
         OnPropertyChanged(nameof(ShowRegionPlaceholder));
         OnPropertyChanged(nameof(ShowRegionReveal));
+        OnPropertyChanged(nameof(RegionAccessibleNotice));
+        OnPropertyChanged(nameof(ShowNestPlaceholder));
+        OnPropertyChanged(nameof(ShowNestReveal));
+        OnPropertyChanged(nameof(NestAccessibleNotice));
         OnPropertyChanged(nameof(ShowContentBlockedNotice));
         OnPropertyChanged(nameof(ShowMutedCollapse));
         OnPropertyChanged(nameof(ShowContentCollapse));
@@ -1200,6 +1459,10 @@ public partial class FeedPostItem : ObservableObject
         IsMuted = manager?.IsMuted(p.postId) ?? false;
         PostId = p.postId;
         AuthorHex = p.author;
+        HomeNestUrl = string.IsNullOrWhiteSpace(p.homeNestUrl) ? null : p.homeNestUrl;
+        HasAuthorFace = p.authorDisplay is not null;
+        AuthorFaceHandle = p.authorDisplay?.handle;
+        AuthorFaceDisplayName = p.authorDisplay?.displayName;
         using (var names = ContactOverlayNames.Open())
             AuthorLabel = names.PeerLabel(
                 p.authorDisplay?.displayName, p.authorDisplay?.handle, p.author).primary;
@@ -1211,6 +1474,13 @@ public partial class FeedPostItem : ObservableObject
         LegalTakedownDisplayBody = IsLegalTakedown
             ? Strings.Resolve(FaunaFfiMethods.LegalTakedownTombstone(p.legalTakedownRef!))
             : "";
+        // The admin block's twin (takedown-and-block.md § Admin block of a reported
+        // item), set by the same resolve_post door: in place of the post when the
+        // nest withheld the body (any viewer but the author), beside it otherwise.
+        AdminBlockNotice = p.adminBlockReason is { Length: > 0 } blockReason
+            ? AdminBlockNoticeText(blockReason)
+            : null;
+        IsAdminBlockedInPlace = AdminBlockNotice is not null && string.IsNullOrEmpty(p.body);
         Timestamp = p.timestamp;
         HasMedia = p.hasMedia;
         PlaysMedia = p.playsMedia;
@@ -1220,16 +1490,28 @@ public partial class FeedPostItem : ObservableObject
         RepostCount = p.repostCount;
         QuoteCount = p.quoteCount;
         ViewerLiked = p.viewerLiked;
+        // The shared per-emoji tally (feed.md ruling 4): empty on a bluesky row, and no
+        // pill row is painted on a repost row (the bar is hidden there).
+        ReactionPills = p.repostedPostId is { Length: > 0 }
+            ? new List<PostReactionPill>()
+            : p.reactions
+                .Select(g => new PostReactionPill(
+                    p.postId, g.emoji, g.count, g.viewerReactId is { Length: > 0 }))
+                .ToList();
         RepostedPostId = p.repostedPostId;
         QuotedPostId = p.quotedPostId;
         ViewerRepostId = p.viewerRepostId;
         GatedTier = p.gatedTier;
         RoomLabel = p.roomLabel;
+        var cardGate = FaunaFeedMethods.PostCardGate(p);
+        BadgeTier = cardGate?.tier;
+        BadgeRoomLabel = cardGate?.roomLabel;
         WebSlug = p.webSlug;
         GatedUnlocked = p.gatedUnlocked;
         HasUnlockOffer = p.unlockOffer is not null;
         UnlockOfferPriceText = p.unlockOffer?.priceHint ?? "";
         UnlockOfferPaymentUrl = p.unlockOffer?.paymentUrl;
+        UnlockPurchasePending = p.unlockPurchasePending;
         // Tip display surface (monetization.md § Tips): guarded independently, per the
         // class-level doc above. HasTips gates on tip_count != 0 (never on total_msats,
         // which can legitimately be 0 while real tips exist), matching tui's
@@ -1268,6 +1550,7 @@ public partial class FeedPostItem : ObservableObject
         // projection as linux, web, and android (priority #1/#4). Both extractors now delegate
         // to the shared UniFFI faces rather than re-walking the block tree here.
         MediaHashHex = FaunaApp.Core.Helpers.DocumentRenderer.MediaImageHash(p.document) ?? "";
+        BlobHome = FaunaFfiMethods.PostBlobHome(p);
         // A bridged post's media folds in as ProxiedImage / ProxiedVideo — a nest-relative
         // path instead of a content hash (render-model.md § D6c). The video slot's hash and
         // path are read off the one block it plays, so what it paints and what a tap asks
@@ -1305,12 +1588,24 @@ public partial class FeedPostItem : ObservableObject
         // author + body, as it does for the tombstone above (linux document.rs's
         // placeholder, web QuotedPost.svelte's not_found arm).
         QuotedPostIsNotFound = !QuotedPostIsLegalTakedown && quote is { notFound: true };
+        // An admin-blocked quote (takedown-and-block.md § Admin block of a reported
+        // item): for any viewer but its author the nest withheld the body, so the
+        // shared notice stands in its place, header omitted, as the tombstone does;
+        // the author's own read keeps the body and the notice paints right after it
+        // (tui's quoted_post_text, FaunaKit's QuotedPostCard).
+        var adminBlockReason = !QuotedPostIsLegalTakedown && !QuotedPostIsNotFound
+            && quote?.adminBlockReason is { Length: > 0 } reason ? reason : null;
+        QuotedPostIsAdminBlocked = adminBlockReason is not null && string.IsNullOrEmpty(QuotedPostBody);
         QuotedPostDisplayBody = QuotedPostIsLegalTakedown
             ? Strings.Resolve(FaunaFfiMethods.LegalTakedownTombstone(quote!.legalTakedownRef!))
             : QuotedPostIsNotFound
                 ? Strings.Get("feed/post/post_not_found")
-                : QuotedPostBody;
-        var quotedPlaceholder = QuotedPostIsLegalTakedown || QuotedPostIsNotFound;
+                : adminBlockReason is null
+                    ? QuotedPostBody
+                    : QuotedPostIsAdminBlocked
+                        ? AdminBlockNoticeText(adminBlockReason)
+                        : QuotedPostBody + "\n" + AdminBlockNoticeText(adminBlockReason);
+        var quotedPlaceholder = QuotedPostIsLegalTakedown || QuotedPostIsNotFound || QuotedPostIsAdminBlocked;
         QuotedPostShowHeaderRow = HasQuotedPost && !quotedPlaceholder;
         QuotedPostAccessibleName = quotedPlaceholder ? QuotedPostDisplayBody : QuotedPostAuthor;
         // Link-preview card text + reveal-gated og:image, single-sourced through the shared
@@ -1342,6 +1637,12 @@ public partial class FeedPostItem : ObservableObject
                 b.id, b.label, FaunaApp.Core.Helpers.SourceGlyphAsset.Emoji(b.glyph)))
             .ToList();
         OffersThreadView = FaunaFeedMethods.PostOffersThreadView(p);
+        // The folded archive comments (archive-import.md § Placement under the owner's
+        // own post): filled by the shared snapshot only on the owner's own archive-origin
+        // posts, "author: text" per entry as every other app paints it.
+        ArchiveComments = (p.archiveComments ?? [])
+            .Select(c => new ArchiveCommentLine(c.externalId, $"{c.authorName}: {c.text}"))
+            .ToList();
         // Walked once at construction (the snapshot is immutable). Drives the muted
         // unverified-source-badge; Failed only ever arrives on a decode path, never
         // the feed-list projection (security.md § App display of unverified content).
@@ -1379,6 +1680,11 @@ public partial class FeedPostItem : ObservableObject
         var decision = ContentPolicyCache.RenderFor(p.labels, RegionSubject.Post(p));
         ContentVerdict = decision.Verdict;
         Region = decision.Placeholder;
+        // The session nest's rules compose in the same call (nest-rules.md § The nest
+        // source in the engine): its placeholder when a nest rule drove the verb, and
+        // the guardian rule's reason the family arm paints beside its frame.
+        Nest = decision.NestPlaceholder;
+        GuardianReason = decision.GuardianReason;
         Reported = decision.Reported;
         // Guardian Notify (family-safety.md § Guardian Notify): count any
         // GUARDIAN-floor enforcement on this item — never the own-threshold
@@ -1422,7 +1728,11 @@ public partial class FeedPostItem : ObservableObject
         return PostId == other.PostId
             && AuthorHex == other.AuthorHex
             && AuthorLabel == other.AuthorLabel
+            && HasAuthorFace == other.HasAuthorFace
+            && AuthorFaceHandle == other.AuthorFaceHandle
+            && AuthorFaceDisplayName == other.AuthorFaceDisplayName
             && BodyText == other.BodyText
+            && AdminBlockNotice == other.AdminBlockNotice
             && Timestamp == other.Timestamp
             && HasMedia == other.HasMedia
             && PlaysMedia == other.PlaysMedia
@@ -1437,16 +1747,20 @@ public partial class FeedPostItem : ObservableObject
             && RepostCount == other.RepostCount
             && QuoteCount == other.QuoteCount
             && ViewerLiked == other.ViewerLiked
+            && ReactionPills.SequenceEqual(other.ReactionPills)
             && RepostedPostId == other.RepostedPostId
             && QuotedPostId == other.QuotedPostId
             && ViewerRepostId == other.ViewerRepostId
             && GatedTier == other.GatedTier
             && RoomLabel == other.RoomLabel
+            && BadgeTier == other.BadgeTier
+            && BadgeRoomLabel == other.BadgeRoomLabel
             && WebSlug == other.WebSlug
             && GatedUnlocked == other.GatedUnlocked
             && HasUnlockOffer == other.HasUnlockOffer
             && UnlockOfferPriceText == other.UnlockOfferPriceText
             && UnlockOfferPaymentUrl == other.UnlockOfferPaymentUrl
+            && UnlockPurchasePending == other.UnlockPurchasePending
             && HasTips == other.HasTips
             && HasTipTotal == other.HasTipTotal
             && TipTotalText == other.TipTotalText
@@ -1460,6 +1774,7 @@ public partial class FeedPostItem : ObservableObject
             && QuotedPostIsDelegatedOrigin == other.QuotedPostIsDelegatedOrigin
             && QuotedPostIsLegalTakedown == other.QuotedPostIsLegalTakedown
             && QuotedPostIsNotFound == other.QuotedPostIsNotFound
+            && QuotedPostIsAdminBlocked == other.QuotedPostIsAdminBlocked
             && QuotedPostDisplayBody == other.QuotedPostDisplayBody
             // Every link-preview card, in order: LinkPreviewCardModel is a record, so
             // SequenceEqual compares all seven painted fields structurally — which keeps this
@@ -1490,6 +1805,10 @@ public partial class FeedPostItem : ObservableObject
             // authority, reason) — a newer document can keep the verb and change
             // the reason, which is render-bound content too.
             && Region == other.Region
+            // ...and the nest placeholder and the guardian rule's reason, for the same
+            // reason: a new rules document can keep the verb and change the words.
+            && Nest == other.Nest
+            && GuardianReason == other.GuardianReason
             // Revealed is deliberately EXCLUDED: it's session-local UI state the
             // reveal handler mutates in place on the surviving instance, not
             // render-bound snapshot content — including it here would make every
@@ -1497,6 +1816,7 @@ public partial class FeedPostItem : ObservableObject
             // keeping the same instance.
             && Tags.SequenceEqual(other.Tags)
             && SourceBadges.SequenceEqual(other.SourceBadges)
+            && ArchiveComments.SequenceEqual(other.ArchiveComments)
             && OffersThreadView == other.OffersThreadView;
     }
 
@@ -1526,6 +1846,14 @@ public partial class FeedPostItem : ObservableObject
     // the shared canonical label (feed.md § Where logic lives).
     public IReadOnlyList<PostSourceBadge> SourceBadges { get; }
 
+    /// <summary>The comments folded under this imported post
+    /// (<c>PostSummary.archive_comments</c>), oldest first; empty for every other post.
+    /// Painted as <c>post-archive-comments</c> / <c>post-archive-comment-item</c>.</summary>
+    public IReadOnlyList<ArchiveCommentLine> ArchiveComments { get; }
+
+    /// <summary>Whether the fold paints at all.</summary>
+    public bool HasArchiveComments => ArchiveComments.Count > 0;
+
     /// <summary>Whether this post's detail offers <c>feed-post-view-thread-button</c>
     /// (`bridges.md` § Bluesky-native thread view) — the exported
     /// <c>post_offers_thread_view</c>, never a page-side source check.</summary>
@@ -1542,6 +1870,23 @@ public partial class FeedPostItem : ObservableObject
 /// type so the XAML can <c>x:Bind</c> it (the generated <c>FfiSourceBadge</c> is
 /// <c>internal</c> to FaunaApp.Core).
 public sealed record PostSourceBadge(string Id, string Label, string Glyph);
+
+/// <summary>One folded archive comment for binding ("author: text"); a windows-local
+/// public type because the generated <c>ArchiveCommentView</c> is <c>internal</c>.</summary>
+public sealed record ArchiveCommentLine(string ExternalId, string Display);
+
+/// <summary>One <c>post-reaction-pill</c> for binding: a windows-local public type (the
+/// generated <c>PostReactionGroup</c> is <c>internal</c>). <paramref name="Own"/> = the
+/// viewer holds a live reaction of this emoji (<c>viewer_react_id</c> present) — the
+/// highlighted pill, whose tap takes it back.</summary>
+public sealed record PostReactionPill(string PostId, string Emoji, long Count, bool Own)
+{
+    /// <summary>The pill's text and accessible Name: emoji, a space, the count.</summary>
+    public string Label => $"{Emoji} {Count}";
+
+    /// <summary>The <c>state</c> automation attr (HelpText): <c>on</c> when the viewer's own.</summary>
+    public string State => Own ? "on" : "off";
+}
 
 /// <summary>One link preview in a post body with its state (<c>resolving</c> /
 /// <c>resolved</c> / <c>failed</c>) — the shared <c>RenderDocument::link_previews</c>

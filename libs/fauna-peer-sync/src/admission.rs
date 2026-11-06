@@ -124,7 +124,7 @@ impl AdmittedEntry for AdmittedConnection {
 /// over-quota, absent, or expired. The preflight both peer-plane servers run
 /// before their own plane-specific admission check —
 /// `fauna_peer_sync::server::PeerSyncServer::admitted_connection`'s served-
-/// account check and `fauna-peer-share`'s `ShareServer::admitted_for_set`'s
+/// account check and `fauna-peer-share`'s `ShareServer::admits_named_set`'s
 /// scope-plus-roster check both continue from what this returns. Error
 /// construction is a caller closure since each plane's `RpcError` carries its
 /// own wire-facing error kind (`error.peer_sync.*` vs `error.peer_share.*`).

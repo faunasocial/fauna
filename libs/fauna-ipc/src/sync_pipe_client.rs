@@ -181,23 +181,35 @@ pub struct SyncPipeClient {
     alive: Arc<AtomicBool>,
     /// Reader thread handle (kept so we can join on close).
     _reader: Option<thread::JoinHandle<()>>,
-    /// A third handle on a unix socket, shut down (both directions) on drop.
-    /// The reader thread owns a `try_clone` of the stream, so dropping the
-    /// writer alone closes nothing: the socket stayed open, the reader stayed
-    /// parked in its read, and the agent's connection task never saw EOF — a
-    /// leaked descriptor on each side per one-shot request. `None` for
-    /// [`from_streams`](Self::from_streams), whose caller owns the streams.
+    /// A third handle on the connection, closed on drop. The reader thread
+    /// owns a handle of its own (a `try_clone` of the unix stream, an `Arc` of
+    /// the windows pipe), so dropping the writer alone closes nothing: the
+    /// connection stayed open, the reader stayed parked in its read, and the
+    /// agent's connection task never saw EOF — a leaked handle on each side
+    /// per one-shot request. `None` for [`from_streams`](Self::from_streams),
+    /// whose caller owns the streams.
     #[cfg(unix)]
-    shutdown_on_drop: Option<std::os::unix::net::UnixStream>,
+    close_on_drop: Option<std::os::unix::net::UnixStream>,
+    /// The windows pipe the reader and writer halves share (see the unix field).
+    #[cfg(windows)]
+    close_on_drop: Option<Arc<overlapped::SharedPipe>>,
 }
 
-#[cfg(unix)]
 impl Drop for SyncPipeClient {
     fn drop(&mut self) {
-        if let Some(stream) = self.shutdown_on_drop.take() {
+        // Not joined on either platform: drop never blocks.
+        #[cfg(unix)]
+        if let Some(stream) = self.close_on_drop.take() {
             // The reader's blocking read returns 0 and the thread exits on
-            // its own; the peer reads EOF. Not joined: drop never blocks.
+            // its own; the peer reads EOF.
             let _ = stream.shutdown(std::net::Shutdown::Both);
+        }
+        #[cfg(windows)]
+        if let Some(pipe) = self.close_on_drop.take() {
+            // The reader's read completes as aborted and the thread exits,
+            // dropping its `Arc`; the pipe handle closes with the last one and
+            // the server reads `ERROR_BROKEN_PIPE`.
+            pipe.close();
         }
     }
 }
@@ -231,8 +243,8 @@ impl SyncPipeClient {
             event_rx: Mutex::new(event_rx),
             alive,
             _reader: Some(handle),
-            #[cfg(unix)]
-            shutdown_on_drop: None,
+            #[cfg(any(unix, windows))]
+            close_on_drop: None,
         }
     }
 
@@ -314,9 +326,9 @@ impl SyncPipeClient {
         self.alive.load(Ordering::Relaxed)
     }
 
-    /// Signal the client as closed.  The underlying OS handle will be dropped
-    /// when the writer lock is released; the reader thread will exit on the
-    /// next read error.
+    /// Mark the client closed ([`is_alive`](Self::is_alive) reads `false`).
+    /// The connection itself closes when the client drops, and the reader
+    /// thread with it.
     pub fn close(&mut self) {
         self.alive.store(false, Ordering::Relaxed);
     }
@@ -346,7 +358,9 @@ impl SyncPipeClient {
     /// drive each direction with its own `OVERLAPPED` + event (see [`overlapped`]).
     /// A *synchronous* duplex handle would serialise the reader thread's pending
     /// read against `request()`'s write and deadlock — caught by the
-    /// `fauna-sync-agent` `pipe_transport_integration` e2e.
+    /// `fauna-sync-agent` `pipe_transport_integration` e2e. Dropping the client
+    /// closes the pipe, so the reader thread and the server's end of the
+    /// connection both go with it.
     pub fn connect_pipe_to(name: &str) -> io::Result<Self> {
         let expected = crate::win_token::current_user_sid_string()
             .map_err(|e| io::Error::other(format!("resolve this process's own user SID: {e:#}")))?;
@@ -364,18 +378,21 @@ impl SyncPipeClient {
         let file = open_pipe_handle(name)?;
         // BEFORE the client exists, so before anything can be written to it.
         verify_pipe_server_is(&file, name, expected_sid)?;
-        let pipe = std::sync::Arc::new(overlapped::SharedPipe::new(file));
+        let pipe = Arc::new(overlapped::SharedPipe::new(file));
         let reader = overlapped::OverlappedReader::new(pipe.clone())?;
-        let writer = overlapped::OverlappedWriter::new(pipe)?;
+        let writer = overlapped::OverlappedWriter::new(pipe.clone())?;
 
-        Ok(Self::from_streams(Box::new(reader), Box::new(writer)))
+        let mut client = Self::from_streams(Box::new(reader), Box::new(writer));
+        client.close_on_drop = Some(pipe);
+        Ok(client)
     }
 }
 
 /// Open the named pipe `name` for the client half, retrying past a transient
-/// `ERROR_PIPE_BUSY`.
+/// `ERROR_PIPE_BUSY`. Shared with the conversations oracle's door client
+/// ([`crate::oracle::OracleClient`]), which opens its pipe the same way.
 #[cfg(windows)]
-fn open_pipe_handle(name: &str) -> io::Result<std::fs::File> {
+pub(crate) fn open_pipe_handle(name: &str) -> io::Result<std::fs::File> {
     use std::fs::OpenOptions;
     use std::os::windows::fs::OpenOptionsExt;
     use windows::Win32::Storage::FileSystem::{FILE_FLAG_OVERLAPPED, SECURITY_IDENTIFICATION};
@@ -439,10 +456,7 @@ fn open_pipe_handle(name: &str) -> io::Result<std::fs::File> {
 /// for why a failed probe is a refusal rather than a fallback.
 #[cfg(windows)]
 fn verify_pipe_server_is(file: &std::fs::File, name: &str, expected_sid: &str) -> io::Result<()> {
-    use std::os::windows::io::AsRawHandle;
-    use windows::Win32::Foundation::HANDLE;
-
-    let refuse = |reason: String| {
+    pipe_server_is(file, expected_sid).map_err(|reason| {
         io::Error::new(
             io::ErrorKind::PermissionDenied,
             ServerIdentityRefused {
@@ -450,15 +464,22 @@ fn verify_pipe_server_is(file: &std::fs::File, name: &str, expected_sid: &str) -
                 reason,
             },
         )
-    };
+    })
+}
+
+/// The probe [`verify_pipe_server_is`] runs, answering why it refuses: `Ok`
+/// only when the process serving `file`'s named pipe runs as `expected_sid`.
+/// The conversations oracle's door client runs the same probe and wraps the
+/// reason in its own refusal.
+#[cfg(windows)]
+pub(crate) fn pipe_server_is(file: &std::fs::File, expected_sid: &str) -> Result<(), String> {
+    use std::os::windows::io::AsRawHandle;
+    use windows::Win32::Foundation::HANDLE;
 
     let served_by = crate::win_token::pipe_server_user_sid_string(HANDLE(file.as_raw_handle()))
-        .map_err(|e| refuse(format!("could not identify the serving process ({e:#})")))?;
-
+        .map_err(|e| format!("could not identify the serving process ({e:#})"))?;
     if served_by != expected_sid {
-        return Err(refuse(format!(
-            "it is served by {served_by}, not {expected_sid}"
-        )));
+        return Err(format!("it is served by {served_by}, not {expected_sid}"));
     }
     Ok(())
 }
@@ -564,7 +585,7 @@ impl SyncPipeClient {
         let reader = stream.try_clone()?;
         let closer = stream.try_clone()?;
         let mut client = Self::from_streams(Box::new(reader), Box::new(stream));
-        client.shutdown_on_drop = Some(closer);
+        client.close_on_drop = Some(closer);
         Ok(client)
     }
 }
@@ -582,16 +603,17 @@ impl SyncPipeClient {
 /// event via `GetOverlappedResult(bWait=true)` — so the rest of `SyncPipeClient`
 /// (the reader thread, `request()`, `recv_event()`) is unchanged.
 #[cfg(windows)]
-mod overlapped {
+pub(crate) mod overlapped {
     use std::io::{self, Read, Write};
     use std::os::windows::io::AsRawHandle;
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     use windows::Win32::Foundation::{
         CloseHandle, ERROR_BROKEN_PIPE, ERROR_HANDLE_EOF, ERROR_IO_PENDING, HANDLE,
     };
     use windows::Win32::Storage::FileSystem::{ReadFile, WriteFile};
-    use windows::Win32::System::IO::{GetOverlappedResult, OVERLAPPED};
+    use windows::Win32::System::IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED};
     use windows::Win32::System::Threading::{CreateEventW, ResetEvent};
     use windows::core::{HRESULT, PCWSTR};
 
@@ -604,19 +626,46 @@ mod overlapped {
             || hr == HRESULT::from_win32(ERROR_HANDLE_EOF.0)
     }
 
-    /// Owns the overlapped pipe file handle; closed when the last half (reader or
-    /// writer `Arc` clone) drops. The handle is used only via overlapped ops, never
+    /// Owns the overlapped pipe file handle; closed when the last `Arc` clone
+    /// drops. The handle is used only via overlapped ops, never
     /// `std::fs::File`'s own (synchronous) `Read`/`Write`.
     pub struct SharedPipe {
         file: std::fs::File,
+        /// Set by [`close`](Self::close); every read started after it cancels
+        /// itself.
+        closing: AtomicBool,
     }
 
     impl SharedPipe {
         pub fn new(file: std::fs::File) -> Self {
-            Self { file }
+            Self {
+                file,
+                closing: AtomicBool::new(false),
+            }
         }
         fn handle(&self) -> HANDLE {
             HANDLE(self.file.as_raw_handle())
+        }
+
+        /// Make every read on this pipe complete as aborted — the one pending
+        /// now and any started later — so a reader thread leaves its loop and
+        /// drops its `Arc`. Never blocks.
+        ///
+        /// `CancelIoEx` alone is not enough: it cancels only a read already
+        /// pending, and a one-shot client is usually dropped while its reader
+        /// is between reads (it has just handed the reply over). The flag,
+        /// set first, catches that reader: [`OverlappedReader::read`] checks
+        /// it after starting each read. Either the check sees it, or the read
+        /// was started before it was set and this cancel finds it pending.
+        pub fn close(&self) {
+            self.closing.store(true, Ordering::SeqCst);
+            unsafe {
+                let _ = CancelIoEx(self.handle(), None);
+            }
+        }
+
+        fn is_closing(&self) -> bool {
+            self.closing.load(Ordering::SeqCst)
         }
     }
 
@@ -689,6 +738,12 @@ mod overlapped {
                 };
                 let handle = self.pipe.handle();
                 let started = ReadFile(handle, Some(buf), None, Some(&mut ov));
+                // A close that came before this read was started cancelled
+                // nothing; cancel it here. `finish` still waits for it to
+                // complete, so `buf` and `ov` outlive the I/O.
+                if self.pipe.is_closing() {
+                    let _ = CancelIoEx(handle, Some(&ov as *const OVERLAPPED));
+                }
                 finish(handle, &ov, started)
             }
         }
@@ -1165,6 +1220,97 @@ mod tests {
 }
 
 // ---------------------------------------------------------------------------
+// A raw test pipe (windows)
+// ---------------------------------------------------------------------------
+
+/// A raw listening named-pipe instance owned by this test process — so its
+/// server SID *is* this user's — which a test serves by hand while the
+/// production connect path dials it.
+#[cfg(all(test, windows))]
+mod test_pipe {
+    use std::io;
+    use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+
+    use windows::Win32::Foundation::{ERROR_PIPE_CONNECTED, HANDLE};
+    use windows::Win32::System::Pipes::{ConnectNamedPipe, CreateNamedPipeW};
+    use windows::core::{HRESULT, PCWSTR};
+
+    pub(super) struct TestPipe {
+        handle: OwnedHandle,
+        pub(super) name: String,
+    }
+
+    impl TestPipe {
+        /// The first instance of a pipe name unique to this process and call.
+        pub(super) fn create() -> Self {
+            use std::sync::atomic::{AtomicU32, Ordering};
+            static N: AtomicU32 = AtomicU32::new(0);
+            Self::instance_of(format!(
+                r"\\.\pipe\fauna-ipc-test-{}-{}",
+                std::process::id(),
+                N.fetch_add(1, Ordering::Relaxed)
+            ))
+        }
+
+        /// Another listening instance of this pipe's name, for the next client.
+        pub(super) fn another_instance(&self) -> Self {
+            Self::instance_of(self.name.clone())
+        }
+
+        fn instance_of(name: String) -> Self {
+            use windows::Win32::Storage::FileSystem::{
+                FILE_FLAGS_AND_ATTRIBUTES, PIPE_ACCESS_DUPLEX,
+            };
+            use windows::Win32::System::Pipes::{
+                PIPE_READMODE_BYTE, PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES,
+            };
+
+            let wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
+            let handle = unsafe {
+                CreateNamedPipeW(
+                    PCWSTR(wide.as_ptr()),
+                    FILE_FLAGS_AND_ATTRIBUTES(PIPE_ACCESS_DUPLEX.0),
+                    PIPE_TYPE_BYTE | PIPE_READMODE_BYTE,
+                    PIPE_UNLIMITED_INSTANCES,
+                    4096,
+                    4096,
+                    0,
+                    None,
+                )
+            };
+            assert!(
+                !handle.is_invalid(),
+                "create test pipe {name}: {:?}",
+                io::Error::last_os_error()
+            );
+            Self {
+                handle: unsafe { OwnedHandle::from_raw_handle(handle.0) },
+                name,
+            }
+        }
+
+        pub(super) fn handle(&self) -> HANDLE {
+            HANDLE(self.handle.as_raw_handle())
+        }
+
+        /// Block until a client has connected to this instance.
+        pub(super) fn accept(&self) {
+            match unsafe { ConnectNamedPipe(self.handle(), None) } {
+                Ok(()) => {}
+                // The client opened the name before this call: already connected.
+                Err(e) if e.code() == HRESULT::from_win32(ERROR_PIPE_CONNECTED.0) => {}
+                Err(e) => panic!("accept a client on {}: {e}", self.name),
+            }
+        }
+
+        /// This instance as a `File`, for blocking frame reads and writes.
+        pub(super) fn into_file(self) -> std::fs::File {
+            std::fs::File::from(self.handle)
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Server-identity refusal pins (windows)
 // ---------------------------------------------------------------------------
 
@@ -1184,71 +1330,15 @@ mod tests {
 /// only the value being compared against is injected.
 #[cfg(all(test, windows))]
 mod server_identity {
+    use super::test_pipe::TestPipe;
     use super::*;
-    use std::io;
 
-    use windows::Win32::Foundation::{CloseHandle, HANDLE};
-    use windows::Win32::System::Pipes::CreateNamedPipeW;
-    use windows::core::PCWSTR;
+    use windows::Win32::Foundation::HANDLE;
 
     /// A SID this test process is certainly not running as — `S-1-5-18` is
     /// `NT AUTHORITY\SYSTEM`, and the agent is ratified as never running as
     /// LocalSystem (`sync-agent.md` § Packaging + lifecycle).
     const FOREIGN_SID: &str = "S-1-5-18";
-
-    /// A raw listening pipe instance owned by this test process — so its server
-    /// SID *is* this user's, and the only thing distinguishing the accept arm
-    /// from the refuse arm is the expected SID the client is given.
-    struct TestPipe {
-        handle: HANDLE,
-        name: String,
-    }
-
-    impl TestPipe {
-        fn create() -> Self {
-            use std::sync::atomic::{AtomicU32, Ordering};
-            use windows::Win32::Storage::FileSystem::{
-                FILE_FLAGS_AND_ATTRIBUTES, PIPE_ACCESS_DUPLEX,
-            };
-            use windows::Win32::System::Pipes::{
-                PIPE_READMODE_BYTE, PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES,
-            };
-
-            static N: AtomicU32 = AtomicU32::new(0);
-            let name = format!(
-                r"\\.\pipe\fauna-sync-identity-test-{}-{}",
-                std::process::id(),
-                N.fetch_add(1, Ordering::Relaxed)
-            );
-            let wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
-            let handle = unsafe {
-                CreateNamedPipeW(
-                    PCWSTR(wide.as_ptr()),
-                    FILE_FLAGS_AND_ATTRIBUTES(PIPE_ACCESS_DUPLEX.0),
-                    PIPE_TYPE_BYTE | PIPE_READMODE_BYTE,
-                    PIPE_UNLIMITED_INSTANCES,
-                    4096,
-                    4096,
-                    0,
-                    None,
-                )
-            };
-            assert!(
-                !handle.is_invalid(),
-                "create test pipe {name}: {:?}",
-                io::Error::last_os_error()
-            );
-            Self { handle, name }
-        }
-    }
-
-    impl Drop for TestPipe {
-        fn drop(&mut self) {
-            unsafe {
-                let _ = CloseHandle(self.handle);
-            }
-        }
-    }
 
     /// **The defect this row closes.** A pipe served by a process that is not the
     /// expected user must be refused *before* the client exists at all — the app
@@ -1258,7 +1348,9 @@ mod server_identity {
     /// checked client is already a client something could write to.
     ///
     /// Mutation-check: delete the verify call in `connect_pipe_to_expecting` and
-    /// exactly this test reddens.
+    /// exactly the two refusal pins redden — this one and
+    /// `a_pipe_served_by_another_account_is_refused_with_no_privilege_needed`;
+    /// the accept, could-not-identify and impersonation pins stay green.
     #[test]
     fn a_pipe_whose_server_is_not_the_expected_user_is_refused() {
         let pipe = TestPipe::create();
@@ -1354,11 +1446,11 @@ mod server_identity {
 
         let mut byte = [0u8; 1];
         let mut got = 0u32;
-        unsafe { ReadFile(pipe.handle, Some(&mut byte), Some(&mut got), None) }
+        unsafe { ReadFile(pipe.handle(), Some(&mut byte), Some(&mut got), None) }
             .expect("server reads the client's bytes");
 
         let level = unsafe {
-            ImpersonateNamedPipeClient(pipe.handle).expect("server impersonates its client");
+            ImpersonateNamedPipeClient(pipe.handle()).expect("server impersonates its client");
 
             let mut token = HANDLE::default();
             let opened = OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, true, &mut token);
@@ -1543,6 +1635,121 @@ mod unix_lifetime_tests {
         assert!(
             after < before + N / 2,
             "{N} one-shot exchanges grew the descriptor count from {before} to {after}"
+        );
+    }
+}
+
+/// The windows client's connection lifetime, the same contract as
+/// [`unix_lifetime_tests`]: dropping a [`SyncPipeClient`] must close its pipe,
+/// so the server reads `ERROR_BROKEN_PIPE` and lets its own instance go. The
+/// reader thread holds an `Arc` of the pipe and parks in an overlapped read, so
+/// without an explicit close the handle outlived every client — one leaked
+/// handle (and a parked thread) per call in the app and in the agent.
+#[cfg(all(test, windows))]
+mod windows_lifetime_tests {
+    use super::test_pipe::TestPipe;
+    use super::*;
+    use std::time::Duration;
+
+    /// Serve `n` clients in turn on `pipe`'s name: read one request frame,
+    /// answer it, then read once more and report whether the client's end
+    /// closed. The next instance listens before the report, so the next client
+    /// never finds the name gone. A client that outlives its drop leaves that
+    /// read parked, and the report never comes.
+    fn spawn_server(pipe: TestPipe, n: usize) -> mpsc::Receiver<bool> {
+        let (tx, rx) = mpsc::channel();
+        thread::spawn(move || {
+            let mut listening = Some(pipe);
+            for i in 0..n {
+                let pipe = listening.take().expect("an instance listening");
+                pipe.accept();
+                if i + 1 < n {
+                    listening = Some(pipe.another_instance());
+                }
+                let mut conn = pipe.into_file();
+                let payload = read_frame(&mut conn).expect("a request frame");
+                let req: Request = decode_payload(&payload).unwrap();
+                let resp = Response {
+                    id: req.id,
+                    result: crate::sync::ResponseResult::Err("unhandled".into()),
+                };
+                write_frame(&mut conn, &resp).unwrap();
+                const ERROR_BROKEN_PIPE: i32 = 109;
+                let mut buf = [0u8; 1];
+                let closed = match conn.read(&mut buf) {
+                    Ok(0) => true,
+                    Err(e) => e.raw_os_error() == Some(ERROR_BROKEN_PIPE),
+                    Ok(_) => false,
+                };
+                if tx.send(closed).is_err() {
+                    return;
+                }
+            }
+        });
+        rx
+    }
+
+    fn one_shot(name: &str) {
+        let client = SyncPipeClient::connect_pipe_to(name).unwrap();
+        client
+            .request_with_timeout(RequestMethod::GetSyncStatus, Duration::from_secs(2))
+            .unwrap();
+        drop(client);
+    }
+
+    fn saw_the_client_go(closes: &mpsc::Receiver<bool>) -> bool {
+        closes.recv_timeout(Duration::from_secs(5)).expect(
+            "the server never saw the client go after it dropped — the pipe outlives \
+             its client",
+        )
+    }
+
+    #[test]
+    fn dropping_the_client_closes_the_pipe_for_the_server() {
+        let pipe = TestPipe::create();
+        let name = pipe.name.clone();
+        let closes = spawn_server(pipe, 1);
+
+        one_shot(&name);
+
+        assert!(
+            saw_the_client_go(&closes),
+            "the server's read after the reply ended in something other than the \
+             client's end closing"
+        );
+    }
+
+    /// This process's handle count stays flat across many one-shot exchanges —
+    /// the agent-control client's exact usage (connect, one request, drop).
+    /// Fifty of them, because a drop can land while the reader thread is
+    /// between reads (it has just handed the reply over), and a close that
+    /// only cancels a read already pending misses that one.
+    #[test]
+    fn one_shot_exchanges_leave_the_handle_count_flat() {
+        use windows::Win32::System::Threading::{GetCurrentProcess, GetProcessHandleCount};
+
+        const N: usize = 50;
+        let handles = || {
+            let mut count = 0u32;
+            unsafe { GetProcessHandleCount(GetCurrentProcess(), &mut count) }
+                .expect("read this process's handle count");
+            count as usize
+        };
+        let pipe = TestPipe::create();
+        let name = pipe.name.clone();
+        let closes = spawn_server(pipe, N);
+
+        let before = handles();
+        for _ in 0..N {
+            one_shot(&name);
+            assert!(saw_the_client_go(&closes));
+        }
+        // Other tests in this binary run in parallel and open handles of their
+        // own: a leak here is N or more, a race a handful.
+        let after = handles();
+        assert!(
+            after < before + N / 2,
+            "{N} one-shot exchanges grew the handle count from {before} to {after}"
         );
     }
 }

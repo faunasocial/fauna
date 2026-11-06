@@ -36,11 +36,11 @@ its identity back through on relaunch:
   seed-and-launch cases (B/C/D/E/F) stay unjoined for now (no test-authored
   case yet exercises them on apple).
 * **windows** rides the same file backend as tui/apple (``WindowsFileCredStore``,
-  ``tests/common/cred_store.py``): the C# ``FileSecretBackend`` is a deliberate
-  twin of linux's file store, selected by the same ``FAUNA_E2E_CREDENTIAL_DIR``
-  the driver already sets, and there is no real-Credential-Manager mode to fall
-  back to (the suite must never touch the dev box's real store). Headless-safe,
-  no skip. ``SecretKeyMap`` remaps nothing — the adapter keys
+  ``tests/common/cred_store.py``): the C# ``SharedSecretBackend`` reaches the
+  shared Rust credential store, whose file arm is linux's own, selected by the
+  same ``FAUNA_E2E_CREDENTIAL_DIR`` the driver already sets, and there is no
+  real-Credential-Manager mode to fall back to (the suite must never touch the
+  dev box's real store). Headless-safe, no skip. ``LogicalSecretStore`` keys
   every logical key verbatim, the same as linux/tui.
 * **android** has no host-side path to its store at all: the on-device bridge
   writes the identity into the app's own ``filesDir`` on the ``/session`` POST
@@ -91,13 +91,13 @@ the client set it targets and why):
 * **I (deferred DNS → "Almost ready") — native only.** Already covered on web by
   ``tests/web/test_awaiting_dns_persistence.py`` (both relaunch-hydration AND the
   real ``dns_post_instructions`` exit). Joining would duplicate it.
-* **J (`--autostart` tray residency) — ``AUTOSTART_APPS`` (windows today).**
+* **J (`--autostart` hidden launch) — ``AUTOSTART_APPS`` (windows, linux, macos).**
   The only case whose subject is the launch's *side effect on the desktop* rather
   than the surface it routes to: the same routing decision that picks a surface
   also decides whether a window opens at all. It belongs here because it IS a
   launch-routing assertion driven by the same seeded-identity-vs-nothing-stored
-  contrast every other case uses — and the set is a set, not a windows-only
-  module, so linux's entrusted leg joins by adding a name.
+  contrast every other case uses — and the set is a set, not one app's module,
+  so an app joins by adding a name.
 
 * **K (a real onboarding completion reaches the main app) — ``NATIVE_ONLY``.**
   The one case that finishes the WIZARD instead of seeding a store: it runs the
@@ -153,10 +153,10 @@ import time
 import pytest
 from nacl.signing import SigningKey
 
-from common.auth import register_handled_actor
+from helpers.admin_wire import admit_adult
 from common.cred_store import INSTALL_DEVICE_SECRET_SLOT, requires_secret_service
 from common.keyring import secret_service_available
-from helpers.app_surface import app_name, skip_environment, skip_unbuilt
+from helpers.app_surface import skip_environment
 from common.launch_harness import make_launch_harness, reached_authenticated_app
 from i18n.strings import S
 from helpers.app_launch import app_launch_config
@@ -164,6 +164,7 @@ from conftest import _trust_seeder, get_available_apps
 from helpers import budgets
 from helpers.waiting import await_account_runtime_assembled, wait_until
 from helpers.launch_token import launch_token
+from helpers.tray_bus import FakeWatcher
 
 pytestmark = [
     pytest.mark.tier_3, pytest.mark.linux, pytest.mark.tui, pytest.mark.web,
@@ -182,11 +183,6 @@ LAUNCH_FALLTHROUGH = "launch-fallthrough-button"
 # `onboarding.launch_sign_in_refused`), so smoke E cannot be satisfied by any
 # old `error-message` text.
 SIGN_IN_REFUSED_NOTICE = "launch-sign-in-refused-notice"
-# The apps that paint that notice (all seven). An app dropped from the set would
-# fall back to the sentence in `error-message`.
-_SIGN_IN_REFUSED_NOTICE_APPS = frozenset(
-    {"tui", "linux", "web", "macos", "ios", "windows", "android"}
-)
 CREATE_IDENTITY = "create-identity-button"
 
 #: Fresh web drivers compile wasm cold and the routed surface only paints after
@@ -219,14 +215,14 @@ WEB_FIT = ("linux", "tui", "web", "android")
 #: macos/ios joined 2026-07-23, windows 2026-08-09 — all on the same file-backed
 #: CredStore mechanism as tui, no per-app copy needed (priority #1).
 NATIVE_ONLY = ("linux", "tui", "macos", "ios", "windows")
-#: Clients that have built a tray-resident auto-start launch (case J). windows is
-#: the only one TODAY — `apps/windows.md` § App Lifecycle → *Auto-start at
-#: sign-in* records linux's leg (default-on autostart `.desktop` + a hidden-launch
-#: equivalent) as entrusted/advisory and macOS as keeping its own login-item
-#: default until its leg is decided. Kept as a SET rather than collapsing the case
-#: into a windows-only module so the second client joins by adding a name here,
-#: not by copying a case (priority #1).
-AUTOSTART_APPS = ("windows",)
+#: Clients that have built a hidden auto-start launch and publish its decision
+#: (case J): windows (`apps/windows.md` § App Lifecycle → *Auto-start at sign-in*);
+#: linux since 2026-10-30 (`apps/linux.md` § Auto-start at sign-in — its hidden arm
+#: needs a confirmed tray host, which `launch_harness` supplies, and its OS-level
+#: window list reads the launch's Xvfb display); and macos since the same day
+#: (`apps/macos.md`, the same section). A SET, so the next client joins by adding
+#: a name here, not by copying a case (priority #1).
+AUTOSTART_APPS = ("windows", "linux", "macos")
 
 
 # ---------------------------------------------------------------------------
@@ -250,9 +246,9 @@ def _await_launch_decision(driver, timeout: float = 90) -> dict:
 
 def _visible_windows(driver) -> list[dict]:
     """The app's on-screen top-level windows, per the OS (not per the app's own
-    report). Offscreen entries are dropped: UIA lists a window that exists but was
-    never shown, and "exists" is not the contract — "opened on the user's desktop"
-    is."""
+    report). Offscreen entries are dropped: UIA, like X with an unmapped window,
+    lists a window that exists but was never shown, and "exists" is not the
+    contract — "opened on the user's desktop" is."""
     return [w for w in driver.top_level_windows() if not w["is_offscreen"]]
 
 
@@ -264,6 +260,24 @@ def _free_closed_port() -> int:
     port = s.getsockname()[1]
     s.close()
     return port
+
+
+def _registered_identity_secret_hex(nest_instance) -> str:
+    """A freshly registered identity's secret, for the cases that need the Online
+    row — never the run's shared admin. The launch harness owns its credential
+    store, so its teardown cannot retire the machine, and the shared admin signed
+    in on it kept a live grant whose walk mark pinned the admin's fleet-scope
+    retention gate for the rest of the run: the 2026-10-30 sweep's census named
+    `test_smoke_g`'s machine holding it 12,000 seqs below the tip
+    (`e2e-launch-isolation.md` convention 10, *A discarded driver retires its
+    machine*: a test whose machine the driver cannot retire never signs a shared
+    actor into it)."""
+    from common import create_actor_and_register
+
+    actor = create_actor_and_register(
+        nest_instance["port"], admin_signing_key=nest_instance["admin"]["signing_key"]
+    )
+    return bytes(actor["signing_key"]).hex()
 
 
 # ---------------------------------------------------------------------------
@@ -295,7 +309,7 @@ def launch_harness(request, tmp_path):
     # than a second indirect param because `request.param` already carries the
     # client (the id conftest's `--client` filter reads out of the test name).
     args_marker = request.node.get_closest_marker("launch_args")
-    extra: dict = {"args": " ".join(args_marker.args)} if args_marker else {}
+    extra: dict = {"app_args": " ".join(args_marker.args)} if args_marker else {}
     # `@pytest.mark.launch_env(NAME="value", ...)`: the cases whose subject is the
     # ENVIRONMENT the binary starts in (case L's wrong-clock seed). Same reasoning
     # as `launch_args` — read here because the fixture is the only constructor,
@@ -314,9 +328,20 @@ def launch_harness(request, tmp_path):
             file_backed=headless, extra_launch_config=extra,
             seed_trust=_trust_seeder(request),
         )
+    # A tray host for linux's `--autostart` cases: linux stays hidden only when a
+    # StatusNotifierWatcher is CONFIRMED on its session bus — with none there is
+    # nothing to restore a hidden window from, so it fails safe to visible
+    # (`apps/linux.md` § Auto-start at sign-in). The watcher joins the private bus
+    # the launch already rides (the keyring store's), so it outlives a relaunch.
+    watcher = None
+    if client == "linux" and args_marker and "--autostart" in args_marker.args:
+        store_env = harness.store.launch_config("", "").get("environment", {})
+        watcher = FakeWatcher(store_env["DBUS_SESSION_BUS_ADDRESS"]).start()
     try:
         yield harness
     finally:
+        if watcher is not None:
+            watcher.stop()
         harness.teardown()
 
 
@@ -380,9 +405,9 @@ def smoke_handled_actor(smoke_handled_nest):
     ahead of the wizard so the real handle check resolves
     ``AlreadyOnNest{handle_matches: true}`` from the nest rather than from an
     injected snapshot."""
-    return register_handled_actor(
-        smoke_handled_nest["port"], handle="smokearrival",
-        domain=smoke_handled_nest["authority"], base_url=smoke_handled_nest["url"],
+    return admit_adult(
+        smoke_handled_nest, "smokearrival",
+        domain=smoke_handled_nest["authority"], token=True,
     )
 
 
@@ -397,14 +422,14 @@ def test_smoke_b_registered_identity_relaunches_to_main_app(
     """Authenticated-launch (smoke B's launch-routing half): a saved identity that
     the nest *does* know (`fauna.auth.verify` succeeds) routes straight to the
     authenticated main app on launch (LaunchPhase::Online → launch_authenticated),
-    no wizard. We reuse the nest's own claimed-admin identity as the registered
-    actor (real `/verify` success); web reaches the same nest through `spa_url`.
+    no wizard. A freshly registered identity is the registered actor (real
+    `/verify` success); web reaches the same nest through `spa_url`.
 
     No-modes retirement (ratified 2026-07-12): a nest is content-ready from
     first boot now, so the Online row is reached with no preliminary commit."""
-    admin_secret_hex = bytes(nest_instance["admin"]["signing_key"]).hex()
+    secret_hex = _registered_identity_secret_hex(nest_instance)
     driver = launch_harness.launch_and_route(
-        secret_hex=admin_secret_hex, node_url=live_node_url, trust=nest_instance
+        secret_hex=secret_hex, node_url=live_node_url, trust=nest_instance
     )
     reached_authenticated_app(driver, timeout=90)
     assert driver.is_absent(HANDLE_INPUT), "should not be in the wizard"
@@ -490,8 +515,7 @@ def test_smoke_e_previously_signed_in_identity_refused_by_claimed_nest_lands_ref
     driver = launch_harness.launch_and_route(
         secret_hex=secrets.token_hex(32), node_url=live_node_url, trust=nest_instance
     )
-    has_notice = app_name(driver) in _SIGN_IN_REFUSED_NOTICE_APPS
-    sentence_id = SIGN_IN_REFUSED_NOTICE if has_notice else "error-message"
+    sentence_id = SIGN_IN_REFUSED_NOTICE
     driver.wait_for(sentence_id, timeout=ROUTE_TIMEOUT)
     assert driver.is_absent(INVITE_SUBMIT), (
         "a nest this app signed in to before is never re-joined through the invite wizard"
@@ -504,12 +528,6 @@ def test_smoke_e_previously_signed_in_identity_refused_by_claimed_nest_lands_ref
         f"the refused surface paints the localized sentence in {sentence_id!r}, "
         f"got {message!r}"
     )
-    if not has_notice:
-        skip_unbuilt(
-            driver,
-            surface=SIGN_IN_REFUSED_NOTICE,
-            detail="the sentence still paints in error-message (checked above)",
-        )
 
 
 # ---------------------------------------------------------------------------
@@ -570,8 +588,7 @@ def test_smoke_e2_suspended_while_signed_in_lands_refused_surface_without_relaun
 
     admin("fauna.admin.users.suspend")
     try:
-        has_notice = app_name(driver) in _SIGN_IN_REFUSED_NOTICE_APPS
-        sentence_id = SIGN_IN_REFUSED_NOTICE if has_notice else "error-message"
+        sentence_id = SIGN_IN_REFUSED_NOTICE
         # `error-message` is the generic per-page slot (convention 2): the
         # still-live authenticated window's OWN error-message can turn
         # visible first, painting a transient RPC failure (`fauna.account.get`
@@ -601,13 +618,6 @@ def test_smoke_e2_suspended_while_signed_in_lands_refused_surface_without_relaun
         assert driver.is_visible(LAUNCH_FALLTHROUGH), (
             "the refused surface keeps 'Use a different nest'"
         )
-        if not has_notice:
-            skip_unbuilt(
-                driver,
-                surface=SIGN_IN_REFUSED_NOTICE,
-                detail="the mid-session escalation lands; the sentence still "
-                "paints in error-message, with no Retry (checked above)",
-            )
         assert driver.is_visible(LAUNCH_RETRY), "the refused surface offers Retry"
     finally:
         admin("fauna.admin.users.cancel_eviction")
@@ -644,9 +654,9 @@ def test_smoke_f_retry_surface_fallthrough_goes_to_handle_entry(launch_harness):
 # ---------------------------------------------------------------------------
 # NATIVE ONLY: web's `reset()` sweeps the whole `fauna_*`/`fauna/*` localStorage
 # namespace as the TEST AGENT's cleanup (`web-bridge/agent.js`), not through the
-# product path, so a reset-erase assertion greens on the harness and pins nothing;
-# `WebCredStore.stored_accounts()` is deliberately unimplemented, and a browser
-# `teardown()` discards the whole profile so there is no force-quit analogue.
+# product path, so a reset-erase assertion greens on the harness and pins nothing,
+# and a browser `teardown()` discards the whole profile so there is no force-quit
+# analogue. Web's arm is `test_sign_out_web.py`'s Settings sign-out + hard reload.
 @pytest.mark.parametrize("launch_harness", _clients(*NATIVE_ONLY), indirect=True)
 @pytest.mark.feature("factory-reset")
 def test_smoke_g_factory_reset_leaves_no_identity_for_the_next_launch(
@@ -674,9 +684,9 @@ def test_smoke_g_factory_reset_leaves_no_identity_for_the_next_launch(
     first boot now, so the pre-reset launch lands in the authenticated main
     app (the Online row) with no preliminary commit needed.
     """
-    admin_secret_hex = bytes(nest_instance["admin"]["signing_key"]).hex()
+    secret_hex = _registered_identity_secret_hex(nest_instance)
     driver = launch_harness.launch(
-        secret_hex=admin_secret_hex, node_url=nest_instance["url"], trust=nest_instance
+        secret_hex=secret_hex, node_url=nest_instance["url"], trust=nest_instance
     )
     # Reset the INSTANT the session flag flips — deliberately racing the launch
     # machine's in-flight `save_authenticated`, which is still writing the
@@ -757,9 +767,11 @@ def test_smoke_g_factory_reset_leaves_no_identity_for_the_next_launch(
 # `tests/web/test_pending_invite_persistence.py` + `..._recheck_404.py`; joining
 # here would duplicate it (priority #4), and the case is bound to the native
 # file-backed cred store (`headless_credential_store` → `file_backed`), which the
-# web localStorage adapter has no analogue for.
+# web localStorage adapter has no analogue for. android joins it: its
+# `AndroidLaunchHarness.relaunch()` is a force-stop + start that re-sends no seed,
+# so the app's own `filesDir` slot is what the new process reads back.
 @pytest.mark.headless_credential_store
-@pytest.mark.parametrize("launch_harness", _clients(*NATIVE_ONLY), indirect=True)
+@pytest.mark.parametrize("launch_harness", _clients(*NATIVE_ONLY, "android"), indirect=True)
 @pytest.mark.feature("join-a-nest")
 def test_smoke_a_pending_invite_survives_force_quit(nest_instance, launch_harness):
     """The faithful save+load case (the others inject; this one drives the real
@@ -1014,7 +1026,7 @@ def test_smoke_i_deferred_dns_relaunches_to_the_almost_ready_surface(launch_harn
 # ---------------------------------------------------------------------------
 # J — `--autostart`: launch ROUTING decides whether a window opens at all
 # ---------------------------------------------------------------------------
-# AUTOSTART_APPS only — see that constant for why the set is one app today.
+# AUTOSTART_APPS only — see that constant for which apps have built the leg.
 @pytest.mark.launch_args("--autostart")
 @pytest.mark.parametrize("launch_harness", _clients(*AUTOSTART_APPS), indirect=True)
 @pytest.mark.feature("general-settings")
@@ -1266,9 +1278,9 @@ def test_smoke_l_wrong_clock_still_signs_in(nest_instance, launch_harness, live_
     per app is the `clock` state key its agent publishes for control (a)
     (`fauna_e2e_agent::CLOCK_KEY`): all seven apps publish it today.
     """
-    admin_secret_hex = bytes(nest_instance["admin"]["signing_key"]).hex()
+    secret_hex = _registered_identity_secret_hex(nest_instance)
     driver = launch_harness.launch_and_route(
-        secret_hex=admin_secret_hex, node_url=live_node_url, trust=nest_instance
+        secret_hex=secret_hex, node_url=live_node_url, trust=nest_instance
     )
     reached_authenticated_app(driver, timeout=90)
     assert driver.is_absent(HANDLE_INPUT), "should not be in the wizard"
@@ -1349,8 +1361,8 @@ TOKEN_TTL_SECS = 3600
 BEARER_REFRESH_BUFFER_SECS = 60
 
 
-def _own_session_ids_on_nest(nest_instance, harness_ids: set[str]) -> set[str]:
-    """The admin actor's live session ids as the NEST lists them
+def _own_session_ids_on_nest(nest_instance, secret_hex: str, harness_ids: set[str]) -> set[str]:
+    """The live session ids of the actor ``secret_hex`` names, as the NEST lists them
     (`fauna.sessions.list`, `login.md` § Sessions), minus every bearer the
     HARNESS minted to look — convention 5's outside observer of how many bearers
     the app minted.
@@ -1362,7 +1374,7 @@ def _own_session_ids_on_nest(nest_instance, harness_ids: set[str]) -> set[str]:
     """
     from clients.ws_rpc_admin_client import WsRpcAdminClient
 
-    sk = SigningKey(bytes(nest_instance["admin"]["signing_key"]))
+    sk = SigningKey(bytes.fromhex(secret_hex))
     with WsRpcAdminClient(
         nest_instance["url"], actor_id=bytes(sk.verify_key), signing_key=bytes(sk)
     ) as client:
@@ -1372,7 +1384,9 @@ def _own_session_ids_on_nest(nest_instance, harness_ids: set[str]) -> set[str]:
 
 
 @pytest.mark.parametrize(
-    "launch_harness", _clients("tui", "linux", "web", "macos", "ios"), indirect=True
+    "launch_harness",
+    _clients("tui", "linux", "web", "macos", "ios", "android", "windows"),
+    indirect=True,
 )
 @pytest.mark.launch_env(FAUNA_E2E_CLOCK_OFFSET_SECS=WRONG_CLOCK_AHEAD_OFFSET_SECS)
 @pytest.mark.feature("connect-and-sign-in")
@@ -1419,13 +1433,15 @@ def test_smoke_m_wrong_clock_ahead_stays_signed_in(nest_instance, launch_harness
     seeded — so `expires_in_secs` a TTL away is computed against that skewed
     `now`, and an anchor on the REAL clock would read hours negative.
     macos and ios publish it from the shared FaunaKit (`AppStateObservables` +
-    `LaunchRefreshTokenTestCommand`); windows and android join as their shells
-    publish the key (their FFI half is built: `launch_token_json_for_test` /
-    `refresh_held_bearer_for_test`).
+    `LaunchRefreshTokenTestCommand`); android's `TestAgent` publishes the same
+    key and command (pinned by `TestAgentLaunchTokenTest`) and joined with
+    this list; windows's `TestAgent` publishes the same key and command over the
+    same two FFI seams (`launch_token_json_for_test` /
+    `refresh_held_bearer_for_test`, through `NestRpcClient`) and joined with it.
     """
-    admin_secret_hex = bytes(nest_instance["admin"]["signing_key"]).hex()
+    secret_hex = _registered_identity_secret_hex(nest_instance)
     driver = launch_harness.launch_and_route(
-        secret_hex=admin_secret_hex, node_url=live_node_url, trust=nest_instance
+        secret_hex=secret_hex, node_url=live_node_url, trust=nest_instance
     )
     reached_authenticated_app(driver, timeout=90)
     assert driver.is_absent(HANDLE_INPUT), "should not be in the wizard"
@@ -1464,7 +1480,7 @@ def test_smoke_m_wrong_clock_ahead_stays_signed_in(nest_instance, launch_harness
         f"{settled_ids!r}) — the hot re-mint loop"
     )
     harness_ids: set[str] = set()
-    on_nest_before = _own_session_ids_on_nest(nest_instance, harness_ids)
+    on_nest_before = _own_session_ids_on_nest(nest_instance, secret_hex, harness_ids)
     assert launch_ids <= on_nest_before, (
         f"the app's own session {launch_ids!r} is not among the nest's {on_nest_before!r}"
     )
@@ -1494,7 +1510,7 @@ def test_smoke_m_wrong_clock_ahead_stays_signed_in(nest_instance, launch_harness
         f"expected the launch sessions plus exactly one refresh session, got {ids_after!r} "
         f"(launch {launch_ids!r})"
     )
-    on_nest_after = _own_session_ids_on_nest(nest_instance, harness_ids)
+    on_nest_after = _own_session_ids_on_nest(nest_instance, secret_hex, harness_ids)
     # The refresh's session exists nest-side. A superset, not equality: other
     # minters in the same app process (the sync agent's own grant, a login
     # re-check) may land a session of their own in this window — none of them
@@ -1509,7 +1525,7 @@ def test_smoke_m_wrong_clock_ahead_stays_signed_in(nest_instance, launch_harness
 # N — a SUSPENDED user's way back into the wizard ends on an honest terminal
 #     sentence, never a "try again" (login.md § Errors, onboarding.md § 3)
 # ---------------------------------------------------------------------------
-@pytest.mark.parametrize("launch_harness", _clients(*NATIVE_ONLY), indirect=True)
+@pytest.mark.parametrize("launch_harness", _clients(*NATIVE_ONLY, "android"), indirect=True)
 @pytest.mark.headless_credential_store
 @pytest.mark.feature("connect-and-sign-in")
 def test_smoke_n_suspended_user_fallthrough_invite_submit_is_terminal(
@@ -1529,14 +1545,17 @@ def test_smoke_n_suspended_user_fallthrough_invite_submit_is_terminal(
     A REAL registered-then-suspended actor, not case E's random seed: a random
     seed's submit SUCCEEDS (a pending row), so only a key the nest actually
     holds can reach the refusal under test. Native-only for case K's reason —
-    the typed loopback handle is dialled directly, which a browser cannot."""
+    the typed loopback handle is dialled directly, which a browser cannot.
+    android joins: the handle's `127.0.0.1:<port>` is the device's own loopback,
+    which `launch()`'s `adb reverse` of the launch url's port carries to this
+    nest (`drivers/android.py::nest_ports_from_config`); not yet run there."""
     from actions import ActionLayer
     from common.auth import _authed_call
 
     nest = smoke_handled_nest
-    actor = register_handled_actor(
-        nest["port"], handle=f"smokesusp{secrets.token_hex(3)}",
-        domain=nest["authority"], base_url=nest["url"],
+    actor = admit_adult(
+        nest, f"smokesusp{secrets.token_hex(3)}",
+        domain=nest["authority"], token=True,
     )
     _authed_call(nest["url"], nest["admin"]["signing_key"], "fauna.admin.users.suspend", {
         "actor_id": actor["actor_id_bytes"],

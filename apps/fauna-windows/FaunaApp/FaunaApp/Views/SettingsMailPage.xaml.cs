@@ -44,8 +44,14 @@ public sealed partial class SettingsMailPage : Page
             // A change made from low on the page (the serve-here switch) leaves this
             // bar scrolled off the top: bring it into view so the refusal is seen
             // (and is IsOffscreen=false to the e2e driver, reference_windows_e2e_is_visible_offscreen).
+            // Asked again at low priority: a refusal raised from a text field's Enter
+            // (the automatic reply, forwarding) runs inside that key, and the field
+            // keeps its caret in view after it, which undoes a same-pass request.
             ErrorBar.UpdateLayout();
             ErrorBar.StartBringIntoView();
+            DispatcherQueue?.TryEnqueue(
+                Microsoft.UI.Dispatching.DispatcherQueuePriority.Low,
+                () => ErrorBar.StartBringIntoView());
         }
     }
 

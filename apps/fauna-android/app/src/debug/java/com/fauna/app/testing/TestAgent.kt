@@ -59,6 +59,8 @@ interface TestAgentEntryPoint {
     /** The guardian policy the engine renders under — read for the
      *  `ward_rule_document_rules` state key. */
     fun contentPolicyStore(): com.fauna.app.core.ContentPolicyStore
+    /** The Guardian Notify buffer — `family_notify_check_now` forces its due-check. */
+    fun familyNotifyStore(): com.fauna.app.core.FamilyNotifyStore
     fun storeConsentStore(): com.fauna.app.core.StoreConsentStore
     fun atprotoSettingsHost(): com.fauna.app.core.atproto.AtprotoSettingsHost
     fun secureStorage(): SecureStorage
@@ -97,6 +99,17 @@ interface TestAgentEntryPoint {
  */
 object TestAgent {
     private var job: Job? = null
+
+    /**
+     * Armed by the `arm_crash_on_next_reset` command: the next `reset` crashes
+     * the app's process with an uncaught exception on its main thread instead
+     * of resetting. The red-first fault for convention 6's close rider
+     * (`docs/goal/architecture/e2e-self-diagnosing-failures.md` § The convention):
+     * an app that dies in the reset opening a test must fail that test's setup,
+     * naming the fatal line, rather than be relaunched unseen. This file is the
+     * debug source set, so the arm and the fault are compiled out of release.
+     */
+    @Volatile private var crashOnNextReset: Boolean = false
 
     /**
      * True once [start] has run — i.e. the app launched in E2E mode (the
@@ -158,6 +171,7 @@ object TestAgent {
     @Volatile private var apiClient: com.fauna.app.core.ApiClient? = null
     @Volatile private var screenTimeStore: com.fauna.app.core.ScreenTimeStore? = null
     @Volatile private var contentPolicyStore: com.fauna.app.core.ContentPolicyStore? = null
+    @Volatile private var familyNotifyStore: com.fauna.app.core.FamilyNotifyStore? = null
     @Volatile private var storeConsentStore: com.fauna.app.core.StoreConsentStore? = null
     @Volatile private var atprotoSettingsHost: com.fauna.app.core.atproto.AtprotoSettingsHost? = null
     @Volatile private var actorScope: com.fauna.app.core.ActorScope? = null
@@ -330,6 +344,7 @@ object TestAgent {
         // must poke the same store the ward's screen-time-lock overlay reads.
         screenTimeStore = entryPoint.screenTimeStore()
         contentPolicyStore = entryPoint.contentPolicyStore()
+        familyNotifyStore = entryPoint.familyNotifyStore()
         // The same @Singleton the global store-consent lock reads —
         // `store_consent_inject` must drive THAT round.
         storeConsentStore = entryPoint.storeConsentStore()
@@ -699,6 +714,35 @@ object TestAgent {
     }
 
     /**
+     * `{"messages": {"error"|"warning"|"info": text|null}}` — inject (text) or
+     * clear (null) a transient banner message, the cross-app patch tui, linux,
+     * windows, apple and web implement (`test_messages.py`). Text goes through
+     * the funnel's own setters ([AppMessages.showError] & co.), which log to the
+     * ring, so an injected error is a displayed error like any other and
+     * `test_displayed_banner_reaches_ring` checks the real logging. All three
+     * are dismissed by the next `nav` patch ([applyNavPatch]). Returns `null`
+     * when applied, else the refusal reason (convention 11).
+     */
+    internal fun applyMessagesPatch(patch: JSONObject, messages: AppMessages): String? {
+        for (level in patch.keys()) {
+            val value = patch.get(level)
+            val text = when {
+                value == JSONObject.NULL -> null
+                value is String -> value.ifEmpty { null }
+                else -> return "the `messages` patch's `$level` is neither text nor null: $value"
+            }
+            when (level) {
+                "error" -> text?.let(messages::showError) ?: messages.clearError()
+                "warning" -> text?.let(messages::showWarning) ?: messages.clearWarning()
+                "info" -> text?.let(messages::showInfo) ?: messages.clearInfo()
+                else -> return "the `messages` patch names an unknown level \"$level\" " +
+                    "(error, warning and info are the funnel's three)"
+            }
+        }
+        return null
+    }
+
+    /**
      * Re-parse [ApiClient.feedPostsJson]'s raw string into the `data.feed.posts`
      * array — the shared `fauna_feed::feed_posts_json` derivation, re-parsed
      * rather than re-derived (the `conversationThreadsJson`/`successionWitnessStateJson`
@@ -947,6 +991,11 @@ object TestAgent {
         val mlsFoldedCommits = convSession
             ?.let { s -> runCatching { org.json.JSONTokener(s.mlsFoldedCommitsJson()).nextValue() as? JSONObject }.getOrNull() }
             ?: JSONObject()
+        // `mls_bound_channels` — a sorted array of channel hex ids, `[]` with no
+        // session (`fauna_e2e_agent::MLS_BOUND_CHANNELS_KEY`).
+        val mlsBoundChannels = convSession
+            ?.let { s -> runCatching { org.json.JSONTokener(s.mlsBoundChannelsJson()).nextValue() as? org.json.JSONArray }.getOrNull() }
+            ?: org.json.JSONArray()
 
         // `account_pump_cycles` — the W3 (account-data-plane.md § Workstreams) account plane's convention-14 observable
         // (`fauna_e2e_agent::ACCOUNT_PUMP_CYCLES_KEY`, beside the
@@ -1101,6 +1150,7 @@ object TestAgent {
             put("caldav_mailbox_reply", caldavMailboxReply ?: JSONObject.NULL)
             put("conv_receive_cycles", convReceiveCycles)
             put("mls_folded_commits", mlsFoldedCommits)
+            put("mls_bound_channels", mlsBoundChannels)
             put("account_pump_cycles", accountPumpCycles)
             put("custody_ceremony_ingest", custodyCeremonyIngest)
             put("feed_reloads", feedReloads)
@@ -1351,7 +1401,22 @@ object TestAgent {
     ): String? {
         val state = cmd.optJSONObject("state")
         when (action) {
+            "arm_crash_on_next_reset" -> {
+                crashOnNextReset = true
+            }
             "reset" -> {
+                if (crashOnNextReset) {
+                    crashOnNextReset = false
+                    android.util.Log.i("TestAgent", "Executing reset: the armed crash fault fires")
+                    // Thrown on the main looper, outside every coroutine and
+                    // catch of the command loop: an uncaught exception there is
+                    // the runtime's FATAL EXCEPTION, the process dies, and the
+                    // reset is never acknowledged.
+                    android.os.Handler(android.os.Looper.getMainLooper()).post {
+                        throw IllegalStateException("e2e crash fault armed by arm_crash_on_next_reset")
+                    }
+                    return null
+                }
                 android.util.Log.i("TestAgent", "Executing reset")
                 // Sign-out-shaped: `storage.clear()` below wipes the WHOLE
                 // `fauna_secure_prefs` file — the same physical file the
@@ -1416,6 +1481,10 @@ object TestAgent {
                 state.optJSONObject("session")?.let { applySessionPatch(it, appState, storage) }
                 state.optJSONObject("nav")?.let { nav ->
                     applyNavPatch(nav, appState)?.let { return it }
+                }
+                // After `nav`, so a patch carrying both keeps its messages.
+                state.optJSONObject("messages")?.let { msgs ->
+                    applyMessagesPatch(msgs, appState.messages)?.let { return it }
                 }
                 state.optJSONObject("compose")?.let { compose ->
                     applyComposePatch(compose)?.let { return it }
@@ -1518,6 +1587,16 @@ object TestAgent {
                 val methodName = cmd.optString("method")
                 if (methodName.isNullOrEmpty()) return "the command carried no `method` name"
                 val jsonArg = cmd.optString("json_arg") ?: ""
+                // The registry arms first — they need this app's own account
+                // registry, which no machine dispatcher can reach (the shared
+                // `fauna_client_accounts::call_registry_method_for_test`; apple's
+                // `RegistryTestBridge` and tui's automation route the same way).
+                val outcome = registry?.callRegistryMethodForTest(methodName, jsonArg)
+                if (outcome is com.fauna.ffi.FfiRegistryMethodOutcome.Handled) {
+                    machineMethodResult = outcome.resultJson
+                    android.util.Log.i("TestAgent", "call_machine_method($methodName) ok (registry)")
+                    return null
+                }
                 val host = onboardingHost
                     ?: return "call_machine_method($methodName) arrived before the " +
                         "OnboardingHost was wired (TestAgent.start has not run yet)"
@@ -1542,7 +1621,7 @@ object TestAgent {
                 // e2e-only: android twin of tui's `device_set_state` automation
                 // arm (`apps/fauna-tui/src/automation.rs`) and linux's
                 // `"device_set_state"` bridge command
-                // (`apps/fauna-linux/src/main.rs`) —
+                // (`apps/fauna-linux/src/lib.rs`) —
                 // whether `device_id_hex`'s plane `fauna.state.device-set` row
                 // reads Removed/Enrolled from THIS app's own account runtime.
                 // Rides the same `machine_method_result` reader-value wire
@@ -1587,6 +1666,17 @@ object TestAgent {
                 machineMethodResult = apiClient
                     ?.let { runCatching { it.nestRpc() }.getOrNull() }
                     ?.readMarkerStateJson(channelIdHex)
+                    ?: JSONObject().put("found", false).toString()
+            }
+            "escrow_wrap_coordinates" -> {
+                // e2e-only: android twin of tui's `escrow_wrap_coordinates` arm —
+                // where this app's account-store escrow-wrap rows sit on the
+                // fleet feed, the recovery-kit let-go journey's staging read
+                // (`fleet-scope-reclamation.md` clause (3)(j)). The
+                // `read_marker_state` shape above; no payload.
+                machineMethodResult = apiClient
+                    ?.let { runCatching { it.nestRpc() }.getOrNull() }
+                    ?.escrowWrapCoordinatesJson()
                     ?: JSONObject().put("found", false).toString()
             }
             "launch_refresh_token" -> {
@@ -1694,6 +1784,22 @@ object TestAgent {
                 val (key, message) = feedInjectErrorArgs(cmd)
                 manager.injectErrorForTest(key, message)
             }
+            "feed_seed_cue_rollup_for_test" -> {
+                // Seeds a real `cues:v1` nest row for "Clear activity data" to
+                // delete (a real round trip, unlike `feed_inject_posts`).
+                // `{content_ids: string[]}`; forwards to the shared Rust seam
+                // `FeedManager::set_cue_rollup_for_test`, awaited so the caller
+                // reads the nest row with no poll. Twin of tui's, linux's and
+                // apple's arms of the same name; a refusal is LOUD (convention 11).
+                val manager = feedManagerFor(action).getOrElse { return it.message }
+                val ids = cmd.optJSONArray("content_ids")
+                val contentIds = (0 until (ids?.length() ?: 0)).map { ids!!.getString(it) }
+                try {
+                    manager.setCueRollupForTest(contentIds)
+                } catch (e: Exception) {
+                    return "feed_seed_cue_rollup_for_test threw ${e::class.simpleName}: ${e.message}"
+                }
+            }
             "feed_hold_next_reload", "feed_release_held_reload" -> {
                 // Arm (or release) the feed manager's one-shot reload hold: the
                 // NEXT reload publishes the list it kept or cleared, then parks
@@ -1757,6 +1863,64 @@ object TestAgent {
                     return "conversations_inject_send_failure threw ${e::class.simpleName}: ${e.message}"
                 }
             }
+            "conversations_select_message" -> {
+                // Drive ConversationsManager.selectThreadAndMessage — the SAME call
+                // a real Search-result tap makes (ConversationDetailScreen's
+                // onOpenRoomSearchHit) — without a real Search hit: a phone never
+                // builds a local content index (CLIENT_BUILDS_INDEX is false), so
+                // SearchNav::Mail cannot surface on one single-seat. Mirror of
+                // windows ConversationsCommands.SelectMessage. Params ride the
+                // command envelope top-level (http_bridge.call_command).
+                val threadId = cmd.optString("thread_id")
+                val messageId = cmd.optString("message_id")
+                if (threadId.isEmpty() || messageId.isEmpty()) {
+                    return "conversations_select_message carried no `thread_id`/`message_id`"
+                }
+                val host = conversationsManagerHost
+                    ?: return "conversations_select_message arrived before the " +
+                        "ConversationsManagerHost was wired (TestAgent.start has not run yet)"
+                try {
+                    host.manager.selectThreadAndMessage(threadId, messageId)
+                    android.util.Log.i("TestAgent", "conversations_select_message($threadId) ok")
+                } catch (e: Exception) {
+                    android.util.Log.e("TestAgent", "conversations_select_message failed: ${e.message}")
+                    return "conversations_select_message threw ${e::class.simpleName}: ${e.message}"
+                }
+            }
+            "conversations_seed_resolved_link_preview" -> {
+                // Seed a PRE-RESOLVED link preview (render-model.md § D4) so an
+                // injected bubble whose body is the standalone `[url](url)`
+                // paragraph folds its LinkPreview block Resolved with no real
+                // `fauna.linkpreview.resolve`. Drives the shared
+                // ConversationsManager::seed_resolved_link_preview_for_test.
+                // Mirrors linux handle_conversations_seed_resolved_link_preview /
+                // windows ConversationsCommands.SeedResolvedLinkPreview; payload
+                // {url, title, description, image_hash}, riding the envelope
+                // top-level (http_bridge.call_command).
+                val url = cmd.optString("url")
+                if (url.isEmpty()) {
+                    return "conversations_seed_resolved_link_preview carried no `url`"
+                }
+                // An empty or JSON-null hash is no hash: every sibling app
+                // normalizes it to null so no broken image slot folds in.
+                val imageHash = if (cmd.isNull("image_hash")) null
+                else cmd.optString("image_hash").ifEmpty { null }
+                val host = conversationsManagerHost
+                    ?: return "conversations_seed_resolved_link_preview arrived before the " +
+                        "ConversationsManagerHost was wired (TestAgent.start has not run yet)"
+                try {
+                    host.manager.seedResolvedLinkPreviewForTest(
+                        url,
+                        cmd.optString("title"),
+                        cmd.optString("description"),
+                        imageHash,
+                    )
+                    android.util.Log.i("TestAgent", "conversations_seed_resolved_link_preview ok")
+                } catch (e: Exception) {
+                    android.util.Log.e("TestAgent", "conversations_seed_resolved_link_preview failed: ${e.message}")
+                    return "conversations_seed_resolved_link_preview threw ${e::class.simpleName}: ${e.message}"
+                }
+            }
             "conversations_inject_page_error" -> {
                 // Stamp ConversationsSnapshot.error — the observable state a
                 // failed membership/label wire op leaves (confirm_add_participant
@@ -1786,6 +1950,34 @@ object TestAgent {
                 } catch (e: Exception) {
                     android.util.Log.e("TestAgent", "conversations_inject_page_error failed: ${e.message}")
                     return "conversations_inject_page_error threw ${e::class.simpleName}: ${e.message}"
+                }
+            }
+            "conversations_mark_receive_stopped", "conversations_begin_receive_loop" -> {
+                // Dead-receive-rail witness (outcome 18, conversations.md §
+                // Errors & edge cases): mark = claim a fresh loop generation and
+                // mark it stopped; begin = claim a fresh generation, which
+                // retires the notice. Mirrors linux's arms of the same names.
+                val host = conversationsManagerHost
+                    ?: return "$action arrived before the ConversationsManagerHost was " +
+                        "wired (TestAgent.start has not run yet)"
+                try {
+                    if (action == "conversations_mark_receive_stopped") {
+                        // "pending" until the session's real receive loop has
+                        // claimed its generation (that claim would retire this
+                        // mark); the action layer asks again until "marked".
+                        if (host.manager.receiveLoopBegunForTest()) {
+                            host.manager.markReceiveStoppedForTest()
+                            machineMethodResult = "\"marked\""
+                        } else {
+                            machineMethodResult = "\"pending\""
+                        }
+                    } else {
+                        host.manager.beginReceiveLoopForTest()
+                    }
+                    android.util.Log.i("TestAgent", "$action ok")
+                } catch (e: Exception) {
+                    android.util.Log.e("TestAgent", "$action failed: ${e.message}")
+                    return "$action threw ${e::class.simpleName}: ${e.message}"
                 }
             }
             "conv_receive_now" -> {
@@ -1821,6 +2013,38 @@ object TestAgent {
                 } catch (e: Exception) {
                     return "widget_refresh_scheduled_pass_now threw ${e::class.simpleName}: ${e.message}"
                 }
+            }
+            "backup_audit_run_now" -> {
+                // Backups-page audit-alert e2e (`test_backups.py`), android's
+                // twin of linux's/tui's arm. Runs one REAL audit pass — real
+                // connections, real custody list, the client's persisted
+                // high-water — with only the clock shifted by `now_offset_secs`
+                // (convention 14: poke the clock, never sleep out the 48 h
+                // window). The pass itself is the Backups page's own refresh,
+                // reached through [E2eBackupAuditPoke], so the page repaints
+                // from the same `auditRows` a destination edit fills.
+                //
+                // Convention 11: no Backups page view model collecting ⇒ refuse
+                // BEFORE touching the process-wide clock offset, which nothing
+                // auto-resets.
+                if (!com.fauna.app.core.E2eBackupAuditPoke.isListening()) {
+                    return "backup_audit_run_now: the Backups page is not built"
+                }
+                val offset = cmd.optLong("now_offset_secs", 0L)
+                com.fauna.ffi.setBackupAuditClockOffsetSecs(offset)
+                if (!com.fauna.app.core.E2eBackupAuditPoke.request()) {
+                    return "backup_audit_run_now: the Backups page is not built"
+                }
+            }
+            "family_notify_check_now" -> {
+                // Guardian Notify flush cadence poke (convention 14's `run_now`),
+                // android's twin of linux's/web's arm: forces the store's due-check
+                // now instead of waiting out `CHECK_INTERVAL_MS`, so a test that
+                // pokes then asserts on the nest-side report has a causal barrier.
+                val store = familyNotifyStore
+                    ?: return "family_notify_check_now: no FamilyNotifyStore wired (TestAgent.start " +
+                        "has not run)"
+                store.flushIfDue()
             }
             "account_pump_now" -> {
                 // The account plane's run-one-pass-now poke (convention 14's
@@ -1910,9 +2134,9 @@ object TestAgent {
                             ?: throw IllegalStateException("no nest connection for the mail-settings machine")
                         machine.use {
                             if (password != null) {
-                                it.enableCaldavMailboxWithPassword("Default", password)
+                                it.enableDavMailboxWithPassword("Default", password)
                             } else {
-                                it.enableCaldavMailboxWithGeneratedPassword("Default")
+                                it.enableDavMailboxWithGeneratedPassword("Default")
                             }
                         }
                         JSONObject().put("ok", true)
@@ -2078,6 +2302,27 @@ object TestAgent {
                 // pass (a reconnect or the daily tick).
                 setMailTokenRefreshClockOffsetSecs(cmd.optLong("now_offset_secs", 0L))
             }
+            "archive_import_pause_after", "archive_import_hold_after" -> {
+                // Arm the mounted archive-import page's machine to pause (or
+                // hold, until the user's own Pause or Cancel) after `records`
+                // settled records — the restart-resume and pause/cancel
+                // journeys' causal anchors (convention 14). Twins of tui's
+                // `automation.rs` arms, windows' `TestAgent` and FaunaKit's
+                // `ArchiveImportTestCommand`; the two setters are
+                // `test-helpers` UniFFI exports, present in the debug face only.
+                if (!cmd.has("records") || cmd.isNull("records")) {
+                    return "$action: needs a numeric `records`"
+                }
+                val records = cmd.optLong("records", -1L)
+                if (records < 0) return "$action: needs a numeric `records`"
+                val machine = com.fauna.app.ui.viewmodel.ArchiveImportVM.current?.get()?.machineOrNull()
+                    ?: return "$action: no archive-import page holds a machine"
+                if (action == "archive_import_hold_after") {
+                    machine.setHoldAfterRecordsForTest(records.toULong())
+                } else {
+                    machine.setPauseAfterRecordsForTest(records.toULong())
+                }
+            }
             "focus_move" -> {
                 // Convention 17 layer (c) — `e2e-systematic-ui-walks.md` § The
                 // convention. Mirrors `fauna_e2e_agent::{FOCUS_MOVE,
@@ -2220,6 +2465,12 @@ object TestAgent {
                     // send_new_thread bootstraps the group (fetch key package ->
                     // create MLS group -> deliver Welcome -> post Application).
                     val recipient = str("recipient")
+                    // A NEW conversation with exactly `recipient`: discard any
+                    // stashed new-thread draft first. startNewConversation keeps
+                    // one by design, so an earlier test's seeded chip would
+                    // otherwise ride into this send (tui's e2e_resolve_send_new
+                    // has the full reason).
+                    manager.cancelNewConversation()
                     manager.startNewConversation()
                     manager.setNewThreadRecipientInput(recipient)
                     manager.resolveRecipient()
@@ -2530,6 +2781,11 @@ object TestAgent {
             return "cannot navigate to \"$route\" (resolved from view=\"$view\"): " +
                 "android's nav graph has no such destination — ${e.message}"
         }
+        // A nav patch dismisses the transient messages even onto the route the
+        // app is already on, where `FaunaNavHost`'s `LaunchedEffect(currentRoute)`
+        // never re-fires — tui's `apply_nav` semantics. The refusal slot is not
+        // touched (`AppMessages.refusedAgentCommand`).
+        appState.messages.clear()
         return null
     }
 

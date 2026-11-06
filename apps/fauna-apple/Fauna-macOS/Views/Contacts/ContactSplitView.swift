@@ -57,7 +57,8 @@ struct ContactSplitView: View {
                 vm.reset()
                 return
             }
-            vm.configure(api: client.api, actorId: actorId, familyStatus: appState.familyStatus)
+            vm.configure(api: client.api, actorId: actorId, familyStatus: appState.familyStatus,
+                archiveLinks: client.archiveLinks)
             await vm.refresh()
             appState.lastContacts = vm.contacts
             appState.lastKnocks = vm.knocks

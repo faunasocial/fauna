@@ -392,6 +392,16 @@ fun ComposeBar(
             )
         }
 
+        // List-send notes (mail-mass-mailing.md § Composing a list send): present
+        // only while the shared `ListSendView` field is non-null, i.e. the compose
+        // is addressed to one of the account's own lists. Shared Rust derives every
+        // text; this paints. Mirrors linux compose_bar.rs `paint_list_note`.
+        compose.listSend?.let { list ->
+            ListSendNote(list.sendWarning, Ids.DM_COMPOSE_LIST_SEND_WARNING)
+            ListSendNote(list.quotaWarning, Ids.DM_COMPOSE_LIST_QUOTA_WARNING)
+            ListSendNote(list.progress, Ids.DM_COMPOSE_LIST_SEND_PROGRESS)
+        }
+
         // Body field. Held as a TextFieldValue so the markdown toolbar can wrap the
         // *selection* (the toolbar is selection-aware). The shared snapshot only
         // carries the plain `bodyDraft` text, so we keep a local TextFieldValue and
@@ -516,5 +526,18 @@ fun ComposeBar(
                 Text(stringResource(R.string.common_send))
             }
         }
+    }
+}
+
+/** One list-send note (`dm-compose-list-*`); absent when the shared text is `null`. */
+@Composable
+private fun ListSendNote(text: LocalizedText?, tag: String) {
+    localized(text)?.let {
+        Text(
+            it,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.fillMaxWidth().testTag(tag),
+        )
     }
 }

@@ -44,8 +44,9 @@ appeal and the discovery poll — so the test reads ``peer_url``
 Latency-independent (convention 14): every wait is a named budget over a
 deadline poll.
 
-App arm: **tui** (the lead app). The six others serve the delivered row as any
-local one; the issuer suffix and fact reach them with their trickle-down.
+App arm: **tui** (the lead app); web, linux, android, macos and ios paint the
+issuer suffix and fact too. windows serves the delivered row as any local one
+until its trickle-down.
 
 Witnesses outcome 13 of ``docs/features/moderation-queue.md`` (a coverage
 contract item follows the spec and lands with its witness, outside the
@@ -90,6 +91,8 @@ pytestmark = [
     pytest.mark.web,
     pytest.mark.linux,
     pytest.mark.android,
+    pytest.mark.macos,
+    pytest.mark.ios,
 ]
 
 # The console's + the queue's own wording (i18n, en.yaml).

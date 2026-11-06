@@ -32,19 +32,16 @@
 #[cfg(feature = "uniffi")]
 uniffi::setup_scaffolding!("fauna_media_machine");
 
-pub mod blob_fetcher;
 pub mod blob_uploader;
 pub mod folder_keys;
 pub mod machine;
 pub mod nest_api;
 pub mod observer;
+mod read_gate;
 #[cfg(feature = "rpc-glue")]
 pub mod served_reseal;
 pub mod snapshots;
 
-#[cfg(any(test, debug_assertions, feature = "test-helpers"))]
-pub use blob_fetcher::FakeMediaBlobFetcher;
-pub use blob_fetcher::MediaBlobFetcher;
 #[cfg(any(test, debug_assertions, feature = "test-helpers"))]
 pub use blob_uploader::FakeMediaBlobUploader;
 pub use blob_uploader::MediaBlobUploader;
@@ -52,7 +49,7 @@ pub use fauna_core::followed_media::{
     FollowedFetchError, FollowedFileEntry, FollowedMediaScope, FollowedMediaSource,
 };
 pub use folder_keys::{FolderKeyResolver, ResolvedCustody, ResolvedFolderKeys};
-pub use machine::{FolderChannelOwners, MediaMachine, MlsQuery};
+pub use machine::{FolderChannelOwners, MediaMachine, MlsQuery, SettlePolicy};
 #[cfg(any(test, debug_assertions, feature = "test-helpers"))]
 pub use nest_api::{FakeMediaNestApi, MediaNestCall};
 pub use nest_api::{MediaApiError, MediaNestApi};

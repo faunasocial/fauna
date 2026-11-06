@@ -29,9 +29,16 @@ public sealed partial class StatusPage : Page
         // place (RegionPlaneHost raises off the UI thread — marshal back).
         Loaded += (_, _) => RegionPlaneHost.Changed += OnRegionChanged;
         Unloaded += (_, _) => RegionPlaneHost.Changed -= OnRegionChanged;
+        // The same for the nest's rules surface: a read that folded a change (a
+        // nest_info push, a reconnect) repaints it in place. NestRulesHost raises on
+        // whatever thread the read landed on — marshal back.
+        Loaded += (_, _) => NestRulesHost.Changed += OnNestRulesChanged;
+        Unloaded += (_, _) => NestRulesHost.Changed -= OnNestRulesChanged;
     }
 
     private void OnRegionChanged() => DispatcherQueue.TryEnqueue(PaintRegion);
+
+    private void OnNestRulesChanged() => DispatcherQueue.TryEnqueue(PaintNestRules);
 
     protected override void OnNavigatedTo(NavigationEventArgs e)
     {
@@ -53,6 +60,10 @@ public sealed partial class StatusPage : Page
     private async void Page_Loaded(object sender, RoutedEventArgs e)
     {
         PaintRegion();
+        // Opening the rules surface is reading the change: the shell's one-line
+        // notice has done its job (nest-rules.md § A change is announced).
+        NestRulesHost.DismissNotice();
+        PaintNestRules();
         await LoadStatusAsync();
     }
 
@@ -160,6 +171,7 @@ public sealed partial class StatusPage : Page
 
         UpdateFeatureLimits();
         PaintRegion();
+        PaintNestRules();
     }
 
     /// <summary>
@@ -233,6 +245,60 @@ public sealed partial class StatusPage : Page
         var line = new TextBlock { Text = text, TextWrapping = TextWrapping.Wrap };
         AutomationProperties.SetAutomationId(line, id);
         return line;
+    }
+
+    /// <summary>
+    /// Paints <c>settings-nest-rules-*</c> from the shared book's summary for the
+    /// session nest (<see cref="NestRulesHost.Summary"/> — every label already chosen
+    /// in <c>fauna_client_policy</c>; this method only places them, one element per
+    /// id). Gated on the shared <c>is_shown</c> rule (<see cref="NestRulesHost.IsShown"/>):
+    /// absent for a nest that published no rules or an applied empty document, and
+    /// shown — the not-applied sentence alone, unscoped — for a document none of
+    /// which applies here. Clear-and-rebuild of a panel this method owns outright,
+    /// like <see cref="PaintRegion"/>. android's <c>NestRulesSettingsSection</c>.
+    /// </summary>
+    private void PaintNestRules()
+    {
+        NestRulesRowsPanel.Children.Clear();
+        var summary = NestRulesHost.Summary();
+        if (summary is null || !NestRulesHost.IsShown(summary))
+        {
+            NestRulesSection.Visibility = Visibility.Collapsed;
+            return;
+        }
+
+        var title = S.Resolve(new uniffi.fauna_core.LocalizedText(
+            "nest_rules.settings_title",
+            new System.Collections.Generic.Dictionary<string, string> { ["nest"] = summary.domain }));
+        NestRulesTitleText.Text = title;
+        // A container with only an AutomationId is pruned from the UIA tree.
+        AutomationProperties.SetName(NestRulesSection, title);
+
+        NestRulesVersionText.Text = S.Resolve(new uniffi.fauna_core.LocalizedText(
+            "nest_rules.version",
+            new System.Collections.Generic.Dictionary<string, string>
+            {
+                ["sequence"] = summary.sequence.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                ["issued"] = uniffi.fauna_ffi.FaunaFfiMethods.FormatUnixLocal(summary.issuedAt),
+            }));
+
+        // The whole document's note, unscoped — a rule's own sits beside its item.
+        if (summary.notAppliedSentence is { } why)
+            NestRulesRowsPanel.Children.Add(RegionLine(Ids.SettingsNestRulesInertNotice, S.Resolve(why)));
+        foreach (var rule in summary.rules)
+        {
+            var row = new StackPanel { Spacing = 2 };
+            row.Children.Add(RegionLine(Ids.SettingsNestRulesItem, NestRulesHost.RuleLine(rule)));
+            if (rule.inert is { } inert)
+            {
+                var note = RegionLine(Ids.SettingsNestRulesInertNotice, S.Resolve(inert));
+                note.Opacity = 0.7;
+                note.FontSize = 12;
+                row.Children.Add(note);
+            }
+            NestRulesRowsPanel.Children.Add(row);
+        }
+        NestRulesSection.Visibility = Visibility.Visible;
     }
 
     /// <summary>

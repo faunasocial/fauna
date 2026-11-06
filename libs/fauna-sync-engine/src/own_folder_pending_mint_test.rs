@@ -60,7 +60,7 @@ async fn an_owner_sealed_write_with_the_nest_down_mints_a_signed_serveable_pendi
     assert_eq!(row.path, REL);
     assert!(row.seq.is_none(), "no nest coordinate");
     assert_eq!(
-        row.content_key_version, None,
+        row.content_stamp, None,
         "an owner-sealed set mints with no M2 generation"
     );
     assert!(

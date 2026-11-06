@@ -89,7 +89,10 @@ public struct SubscriptionSettingsView: View {
                 let author = overlays.subscriptionAuthorLabel(
                     handle: sub.handle, authorId: sub.authorId)
                 SubscriptionMineRow(subscription: sub, author: author) {
-                    Task { await vm.unsubscribe(authorId: sub.authorId) }
+                    Task {
+                        await vm.unsubscribe(
+                            authorId: sub.authorId, tier: sub.tier, homeNestUrl: sub.homeNestUrl)
+                    }
                 }
                 // `.contain` keeps both this row id AND its child cell ids
                 // queryable (a bare container id otherwise clobbers children —

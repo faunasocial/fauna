@@ -21,6 +21,7 @@ import pytest
 from clients._ws_rpc_core import RpcCallError
 
 from .helpers import (
+    IMAGE_TAG,
     admin_ws,
     bridge_diag,
     claim_admin_api,
@@ -50,6 +51,15 @@ pytestmark = [
     pytest.mark.tier_4,
 ]
 
+
+@pytest.fixture(scope="module")
+def docker_image():
+    """This tree's image, built once for the module. A fixture rather than a
+    call in each test body, so the nest-mode axis sees what the test boots and
+    excludes it from docker and live runs (`nest_surface.OWN_IMAGE_FIXTURES`)."""
+    docker_build(get_repo_root())
+    return IMAGE_TAG
+
 MTA = "fauna-mail-bridge-mta"
 
 
@@ -66,8 +76,7 @@ def _claimed(name: str, port: int, code: str) -> dict:
     return {"name": name, "port": port, "url": f"https://127.0.0.1:{port}", "admin": admin}
 
 
-def test_no_scanners_public_box_refuses_mail_enable():
-    docker_build(get_repo_root())
+def test_no_scanners_public_box_refuses_mail_enable(docker_image):
     port = find_free_port()
     name = f"fauna-noscan-{port}"
     code = "NOSCAN1"
@@ -106,8 +115,7 @@ def test_no_scanners_public_box_refuses_mail_enable():
         remove_container(name)
 
 
-def test_scanner_wired_box_still_enables_mail():
-    docker_build(get_repo_root())
+def test_scanner_wired_box_still_enables_mail(docker_image):
     suffix = find_free_port()
     network = f"fauna-scanwired-net-{suffix}"
     clamd_name = f"fauna-scanwired-clamd-{suffix}"

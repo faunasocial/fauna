@@ -69,29 +69,38 @@ import SwiftUI
 /// - **Gmail / iCloud** show `source-username` + `source-app-password` (plus
 ///   the provider's app-password help line); host/port/tls-mode stay on the
 ///   preset the machine's `SelectSourceKind` arm applies.
-/// - **Outlook** shows the OAuth button **and** the IMAP-fallback fields
-///   (host/port/tls-mode/username/password) — ui.yaml's own "(+ Outlook
-///   fallback)" annotation on those four ids is what settles this.
+/// - **Outlook** shows `source-username` (the Microsoft account's address, the
+///   XOAUTH2 user) and **Sign in with Microsoft** — no password field, no host
+///   field, no Connect button: Microsoft takes no password from a mail app, so
+///   the IMAP fallback is withdrawn (`mailbox-migration.md` § Microsoft
+///   sign-in — the device-code grant).
 /// - **Generic** shows the IMAP fields alone; no app-password, no OAuth.
 ///
-/// `mail-import-source-oauth-button` paints (ui.yaml requires the element
-/// exist) but is never actuable — no app wires the Microsoft Graph dance yet
-/// (`mailbox-migration.md`'s own "Not in scope" list). The IMAP fallback fields
-/// beside it are the real, working path for an Outlook account today.
+/// # The Outlook source signs in with Microsoft
+///
+/// `mail-import-source-oauth-button` dispatches the shared
+/// `microsoftSignInActions` (commit the address, `BeginMicrosoftSignIn`); once
+/// Microsoft has answered with a code ``MailImportVM`` spawns
+/// `runMicrosoftSignIn`, the polling half, exactly as it spawns `runImport`.
+/// While the code is out `mail-import-source-oauth-code` paints the code and
+/// Microsoft's address (its `code` and `url` attributes carry each alone) beside
+/// an id-less **Open in browser**; the grant connects by itself and the step
+/// moves on to Scope with nothing more pressed. A deployment without a
+/// registration paints the unavailable sentence and keeps the button inert.
 ///
 /// # Two controls with no machine action
 ///
 /// `mail-import-scope-mailbox-mapping` is informational: no `MailImportAction`
 /// changes the destination mapping and the doc names no control for it
-/// (§ Wizard steps step 3 — "1:1 by default"). And the two Done deep-links
-/// (`view-imported` / `review-skipped`) are backed by no action either — both
-/// navigate to Conversations, where mail lives, the tui lead app's own
-/// resolution: a real navigation, not a stub, but "Review skipped" cannot
-/// deep-link to a skip-log page that exists nowhere in the app yet (the error
-/// log lives inline on the Progress screen instead).
+/// (§ Wizard steps step 3 — "1:1 by default"). And the two Done buttons are
+/// backed by no action either: `view-imported` navigates to Conversations,
+/// where mail lives, and `review-skipped` is a page-local toggle
+/// (`showSkipped`, the tui `show_skipped` shape) that reveals the snapshot's
+/// `error_log` below the Done card (§ Wizard steps step 6).
 public struct MailImportView: View {
     @Environment(FaunaClient.self) private var client: FaunaClient?
     @State private var vm = MailImportVM()
+    @Environment(\.openURL) private var openURL
 
     /// Both Done deep-links go here — Conversations, where mail lives. Wired by
     /// each target's settings shell (the `MailListsView.onNavigateToMembers`
@@ -107,6 +116,10 @@ public struct MailImportView: View {
     @State private var draftUsername = ""
     @State private var draftPassword = ""
     @State private var draftAppPassword = ""
+    /// Whether the remembered source (`MailImportSnapshot.sourceRemembered`) has
+    /// filled the Source drafts on this visit — once, so a re-read never writes
+    /// over what the user typed (the tui `apply_mail_import_snapshot` shape).
+    @State private var sourcePrefilled = false
 
     // ── Scope-screen drafts ──
     @State private var draftDateFrom = ""
@@ -122,6 +135,10 @@ public struct MailImportView: View {
     /// messages are kept, § UX shape step 5). Mirrors `MailListsView.tapDelete`
     /// / linux `wire_two_click`.
     @State private var cancelArmed = false
+    /// Whether Review skipped has revealed the skip log below the Done card —
+    /// page-local, the tui `show_skipped` shape; cleared when the wizard
+    /// leaves Done.
+    @State private var showSkipped = false
 
     public init(onNavigateToConversations: @escaping () -> Void = {}) {
         self.onNavigateToConversations = onNavigateToConversations
@@ -164,12 +181,28 @@ public struct MailImportView: View {
             await vm.configure(api: client.api)
             syncDraftsFromSnapshot()
         }
+        .onChange(of: vm.snapshot?.resumeNeedsCredentials ?? false) { _, needs in
+            resumePromptChanged(to: needs)
+        }
+        // Another device moved this account's import: re-read the session
+        // through the machine. Cancel's two-click arm is view state, so the
+        // re-read cannot disarm it (`test_cancel_asks_first_and_keeps_what_already_arrived`).
+        .onMailImportChanged { await vm.hydrate() }
+        .onDisappear { vm.leavePage() }
     }
 
     // MARK: - Screen 1 — Source
 
     private var showsAppPassword: Bool { draftKind == .gmail || draftKind == .iCloud }
-    private var showsImapFields: Bool { draftKind == .outlook || draftKind == .generic }
+    private var showsImapFields: Bool { draftKind == .generic }
+
+    /// The provider's app-password sentence — painted under the field and
+    /// published as its `help` attribute (what the cross-app journey reads).
+    private var appPasswordHelp: String {
+        draftKind == .gmail
+            ? L.mailImport.sourceAppPasswordHelpGmail
+            : L.mailImport.sourceAppPasswordHelpIcloud
+    }
 
     private var sourceSection: some View {
         groupedSection(title: L.mailImport.sourceTitle) {
@@ -194,32 +227,29 @@ public struct MailImportView: View {
 
             // Painted for every provider kind — nothing in ui.yaml scopes
             // `mail-import-source-username` to a subset the way the other four
-            // are annotated.
-            TextField(L.mailImport.sourceUsernamePlaceholder, text: $draftUsername)
+            // are annotated. Outlook asks for the Microsoft account's address,
+            // the XOAUTH2 user.
+            TextField(
+                draftKind == .outlook
+                    ? L.mailImport.sourceOutlookAddressLabel
+                    : L.mailImport.sourceUsernamePlaceholder,
+                text: $draftUsername)
                 .accessibilityIdentifier(Ids.mailImportSourceUsername)
                 .automationField(Ids.mailImportSourceUsername, text: $draftUsername)
 
             if showsAppPassword {
                 SecureField(L.mailImport.sourceAppPasswordLabel, text: $draftAppPassword)
                     .accessibilityIdentifier(Ids.mailImportSourceAppPassword)
-                    .automationField(Ids.mailImportSourceAppPassword, text: $draftAppPassword)
-                Text(draftKind == .gmail
-                    ? L.mailImport.sourceAppPasswordHelpGmail
-                    : L.mailImport.sourceAppPasswordHelpIcloud)
+                    .automationField(
+                        Ids.mailImportSourceAppPassword, text: $draftAppPassword,
+                        attributes: { ["help": appPasswordHelp] })
+                Text(appPasswordHelp)
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
 
             if draftKind == .outlook {
-                // Painted because ui.yaml requires the element exist; never
-                // actuable — no app wires the Microsoft Graph dance yet.
-                Button(L.mailImport.sourceOauthButton) {}
-                    .disabled(true)
-                    .accessibilityIdentifier(Ids.mailImportSourceOauthButton)
-                    .automationActivate(
-                        Ids.mailImportSourceOauthButton,
-                        isEnabled: { false },
-                        perform: {})
+                microsoftSignInRows
             }
 
             if showsImapFields {
@@ -229,37 +259,96 @@ public struct MailImportView: View {
                 TextField(L.mailImport.sourcePortPlaceholder, text: $draftPort)
                     .accessibilityIdentifier(Ids.mailImportSourcePort)
                     .automationField(Ids.mailImportSourcePort, text: $draftPort)
-                Picker(L.mailImport.tlsImplicit, selection: Binding(
-                    get: { vm.snapshot?.tlsMode ?? .implicit },
-                    set: { mode in Task { await vm.dispatch(.setTlsMode(mode: mode)) } }
-                )) {
-                    ForEach(Self.tlsModes, id: \.self) { mode in
-                        Text(tlsLabel(mode)).tag(mode)
-                    }
-                }
-                .accessibilityIdentifier(Ids.mailImportSourceTlsMode)
-                .automationSelect(
-                    Ids.mailImportSourceTlsMode,
-                    value: { tlsLabel(vm.snapshot?.tlsMode ?? .implicit) },
-                    options: { Self.tlsModes.map(tlsLabel) },
-                    set: { label in
-                        if let m = Self.tlsModes.first(where: { tlsLabel($0) == label }) {
-                            Task { await vm.dispatch(.setTlsMode(mode: m)) }
-                        }
-                    })
+                tlsModePicker
                 SecureField(L.mailImport.sourcePasswordPlaceholder, text: $draftPassword)
                     .accessibilityIdentifier(Ids.mailImportSourcePassword)
                     .automationField(Ids.mailImportSourcePassword, text: $draftPassword)
             }
 
-            // Deliberately NOT `.faunaGate`d: Connect is a `LOGIN` + `LIST`
+            // The Microsoft grant connects by itself — no Connect button beside
+            // it. Deliberately NOT `.faunaGate`d: Connect is a `LOGIN` + `LIST`
             // against the FOREIGN source server over the client's own TLS
             // socket, not a nest RPC — no wire kind exists for it, and the
             // offline gate grades nest reachability. Only the four durable
             // session controls (Start/Pause/Resume/Cancel) touch the nest.
-            Button(L.mailImport.connectButton) { connect() }
-                .accessibilityIdentifier(Ids.mailImportConnectButton)
-                .automationActivate(Ids.mailImportConnectButton) { connect() }
+            if draftKind != .outlook {
+                Button(L.mailImport.connectButton) { connect() }
+                    .accessibilityIdentifier(Ids.mailImportConnectButton)
+                    .automationActivate(Ids.mailImportConnectButton) { connect() }
+            }
+
+            // The account remembers the source a successful Connect reached;
+            // Forget deletes the record and the machine resets the Source
+            // fields (`mailbox-migration.md` § Credential handling → The
+            // remembered source). Every provider, while a record exists.
+            if vm.snapshot?.sourceRemembered ?? false {
+                Button(L.mailImport.sourceForgetButton) { forgetSource() }
+                    .accessibilityIdentifier(Ids.mailImportSourceForgetButton)
+                    .automationActivate(Ids.mailImportSourceForgetButton) { forgetSource() }
+            }
+        }
+    }
+
+    /// The connection-security picker — the Source step's, and the restart-resume
+    /// prompt's for a Generic session (the session row does not record it).
+    private var tlsModePicker: some View {
+        Picker(L.mailImport.tlsImplicit, selection: Binding(
+            get: { vm.snapshot?.tlsMode ?? .implicit },
+            set: { mode in Task { await vm.dispatch(.setTlsMode(mode: mode)) } }
+        )) {
+            ForEach(Self.tlsModes, id: \.self) { mode in
+                Text(tlsLabel(mode)).tag(mode)
+            }
+        }
+        .accessibilityIdentifier(Ids.mailImportSourceTlsMode)
+        .automationSelect(
+            Ids.mailImportSourceTlsMode,
+            value: { tlsLabel(vm.snapshot?.tlsMode ?? .implicit) },
+            options: { Self.tlsModes.map(tlsLabel) },
+            set: { label in
+                if let m = Self.tlsModes.first(where: { tlsLabel($0) == label }) {
+                    Task { await vm.dispatch(.setTlsMode(mode: m)) }
+                }
+            })
+    }
+
+    /// The Outlook source's Microsoft sign-in: the button, the code the grant is
+    /// waiting on beside **Open in browser**, and the sentence under them. A
+    /// deployment without a registration paints the unavailable sentence and
+    /// keeps the button inert (`MailImportSnapshot.microsoftSigninAvailable`).
+    @ViewBuilder
+    private var microsoftSignInRows: some View {
+        let available = vm.snapshot?.microsoftSigninAvailable ?? false
+        Button(L.mailImport.sourceOauthButton) {
+            Task { await vm.signInWithMicrosoft(username: draftUsername) }
+        }
+        .disabled(!available || vm.microsoftSignInInFlight)
+        .accessibilityIdentifier(Ids.mailImportSourceOauthButton)
+        .automationActivate(
+            Ids.mailImportSourceOauthButton,
+            isEnabled: { available && !vm.microsoftSignInInFlight },
+            perform: { Task { await vm.signInWithMicrosoft(username: draftUsername) } })
+        if !available {
+            Text(L.mailImport.microsoftUnavailable)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        } else if let view = vm.snapshot?.microsoftSignin,
+                  view.state == .waiting, !view.userCode.isEmpty {
+            // The code and the address each ride alone as attributes — the
+            // observables the cross-app journey reads (tui's `.attr("code", …)`).
+            Text(L.mailImport.microsoftCodeFmt(url: view.verificationUri, code: view.userCode))
+                .accessibilityIdentifier(Ids.mailImportSourceOauthCode)
+                .automationValue(
+                    Ids.mailImportSourceOauthCode,
+                    text: { L.mailImport.microsoftCodeFmt(url: view.verificationUri, code: view.userCode) },
+                    attributes: { ["code": view.userCode, "url": view.verificationUri] })
+            // Id-less, like every other app's: the OS opener is the only effect.
+            Button(L.mailImport.microsoftOpenBrowser) {
+                if let url = URL(string: view.verificationUri) { openURL(url) }
+            }
+            Text(L.mailImport.microsoftWaiting)
+                .font(.caption)
+                .foregroundStyle(.secondary)
         }
     }
 
@@ -310,6 +399,20 @@ public struct MailImportView: View {
                 TextField(L.mailImport.scopeMaxSizeLabel, text: $draftMaxSizeMb)
                     .accessibilityIdentifier(Ids.mailImportScopeMaxSize)
                     .automationField(Ids.mailImportScopeMaxSize, text: $draftMaxSizeMb)
+                // The state is read from the snapshot, never a click echo; the
+                // dispatch is the negated snapshot value. The label carries the
+                // double-storage warning itself (`mailbox-migration.md` § Opt-out
+                // per session) — never paint the toggle without it.
+                Toggle(L.mailImport.scopeImportDuplicatesLabel, isOn: Binding(
+                    get: { vm.snapshot?.importDuplicates ?? false },
+                    set: { _ in toggleImportDuplicates() }
+                ))
+                .accessibilityIdentifier(Ids.mailImportScopeImportDuplicatesToggle)
+                .automationActivate(
+                    Ids.mailImportScopeImportDuplicatesToggle,
+                    text: { L.mailImport.scopeImportDuplicatesLabel },
+                    value: { (vm.snapshot?.importDuplicates ?? false) ? "on" : "off" },
+                    perform: { toggleImportDuplicates() })
                 // Informational only — no action changes the mapping (docs above).
                 automationText(Ids.mailImportScopeMailboxMapping, L.mailImport.scopeMailboxMappingLabel)
                     .font(.caption)
@@ -356,6 +459,39 @@ public struct MailImportView: View {
         groupedSection(title: L.mailImport.progressTitle) {
             automationText(Ids.mailImportProgressSummary, progressSummary)
             automationProgressBar(Ids.mailImportProgressBar, fraction: progressFraction)
+            if vm.snapshot?.sessionState == .errored {
+                // A failed import is a record the wizard shows until the user
+                // moves on (`mailbox-migration.md` § A failed import …): counters
+                // frozen, the reason as the log's last line, and Dismiss as the
+                // one control — no credential field, Pause, Resume, restart
+                // offer or Cancel (the machine refuses each with a sentence).
+                Button(L.mailImport.dismissFailedButton) { Task { await vm.dispatch(.dismiss) } }
+                    .accessibilityIdentifier(Ids.mailImportDismissButton)
+                    .automationActivate(
+                        Ids.mailImportDismissButton, text: { L.mailImport.dismissFailedButton }
+                    ) {
+                        Task { await vm.dispatch(.dismiss) }
+                    }
+                    .faunaGate("fauna.bridges.discard_import_session")
+            } else {
+                runControls
+            }
+            Text(L.mailImport.errorLogTitle)
+                .font(.headline)
+            automationText(Ids.mailImportErrorLog, (vm.snapshot?.errorLog ?? []).joined(separator: "\n"))
+                .font(.caption.monospaced())
+            mailboxProgressList
+        }
+    }
+
+    /// The live session's controls: the restart-resume credential prompt, Pause,
+    /// Resume, Cancel, the full-mailbox notice and the rebuilt-mailbox restart.
+    @ViewBuilder
+    private var runControls: some View {
+        if let snap = vm.snapshot, snap.resumeNeedsCredentials {
+            resumeCredentialRows(snap)
+        }
+        Group {
             HStack {
                 Button(L.mailImport.pauseButton) { Task { await vm.dispatch(.pause) } }
                     .accessibilityIdentifier(Ids.mailImportPauseButton)
@@ -363,11 +499,9 @@ public struct MailImportView: View {
                         Task { await vm.dispatch(.pause) }
                     }
                     .faunaGate("fauna.bridges.pause_import_session")
-                Button(L.mailImport.resumeButton) { Task { await vm.dispatch(.resume) } }
+                Button(L.mailImport.resumeButton) { resume() }
                     .accessibilityIdentifier(Ids.mailImportResumeButton)
-                    .automationActivate(Ids.mailImportResumeButton) {
-                        Task { await vm.dispatch(.resume) }
-                    }
+                    .automationActivate(Ids.mailImportResumeButton) { resume() }
                     .faunaGate("fauna.bridges.resume_import_session")
                 Button(cancelLabel, role: .destructive) { tapCancel() }
                     .accessibilityIdentifier(Ids.mailImportCancelButton)
@@ -378,22 +512,67 @@ public struct MailImportView: View {
                     // so this is the control that issues Cancel.
                     .faunaGate("fauna.bridges.cancel_import_session")
             }
-            Text(L.mailImport.errorLogTitle)
-                .font(.headline)
-            automationText(Ids.mailImportErrorLog, (vm.snapshot?.errorLog ?? []).joined(separator: "\n"))
-                .font(.caption.monospaced())
-            mailboxProgressList
+            // The full-mailbox notice (§ Failure handling → Nest-side errors):
+            // Resume and Cancel are the buttons above, Skip the rest is here.
+            if let snap = vm.snapshot, snap.sessionState == .paused,
+               snap.pauseReason == .mailboxFull {
+                automationText(Ids.mailImportQuotaNotice, L.mailImport.quotaNotice)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Button(L.mailImport.quotaSkipRestButton) { Task { await vm.dispatch(.skipRest) } }
+                    .accessibilityIdentifier(Ids.mailImportQuotaSkipRestButton)
+                    .automationActivate(Ids.mailImportQuotaSkipRestButton) {
+                        Task { await vm.dispatch(.skipRest) }
+                    }
+                    .faunaGate("fauna.bridges.resume_import_session")
+            }
+            // A source mailbox the provider rebuilt (UIDVALIDITY changed) paused
+            // the session; this drops its cursors and resumes. The run is
+            // spawned by `MailImportVM` off `importActionStartsRun`.
+            if let snap = vm.snapshot, !snap.rebuiltMailboxes.isEmpty {
+                Button(L.mailImport.restartButton) { Task { await vm.dispatch(.restartRebuiltMailboxes) } }
+                    .accessibilityIdentifier(Ids.mailImportRestartButton)
+                    .automationActivate(Ids.mailImportRestartButton) {
+                        Task { await vm.dispatch(.restartRebuiltMailboxes) }
+                    }
+                    .faunaGate("fauna.bridges.resume_import_session")
+            }
         }
     }
 
-    /// Per-mailbox progress rows. The machine tracks only GLOBAL
-    /// imported/skipped/errored counts, not a per-mailbox breakdown
-    /// (`MailImportSnapshot` has no `mailboxProgress` field the way export's
-    /// does) — so each row shows its planned message count, not a live
-    /// per-mailbox fraction. The tui lead app's own accurate-to-what-exists
-    /// simplification, not a gap this page adds.
+    /// The Progress step of a session adopted after a restart
+    /// (`MailImportSnapshot.resumeNeedsCredentials`, § Resume protocol step 2):
+    /// the sentence saying why and the Source step's own credential field for
+    /// the session's provider. Outlook asks for the Microsoft sign-in again.
+    @ViewBuilder
+    private func resumeCredentialRows(_ snap: MailImportSnapshot) -> some View {
+        switch snap.sourceKind {
+        case .gmail, .iCloud:
+            Text(L.mailImport.resumeNeedsPassword).font(.caption)
+            SecureField(L.mailImport.sourceAppPasswordLabel, text: $draftAppPassword)
+                .accessibilityIdentifier(Ids.mailImportSourceAppPassword)
+                .automationField(Ids.mailImportSourceAppPassword, text: $draftAppPassword)
+        case .generic:
+            Text(L.mailImport.resumeNeedsPassword).font(.caption)
+            TextField(L.mailImport.sourcePortPlaceholder, text: $draftPort)
+                .accessibilityIdentifier(Ids.mailImportSourcePort)
+                .automationField(Ids.mailImportSourcePort, text: $draftPort)
+            tlsModePicker
+            SecureField(L.mailImport.sourcePasswordPlaceholder, text: $draftPassword)
+                .accessibilityIdentifier(Ids.mailImportSourcePassword)
+                .automationField(Ids.mailImportSourcePassword, text: $draftPassword)
+        case .outlook:
+            Text(L.mailImport.resumeNeedsMicrosoft).font(.caption)
+            microsoftSignInRows
+        }
+    }
+
+    /// Per-mailbox progress rows, painted from the shared
+    /// `MailImportSnapshot.mailboxProgress` (one row per mailbox the run
+    /// takes, laid at Start); the count text is the shared
+    /// `importMailboxProgressText`.
     private var mailboxProgressList: some View {
-        let rows = (vm.snapshot?.mailboxes ?? []).filter(\.selected)
+        let rows = vm.snapshot?.mailboxProgress ?? []
         // The container is a real `VStack`, not a bare modifier on the
         // `ForEach`: a modifier applied to a `ForEach` lands on each ROW, so
         // the list id would register once per row (or, unregistered, not at
@@ -406,7 +585,7 @@ public struct MailImportView: View {
             HStack {
                 automationText(Ids.mailImportMailboxProgressListItemName, mb.name)
                 Spacer()
-                automationText(Ids.mailImportMailboxProgressListItemProgress, L.mailImport.progressRowFmt(count: String(mb.messageCount)))
+                automationText(Ids.mailImportMailboxProgressListItemProgress, renderLocalizedText(importMailboxProgressText(row: mb)))
                     .font(.caption.monospaced())
             }
             .accessibilityElement(children: .contain)
@@ -417,7 +596,7 @@ public struct MailImportView: View {
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier(Ids.mailImportMailboxProgressList)
         .automationValue(Ids.mailImportMailboxProgressList, text: {
-            String((vm.snapshot?.mailboxes ?? []).filter(\.selected).count)
+            String(rows.count)
         })
     }
 
@@ -432,12 +611,21 @@ public struct MailImportView: View {
                     .automationActivate(Ids.mailImportViewImportedButton) {
                         onNavigateToConversations()
                     }
-                Button(L.mailImport.reviewSkippedButton) { onNavigateToConversations() }
+                Button(L.mailImport.reviewSkippedButton) { showSkipped.toggle() }
                     .accessibilityIdentifier(Ids.mailImportReviewSkippedButton)
                     .automationActivate(Ids.mailImportReviewSkippedButton) {
-                        onNavigateToConversations()
+                        showSkipped.toggle()
                     }
             }
+            if showSkipped {
+                Text(L.mailImport.errorLogTitle)
+                    .font(.headline)
+                automationText(Ids.mailImportErrorLog, (vm.snapshot?.errorLog ?? []).joined(separator: "\n"))
+                    .font(.caption.monospaced())
+            }
+        }
+        .onChange(of: step) { _, newStep in
+            if newStep != .done { showSkipped = false }
         }
     }
 
@@ -472,11 +660,60 @@ public struct MailImportView: View {
         Task { await vm.dispatchSequence(actions) }
     }
 
+    /// Forget the remembered source: the machine deletes the record and resets
+    /// its Source fields; the drafts empty with them (the secrets were never
+    /// remembered, so they go too), and a later remembered source may prefill
+    /// afresh.
+    private func forgetSource() {
+        Task {
+            await vm.dispatch(.forgetSource)
+            draftUsername = ""
+            draftPassword = ""
+            draftAppPassword = ""
+            sourcePrefilled = false
+            syncDraftsFromSnapshot()
+        }
+    }
+
+    /// The Scope toggle: the dispatch is the negated SNAPSHOT value, never a
+    /// local echo, so the painted state is always the machine's.
+    private func toggleImportDuplicates() {
+        let next = !(vm.snapshot?.importDuplicates ?? false)
+        Task { await vm.dispatch(.setImportDuplicates(value: next)) }
+    }
+
     /// Step 2→3: commit both Scope drafts, then advance. `scopeNextActions`
     /// also owns the unparseable-max-size fallback.
     private func scopeNext() {
         let actions = scopeNextActions(dateFrom: draftDateFrom, maxSizeInput: draftMaxSizeMb)
         Task { await vm.dispatchSequence(actions) }
+    }
+
+    /// Step 5's Resume as one ordered dispatch — the shared `resumeActions`
+    /// commits the credential the restart prompt painted before the `Resume`.
+    private func resume() {
+        guard let snap = vm.snapshot else { return }
+        let secret = (snap.sourceKind == .gmail || snap.sourceKind == .iCloud)
+            ? draftAppPassword : draftPassword
+        let actions = resumeActions(
+            needsCredentials: snap.resumeNeedsCredentials, kind: snap.sourceKind,
+            port: draftPort, password: secret)
+        Task { await vm.dispatchSequence(actions) }
+    }
+
+    /// The restart prompt's drafts: the port starts at the one the machine
+    /// holds when the flag turns on, and the password drafts are dropped when
+    /// it turns off (the secret lives no longer than the prompt).
+    private func resumePromptChanged(to needs: Bool) {
+        if needs {
+            if let snap = vm.snapshot {
+                draftPort = String(snap.port)
+                if draftUsername.isEmpty { draftUsername = snap.username }
+            }
+        } else {
+            draftPassword = ""
+            draftAppPassword = ""
+        }
     }
 
     /// Toggle one mailbox. The local echo is written FIRST and synchronously —
@@ -515,6 +752,14 @@ public struct MailImportView: View {
     /// connect keeps exactly what the user typed (§ Wizard steps step 2).
     private func syncDraftsFromSnapshot() {
         guard let snap = vm.snapshot else { return }
+        // A remembered source prefills the Source drafts once per visit, never
+        // over what the user typed (the snapshot arrives prefilled — kind,
+        // host, port, TLS mode, username; the secret is never remembered).
+        if snap.sourceRemembered, !sourcePrefilled {
+            sourcePrefilled = true
+            draftKind = snap.sourceKind
+            if draftUsername.isEmpty { draftUsername = snap.username }
+        }
         draftHost = snap.host
         draftPort = String(snap.port)
         if draftMaxSizeMb.isEmpty {
@@ -539,18 +784,23 @@ public struct MailImportView: View {
         renderLocalizedText(importTlsModeLabel(mode: mode))
     }
 
-    /// The Confirm summary: the source, the selected-mailbox count, and their
-    /// summed `messageCount` estimate (§ Wizard steps step 4 — no
-    /// estimated-bytes or wall-clock field exists on the snapshot, so neither is
-    /// claimed here).
+    /// The Confirm summary: the source, the selected-mailbox count, their
+    /// message total and — when every one of them was sized — roughly how much
+    /// data (§ Wizard steps step 4), all from the shared
+    /// `importSelectedTotals`; nothing is summed here.
     private var confirmSummary: String {
         guard let snap = vm.snapshot else { return "" }
-        let selected = snap.mailboxes.filter { isSelected($0) }
-        let messages = selected.reduce(UInt64(0)) { $0 + UInt64($1.messageCount) }
+        let totals = importSelectedTotals(snapshot: snap)
+        let source = kindLabel(snap.sourceKind)
+        let mailboxes = String(totals.mailboxes)
+        let messages = String(totals.messages)
+        if let bytes = totals.bytes {
+            return L.mailImport.confirmSummarySizedFmt(
+                source: source, mailboxes: mailboxes, messages: messages,
+                size: ValueFormat.byteSize(bytes))
+        }
         return L.mailImport.confirmSummaryFmt(
-            source: kindLabel(snap.sourceKind),
-            mailboxes: String(selected.count),
-            messages: String(messages))
+            source: source, mailboxes: mailboxes, messages: messages)
     }
 
     /// The shared elapsed time / time left of this session

@@ -134,7 +134,8 @@
                 x:Name="FilterRuleType"
                 AutomationProperties.AutomationId="{x:Bind ids:Ids.FilterRuleType}"
                 Header="{loc:Localize Key=settings/rule_type}"
-                HorizontalAlignment="Stretch">
+                HorizontalAlignment="Stretch"
+                SelectionChanged="FilterRuleType_SelectionChanged">
                 <!-- AutomationProperties.Name = the wire enum (the cross-app select()
                      key) so the e2e bridge, which matches a ComboBoxItem by its UIA Name,
                      resolves "SenderIs" etc. regardless of the localized Content label. -->
@@ -143,6 +144,8 @@
                 <ComboBoxItem Content="{loc:Localize Key=status/email_filters/subject_contains}" Tag="SubjectContains" AutomationProperties.Name="SubjectContains" />
                 <ComboBoxItem Content="{loc:Localize Key=status/email_filters/body_contains}" Tag="BodyContains" AutomationProperties.Name="BodyContains" />
                 <ComboBoxItem Content="{loc:Localize Key=status/email_filters/header_exists}" Tag="HeaderExists" AutomationProperties.Name="HeaderExists" />
+                <ComboBoxItem Content="{loc:Localize Key=settings/privacy_page/header_value}" Tag="HeaderContains" AutomationProperties.Name="HeaderContains" />
+                <ComboBoxItem Content="{loc:Localize Key=settings/privacy_page/spam_score}" Tag="SpamScoreAtLeast" AutomationProperties.Name="SpamScoreAtLeast" />
             </ComboBox>
 
             <TextBox
@@ -150,6 +153,19 @@
                 AutomationProperties.AutomationId="{x:Bind ids:Ids.FilterRuleValue}"
                 Header="{loc:Localize Key=settings/rule_value}"
                 PlaceholderText="e.g. spam@example.com" />
+
+            <!-- The two conditions with a second input (Collapsed, so absent from
+                 the UIA count, unless their kind is selected). -->
+            <TextBox
+                x:Name="FilterRuleHeaderValueInput"
+                AutomationProperties.AutomationId="{x:Bind ids:Ids.FilterRuleHeaderValue}"
+                Header="{loc:Localize Key=settings/privacy_page/header_value}"
+                Visibility="Collapsed" />
+            <TextBox
+                x:Name="FilterRuleSpamScoreInput"
+                AutomationProperties.AutomationId="{x:Bind ids:Ids.FilterRuleSpamScore}"
+                Header="{loc:Localize Key=settings/privacy_page/spam_score}"
+                Visibility="Collapsed" />
 
             <ComboBox
                 x:Name="FilterActionSelect"
@@ -163,6 +179,9 @@
                 <ComboBoxItem Content="{loc:Localize Key=status/email_filters/action_discard}" Tag="Discard" AutomationProperties.Name="Discard" />
                 <ComboBoxItem Content="{loc:Localize Key=status/email_filters/action_reject}" Tag="Reject" AutomationProperties.Name="Reject" />
                 <ComboBoxItem Content="{loc:Localize Key=status/email_filters/action_forward}" Tag="Forward" AutomationProperties.Name="Forward" />
+                <ComboBoxItem Content="{loc:Localize Key=status/email_filters/action_file_into}" Tag="FileInto" AutomationProperties.Name="FileInto" />
+                <ComboBoxItem Content="{loc:Localize Key=status/email_filters/action_auto_reply}" Tag="AutoReply" AutomationProperties.Name="AutoReply" />
+                <ComboBoxItem Content="{loc:Localize Key=status/email_filters/action_add_label}" Tag="AddLabel" AutomationProperties.Name="AddLabel" />
             </ComboBox>
 
             <!-- The Forward inputs: shown only while the action reads Forward
@@ -181,6 +200,49 @@
                     Content="{loc:Localize Key=settings/privacy_page/keep_local_copy}"
                     IsChecked="True" />
             </StackPanel>
+
+            <!-- The other actions' own inputs: each shown only while its action is
+                 selected (Collapsed otherwise). -->
+            <TextBox
+                x:Name="FilterFileIntoMailboxInput"
+                AutomationProperties.AutomationId="{x:Bind ids:Ids.FilterFileIntoMailbox}"
+                Header="{loc:Localize Key=settings/privacy_page/file_into_mailbox}"
+                Visibility="Collapsed" />
+            <TextBox
+                x:Name="FilterAddLabelInput"
+                AutomationProperties.AutomationId="{x:Bind ids:Ids.FilterAddLabel}"
+                Header="{loc:Localize Key=settings/privacy_page/add_label}"
+                Visibility="Collapsed" />
+            <StackPanel
+                x:Name="AutoReplyInputs"
+                Spacing="8"
+                Visibility="Collapsed">
+                <TextBox
+                    x:Name="FilterAutoReplySubjectInput"
+                    AutomationProperties.AutomationId="{x:Bind ids:Ids.FilterAutoReplySubject}"
+                    Header="{loc:Localize Key=settings/privacy_page/auto_reply_subject}" />
+                <TextBox
+                    x:Name="FilterAutoReplyBodyInput"
+                    AutomationProperties.AutomationId="{x:Bind ids:Ids.FilterAutoReplyBody}"
+                    Header="{loc:Localize Key=settings/privacy_page/auto_reply_body}"
+                    AcceptsReturn="True"
+                    TextWrapping="Wrap" />
+                <TextBox
+                    x:Name="FilterAutoReplyIntervalInput"
+                    AutomationProperties.AutomationId="{x:Bind ids:Ids.FilterAutoReplyIntervalHours}"
+                    Header="{loc:Localize Key=settings/privacy_page/auto_reply_interval_hours}" />
+            </StackPanel>
+
+            <!-- The rule's place in the order and its `continue` flag
+                 (email-filters.md § Email filter rules). -->
+            <TextBox
+                x:Name="FilterPriorityInput"
+                AutomationProperties.AutomationId="{x:Bind ids:Ids.FilterPriorityInput}"
+                Header="{loc:Localize Key=settings/privacy_page/priority}" />
+            <CheckBox
+                x:Name="FilterContinueBox"
+                AutomationProperties.AutomationId="{x:Bind ids:Ids.FilterContinueToggle}"
+                Content="{loc:Localize Key=settings/privacy_page/continue_matching}" />
 
             <StackPanel Orientation="Horizontal" Spacing="8">
                 <Button

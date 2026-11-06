@@ -2152,7 +2152,9 @@ fn unsubscribe_handler() -> RpcHandler {
 
             // The remote arm, as at `subscribe` (`federated-follow.md`
             // § Decision 2): an author not hosted here whose home is named.
-            if let Some(home_url) = req.home_nest_url.as_deref()
+            // The leave dials the home stored on the follow, never the named
+            // one (`remote_unsubscribe`).
+            if req.home_nest_url.is_some()
                 && state
                     .db
                     .get_user(&author_id)
@@ -2160,13 +2162,9 @@ fn unsubscribe_handler() -> RpcHandler {
                     .map_err(internal)?
                     .is_none()
             {
-                let reply = crate::follow_federation::remote_unsubscribe(
-                    &state,
-                    subscriber_id,
-                    &req,
-                    home_url,
-                )
-                .await?;
+                let reply =
+                    crate::follow_federation::remote_unsubscribe(&state, subscriber_id, &req)
+                        .await?;
                 return encode_reply(&reply);
             }
 

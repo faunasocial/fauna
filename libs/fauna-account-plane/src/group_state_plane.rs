@@ -20,11 +20,15 @@
 //! [`GroupSealing::MachineryRoot`] — possession of the scope's birth-minted,
 //! never-rotated root, which a joiner unwraps from its admission bundle —
 //! rather than under the owner `BackupKey` the account applier derives its
-//! schedule from. [`GroupSealing::GenerationTip`] is the second stratum and
-//! arrives with group content-kind sealing: the seam is registered (every
-//! door here dispatches on the sealing column) and its arm deliberately
-//! unbuilt — a `GenerationTip` write refuses, a v2 envelope on the feed
-//! counts [`WalkReport::unopened`].
+//! schedule from. [`GroupSealing::GenerationTip`] is the second stratum — the
+//! group set's content kinds (`p2p-shared-set-build.md` § Build design — the
+//! group set, decision 3): such an entry seals in the v2 envelope under the
+//! content branch of this member's admissible, keyable generation tip
+//! ([`crate::group_set::held_group_generations`]), and a reader peeks the
+//! generation id and opens with the key it holds for it. No admissible tip →
+//! the write refuses, never a machinery-root fallback; a v2 row whose
+//! generation this replica holds no key for counts
+//! [`WalkReport::unopened`] and `reconcile` re-presents it.
 //!
 //! # Pull-only by construction
 //!
@@ -47,6 +51,7 @@
 //! without the machinery root sees nothing past the custody floor.
 
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{Context, Result, bail};
 use ed25519_dalek::SigningKey;
@@ -56,19 +61,21 @@ use fauna_account_store::{
     types::{ItemRef, JournalOp, JournalRow, RelayRow, StateEntry},
 };
 use fauna_core::account_entry_crypto::{
-    EntryCoordinates, EntryPlaintext, open_entry, peek_generation_id, seal_entry,
+    EntryCoordinates, EntryPlaintext, SealedEntry, open_entry, peek_generation_id, seal_entry,
+    seal_entry_v2,
 };
-use fauna_core::crypto::{GroupMachineryRoot, GroupMachinerySchedule};
+use fauna_core::crypto::{GroupContentSchedule, GroupMachineryRoot, GroupMachinerySchedule};
 use fauna_core::group_ceremony::GroupPlaneRow;
 use fauna_core::group_generation::{GroupHeldRootRecord, GroupReceptionKeyRecord};
 use fauna_core::group_scope::decode_birth_for_scope;
 use fauna_protocol::RpcRequester;
 use fauna_protocol::account_state::{ItemClass, OP_STATE_PUT, OP_TOMBSTONE};
 use fauna_protocol::group_state::{
-    GroupSealing, KIND_GROUP_BIRTH, group_kinds, group_merge_policy, group_sealing,
+    GroupSealing, KIND_GROUP_BIRTH, KIND_GROUP_ENDPOINTS, KIND_GROUP_FILE, KIND_GROUP_NAME,
+    group_kinds, group_merge_policy, group_sealing,
 };
 use fauna_protocol::merge_policy::{
-    KIND_GROUP_MACHINERY_ROOT, KIND_GROUP_RECEPTION_KEY, MergeOutcome,
+    KIND_GROUP_MACHINERY_ROOT, KIND_GROUP_RECEPTION_KEY, LwwStamp, MergeOutcome,
 };
 use fauna_protocol::scope::GroupScope;
 use fauna_protocol::sync::{SyncChange, SyncChangesListReply, SyncChangesListRequest};
@@ -93,10 +100,13 @@ pub struct AdoptReport {
     /// the plane's standing compat answer (a later build re-adopts them from
     /// the feed).
     pub unknown: usize,
-    /// Rows `apply_class2`'s first-contact strictness refused. Never benign —
-    /// the ceremony verifier refuses a snapshot that does not admit, so one
-    /// here means a forged or corrupted row — but skip-not-abort, the walk's
-    /// own discipline: one bad row must not strand the rest of the scope.
+    /// Rows `apply_class2`'s first-contact strictness refused, and
+    /// `GenerationTip` rows this replica holds no admissible tip to seal
+    /// under. Never benign — the ceremony verifier refuses a snapshot that
+    /// does not admit, so one here means a forged or corrupted row, or a
+    /// content row offered before its generation — but skip-not-abort, the
+    /// walk's own discipline: one bad row must not strand the rest of the
+    /// scope.
     pub refused: usize,
 }
 
@@ -120,6 +130,14 @@ pub struct GroupStatePlane<'a, B: StoreBackend, R: RpcRequester> {
     /// The scope's content-derived id — what a birth row landing here must
     /// re-derive to ([`Self::unbound_birth`]).
     scope_id: [u8; 32],
+    /// This member's generation keys and the file rows' writer check, read
+    /// from the store on first need and re-read on a miss
+    /// ([`crate::group_set`]).
+    reads: crate::group_set::ScopeReadCache,
+    /// A row the writer check reads has landed since the last
+    /// [`Self::settle`] — every writer-checked cell of the scope re-folds
+    /// once, at the end of the pass (`group-set.md` decision 5, rule (ii)).
+    check_moved: AtomicBool,
 }
 
 impl<'a, B: StoreBackend, R: RpcRequester> GroupStatePlane<'a, B, R> {
@@ -147,6 +165,8 @@ impl<'a, B: StoreBackend, R: RpcRequester> GroupStatePlane<'a, B, R> {
             writer_key,
             scope: GroupScope::new(*scope_id).to_string(),
             scope_id: *scope_id,
+            reads: Default::default(),
+            check_moved: AtomicBool::new(false),
         })
     }
 
@@ -161,11 +181,10 @@ impl<'a, B: StoreBackend, R: RpcRequester> GroupStatePlane<'a, B, R> {
     /// one transaction), then the sealed relay row for onward serving.
     /// Returns the writer seq the entry landed on.
     ///
-    /// No tombstone door exists here on purpose: every registered group kind
-    /// merges under `Immutable` or `CrdtPerField`, neither of which admits
-    /// one — deletion on this plane is an absorbing lattice phase (`Removed`,
-    /// `Shredded`), written through this same door. The door lands with the
-    /// first kind whose policy admits a tombstone, not before.
+    /// No tombstone door exists here on purpose: deletion on this plane is a
+    /// value phase — an absorbing lattice phase (`Removed`, `Shredded`), or a
+    /// `LatestWins` value that says so (a group file row's `Delete`) —
+    /// written through this same door, so every deletion stays a merged fact.
     pub async fn put(
         &self,
         item: &ItemId,
@@ -193,19 +212,22 @@ impl<'a, B: StoreBackend, R: RpcRequester> GroupStatePlane<'a, B, R> {
         // The sealing-stratum door lives in `write_own` — the one funnel every
         // write path reaches (a `put`-only door let
         // `adopt_rows` seal any kind under the machinery root).
-        self.write_own(&EntryPlaintext {
-            kind: item.kind.clone(),
-            key: item.key.clone(),
-            merge_meta: merge_meta.map(Into::into),
-            value: value.into(),
-            tombstone: false,
-        })
-        .await
+        let seq = self
+            .write_own(&EntryPlaintext {
+                kind: item.kind.clone(),
+                key: item.key.clone(),
+                merge_meta: merge_meta.map(Into::into),
+                value: value.into(),
+                tombstone: false,
+            })
+            .await?;
+        self.settle().await?;
+        Ok(seq)
     }
 
     /// Land one own-authored plaintext: the local write (journal + entry in
-    /// one transaction), the seal under the machinery-root schedule, and the
-    /// relay row. Our own frontier slot deliberately never advances — it is
+    /// one transaction), the seal under the kind's stratum, and the relay
+    /// row. Our own frontier slot deliberately never advances — it is
     /// the published-to-a-feed high-water, and this plane has no publish leg
     /// (pull-only posture, module docs).
     ///
@@ -214,39 +236,47 @@ impl<'a, B: StoreBackend, R: RpcRequester> GroupStatePlane<'a, B, R> {
     /// alone, so [`Self::adopt_rows`] could drive any kind into the
     /// machinery-root seal below — latent while all registered group kinds
     /// are `MachineryRoot`, and exactly the silent stratum forfeit the first
-    /// `GenerationTip` kind would have shipped). A refused row aborts the
-    /// whole write — for `adopt_rows` that drops the snapshot, which is the
-    /// deliberately conservative arm while no `GenerationTip` kind is
-    /// registerable (nothing can stage a counted per-row refusal today);
-    /// whoever lands the first `GenerationTip` kind owns adding the counted
-    /// `report.refused` pre-check in `adopt_rows` beside its seal path.
+    /// `GenerationTip` kind would have shipped). The tip is resolved BEFORE
+    /// the local write, so a refused `GenerationTip` row leaves nothing
+    /// behind; `adopt_rows` pre-checks the same tip and counts the row
+    /// `refused` rather than aborting its snapshot.
     async fn write_own(&self, plaintext: &EntryPlaintext) -> Result<u64> {
         if let Some(why) = self.unbound_birth(plaintext) {
             bail!("group-state put: {why}");
         }
         // The registry answers the column for every registered kind
-        // (law-tested), and only the machinery stratum has a built seal path.
-        match group_sealing(&plaintext.kind) {
-            Some(GroupSealing::MachineryRoot) => {}
-            Some(GroupSealing::GenerationTip) => bail!(
-                "kind {:?} is registered under the GenerationTip stratum, whose seal path \
-                 arrives with group content-kind sealing (the `p2p-share` data plane) — \
-                 nothing can seal it yet (key-material-hierarchy.md § Audience: a storage \
-                 group)",
-                plaintext.kind
-            ),
+        // (law-tested); each stratum names its own key material.
+        let tip = match group_sealing(&plaintext.kind) {
+            Some(GroupSealing::MachineryRoot) => None,
+            Some(GroupSealing::GenerationTip) => {
+                let reads = self.reads.refresh(self.store, &self.scope_id).await?;
+                let Some((id, key)) = reads.generations.tip() else {
+                    bail!(
+                        "kind {:?} seals under the group generation tip, and this member \
+                         resolves no admissible, keyable tip in scope {} — the fail-safe gap \
+                         a severance mint pays (recipient-set-scheme.md § The recipient-set \
+                         scheme → Mint triggers); never a machinery-root fallback",
+                        plaintext.kind,
+                        self.scope
+                    );
+                };
+                Some((
+                    id,
+                    GroupContentSchedule::derive(key).for_kind(&plaintext.kind),
+                ))
+            }
             None => bail!(
-                "kind {:?} has no MachineryRoot stratum registration — only machinery \
-                 kinds can seal on this plane today, and every write path funnels \
-                 through this door",
+                "kind {:?} has no group-plane stratum registration — every write path \
+                 funnels through this door",
                 plaintext.kind
             ),
-        }
+        };
         let (_, seq) = self
             .store
             .put_group_state(self.entry_of(plaintext))
             .await
             .context("group-state put: local write")?;
+        self.note_landed(&plaintext.kind);
 
         let writer = self.store.writer();
         let coords = EntryCoordinates {
@@ -254,9 +284,16 @@ impl<'a, B: StoreBackend, R: RpcRequester> GroupStatePlane<'a, B, R> {
             writer_seq: seq,
             scope: &self.scope,
         };
-        let keys = self.schedule.for_kind(&plaintext.kind);
-        let sealed = seal_entry(&keys, &coords, plaintext, self.writer_key)
-            .context("group-state put: seal")?;
+        let sealed: SealedEntry = match &tip {
+            None => seal_entry(
+                &self.schedule.for_kind(&plaintext.kind),
+                &coords,
+                plaintext,
+                self.writer_key,
+            ),
+            Some((id, keys)) => seal_entry_v2(keys, &coords, id, plaintext, self.writer_key),
+        }
+        .context("group-state put: seal")?;
         self.store
             .record_relay_row(&RelayRow {
                 scope: self.scope.clone(),
@@ -301,12 +338,34 @@ impl<'a, B: StoreBackend, R: RpcRequester> GroupStatePlane<'a, B, R> {
             let incoming = EntryPlaintext {
                 kind: row.kind.clone(),
                 key: row.key.clone(),
-                merge_meta: None,
+                // Verbatim, like the value: a `LatestWins` row's first
+                // contact needs its stamp, and the stamp is what ranks it
+                // against the writer's own later refreshes.
+                merge_meta: row.merge_meta.clone(),
                 value: row.value.clone().into(),
                 tombstone: false,
             };
             if let Some(why) = self.unbound_birth(&incoming) {
                 tracing::warn!(scope = %self.scope, "refusing a group snapshot row: {why}");
+                report.refused += 1;
+                continue;
+            }
+            // A content row seals under the tip: with none resolvable here it
+            // is counted, and the rest of the snapshot still lands.
+            if group_sealing(&row.kind) == Some(GroupSealing::GenerationTip)
+                && self
+                    .reads
+                    .refresh(self.store, &self.scope_id)
+                    .await?
+                    .generations
+                    .tip()
+                    .is_none()
+            {
+                tracing::warn!(
+                    kind = %row.kind,
+                    scope = %self.scope,
+                    "refusing a group snapshot content row: no admissible tip to seal it under"
+                );
                 report.refused += 1;
                 continue;
             }
@@ -337,6 +396,12 @@ impl<'a, B: StoreBackend, R: RpcRequester> GroupStatePlane<'a, B, R> {
                 MergeOutcome::KeepCurrent => report.kept += 1,
                 MergeOutcome::Replace => {
                     self.write_own(&incoming).await?;
+                    // A writer-checked row lands through the fold: the cell
+                    // is the honoured winner over its item's relay rows.
+                    if writer_checked(&row.kind) {
+                        let reads = self.scope_read().await?;
+                        self.refold_cell(&reads, &row.kind, &row.key).await?;
+                    }
                     report.adopted += 1;
                 }
                 MergeOutcome::Merged(merged) => {
@@ -350,6 +415,7 @@ impl<'a, B: StoreBackend, R: RpcRequester> GroupStatePlane<'a, B, R> {
                 ),
             }
         }
+        self.settle().await?;
         Ok(report)
     }
 
@@ -377,7 +443,7 @@ impl<'a, B: StoreBackend, R: RpcRequester> GroupStatePlane<'a, B, R> {
     /// itself — which is `crate::page_walk`'s, shared with every other walk in
     /// the crate. What stays here is the request and the per-row apply.
     async fn run(&self, cursor: BTreeMap<String, i64>) -> Result<WalkReport> {
-        crate::page_walk::drive(
+        let report = crate::page_walk::drive(
             cursor,
             WalkReport::default(),
             "group-state walk",
@@ -395,7 +461,9 @@ impl<'a, B: StoreBackend, R: RpcRequester> GroupStatePlane<'a, B, R> {
                         },
                     )
                     .await
-                    .map_err(|e| anyhow::anyhow!("fauna.sync.changes.list (group-state): {e}"))?;
+                    // `{e:#}`: the whole chain — a peer's refusal sits under
+                    // the requester's own context, and `{e}` printed only that.
+                    .map_err(|e| anyhow::anyhow!("fauna.sync.changes.list (group-state): {e:#}"))?;
                 Ok(reply)
             },
             async |change: &SyncChange,
@@ -404,7 +472,9 @@ impl<'a, B: StoreBackend, R: RpcRequester> GroupStatePlane<'a, B, R> {
                 self.apply(change, report, cursor).await
             },
         )
-        .await
+        .await?;
+        self.settle().await?;
+        Ok(report)
     }
 
     async fn apply(
@@ -477,7 +547,7 @@ impl<'a, B: StoreBackend, R: RpcRequester> GroupStatePlane<'a, B, R> {
             writer_seq: origin_seq,
             scope: &self.scope,
         };
-        let Some(plaintext) = self.trial_open(&coords, &item_key, envelope) else {
+        let Some(plaintext) = self.trial_open(&coords, &item_key, envelope).await? else {
             report.unopened += 1;
             return Ok(());
         };
@@ -515,12 +585,6 @@ impl<'a, B: StoreBackend, R: RpcRequester> GroupStatePlane<'a, B, R> {
             report.unmergeable += 1;
             return Ok(());
         }
-        let current = self
-            .store
-            .group_state(&self.scope, &plaintext.kind, &plaintext.key)
-            .await?
-            .map(|e| entry_to_plaintext(&e));
-
         let row = JournalRow {
             writer,
             seq: origin_seq,
@@ -536,6 +600,52 @@ impl<'a, B: StoreBackend, R: RpcRequester> GroupStatePlane<'a, B, R> {
                 entry_version: origin_seq,
             },
         };
+
+        // The group set's writer-checked kinds (decisions 2 and 5) never
+        // merge the incoming row against the stored cell: the cell is the
+        // fold of the item's live relay rows, one per writer, honoured rows
+        // only (decision 5, rule (ii)) — re-derived now that a row of the
+        // item landed, honoured or not, so a writer's refused row retires
+        // its own earlier one and a stored row the check no longer honours
+        // yields the cell ().
+        if writer_checked(&plaintext.kind) {
+            let honoured = match self.check_writer(&plaintext).await? {
+                Ok(()) => true,
+                Err(why) => {
+                    tracing::warn!(
+                        writer = %hex::encode(writer.0),
+                        seq = origin_seq,
+                        scope = %self.scope,
+                        kind = %plaintext.kind,
+                        "refusing a group-state row: {why}"
+                    );
+                    report.refused += 1;
+                    false
+                }
+            };
+            let reads = self.scope_read().await?;
+            let winner = self
+                .refold_cell(&reads, &plaintext.kind, &plaintext.key)
+                .await?;
+            if !honoured {
+                return Ok(());
+            }
+            self.store.ingest_row(&row).await?;
+            if winner.as_ref() == Some(&plaintext) {
+                report.applied += 1;
+            } else {
+                report.kept += 1;
+            }
+            self.store
+                .advance_frontier(&self.scope, &writer, origin_seq)
+                .await?;
+            return Ok(());
+        }
+        let current = self
+            .store
+            .group_state(&self.scope, &plaintext.kind, &plaintext.key)
+            .await?
+            .map(|e| entry_to_plaintext(&e));
 
         let outcome = match fauna_protocol::merge_policy::apply_class2(
             policy,
@@ -567,6 +677,7 @@ impl<'a, B: StoreBackend, R: RpcRequester> GroupStatePlane<'a, B, R> {
                 self.store
                     .ingest_group_state(&row, self.entry_of(&plaintext))
                     .await?;
+                self.note_landed(&plaintext.kind);
                 report.applied += 1;
             }
             MergeOutcome::Merged(merged) => {
@@ -593,25 +704,218 @@ impl<'a, B: StoreBackend, R: RpcRequester> GroupStatePlane<'a, B, R> {
         Ok(())
     }
 
-    /// Open one feed row under this scope's machinery schedule, or `None` for
-    /// the [`WalkReport::unopened`] skip. The trial set is the registry's
-    /// machinery kinds under the one derived schedule — a v2 (generation-
-    /// sealed) envelope is the `GenerationTip` stratum, whose read arm
-    /// arrives with group content-kind sealing: unopened, never guessed at.
-    fn trial_open(
+    /// Open one feed row, or `None` for the [`WalkReport::unopened`] skip. A
+    /// v1 envelope trial-opens over the registry's machinery kinds under the
+    /// one derived schedule; a v2 envelope names its generation, and opens
+    /// over the content kinds under that generation's content branch — with
+    /// the key this member holds for it, re-reading the store once on a
+    /// miss (the mint or top-up may have landed earlier in this walk). No key
+    /// → unopened, never guessed at; `reconcile` re-presents it.
+    async fn trial_open(
         &self,
         coords: &EntryCoordinates<'_>,
         item_key: &[u8; 32],
         envelope: &[u8],
-    ) -> Option<EntryPlaintext> {
-        if peek_generation_id(envelope).is_some() {
-            return None;
+    ) -> Result<Option<EntryPlaintext>> {
+        let Some(generation) = peek_generation_id(envelope) else {
+            return Ok(group_kinds()
+                .filter(|kind| group_sealing(kind) == Some(GroupSealing::MachineryRoot))
+                .find_map(|kind| {
+                    open_entry(&self.schedule.for_kind(kind), coords, item_key, envelope).ok()
+                }));
+        };
+        let reads = match self.reads.current() {
+            Some(reads) if reads.generations.key(&generation).is_some() => reads,
+            _ => self.reads.refresh(self.store, &self.scope_id).await?,
+        };
+        let Some(gen_key) = reads.generations.key(&generation) else {
+            return Ok(None);
+        };
+        let schedule = GroupContentSchedule::derive(gen_key);
+        Ok(group_kinds()
+            .filter(|kind| group_sealing(kind) == Some(GroupSealing::GenerationTip))
+            .find_map(|kind| open_entry(&schedule.for_kind(kind), coords, item_key, envelope).ok()))
+    }
+
+    /// The writer check for one opened row of a kind that has one — a
+    /// `fauna.group.file` row, the `fauna.group.name` cell or a
+    /// `fauna.group.endpoints` cell — against the scope's merged rows,
+    /// re-read once on a refusal, since the mint or top-up that enrols a
+    /// file's author, or the roster row that enrols a cell's writer, may
+    /// have landed earlier in this walk. Every other kind passes.
+    /// `Ok(Err(why))` is a refusal; `Err` a store failure.
+    async fn check_writer(
+        &self,
+        plaintext: &EntryPlaintext,
+    ) -> Result<std::result::Result<(), String>> {
+        if !writer_checked(&plaintext.kind) {
+            return Ok(Ok(()));
         }
-        group_kinds()
-            .filter(|kind| group_sealing(kind) == Some(GroupSealing::MachineryRoot))
-            .find_map(|kind| {
-                open_entry(&self.schedule.for_kind(kind), coords, item_key, envelope).ok()
+        if let Some(reads) = self.reads.current()
+            && verify_writer(&reads, plaintext).is_ok()
+        {
+            return Ok(Ok(()));
+        }
+        let reads = self.reads.refresh(self.store, &self.scope_id).await?;
+        Ok(verify_writer(&reads, plaintext))
+    }
+
+    /// This scope's read — the memo, or a fresh one when there is none.
+    async fn scope_read(&self) -> Result<std::sync::Arc<crate::group_set::ScopeRead>> {
+        match self.reads.current() {
+            Some(reads) => Ok(reads),
+            None => self.reads.refresh(self.store, &self.scope_id).await,
+        }
+    }
+
+    /// A row of `kind` landed in this scope's cells. A kind the writer check
+    /// reads (everything but the writer-checked kinds themselves) drops the
+    /// scope-read memo — a removal or a revocation narrows the check — and
+    /// marks every writer-checked cell for the re-fold [`Self::settle`] runs
+    /// at the end of the pass.
+    fn note_landed(&self, kind: &str) {
+        if writer_checked(kind) {
+            return;
+        }
+        self.reads.invalidate();
+        self.check_moved.store(true, Ordering::SeqCst);
+    }
+
+    /// **The re-fold on a check change** (`group-set.md` decision 5, rule
+    /// (ii)): once a pass has landed a row the writer check reads — a roster
+    /// cell, a mint, a top-up, a revocation — every writer-checked cell of
+    /// the scope is re-derived once from the relay rows, under a fresh scope
+    /// read. Rare (removals and mints), and a no-op otherwise.
+    async fn settle(&self) -> Result<()> {
+        if !self.check_moved.swap(false, Ordering::SeqCst) {
+            return Ok(());
+        }
+        let reads = self.reads.refresh(self.store, &self.scope_id).await?;
+        let cells: Vec<(String, String)> = self
+            .store
+            .group_scope_states(&self.scope)
+            .await?
+            .into_iter()
+            .filter(|e| writer_checked(&e.kind))
+            .map(|e| (e.kind, e.key))
+            .collect();
+        for (kind, key) in cells {
+            self.refold_cell(&reads, &kind, &key).await?;
+        }
+        Ok(())
+    }
+
+    /// **A writer-checked cell folds over each writer's latest row, honoured
+    /// rows only** (`group-set.md` decision 5, rule (ii)). The item's live
+    /// relay rows are gathered under every generation this member holds a
+    /// key for (the blinded item key is the generation's, so one path's rows
+    /// under two generations sit at two item keys), opened, and kept one per
+    /// writer — the writer's greatest `writer_seq`, the one order the plane
+    /// has, so a writer's newer row supersedes its older one whether or not
+    /// the newer is honoured. The cell is the honoured row of greatest
+    /// `LwwStamp` rank among them; with none it folds as no row, cached as a
+    /// tombstoned entry carrying the latest writer's value (so a reader can
+    /// still open the path that left the set). The merged cell is this
+    /// fold's cache, written only when it changes. An item with no relay row
+    /// this member can open (its generations no longer admissible here)
+    /// keeps its stored cell only while that row is honoured. Returns the
+    /// winner.
+    async fn refold_cell(
+        &self,
+        reads: &crate::group_set::ScopeRead,
+        kind: &str,
+        key: &str,
+    ) -> Result<Option<EntryPlaintext>> {
+        let class = ItemClass::StateEntry.as_wire();
+        let mut latest: BTreeMap<[u8; 32], (u64, EntryPlaintext)> = BTreeMap::new();
+        // The item's rows sit under the kind's stratum: a machinery-sealed
+        // kind (the endpoints cell, decision 8) under the one derived
+        // machinery schedule, a content kind under every generation held.
+        let key_sets: Vec<_> = match group_sealing(kind) {
+            Some(GroupSealing::MachineryRoot) => vec![self.schedule.for_kind(kind)],
+            _ => reads
+                .generations
+                .held()
+                .map(|(_, gen_key)| GroupContentSchedule::derive(gen_key).for_kind(kind))
+                .collect(),
+        };
+        for keys in &key_sets {
+            let item_key = keys.item_key(key.as_bytes());
+            for relay in self
+                .store
+                .relay_rows_at(&self.scope, class, &item_key)
+                .await?
+            {
+                let Some(envelope) = relay.entry.as_deref() else {
+                    continue;
+                };
+                let coords = EntryCoordinates {
+                    writer_id: relay.writer.0,
+                    writer_seq: relay.writer_seq,
+                    scope: &self.scope,
+                };
+                let Ok(opened) = open_entry(keys, &coords, &item_key, envelope) else {
+                    continue;
+                };
+                if opened.kind != kind || opened.key != key {
+                    continue;
+                }
+                match latest.get(&relay.writer.0) {
+                    Some((seq, _)) if *seq >= relay.writer_seq => {}
+                    _ => {
+                        latest.insert(relay.writer.0, (relay.writer_seq, opened));
+                    }
+                }
+            }
+        }
+        let held = self.store.group_state(&self.scope, kind, key).await?;
+        // No relay row opens here — the item's generations may have left the
+        // admissible set (a revocation of the device that minted them) — so
+        // the stored cell is the one candidate left, and it too stands only
+        // while it is honoured.
+        if latest.is_empty() {
+            let Some(cell) = held.as_ref().filter(|h| !h.tombstone) else {
+                return Ok(None);
+            };
+            let row = entry_to_plaintext(cell);
+            if verify_writer(reads, &row).is_ok() {
+                return Ok(Some(row));
+            }
+            latest.insert([0; 32], (0, row));
+        }
+        let Some((_, fallback)) = latest.values().max_by_key(|(seq, _)| *seq) else {
+            return Ok(None);
+        };
+        let winner = latest
+            .values()
+            .map(|(_, row)| row)
+            .filter(|row| !row.tombstone && verify_writer(reads, row).is_ok())
+            .filter_map(|row| {
+                let stamp = LwwStamp::decode(row.merge_meta.as_deref()?).ok()?;
+                Some((stamp.rank(), row))
             })
+            .max_by(|a, b| a.0.cmp(&b.0))
+            .map(|(_, row)| row.clone());
+        let mut want = self.entry_of(winner.as_ref().unwrap_or(fallback));
+        want.tombstone = winner.is_none();
+        if held.as_ref().is_none_or(|h| {
+            (h.value.as_slice(), h.merge_meta.as_deref(), h.tombstone)
+                != (
+                    want.value.as_slice(),
+                    want.merge_meta.as_deref(),
+                    want.tombstone,
+                )
+        }) {
+            if winner.is_none() {
+                tracing::warn!(
+                    scope = %self.scope,
+                    kind,
+                    "a group-state cell holds no honoured row and folds as no row"
+                );
+            }
+            self.store.cache_group_state(want).await?;
+        }
+        Ok(winner)
     }
 
     /// Why `plaintext` may not land here, when it is a live birth row that is
@@ -642,6 +946,38 @@ impl<'a, B: StoreBackend, R: RpcRequester> GroupStatePlane<'a, B, R> {
             entry_version: 0, // reassigned by the store
             tombstone: plaintext.tombstone,
         }
+    }
+}
+
+/// Whether a kind carries the group set's writer check — a
+/// `fauna.group.file` row, the `fauna.group.name` cell (decisions 2 and 5)
+/// or a `fauna.group.endpoints` cell (decision 8).
+fn writer_checked(kind: &str) -> bool {
+    kind == KIND_GROUP_FILE || kind == KIND_GROUP_NAME || kind == KIND_GROUP_ENDPOINTS
+}
+
+/// The writer check for one row of a [`writer_checked`] kind against one
+/// scope read. `Err(why)` is a refusal.
+fn verify_writer(
+    reads: &crate::group_set::ScopeRead,
+    plaintext: &EntryPlaintext,
+) -> std::result::Result<(), String> {
+    let Some(check) = &reads.check else {
+        return Err("this replica holds no readable birth row for the scope".to_string());
+    };
+    let meta = plaintext.merge_meta.as_ref().map(|m| &m[..]);
+    if plaintext.kind == KIND_GROUP_FILE {
+        check
+            .verify_file(&plaintext.key, &plaintext.value, meta)
+            .map(|_| ())
+    } else if plaintext.kind == KIND_GROUP_ENDPOINTS {
+        check
+            .verify_endpoints(&plaintext.key, &plaintext.value, meta)
+            .map(|_| ())
+    } else {
+        check
+            .verify_name(&plaintext.key, &plaintext.value, meta)
+            .map(|_| ())
     }
 }
 
@@ -985,6 +1321,7 @@ mod tests {
         GroupPlaneRow {
             kind: KIND_GROUP_BIRTH.into(),
             key: fauna_protocol::group_state::GROUP_BIRTH_KEY.into(),
+            merge_meta: None,
             value: fauna_core::encoding::canonical_encode(record)
                 .unwrap()
                 .to_vec(),
@@ -1014,13 +1351,10 @@ mod tests {
 
     /// Finding: the sealing-stratum door holds at `write_own` — the
     /// one funnel EVERY write path reaches — never only at `put`. Driven
-    /// directly at the funnel because no `GenerationTip` kind is registerable
-    /// today (the registry is a frozen const; its own reminder test tells the
-    /// first content kind's lander to carry that stratum): an unregistered
-    /// kind pushed straight into `write_own` must refuse at the stratum door
-    /// and land nothing — a door living only in `put` answers this with a
-    /// silent machinery-root seal, which is exactly the forfeit the finding
-    /// names for `adopt_rows`.
+    /// directly at the funnel: an unregistered kind pushed straight into
+    /// `write_own` must refuse at the stratum door and land nothing — a door
+    /// living only in `put` answers this with a silent machinery-root seal,
+    /// which is exactly the forfeit the finding names for `adopt_rows`.
     #[tokio::test]
     async fn the_stratum_door_holds_at_the_write_funnel_not_only_at_put() {
         let dir = tempfile::tempdir().unwrap();
@@ -1049,6 +1383,49 @@ mod tests {
         );
     }
 
+    /// Decision 3's fail-safe gap: a `GenerationTip` kind with no admissible,
+    /// keyable tip refuses at the funnel — never a machinery-root fallback —
+    /// and lands nothing, not even the local entry; through `adopt_rows` the
+    /// same row is counted `refused` and the snapshot goes on.
+    #[tokio::test]
+    async fn a_content_kind_with_no_tip_refuses_and_lands_nothing() {
+        use fauna_protocol::group_state::{GROUP_NAME_KEY, KIND_GROUP_NAME};
+        let dir = tempfile::tempdir().unwrap();
+        let store = open_store(&dir).await;
+        let root = GroupMachineryRoot::mint();
+        let sk = device();
+        let plane = GroupStatePlane::new(&store, &NoFeed, &root, &sk, &[0xAD; 32]).unwrap();
+        let err = plane
+            .write_own(&EntryPlaintext {
+                kind: KIND_GROUP_NAME.into(),
+                key: GROUP_NAME_KEY.into(),
+                merge_meta: None,
+                value: b"holiday".to_vec().into(),
+                tombstone: false,
+            })
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("no admissible"), "{err}");
+        assert!(
+            store
+                .group_state(&plane.scope, KIND_GROUP_NAME, GROUP_NAME_KEY)
+                .await
+                .unwrap()
+                .is_none(),
+            "the refused write landed nothing"
+        );
+        let report = plane
+            .adopt_rows(&[GroupPlaneRow {
+                kind: KIND_GROUP_NAME.into(),
+                key: GROUP_NAME_KEY.into(),
+                merge_meta: None,
+                value: b"holiday".to_vec(),
+            }])
+            .await
+            .expect("a content row with no tip is counted, never fatal");
+        assert_eq!(report.refused, 1, "{report:?}");
+    }
+
     #[tokio::test]
     async fn adopt_is_first_contact_then_idempotent_and_skips_unknown_kinds() {
         let dir = tempfile::tempdir().unwrap();
@@ -1063,6 +1440,7 @@ mod tests {
             GroupPlaneRow {
                 kind: "fauna.group.from-a-newer-build".into(),
                 key: "k".into(),
+                merge_meta: None,
                 value: b"opaque".to_vec(),
             },
         ];

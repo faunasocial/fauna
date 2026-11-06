@@ -1,0 +1,139 @@
+;; The compile boundary on macOS — docs/goal/architecture/build-compile-cache.md
+;; § The boundary's scope and what OFF means, decisions (1) and (7). Applied by
+;; `sandbox-exec -f <this file> -D <role>=<path>…`: by the cargo boundary on every
+;; compiling cargo (`scripts/cargo-boundary.py`), by the kache launcher's macOS tail
+;; (a dev machine's installed copy beside the launcher, put there by
+;; `just kache-launcher-install`), and on a hosted macOS CI runner, which reads this
+;; copy from the tree. Every process they start inherits it.
+;;
+;; No network — an allowlist, never a list of what is refused (decision (1), the
+;; socket-family paragraph): every outbound connection of every family is denied but
+;; to a unix socket under the compile cache's store, so IPv4, IPv6, AF_VSOCK (the
+;; hypervisor's transport) and every family XNU adds later are refused alike; the
+;; compile cache's wrapper reaches its daemon through `<store>/daemon.sock`. Every
+;; other unix socket is refused too (decision (8), darwin): a pathname socket is
+;; reachable whatever the write rules say, and the session host's control socket
+;; (`~/.cache/fauna/session-host/<session>.sock`) types into a live session —
+;; measured 2026-11-05 on macOS: from inside, a listener at that path's shape connected
+;; under the old `(remote unix-socket)` allow and answers EPERM under this one, the
+;; store's socket connecting under both. An unused store role allows no unix connect
+;; at all. The mDNSResponder socket's deny stays AFTER the allow (the last matching
+;; rule wins), a belt should the store ever be named above it: with it gone a name
+;; resolves (measured 2026-11-05), and a lookup carries data out. Creating a
+;; socket is refused too for every family but unix: `system-socket` is not asked for
+;; AF_INET/AF_INET6 (measured 2026-11-05: both open under the deny, as on Linux's
+;; line; their connects are refused above), and refused for AF_VSOCK, AF_ROUTE,
+;; AF_SYSTEM and AF_NDRV — `socket(AF_VSOCK)` answers EPERM, as Linux's line
+;; answers EAFNOSUPPORT. Measured 2026-11-05 on a macOS the virtualization host guest: outside, a
+;; vsock socket opens and its connect to the host (CID 2) reaches the transport
+;; (EAGAIN); under the old `(remote ip)` deny the same; under this profile both EPERM.
+;;
+;; No write but the writable set: everything on disk stays readable, and a write is
+;; allowed only under the path each role parameter names — the target cargo resolves,
+;; this compile's scratch (`TMPDIR`, a directory under the target), the compile
+;; cache's store, kache's state directory (`~/Library/Caches/kache`: its probe,
+;; rustc, sysroot and linker digests) and its log directory (`~/Library/Logs/kache`,
+;; its `kache.log` — refused otherwise, measured 2026-11-05), and the workspace root
+;; for `cargo fix` / `clippy --fix`. Every role is passed on every
+;; line (an unset one fails the profile closed); an unused one names
+;; `/dev/null/fauna-unused-role`, which cannot exist. So nothing a build script or
+;; proc-macro writes is run later outside: not the rustup proxy, the cargo shim, the
+;; helper, `just`, this profile, nor a runner's file-command files.
+;;
+;; The writes a compile makes outside its set, measured on macOS 2026-11-05 under this
+;; profile without the device allows (cold `cargo check -p fauna-core`, macOS and
+;; aarch64-apple-ios-sim, every refusal read from the kernel's sandbox report):
+;;   /dev/null          — allowed: build scripts open it for writing to discard a
+;;                        probe's output (rustix's build script fails without it).
+;;   /dev/dtracehelper  — allowed: dyld registers every process's DTrace probes there
+;;                        at launch; refused, nothing fails, but every process of the
+;;                        compile files a report.
+;;   ~/.cargo/.package-cache, .package-cache-mutate, .global-cache, the registry's
+;;                        fileprovider xattr — DENIED: cargo's home is read-only by
+;;                        the ruling; cargo carries on without its locks after the
+;;                        `cargo fetch` prelude outside, as on Linux.
+;;   $DARWIN_USER_TEMP_DIR/xcrun_db-*, $DARWIN_USER_CACHE_DIR/…/PlugInCache-xcodebuild
+;;                        — DENIED: xcrun's SDK lookup cache, read later by every xcrun
+;;                        outside; a compile that could write it could point the next
+;;                        tool lookup at a file in its target. xcrun answers uncached.
+;;   /dev/tty           — DENIED: nothing a compile needs; refused, nothing fails.
+;;
+;; And one write by vnode type, not by path: DATA into an EXISTING FIFO. A grant's
+;; jobserver is a FIFO in the build slot's directory, outside every role, named to
+;; cargo by `CARGO_MAKEFLAGS=--jobserver-auth=fifo:<path>`; cargo and rustc open it
+;; read-write to take and return tokens. Refused, cargo warns `failed to connect to
+;; jobserver … Operation not permitted` and runs at its own width — the mac job pool's
+;; join undone silently (measured on macOS 2026-11-05: a cold three-crate check
+;; against an empty jobserver FIFO). Allowed: opening an existing FIFO for writing. Still refused
+;; under it (measured the same day): creating a FIFO, unlinking one, and every
+;; regular-file write. It is the Linux line's reading too — a read-only bind refuses
+;; a write to a regular file, never to a FIFO.
+;;
+;; No network through a system service either (decision (1), the darwin hole): a
+;; process may hand network work to an XPC service running outside this profile — a
+;; background URLSession's transfer is nsurlsessiond's, measured reaching a loopback
+;; server and the internet and bringing a body back in. So every mach-lookup is
+;; refused but a list of literal global names, each with who asks for it and why it
+;; stays; no pattern, no prefix, no local name. The list was cut by a deny-run on
+;; macOS 2026-11-06 (cold `cargo check -p fauna-core`, macOS and aarch64-apple-ios-sim,
+;; kache-wrapped and FAUNA_KACHE=0, and `-p fauna-ffi` for ios-sim kache-wrapped; each
+;; green with the same artifacts as under every name allowed): a name stays only when
+;; a tool fails or changes its result without it, or every process asks for it at
+;; launch so a refusal files a report per process.
+;;   com.apple.logd, com.apple.system.notification_center — KEPT: every Apple tool
+;;                        asks for both at launch (sandbox-exec, cargo, rustup, cc,
+;;                        clang, ar, ld, xcrun, xcodebuild — rustc, kache, build
+;;                        scripts and proc-macros look nothing up); refused, nothing fails,
+;;                        but every process files two reports.
+;; Dropped — refused, nothing fails, the compile's artifacts the same:
+;;   com.apple.system.opendirectoryd.libinfo (cargo, rustup, xcodebuild, the kache
+;;                        daemon: user lookups, which fall back to HOME) and .membership (cc, clang,
+;;                        ar, dsymutil, git, xcrun, xcodebuild, which then ask
+;;                        com.apple.bsd.dirhelper, refused too: confstr cannot name
+;;                        DARWIN_USER_TEMP_DIR, each tool warns on stderr and uses /tmp,
+;;                        and xcrun answers the same but uncached);
+;;                        com.apple.cfprefsd.agent and .daemon
+;;                        (preferences go unread; no report — CoreFoundation checks the
+;;                        sandbox before it looks up); com.apple.SystemConfiguration.configd
+;;                        (cargo, rustup, the kache daemon); com.apple.distributed_notifications@Uv3 and
+;;                        com.apple.CoreServices.coreservicesd (cargo, xcodebuild; cargo
+;;                        then asks com.apple.DiskArbitration.diskarbitrationd, refused
+;;                        too); com.apple.metadata.mds (cargo: Spotlight);
+;;                        com.apple.FSEvents and com.apple.lsd.mapdb (xcodebuild, for
+;;                        xcrun's SDK lookup, which then asks com.apple.lsd.modifydb,
+;;                        refused too); com.apple.analyticsd (ld, codesign: telemetry);
+;;                        com.apple.security.syspolicy (codesign) — each files a
+;;                        report from the tool that asks.
+;; A name a later toolchain or a hosted runner's image needs is added here BY NAME with
+;; its reason, read from the kernel's sandbox report, never by widening. The deny of
+;; com.apple.nsurlsessiond after the allow is a belt (the last matching rule wins),
+;; should a wide allow ever be written above it, as the mDNSResponder socket's is.
+;; And cfprefsd writes ~/Library/Preferences on a caller's behalf, outside the writable
+;; set: a preference set from inside landed there under (allow default) (measured
+;; 2026-11-06); user-preference-write is refused, and a domain a compile's tool needs
+;; to write would be allowed by its literal preference-domain.
+(version 1)
+(allow default)
+(deny network-outbound)
+(allow network-outbound (remote unix-socket (subpath (param "FAUNA_STORE"))))
+(deny network-outbound (literal "/private/var/run/mDNSResponder"))
+(deny system-socket)
+(allow system-socket (socket-domain AF_UNIX))
+(deny mach-lookup)
+(allow mach-lookup
+  (global-name "com.apple.logd")
+  (global-name "com.apple.system.notification_center"))
+(deny mach-lookup (global-name "com.apple.nsurlsessiond"))
+(deny user-preference-write)
+(deny file-write*)
+(allow file-write*
+  (subpath (param "FAUNA_TARGET"))
+  (subpath (param "FAUNA_SCRATCH"))
+  (subpath (param "FAUNA_STORE"))
+  (subpath (param "FAUNA_KACHE_STATE"))
+  (subpath (param "FAUNA_KACHE_LOG"))
+  (subpath (param "FAUNA_WORKSPACE")))
+(allow file-write-data
+  (literal "/dev/null")
+  (literal "/dev/dtracehelper"))
+(allow file-write-data (vnode-type FIFO))

@@ -410,10 +410,10 @@ fn is_install_card(row: &NestConsentRow) -> bool {
     row.install.as_ref().is_some_and(|i| !i.bind)
 }
 
-/// The owner's own name for every folder `rows`' `folder:read` scopes name,
-/// through the folder seam — what the card words the read row with
-/// (`fauna_scope::folder_read_card_row`). Empty without the seam; a folder
-/// it cannot resolve is left out, and its row reads unnamed.
+/// The owner's own name for every folder `rows`' qualified `folder:deposit`
+/// and `folder:read` scopes name, through the folder seam — what the card
+/// words those rows with (`fauna_scope::folder_card_row`). Empty without the
+/// seam; a folder it cannot resolve is left out, and its row reads unnamed.
 pub async fn consent_folder_names(
     seams: Option<&ConsentGrantSeams>,
     rows: &[NestConsentRow],
@@ -423,7 +423,11 @@ pub async fn consent_folder_names(
         return names;
     };
     for row in rows {
-        for id in folder_read_ids(&row.scopes) {
+        let ids = row
+            .scopes
+            .iter()
+            .filter_map(|s| fauna_bridge_atproto::fauna_scope::folder_qualifier(s));
+        for id in ids {
             if names.contains_key(&id) {
                 continue;
             }
@@ -792,9 +796,15 @@ mod tests {
                     .1
                     .to_vec(),
             ),
+            writer_ed25519: Some(WRITER.to_vec()),
             ..Default::default()
         }
     }
+
+    /// The writer key every test consent attested — a deposit scope is never
+    /// granted blind of its writer (`folder-deposit.md` § The depositor
+    /// signs, the owner's device verifies).
+    const WRITER: [u8; 32] = [0x5D; 32];
 
     /// What the approve path called, in order, and every blob it deposited.
     #[derive(Default)]
@@ -924,7 +934,7 @@ mod tests {
         );
         assert_eq!(calls.log(), ["deposit", "resolve in 7"]);
         let blob = &calls.blobs()[0];
-        assert_eq!(blob.scope, [ScopeTuple::folder_deposit(7)]);
+        assert_eq!(blob.scope, [ScopeTuple::folder_deposit(7, &WRITER)]);
         assert!(blob.wrapped_keys.is_empty(), "deposit is keyless");
     }
 
@@ -937,7 +947,10 @@ mod tests {
         let row = consent(&["fauna:folder:deposit:9"]);
         assert!(approve(Some(&seams), &row, &calls).await.unwrap());
         assert_eq!(calls.log(), ["deposit", "resolve"]);
-        assert_eq!(calls.blobs()[0].scope, [ScopeTuple::folder_deposit(9)]);
+        assert_eq!(
+            calls.blobs()[0].scope,
+            [ScopeTuple::folder_deposit(9, &WRITER)]
+        );
     }
 
     /// A bare row approved with no folder, and a qualified row approved with
@@ -1307,6 +1320,16 @@ mod tests {
         );
         let card = crate::machine::consent_card_row(row, &BTreeMap::new());
         assert!(card.scope_descriptions[0].contains("one of your folders"));
+
+        // The deposit row is named the same way.
+        let row = consent(&["fauna:folder:deposit:42"]);
+        let names = consent_folder_names(Some(&seams), std::slice::from_ref(&row)).await;
+        let card = crate::machine::consent_card_row(row, &names);
+        assert!(
+            card.scope_descriptions[0].contains("your folder \"photos\""),
+            "{:?}",
+            card.scope_descriptions
+        );
     }
 
     /// The seam lists the owner's own sets — a member row is never one — and

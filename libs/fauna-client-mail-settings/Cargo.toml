@@ -30,6 +30,15 @@ test-helpers = ["fauna-mail/test-helpers", "fauna-client-config/test-helpers"]
 # A consumer's own `e2e-agent` forwards this one — never default-on, never
 # named on a dep line (convention 15 rule (b)).
 e2e-agent = []
+# The web half of the mail-import source seam (`import_source::web`): the
+# shared sans-io TLS transport over the nest's byte tunnel
+# (`mailbox-migration.md` § Where the IMAP client runs → *The web tunnel*).
+# Off, and named by no consumer yet: the web graph builds `rustls`' `ring`
+# provider only once `ring`'s `wasm32_unknown_unknown_js` feature is in it,
+# which is a dependency change waiting on a bump round (bump queue need 25).
+# Until then web keeps the honest `Rejected` stub; `fauna-wasm` turns this on
+# in the same change that takes the round's `ring` entry.
+web-mail-tunnel = ["fauna-mail/imap-client-tunnel"]
 # Shared WS-RPC seam glue (`rpc_glue`) — the `build_*_machine` constructors
 # `fauna-ffi` + linux (native) and `fauna-wasm` (web) call instead of hand-rolling
 # each machine's `…Nest` seam. Pulls the per-target transport (native
@@ -171,6 +180,10 @@ fauna-client-account = { path = "../fauna-client-account" }
 fauna-client-posts = { path = "../fauna-client-posts" }
 fauna-client-moderation = { path = "../fauna-client-moderation" }
 fauna-sleep = { workspace = true }
+# The source seam's async mutex (`import_source::SourceSeam`) — one lock type
+# for native and wasm alike, where tokio's is native-only in this crate. A
+# workspace entry, already in every consumer's graph.
+futures-util = { workspace = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 # `rand::thread_rng()` (the MSEK CSPRNG in `machine.rs`) needs getrandom's wasm

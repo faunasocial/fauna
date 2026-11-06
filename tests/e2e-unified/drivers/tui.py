@@ -63,6 +63,11 @@ from pathlib import Path
 
 from .base import detached_agent_log_text, rolling_log_text, stitch_agent_log
 from .http_bridge import HttpBridgeDriver
+from .local_launch import (
+    local_launch_timeout_report,
+    mark_exit_reported,
+    read_exit_before_close,
+)
 from .port_util import (
     find_free_port,
     reap_descendants_of,
@@ -199,6 +204,13 @@ def build_launch_env(
     # the debounce test pushes it PAST its budget instead.
     env.setdefault("FAUNA_E2E_RESCAN_MS", "30000")
 
+    # The agent's e2e custody hold (`content_keys::custody_reread_held`, the
+    # compile-gated `FAUNA_E2E_CUSTODY_HOLD_FILE` seam): a path in this launch's
+    # scratch dir that does not exist, so the hold is inert until a test creates
+    # the file (`helpers/folder_content.py::hold_custody_reread`) and released
+    # when it is deleted. Read back through the driver's `custody_hold_file`.
+    env.setdefault("FAUNA_E2E_CUSTODY_HOLD_FILE", os.path.join(tmp, "custody-hold"))
+
     # ── macOS: relocate HOME, or the agent socket is the machine-global one ───
     #
     # `fauna_ipc::unix_transport::default_socket_path` branches on the platform:
@@ -284,6 +296,13 @@ def build_launch_env(
                 "probed_store launch without a caller-owned DBUS_SESSION_BUS_ADDRESS: "
                 "the store probe would reach the desktop's own Secret Service"
             )
+        # On win32 the probe answers yes on every box, so this launch always lands
+        # on the real Credential Manager, one store per user with no private
+        # instance: convention 12's Windows arm, fenced by its namespace alone.
+        if (sys_platform or sys.platform) == "win32":
+            from helpers.windows_credman import refuse_unless_unique
+
+            refuse_unless_unique(config.get("keyring_app"), "a windows probed_store launch")
         env["FAUNA_E2E_CREDENTIAL_DIR"] = ""
         env.pop("FAUNA_E2E_FORCE_HEADLESS_STORE", None)
         env.pop("FAUNA_E2E_FORCE_LOCKED_KEYRING", None)
@@ -369,8 +388,14 @@ def build_launch_env(
         # this launch's unique id (`FAUNA_KEYRING_APP` uses it too) — a pid would
         # be the harness's, shared by every launch in the run.
         env.setdefault("FAUNA_E2E_SYNC_PIPE", f"fauna-sync-e2e-tui-{port}")
+        # The agent's state root — its binding, `sync.db` and anchor — derived
+        # from `xdg_base` like `LOCALAPPDATA` above, so a relaunch that
+        # `preserve_state_across_relaunch()` pinned comes back as the SAME device
+        # (on linux the agent's state rides the pinned XDG world for free). Rooted
+        # in the per-launch `tmp` it came back empty: a restarted tui seat on
+        # windows had no binding, and never reported a running engine.
         env.setdefault(
-            "FAUNA_E2E_SYNC_AGENT_DATA_DIR", os.path.join(tmp, "sync-agent")
+            "FAUNA_E2E_SYNC_AGENT_DATA_DIR", os.path.join(xdg_base, "sync-agent")
         )
         # PIN the binary, never leave it to the sibling probe: an unpinned miss
         # falls through to whatever `fauna-sync-agent.exe` the box has installed,
@@ -415,6 +440,13 @@ class TuiDriver(HttpBridgeDriver):
     def is_tui(self) -> bool:
         return True
 
+    def custody_hold_file(self) -> str | None:
+        """The file whose existence holds this launch's agent from re-reading
+        custody (`FAUNA_E2E_CUSTODY_HOLD_FILE`, set by `build_launch_env`);
+        None before `launch()`. Driven through
+        `helpers/folder_content.py::hold_custody_reread`."""
+        return getattr(self, "_custody_hold_file", None)
+
     def download_dir(self) -> str | None:
         """Where fauna-tui saves e2e-mode downloads (no save dialog on a
         terminal — `backups.rs::download_dir()` prefers `FAUNA_E2E_DOWNLOAD_DIR`,
@@ -444,17 +476,23 @@ class TuiDriver(HttpBridgeDriver):
         """Where THIS launch's agent keeps its state, when that is not derivable
         from `config_home`.
 
-        `None` on unix, where the agent inherits the isolated XDG world and
-        `<config_home>/fauna/sync` is the answer. On windows there is no such
+        `None` on linux, where the agent inherits the isolated XDG world and
+        `<config_home>/fauna/sync` is the answer. darwin has no XDG world for the
+        agent: it roots at `<HOME>/Library/Application Support/Fauna/sync`
+        (`fauna-sync-agent` `SyncPaths`), under the HOME this launch relocated —
+        the same root `_account_store_root` names. On windows there is no such
         derivation: the agent's default root is the machine-global
         `%LOCALAPPDATA%`, so the driver passes `--data-dir` explicitly (via
         `FAUNA_E2E_SYNC_AGENT_DATA_DIR`) and that dir — no `fauna/sync` suffix,
         since `--data-dir` suppresses the derivation; the per-actor subdir nests
         under it as on every layout — is the base.
         """
-        if os.name != "nt":
-            return None
-        return getattr(self, "_sync_agent_data_dir", None)
+        if os.name == "nt":
+            return getattr(self, "_sync_agent_data_dir", None)
+        home = getattr(self, "_resolved_home", None)
+        if sys.platform == "darwin" and home:
+            return os.path.join(home, "Library", "Application Support", "Fauna", "sync")
+        return None
 
     @property
     def sync_agent_pipe(self) -> str | None:
@@ -469,11 +507,17 @@ class TuiDriver(HttpBridgeDriver):
 
     @property
     def sync_agent_socket(self) -> str | None:
-        """The unix socket THIS launch's agent serves (linux:
+        """The unix socket THIS launch's agent serves — linux:
         `$XDG_RUNTIME_DIR/fauna/sync-agent.sock`, the private runtime dir
-        `build_launch_env` made; `fauna_ipc::unix_transport::linux_socket_path`)
-        — `None` on windows and darwin, or before launch."""
-        if os.name == "nt" or sys.platform == "darwin":
+        `build_launch_env` made (`fauna_ipc::unix_transport::linux_socket_path`);
+        darwin: `<launch HOME>/Library/Application Support/Fauna/sync-agent.sock`
+        under the HOME `build_launch_env` relocated, where the e2e
+        direct-child-spawned agent binds (`LaunchdAgentSpawner`'s e2e arm;
+        `macos_socket_path`) — `None` on windows, or before launch."""
+        if sys.platform == "darwin":
+            home = getattr(self, "_resolved_home", None)
+            return os.path.join(home, _AGENT_SOCKET_RELPATH) if home else None
+        if os.name == "nt":
             return None
         runtime = getattr(self, "_xdg_runtime", None)
         return os.path.join(runtime, "fauna", "sync-agent.sock") if runtime else None
@@ -484,6 +528,10 @@ class TuiDriver(HttpBridgeDriver):
     # and the next frame paints it in view. It errors rather than acking when
     # nothing moved — found/error semantics identical to linux's.
     _supports_scroll_into_view = True
+
+    # The shared agent serves GET /element/texts (see `LinuxBridgeDriver`), one
+    # registry pass for a whole column; /element/attrs 404s into the loop.
+    _supports_bulk_reads = True
 
     def in_viewport(self, element_id: str, *, index: int = 0,
                     scope: str | None = None) -> bool:
@@ -718,6 +766,7 @@ class TuiDriver(HttpBridgeDriver):
         # var) — read back from the env build_launch_env produced, same shape
         # as drivers/linux.py's download_dir().
         self._download_dir = env.get("FAUNA_E2E_DOWNLOAD_DIR")
+        self._custody_hold_file = env.get("FAUNA_E2E_CUSTODY_HOLD_FILE")
 
         self._remember_launch_store(config, env, tmp)
 
@@ -743,6 +792,7 @@ class TuiDriver(HttpBridgeDriver):
         # (POSIX only — the Windows ConPTY backend attaches the whole console and
         # ignores this handle, so there stderr rides the stream into `app.out`).
         self._app_stderr = open(os.path.join(tmp, "app.err"), "w")
+        posted_at = time.time()
         self._pty = spawn_pty(
             cmd,
             env,
@@ -752,6 +802,8 @@ class TuiDriver(HttpBridgeDriver):
             _PTY_CELL_H,
             stderr_file=self._app_stderr,
         )
+        # When this launch began, for the close rider's report.
+        self._app_launched_at = posted_at
         track_process(self._pty)
         # Windows: bind the launch and everything it spawns to a kill-on-close
         # job. fauna-tui spawns `fauna-sync-agent`, which is BUILT to outlive
@@ -801,34 +853,40 @@ class TuiDriver(HttpBridgeDriver):
         self._drain_thread = threading.Thread(target=drain, daemon=True)
         self._drain_thread.start()
 
-        deadline = time.monotonic() + 30
+        # Both ends of the gate go through convention 6's launch-timeout builder:
+        # an early exit is its FAULTED verdict, not a second grammar.
+        deadline = time.monotonic() + self._RELAUNCH_READY_BUDGET_S
         while time.monotonic() < deadline:
-            rc = self._pty.poll()
-            if rc is not None:
-                raise RuntimeError(
-                    f"fauna-tui exited early (rc={rc}). diagnostic tail: "
-                    f"{self._exit_diagnostics(tmp, out_path)[-800:]}"
-                )
+            if self._pty.poll() is not None:
+                # The FAULTED verdict carries this exit; the close after it is silent.
+                mark_exit_reported(self._pty)
+                raise RuntimeError(self._launch_timeout_report(posted_at, tmp, out_path))
             if self._agent_health_ok():
                 self._bridge_dead = False
                 return
             time.sleep(0.3)
-        raise RuntimeError(f"in-process agent never became healthy on {self._url}")
+        raise TimeoutError(self._launch_timeout_report(posted_at, tmp, out_path))
 
-    @staticmethod
-    def _exit_diagnostics(tmp: str, out_path: str) -> str:
-        """Best text for an early-exit message: the POSIX stderr file if it has
-        content, else the pty stream (Windows merges stderr into `app.out`)."""
-        try:
-            err = Path(os.path.join(tmp, "app.err")).read_text(errors="replace")
-        except OSError:
-            err = ""
-        if err.strip():
-            return err
-        try:
-            return Path(out_path).read_text(errors="replace")
-        except OSError:
-            return err
+    #: The launch gate's budget: the agent's `/health` answering after the spawn.
+    #: 30 s, the figure the gate already carried; a deadline poll, so a green run
+    #: never pays it (convention 14). Named as windows' twin is, and never
+    #: load-aware (convention 6's launch-timeout rider, its part (3)).
+    _RELAUNCH_READY_BUDGET_S = 30.0
+
+    def _launch_timeout_report(self, posted_at: float, tmp: str, out_path: str) -> str:
+        """Convention 6's launch-timeout report over this launch's witnesses: the
+        pty's handle on `fauna-tui`, the launch's stderr — the POSIX `app.err`,
+        else the pty stream (Windows merges stderr into `app.out`) — its XDG log
+        and this machine's agent ledger."""
+        return local_launch_timeout_report(
+            proc=self._pty,
+            comm="fauna-tui",
+            budget_s=self._RELAUNCH_READY_BUDGET_S,
+            posted_at=posted_at,
+            stderr_paths=(os.path.join(tmp, "app.err"), out_path),
+            log_text=self.on_device_log_text(),
+            apps=("tui",),
+        )
 
     def _agent_health_ok(self) -> bool:
         try:
@@ -872,6 +930,7 @@ class TuiDriver(HttpBridgeDriver):
             # The inherited NotImplementedError carries the contract text.
             super().kill_uncleanly()
             return
+        self._read_exit_before_close("kill_uncleanly()")
         pid = getattr(backend, "pid", 0)
         # ConPTY has no process groups (and `os.killpg` does not exist on Windows),
         # so there the backend's own force-stop — which is job-object backed via
@@ -890,7 +949,23 @@ class TuiDriver(HttpBridgeDriver):
             # gone, which is all this primitive promises.
             pass
 
+    def _read_exit_before_close(self, close: str) -> None:
+        """Convention 6's close rider over the pty backend's handle on `fauna-tui`
+        (its own exit status: the app is the pty's child, no wrapper) and, on a
+        crash, the launch's stderr and XDG log, read before the close reclaims them
+        (`drivers/local_launch.py::read_exit_before_close`). On windows the ConPTY
+        status is an NTSTATUS, read by the same rule as windows' bridge leg."""
+        read_exit_before_close(
+            self._pty,
+            close=close,
+            comm="fauna-tui",
+            launched_at=getattr(self, "_app_launched_at", None),
+            stderr_text=self.app_stderr_text,
+            log_text=self.on_device_log_text,
+        )
+
     def _stop_app(self) -> None:
+        self._read_exit_before_close("teardown")
         # `terminate_tree`, per PtyBackend's own contract (a backend is
         # Popen-compatible precisely so it can be handed to it): fauna-tui
         # spawns `fauna-sync-agent` as a group child, and that agent is built to
@@ -1019,6 +1094,10 @@ class TuiDriver(HttpBridgeDriver):
         config = getattr(self, "_launch_config", None)
         if config is None:
             return False
+        # The app it is about to close may already be dead of a crash — the `app`
+        # fixture reaches here when a reset was never acknowledged. The relaunch
+        # goes ahead either way; the death is recorded for the phase.
+        self._read_exit_before_close("the relaunch in recover()")
         try:
             self._stop_app()
         except Exception:

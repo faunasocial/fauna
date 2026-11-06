@@ -11,7 +11,7 @@
 // ## What the command drives
 //
 // The production mint: the shared mail-settings machine's
-// `enableCaldavMailboxWith{Password,GeneratedPassword}`, the same face web's
+// `enableDavMailboxWith{Password,GeneratedPassword}`, the same face web's
 // first-setup glue calls for a CalDAV-only user. It is a fixture step (mint the
 // logged-in actor's CalDAV mailbox material) that a test runs before asserting
 // on what a page renders, never the gesture under test.
@@ -61,9 +61,9 @@ export function registerMailCaldavCommands(): void {
       if (!secret) throw new Error('no identity on this seat (not logged in?)');
       const machine = await mailSettingsMachine(secret);
       if (typeof p.password === 'string' && p.password !== '') {
-        await machine.enableCaldavMailboxWithPassword('Default', p.password);
+        await machine.enableDavMailboxWithPassword('Default', p.password);
       } else {
-        await machine.enableCaldavMailboxWithGeneratedPassword('Default');
+        await machine.enableDavMailboxWithGeneratedPassword('Default');
       }
       setReply({ ok: true });
     } catch (e) {

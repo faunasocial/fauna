@@ -1,0 +1,8 @@
+[package]
+name = "fauna-alloc-probe"
+description = "Test-only counting global allocators for the memory-bound tests (peak live bytes, largest single allocation). Dev-dependency only."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]

@@ -30,6 +30,8 @@ fauna-core = { path = "../fauna-core", default-features = false }
 # (native-only wireguard → tokio net) so this crate is wasm-clean; the `js` time
 # backend is forwarded on wasm below. Mirrors fauna-client-config.
 fauna-protocol = { path = "../fauna-protocol", default-features = false }
+# The cross-target sleep between launch-load attempts (`sync::LAUNCH_LOAD_RETRY_DELAYS`).
+fauna-sleep.workspace = true
 serde = { workspace = true }
 serde_bytes = "0.11"
 thiserror = { workspace = true }

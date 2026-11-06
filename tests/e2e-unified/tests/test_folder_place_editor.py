@@ -56,6 +56,10 @@ pytestmark = [
     # contract wants, so each box stamps the two literals itself. Six apps now
     # assert these exact states off the one `place_rows` projection.
     pytest.mark.windows,
+    # android: `FolderPlacesSection` in FoldersScreen.kt paints one
+    # `folder-place-row` per seat off the same `FfiFolderMember` projection.
+    # Witness NOT RUN — the device venue does not exist yet.
+    pytest.mark.android,
 ]
 
 def _user_client(nest_instance, test_user):

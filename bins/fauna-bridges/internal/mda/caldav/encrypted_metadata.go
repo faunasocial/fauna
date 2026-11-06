@@ -32,17 +32,17 @@ type EncryptedCollectionMetadata struct {
 	Description string `cbor:"description,omitempty"`
 }
 
-// SealCollectionMetadata CBOR-encodes `m` and HPKE-seals the result
-// to `recipientPubkey` (the AUTH'd actor's MLS pubkey). Result is
-// the opaque byte-string nest stores in
-// `bridge_caldav_calendars.encrypted_metadata`.
+// SealCollectionMetadata CBOR-encodes `m` and HPKE-seals the result as a
+// `calendar-record` to `recipientPubkey` (the AUTH'd actor's calendar pubkey,
+// `sess.CalendarPubkey()` — `owner-key-material.md` § Path B-sibling-5 →
+// *Protects*). Result is the opaque byte-string nest stores in
+// `bridge_caldav_calendars.encrypted_metadata`; the nest refuses any other
+// kind there.
 //
-// `mlkemEk` is the ML-KEM half of the AUTH'd actor's seal key
-// (`sess.MlkemEk()`, cached at sign-in with the pubkey — the fetch refuses a
-// key without it): the metadata body seals with the X-Wing post-quantum suite
-// (leg D2a), like every other body seal
-// (`mailfauna.EncryptToRecipientHybrid`). The native Fauna app opens
-// either suite (self-describing blob).
+// `mlkemEk` is the ML-KEM half of the same calendar key
+// (`sess.CalendarMlkemEk()`): the metadata seals with the X-Wing post-quantum
+// suite, like every other body seal (`mailfauna.SealRecordHybrid`). The native
+// Fauna app opens either suite (self-describing blob).
 //
 // HPKE freshness per call — the same plaintext seals to different
 // ciphertext on every invocation, so PROPPATCH idempotency is
@@ -63,7 +63,7 @@ func SealCollectionMetadata(m EncryptedCollectionMetadata, recipientPubkey, mlke
 	if err != nil {
 		return nil, fmt.Errorf("caldav: marshal collection metadata: %w", err)
 	}
-	ct, err := mailfauna.EncryptToRecipientHybrid(plaintext, recipientPubkey, mlkemEk)
+	ct, err := mailfauna.SealRecordHybrid(mailfauna.RecordKindCalendar, plaintext, recipientPubkey, mlkemEk)
 	if err != nil {
 		return nil, fmt.Errorf("caldav: seal collection metadata: %w", err)
 	}

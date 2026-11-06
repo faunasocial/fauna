@@ -30,14 +30,14 @@ function recordingSinks() {
   return { sinks, content, screen };
 }
 
-const floor = { nsfw: 'block', spam: 'inherit', phishing: 'inherit', commercial: 'inherit' };
+const rules = { document: { rules: [] } };
 const bedtime = { window_start: 1260, window_end: 420, daily_minutes: 90 };
 
 function supervisedSnapshot(): SupervisionSnapshotValue {
   return {
     supervised_by: { actor_id_hex: 'abcd01', handle: 'parent@example.org' },
     // deno-lint-ignore no-explicit-any
-    content_policy: floor as any,
+    content_policy: rules as any,
     content_notify: true,
     // deno-lint-ignore no-explicit-any
     screen_time: bedtime as any,
@@ -49,7 +49,7 @@ Deno.test('applyRestoredSnapshot — a supervised snapshot seeds all three pilla
   const handle = applyRestoredSnapshot(supervisedSnapshot(), sinks);
   eq(handle, 'parent@example.org', 'the guardian handle drives the indicator + family-tab gate');
   eq(content.length, 1, 'the content half is seeded once');
-  eq(content[0].policy, floor, 'the guardian floor is what a cold launch must restore');
+  eq(content[0].policy, rules, 'the guardian rules are what a cold launch must restore');
   eq(content[0].notify, true, 'content_notify restores too — the tui mutant-7 field');
   eq(screen.length, 1, 'the screen-time half is seeded once');
   eq(screen[0].policy, bedtime, 'the bedtime window restores — airplane mode is not a bypass');

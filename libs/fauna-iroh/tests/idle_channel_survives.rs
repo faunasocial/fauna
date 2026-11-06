@@ -51,6 +51,9 @@ async fn an_early_opened_connection_survives_a_long_idle_gap() {
     let addrs: Vec<SocketAddr> = server
         .bound_addrs()
         .into_iter()
+        // Only an IPv4 socket's port pairs with 127.0.0.1: the `[::]` socket is
+        // v6-only on Windows (`fauna_core::device_endpoints`).
+        .filter(SocketAddr::is_ipv4)
         .map(|a| SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), a.port()))
         .collect();
     let mut incoming = server.listen().await.expect("listen");

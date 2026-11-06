@@ -1,10 +1,10 @@
 //! tier_1: the conversations tools' half of the oracle's door
 //! (`conversations-oracle.md` § The custodian and the door) against a test
-//! door on a socket of its own — the possession proof opened under the
-//! consent's holder key, each catalog operation crossing as its door's own,
-//! every refusal relayed verbatim, and the one sentence for a door nothing
-//! serves.
-#![cfg(all(feature = "device", unix))]
+//! door on an endpoint of its own — a unix socket, a windows named pipe — the
+//! possession proof opened under the consent's holder key, each catalog
+//! operation crossing as its door's own, every refusal relayed verbatim, and
+//! the one sentence for a door nothing serves.
+#![cfg(all(feature = "device", any(unix, windows)))]
 
 use std::sync::{Arc, Mutex};
 
@@ -99,31 +99,33 @@ impl OracleDoor for TestDoor {
     }
 }
 
-fn socket_path(name: &str) -> std::path::PathBuf {
-    // Short and fixed: a unix socket path has a hard length budget.
-    std::path::PathBuf::from(format!(
+/// An endpoint of this test's own: on unix a short, fixed socket path (a unix
+/// socket path has a hard length budget), on windows a pipe name unique to
+/// this process.
+fn endpoint(name: &str) -> OracleEndpoint {
+    #[cfg(unix)]
+    return OracleEndpoint::Unix(std::path::PathBuf::from(format!(
         "/tmp/fauna-cli-door-{}-{name}/oracle.sock",
         std::process::id()
-    ))
+    )));
+    #[cfg(windows)]
+    return OracleEndpoint::Pipe(format!(
+        r"\\.\pipe\fauna-cli-door-{}-{name}",
+        std::process::id()
+    ));
 }
 
-/// Serve `door` at a socket of this test's own; the endpoint and the
-/// shutdown switch.
+/// Serve `door` at an endpoint of this test's own; the endpoint and the
+/// shutdown switch. The door is reachable once this answers.
 async fn serve(
     name: &str,
     door: Arc<TestDoor>,
 ) -> (OracleEndpoint, tokio::sync::watch::Sender<bool>) {
-    let path = socket_path(name);
+    let endpoint = endpoint(name);
+    let listener = fauna_ipc::oracle::OracleListener::bind(&endpoint).expect("bind the test door");
     let (stop, stopped) = tokio::sync::watch::channel(false);
-    let at = path.clone();
-    tokio::spawn(async move { fauna_ipc::oracle::serve_unix(&at, door, stopped).await });
-    for _ in 0..200 {
-        if path.exists() {
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-    }
-    (OracleEndpoint::Unix(path), stop)
+    tokio::spawn(listener.serve(door, stopped));
+    (endpoint, stop)
 }
 
 async fn run(
@@ -246,7 +248,7 @@ async fn another_holder_key_cannot_enter() {
 /// Nothing serving the door is the one sentence the model relays.
 #[tokio::test(flavor = "multi_thread")]
 async fn no_custodian_is_one_sentence_the_model_can_relay() {
-    let endpoint = OracleEndpoint::Unix(socket_path("none"));
+    let endpoint = endpoint("none");
     let refused = run(
         &endpoint,
         Arc::new(HolderKey::generate()),

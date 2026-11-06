@@ -108,16 +108,53 @@ func TestClassifyAutoScheduleRecipients(t *testing.T) {
 	})
 
 	t.Run("mailEnabledLocalToEmail", func(t *testing.T) {
-		// A local attendee with a mailbox (resolve_recipient Resolved) stays on
-		// the email rail (in-domain seal) — and Resolved short-circuits, so no
-		// by_handle/keypackage reads.
-		caller := &mockCaller{resolveRecipientOutcome: "resolved"}
+		// A local attendee with a mailbox (resolve_recipient Resolved, recipient
+		// key provisioned) stays on the email rail (in-domain seal) — and the key
+		// short-circuits, so no by_handle/keypackage reads.
+		caller := &mockCaller{resolveRecipientOutcome: "resolved", mlsPubkey: bytes.Repeat([]byte{0xa1}, 32)}
 		email, mbl := classify(caller, "carol@fauna.test")
 		if len(mbl) != 0 || len(email) != 1 || email[0] != "carol@fauna.test" {
 			t.Fatalf("mail-enabled: email=%v mailboxLess=%v", email, mbl)
 		}
 		if n := len(caller.callsOf(wsrpc.MethodActorByHandle)); n != 0 {
 			t.Errorf("actor.by_handle fired %d times for a mail-enabled attendee, want 0", n)
+		}
+	})
+
+	t.Run("handleOwnerWithNoRecipientKeyToSealedRail", func(t *testing.T) {
+		// A registered handle is its actor's address on every active local domain
+		// (mail-aliases.md § Resolution order step 2), so resolve_recipient
+		// Resolves an account that never enabled mail. No recipient key means
+		// nothing can seal mail to her: she is mailbox-less, and the sealed rail
+		// is hers. RED before the fix: Resolved alone → email rail → no welcome.
+		caller := &mockCaller{
+			resolveRecipientOutcome: "resolved",
+			actorByHandleActorIDHex: strings.Repeat("bc", 32),
+			keypackageBytes:         []byte("kp"),
+		}
+		email, mbl := classify(caller, "carol@fauna.test")
+		if len(email) != 0 {
+			t.Fatalf("a handle owner with no recipient key must not ride the email rail: %v", email)
+		}
+		if len(mbl) != 1 || mbl[0].address != "carol@fauna.test" {
+			t.Fatalf("handle owner with no recipient key: want the sealed rail, got %+v", mbl)
+		}
+	})
+
+	t.Run("successionPendingStaysOnEmail", func(t *testing.T) {
+		// A successor who has not re-provisioned yet has no key on file, but the
+		// mailbox exists: the MTA tempfails until the key arrives, so the invite
+		// keeps its place on the email rail (smtp-server.md § Error / tempfail
+		// strategy).
+		caller := &mockCaller{
+			resolveRecipientOutcome:    "resolved",
+			recipientSuccessionPending: true,
+			actorByHandleActorIDHex:    strings.Repeat("bc", 32),
+			keypackageBytes:            []byte("kp"),
+		}
+		email, mbl := classify(caller, "carol@fauna.test")
+		if len(mbl) != 0 || len(email) != 1 || email[0] != "carol@fauna.test" {
+			t.Fatalf("succession pending: email=%v mailboxLess=%v", email, mbl)
 		}
 	})
 

@@ -190,6 +190,16 @@ pub const DEVICE_HANDSHAKE_V1: &[u8] = b"fauna.device-auth.handshake.v1\0";
 /// and replay guard as V1.
 pub const DEVICE_HANDSHAKE_V2: &[u8] = b"fauna.device-auth.handshake.v2\0";
 
+/// The in-band device bind (`fauna.auth.device_bind`), over `actor_id ‖
+/// device_key ‖ timestamp_be ‖ nest_id ‖ nonce` — signed by the granted device
+/// key ([`crate::auth::device_bind_signed_message`]). **APPLIED.** The very
+/// field layout of [`DEVICE_HANDSHAKE_V2`], by the very key, with the opposite
+/// reach: a handshake mints a bearer and a bind only narrows a connection that
+/// already has one, so the tag alone keeps a captured signature of either from
+/// serving as the other. Owner: `docs/goal/behavior/devices.md` § Listing
+/// Devices → *The binding* → *Web binds its one socket in band*.
+pub const DEVICE_BIND_V1: &[u8] = b"fauna.device-auth.bind.v1\0";
+
 /// Sync-agent **self-retirement** of a renewal grant
 /// (`fauna.sync.device_grant.revoke`), over `actor_id ‖ device_key ‖
 /// timestamp_be ‖ nonce`. **APPLIED.** Signed by the very renewal device key
@@ -497,6 +507,7 @@ mod tests {
         KEYBLOB_V1,
         DEVICE_HANDSHAKE_V1,
         DEVICE_HANDSHAKE_V2,
+        DEVICE_BIND_V1,
         DEVICE_GRANT_REVOKE_V1,
         DEVICE_ADOPT_V1,
         DEVICE_P2P_PARTICIPATION_V1,
@@ -527,6 +538,7 @@ mod tests {
         CERT_BINDING_V1,
         FEDERATION_HELLO_V1,
         DEVICE_HANDSHAKE_V2,
+        DEVICE_BIND_V1,
         DEVICE_GRANT_REVOKE_V1,
         DEVICE_P2P_PARTICIPATION_V1,
         CUSTODY_HANDSHAKE_V2,

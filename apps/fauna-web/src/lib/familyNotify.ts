@@ -40,6 +40,15 @@ class NotifyBuffer {
     this.secretHex = secretHex;
   }
 
+  /** Would `record` count an item with these labels? The predicate
+   *  `record` counts by, so the sealed-item sentence (`region.sealed_note`)
+   *  can never say "nothing was reported" of an item Notify counted. */
+  wouldCount(labels: ContentLabelEntry[] | undefined): boolean {
+    return (
+      contentNotifyOn() && guardianEnforcedCategories(labels ?? [], guardianContentPolicy()).length > 0
+    );
+  }
+
   /** Count any GUARDIAN-floor enforcement on `itemId` (a feed post / DM message).
    *  A no-op unless the ward's content_notify knob is on AND the guardian floor
    *  bites on one of this item's labels. Deduped per item per local day, so a

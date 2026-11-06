@@ -30,6 +30,7 @@ use serde_bytes::ByteBuf;
 use fauna_core::data::{Capability, Timestamp};
 use fauna_core::encoding::EmbedAsBytes;
 use fauna_core::identity::ActorId;
+use fauna_core::subscription::FOLLOWERS_TIER;
 use fauna_core::subscription::types::{FollowIntent, FollowIntentKind};
 use fauna_protocol::subscriptions::{
     KeyBlobGetReply, SubscribeReply, SubscribeRequest, UnsubscribeReply, UnsubscribeRequest,
@@ -310,13 +311,15 @@ pub(crate) async fn remote_subscribe(
     Ok(reply)
 }
 
-/// `fauna.subscriptions.unsubscribe`'s remote arm. The follow's state moves
-/// only when the home's `follow.state` push says the leave committed.
+/// `fauna.subscriptions.unsubscribe`'s remote arm. The leave is the reader's
+/// own act, so it first moves the reader's own rows — every approved paid tier
+/// of the follow to `removed`, whatever the home answers — and is then relayed
+/// to the home stored on the follow, never to a URL the caller names
+/// (`federated-follow.md` § Decision 2, the state leg).
 pub(crate) async fn remote_unsubscribe(
     state: &Arc<AppState>,
     bearer: [u8; 32],
     req: &UnsubscribeRequest,
-    home_url: &str,
 ) -> Result<UnsubscribeReply, RpcError> {
     let wire = req.intent.as_ref().ok_or_else(|| {
         malformed_upload(
@@ -330,17 +333,34 @@ pub(crate) async fn remote_unsubscribe(
         &req.author_id.0,
         FollowIntentKind::Unsubscribe,
     )?;
-    let home_url = home_url.trim().trim_end_matches('/');
-    let home_nest_id = state
-        .federation_pool
-        .resolve_peer_nest_id(home_url)
+    // The home the follow is stored at: the newest paid tier's row (what a
+    // leave ends), else any row of the follow.
+    let rows = state
+        .db
+        .remote_follows_of(&bearer, &req.author_id.0)
         .await
-        .map_err(|e| relay_failed("resolve the author's home nest", e))?;
+        .map_err(internal)?;
+    let (home_nest_id, home_url) = rows
+        .iter()
+        .filter(|r| r.tier != FOLLOWERS_TIER)
+        .max_by_key(|r| r.updated_at)
+        .or_else(|| rows.iter().max_by_key(|r| r.updated_at))
+        .map(|r| (r.home_nest_id, r.home_nest_url.clone()))
+        .ok_or_else(|| {
+            crate::subscription_handlers::not_subscribed(
+                "no follow of this author is recorded on this nest",
+            )
+        })?;
+    state
+        .db
+        .leave_remote_follow(&bearer, &req.author_id.0, FOLLOWERS_TIER)
+        .await
+        .map_err(internal)?;
     let fed_req = split_intent(state, wire, None)?;
     match crate::federation_pool::originate_follow_unsubscribe(
         &state.federation_pool,
         state,
-        home_url,
+        &home_url,
         &home_nest_id,
         fed_req,
     )
@@ -764,7 +784,6 @@ mod tests {
     use super::*;
 
     use fauna_core::identity::ActorKeypair;
-    use fauna_core::subscription::FOLLOWERS_TIER;
     use fauna_protocol::encode_canonical;
 
     use crate::test_support::fixture_state;
@@ -1105,6 +1124,262 @@ mod tests {
         assert_eq!(
             state.db.remote_follows_of(&reader, &author).await.unwrap()[0].state,
             RemoteFollowState::Approved
+        );
+    }
+
+    /// `removed` is terminal for a home's `follow.state` push (§ Decision 2):
+    /// a home that answers a leave with `rejected` and then `approved` cannot
+    /// walk the row back open, and a `removed` push onto a `removed` row is
+    /// still accepted so the home's retry stays idempotent.
+    #[tokio::test]
+    async fn a_state_push_never_moves_a_removed_follow() {
+        let state = fixture_state();
+        let reader = ActorKeypair::generate().actor_id().0;
+        let author = [0x34; 32];
+        state
+            .db
+            .upsert_remote_follow(
+                &reader,
+                &author,
+                "gold",
+                &HOME_A,
+                "https://a.example",
+                RemoteFollowState::Approved,
+                None,
+                ago(5) as i64,
+            )
+            .await
+            .unwrap();
+        state
+            .db
+            .leave_remote_follow(&reader, &author, FOLLOWERS_TIER)
+            .await
+            .unwrap();
+        let push = |to: &str| {
+            let req = FedFollowStateRequest {
+                author: ActorId(author),
+                subscriber: ActorId(reader),
+                tier: "gold".into(),
+                state: to.into(),
+                at: Timestamp::now(),
+            };
+            state_handler()(
+                state.clone(),
+                HOME_A,
+                Bytes::from(encode_canonical(&req).unwrap().to_vec()),
+            )
+        };
+        let left =
+            || async { state.db.remote_follows_of(&reader, &author).await.unwrap()[0].state };
+        assert_eq!(left().await, RemoteFollowState::Removed);
+        push("rejected")
+            .await
+            .expect("a rejected push answers success");
+        push("approved")
+            .await
+            .expect("an approved push answers success");
+        assert_eq!(
+            left().await,
+            RemoteFollowState::Removed,
+            "rejected then approved must not re-open a left follow"
+        );
+        push("removed")
+            .await
+            .expect("a removed push onto a removed row is accepted");
+        assert_eq!(left().await, RemoteFollowState::Removed);
+    }
+
+    /// The reader's leave of a remote paid follow moves the reader's
+    /// own row at once, so a home that never acts on it — here, one that is
+    /// never even reached — stops delivering into the reader's feed, and the
+    /// home's stale `approved` push cannot re-open it. The free follow, which
+    /// a leave never ends, stays.
+    #[tokio::test]
+    async fn a_readers_leave_ends_the_follow_on_its_own_nest_whatever_the_home_answers() {
+        use crate::db::feeds::{FeedAudience, FeedLocality};
+        use fauna_core::data::{Post, PostBody};
+        use fauna_core::scoring::FilterCombination;
+
+        let state = fixture_state();
+        let reader = ActorKeypair::generate();
+        let reader_id = reader.actor_id().0;
+        let author = ActorKeypair::generate();
+        let author_id = author.actor_id().0;
+        // A home this test never reaches: the leave's relay fails, as a home
+        // that ignores the leave would leave it.
+        let home_url = "https://0.0.0.0:1";
+        state
+            .db
+            .upsert_remote_follow(
+                &reader_id,
+                &author_id,
+                "gold",
+                &HOME_A,
+                home_url,
+                RemoteFollowState::Approved,
+                None,
+                ago(60) as i64,
+            )
+            .await
+            .unwrap();
+        let post = Post {
+            author: author.actor_id(),
+            created_at: Timestamp::now(),
+            body: PostBody::Text {
+                content: "a delivered post".into(),
+                facets: vec![],
+            },
+            references: vec![],
+            expires_at: None,
+            gated: None,
+            content_warning: None,
+            origin: None,
+        };
+        let (bytes, env) = fauna_core::encoding::sign_envelope(&author, &post).unwrap();
+        let wire =
+            fauna_core::encoding::canonical_encode(&EmbedAsBytes::from_signed(bytes, env)).unwrap();
+        let post_id = *blake3::hash(&wire).as_bytes();
+        state
+            .db
+            .put_delivered_post_index_only(&post_id, &wire, home_url, &HOME_A)
+            .await
+            .unwrap();
+        let listed = || async {
+            state
+                .db
+                .query_feed_for(
+                    &[],
+                    FilterCombination::All,
+                    &[],
+                    None,
+                    50,
+                    FeedAudience::OnBox,
+                    FeedLocality::ForReader(reader_id),
+                )
+                .await
+                .unwrap()
+                .into_iter()
+                .any(|r| r.post_id == post_id)
+        };
+        assert!(listed().await, "the follow delivers before the leave");
+
+        let req = UnsubscribeRequest {
+            author_id: ActorId(author_id),
+            // The caller's named home is not where the leave goes.
+            home_nest_url: Some("https://elsewhere.example".into()),
+            intent: Some(intent(
+                &reader,
+                author_id,
+                "gold",
+                FollowIntentKind::Unsubscribe,
+                state.nest_identity.public_key_bytes(),
+                ago(5),
+            )),
+            extra: Default::default(),
+        };
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_secs(60),
+            remote_unsubscribe(&state, reader_id, &req),
+        )
+        .await;
+
+        let row_state = || async {
+            state
+                .db
+                .remote_follows_of(&reader_id, &author_id)
+                .await
+                .unwrap()[0]
+                .state
+        };
+        assert_eq!(row_state().await, RemoteFollowState::Removed);
+        assert!(!listed().await, "the left follow delivers nothing more");
+        assert_eq!(
+            state
+                .db
+                .has_approved_remote_follow_from(&author_id, &HOME_A)
+                .await
+                .unwrap(),
+            None,
+            "the delivery gate no longer admits that home for this author"
+        );
+
+        // The home's stale `approved` lands, and re-opens nothing.
+        let push = FedFollowStateRequest {
+            author: ActorId(author_id),
+            subscriber: ActorId(reader_id),
+            tier: "gold".into(),
+            state: "approved".into(),
+            at: Timestamp::now(),
+        };
+        state_handler()(
+            state.clone(),
+            HOME_A,
+            Bytes::from(encode_canonical(&push).unwrap().to_vec()),
+        )
+        .await
+        .expect("the home's push is answered");
+        assert_eq!(row_state().await, RemoteFollowState::Removed);
+        assert!(
+            !listed().await,
+            "a stale approval does not restore the follow"
+        );
+    }
+
+    /// A leave never ends the free follow (unsubscribe is not unfollow), and a
+    /// leave of an author with no follow recorded here is `not_subscribed`
+    /// before anything is dialled.
+    #[tokio::test]
+    async fn a_leave_keeps_the_free_follow_and_needs_a_recorded_follow() {
+        let state = fixture_state();
+        let reader = ActorKeypair::generate();
+        let reader_id = reader.actor_id().0;
+        let author_id = ActorKeypair::generate().actor_id().0;
+        let req = UnsubscribeRequest {
+            author_id: ActorId(author_id),
+            home_nest_url: Some("https://0.0.0.0:1".into()),
+            intent: Some(intent(
+                &reader,
+                author_id,
+                "gold",
+                FollowIntentKind::Unsubscribe,
+                state.nest_identity.public_key_bytes(),
+                ago(5),
+            )),
+            extra: Default::default(),
+        };
+        let err = remote_unsubscribe(&state, reader_id, &req)
+            .await
+            .expect_err("no follow recorded");
+        assert_eq!(err.code, "fauna.subscriptions.not_subscribed");
+
+        state
+            .db
+            .upsert_remote_follow(
+                &reader_id,
+                &author_id,
+                FOLLOWERS_TIER,
+                &HOME_A,
+                "https://0.0.0.0:1",
+                RemoteFollowState::Approved,
+                None,
+                ago(60) as i64,
+            )
+            .await
+            .unwrap();
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_secs(60),
+            remote_unsubscribe(&state, reader_id, &req),
+        )
+        .await;
+        assert_eq!(
+            state
+                .db
+                .remote_follows_of(&reader_id, &author_id)
+                .await
+                .unwrap()[0]
+                .state,
+            RemoteFollowState::Approved,
+            "the free follow survives a leave"
         );
     }
 }

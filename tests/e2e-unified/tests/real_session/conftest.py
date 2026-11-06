@@ -38,6 +38,23 @@ machine** — the user approved the VM's own disposable library, and the guard i
 what keeps a run on a real person's Mac from ever writing into theirs. Gate 3 is
 keyed ``real-photos-library``, the resource actually held.
 
+**The Windows arm.** Windows has no units or bus to borrow; its ambient resources
+are this user's own sets, one of each, which no launch can relocate: the **package
+catalogue** the Store-package witnesses register into, and **Credential Manager**,
+which ``test_identity_rests_in_credential_manager.py`` reads because the row it
+holds is the subject (linux's twin starts a private keyring daemon; Windows has no
+such thing to start). Gate 3 stays keyed ``real-desktop-session``: it is what makes
+one session the only owner of both.
+
+**The Android arm.** The ambient resource is on the device, not the box: the
+package's production credential store, one per install, which every ordinary launch
+leaves alone because it rests its identity in the e2e file backend instead. The
+driver's ``production_store`` launch wipes and gives back that store, so gate 2
+asserts the device is an **emulator** — on a person's phone a debug install's store
+could be theirs — and needs nothing of the desktop session, which a run driving a
+device does not use. A run whose every test is marked ``android`` takes this arm.
+Gate 3 is keyed ``real-android-device``, the resource actually held.
+
 Contract for tests here: **borrow and give back**. Back up any real state you
 touch (an existing ``fauna-sync-agent.service``, a running agent), restore it
 on teardown, and remove state your run created. Debris that is inert-by-key
@@ -65,8 +82,12 @@ def _fail(msg: str):
     pytest.fail(f"real_session ambient-session guard: {msg}", pytrace=False)
 
 
+#: Gate 3's key for the Android arm: the run's device.
+REAL_ANDROID_LOCK_KEY = "real-android-device"
+
+
 @pytest.fixture(scope="session", autouse=True)
-def real_ambient_session():
+def real_ambient_session(request):
     """Assert this run owns the box's real desktop session, then hold the
     machine-wide desktop-session lock for the whole pytest session.
 
@@ -80,27 +101,67 @@ def real_ambient_session():
             _fail(f"{var} is set — e2e mode would make the app skip the very "
                   "production paths this category exists to exercise")
 
-    if sys.platform == "win32":
+    items = request.session.items
+    android_only = bool(items) and all(i.get_closest_marker("android") for i in items)
+    if android_only:
+        _guard_android_device()
+    elif sys.platform == "win32":
         _guard_windows_ambient_session()
     elif sys.platform == "darwin":
         _guard_macos_ambient_session()
     else:
         _guard_posix_ambient_session()
 
-    fd = live_box_lock.acquire(REAL_SESSION_LOCK_KEY)
+    fd = live_box_lock.acquire(REAL_ANDROID_LOCK_KEY if android_only else REAL_SESSION_LOCK_KEY)
     try:
         yield
     finally:
         live_box_lock.release(fd)
 
 
+def _guard_android_device():
+    """Android: the ambient resource is the production store on this run's device.
+
+    A run that names ``--app android`` is not skipped for want of a device: it goes
+    on to ``adb install`` and fails there, naming nothing, so an unreachable device
+    is failed here, naming the venue. A device that answers must say it is an
+    emulator (``ro.boot.qemu``, ``ro.kernel.qemu`` before API 31), or the run is
+    refused rather than trusted, the macOS arm's virtual-machine rule: the venue's
+    store is disposable, a person's is not.
+    """
+    from helpers import android_device
+
+    serial, server = android_device.device_serial(), android_device.adb_server()
+    if not android_device.probe_device(serial, server):
+        _fail(
+            f"no android device answers (serial {serial!r}, adb server {server!r}). "
+            "Bring the venue up (`just android-venue-probe` says whether it is), "
+            "then re-run"
+        )
+    probe = subprocess.run(
+        [*android_device.adb_argv(serial, server), "shell",
+         "getprop ro.boot.qemu; getprop ro.kernel.qemu"],
+        capture_output=True, text=True, timeout=15,
+    )
+    if "1" not in (probe.stdout or "").split():
+        _fail(
+            "this run's device does not report an emulator (ro.boot.qemu and "
+            "ro.kernel.qemu are not 1). The production-store launch wipes the "
+            "package's credential store, which is disposable on the venue's emulator "
+            "and may be a person's own on a phone, so it runs on an emulator alone"
+        )
+
+
 def _guard_windows_ambient_session():
-    """Windows: the ambient resource is the real USER's package registration state.
+    """Windows: the ambient resources are the real USER's own sets.
 
     There is no XDG/D-Bus/systemd triad here. What makes a Windows run "ambient" is
     that `Add-AppxPackage` will register into this logged-on user's own package
-    catalogue — machine-global state a driver-isolated launch never touches. Two
-    things must hold or the assertions below mean nothing.
+    catalogue, and that a launch with the file store off writes this user's own
+    Credential Manager — machine-global state a driver-isolated launch never
+    touches. The Credential Manager needs no probe: it is there in any user session
+    (`win_credman::keyring_probe`). For the package catalogue, two things must hold
+    or the assertions below mean nothing.
     """
     # Developer Mode: without it an unsigned/self-signed package cannot register
     # per-user, and every registration assertion would fail for an environmental

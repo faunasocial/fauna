@@ -6,7 +6,9 @@ struct BridgesSettingsView: View {
     /// The ward's durable feed-source asks ride the app-root status projection
     /// (`family-safety.md` § Feed-source approvals); `nil` where none is injected.
     @Environment(FamilyStatusStore.self) private var familyStatus: FamilyStatusStore?
+    @Environment(MacAppState.self) private var appState
     @State private var vm = BridgeManagerVM()
+    @State private var pluginCards = PluginCardsVM()
 
     var body: some View {
         Form {
@@ -22,6 +24,16 @@ struct BridgesSettingsView: View {
             } else {
                 ForEach(Array(vm.bridges.enumerated()), id: \.offset) { index, bridge in
                     bridgeSection(bridge, index: index)
+                }
+            }
+
+            // Every account's plugin settings cards: one more `bridge-card` each,
+            // after the bridges.
+            PluginCardsSection(vm: pluginCards, startIndex: vm.bridges.count)
+
+            if appState.isAdmin {
+                Section {
+                    PluginAdminSection(isAdmin: appState.isAdmin)
                 }
             }
 
@@ -53,6 +65,7 @@ struct BridgesSettingsView: View {
             await familyStatus?.refresh(api: client.api)
             await vm.refresh()
         }
+        .task(id: SessionKey(client)) { await pluginCards.start(client: client) }
     }
 
     @ViewBuilder

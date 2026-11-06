@@ -136,6 +136,29 @@ public final class AdminTiersVM: BusyAdminCommandVM {
         return created
     }
 
+    /// Remove one tier via `fauna.admin.tiers.delete` (admin.md § 3 → *Removing a
+    /// tier*), then refetch so the row disappears (non-optimistic). No confirm
+    /// dialog. A refusal — including the nest's in-use `fauna.admin.conflict`,
+    /// which the UniFFI face already words through the shared `tier_delete_refusal`
+    /// — goes on `error-message` as `deleteTierError(message:)`; the refusal is
+    /// kept across the refetch, as in `addTier`.
+    public func deleteTier(name: String) async {
+        guard let admin else { return }
+        isBusy = true
+        var deleted = false
+        do {
+            try await admin.tiersDelete(name: name)
+            errorMessage = nil
+            deleted = true
+        } catch {
+            errorMessage = L.admin.settingsPage.deleteTierError(message: DisplayError.message(error) ?? "")
+        }
+        isBusy = false
+        let failure = errorMessage
+        await hydrate()
+        if !deleted { errorMessage = failure }
+    }
+
     /// Designate/re-point a membership tier via `fauna.admin.membership_tiers.set`
     /// (an upsert), then refetch so the row re-renders from persisted state.
     /// `lapseTier` always rides an explicit selection — the row never relies on

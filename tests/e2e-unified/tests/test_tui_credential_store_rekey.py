@@ -46,6 +46,7 @@ from nacl.signing import SigningKey
 
 from conftest import get_available_apps
 from helpers import tui_headless_store as hs
+from tests.test_onboarding_launch_routing_smoke import smoke_handled_nest  # noqa: F401 (fixture)
 
 pytestmark = [pytest.mark.tier_3, pytest.mark.tui]
 
@@ -126,7 +127,7 @@ def test_change_passphrase_relaunch_old_refused_new_unlocks(
         hs.submit_passphrase(driver, OLD_PASSPHRASE, confirm=OLD_PASSPHRASE)
         driver.wait_for(hs.CREATE_IDENTITY, timeout=15)
         hs.claim_admin_through_wizard(
-            driver, rekey_unclaimed_nest["url"], admin_secret_hex
+            driver, rekey_unclaimed_nest, admin_secret_hex
         )
 
         # 2. Settings → Account: the section renders on the sealed arm; the
@@ -207,3 +208,73 @@ def test_change_passphrase_relaunch_old_refused_new_unlocks(
             f"session={state.get('session')!r} "
             f"error={driver.get_text('error-message')!r}"
         )
+
+
+@pytest.mark.feature("identity-sealed-under-a-passphrase")
+def test_an_interrupted_passphrase_change_opens_with_old_or_new(
+    launch_client, tui_app_path, smoke_handled_nest, tmp_path, request  # noqa: F811
+):
+    """Outcome 10 — if the app stops in the middle of changing the
+    passphrase, the identity still opens with the old passphrase or the new
+    one, never neither (``tui.md`` § Credential storage, *Crash-safety*: the
+    rename is the single decision point, so the file is wholly old or wholly
+    new at every instant).
+
+    A registered actor signs in on the sealed store. Then, round after round,
+    the change is submitted and the app is SIGKILLed by a timer racing the
+    submit (several offsets, so some kills land inside the two Argon2id
+    derives and the write, others after). After each kill a write file cut
+    short beside the sealed file — what a kill before the rename leaves — is
+    planted too. The relaunch must open under exactly one of the two, and
+    that one becomes the next round's current passphrase; the round's last
+    relaunch signs the identity straight back in. The assertions are on what
+    opens, never on where the kill landed.
+    """
+    import contextlib
+    import threading
+
+    from helpers.admin_wire import admit_adult
+    from common.launch_harness import sign_in_through_the_wizard
+
+    nest = smoke_handled_nest
+    suffix = SigningKey.generate().verify_key.encode().hex()[:6]
+    actor = admit_adult(nest, f"rekeycrash{suffix}", domain=nest["authority"], token=True)
+    with hs.headless_launch(tui_app_path, nest, tmp_path / "xdg", request) as (driver, config):
+        driver.wait_for(hs.PASSPHRASE_INPUT, timeout=15)
+        hs.submit_passphrase(driver, OLD_PASSPHRASE, confirm=OLD_PASSPHRASE)
+        driver.wait_for(hs.CREATE_IDENTITY, timeout=15)
+        sign_in_through_the_wizard(driver, actor, nest)
+        path = hs.sealed_path(config)
+
+        current = OLD_PASSPHRASE
+        for round_no, offset in enumerate((0.0, 0.05, 0.15, 0.4)):
+            new = f"{NEW_PASSPHRASE}-{round_no}"
+            driver.set_state(ACCOUNT_PAGE_NAV)
+            driver.wait_for(REKEY_BUTTON, timeout=15)
+            driver.click(REKEY_BUTTON)
+            driver.wait_for(MODAL, timeout=10)
+            driver.clear_and_type(CURRENT_INPUT, current)
+            driver.clear_and_type(NEW_INPUT, new)
+            driver.clear_and_type(CONFIRM_INPUT, new)
+            killer = threading.Timer(offset, driver.kill_uncleanly)
+            killer.start()
+            with contextlib.suppress(Exception):
+                driver.click(SUBMIT)
+            killer.join()
+
+            before = hs.assert_sealed_whole(path, f"a kill {offset}s into a re-key")
+            residue = path.with_name(f".{path.name}.tmp-424242")
+            residue.write_bytes(before[: hs.SEALED_HEADER_LEN // 2])
+            hs.relaunch(driver)
+            hs.wait_unlock_surface(driver)
+            if hs.unlock_opens(driver, current):
+                opened = current
+            else:
+                assert hs.unlock_opens(driver, new), (
+                    f"a kill {offset}s into a re-key left a file neither the old nor "
+                    f"the new passphrase opens: error={driver.get_text('error-message')!r}"
+                )
+                opened = new
+            hs.wait_authenticated(driver, f"the passphrase that opened after round {round_no}")
+            residue.unlink(missing_ok=True)
+            current = opened

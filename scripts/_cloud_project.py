@@ -38,10 +38,6 @@ THE RESOLUTION ORDER (`token_for`):
   2. `~/.config/fauna/cloud/<project>.token` — the dev host's per-project
      file, mode 0600, first non-empty line. A missing file is no token: a
      purpose never falls back to another project's file.
-  3. For the production project only, the legacy `~/.hetzner-token`: today's
-     single project becomes the production project once the dev nest leaves
-     it, so that file IS the production token. Its read goes when the dev
-     nest is re-created in the uat project.
 
 A host outside the map resolves to no project and no file: only the env can
 supply its token (a deployment that is not the organisation's).
@@ -75,10 +71,6 @@ PURPOSES = (CLOUD, DNS)
 ORG_ZONE = "fauna.build"
 #: The apex zone, in the production project.
 PRODUCTION_APEX = "fauna.social"
-#: TRANSITIONAL: the dev nest still runs as dev.example.com in today's single
-#: project, which becomes the production project once it leaves. Removed when
-#: the dev nest is re-created as dev.fauna.build.
-_LEGACY_PRODUCTION_ZONE = "example.com"
 
 #: The project a run that names no box works in, per purpose: the live
 #: suite's throwaway boxes are made in the uat project, their records go in
@@ -86,8 +78,6 @@ _LEGACY_PRODUCTION_ZONE = "example.com"
 DEFAULT_PROJECT = {CLOUD: UAT, DNS: ZONE}
 
 TOKEN_DIR = "~/.config/fauna/cloud"
-#: TRANSITIONAL: the production project's token under its pre-split name.
-LEGACY_TOKEN_FILE = "~/.hetzner-token"
 
 
 def normalize_host(host: str) -> str:
@@ -123,7 +113,7 @@ def project_for(host: str | None, purpose: str = CLOUD) -> str | None:
         if purpose == DNS:
             return ZONE
         return ACCEPTANCE if h == ORG_ZONE else UAT
-    if _within(h, PRODUCTION_APEX) or _within(h, _LEGACY_PRODUCTION_ZONE):
+    if _within(h, PRODUCTION_APEX):
         return PRODUCTION
     return None
 
@@ -139,15 +129,14 @@ class TokenFileModeError(RuntimeError):
     """A token file other users can read — refused rather than used."""
 
 
-def _read_first_line(path: str, *, private: bool = True) -> str:
+def _read_first_line(path: str) -> str:
     full = os.path.expanduser(path)
     try:
         st = os.stat(full)
     except OSError:
         return ""
-    # POSIX only: Windows reports synthetic mode bits. The legacy file predates
-    # the rule and is read as it stands until it goes.
-    if private and os.name != "nt" and st.st_mode & (stat.S_IRWXG | stat.S_IRWXO):
+    # POSIX only: Windows reports synthetic mode bits.
+    if os.name != "nt" and st.st_mode & (stat.S_IRWXG | stat.S_IRWXO):
         raise TokenFileModeError(
             f"{full} is readable by other users (mode {stat.S_IMODE(st.st_mode):o}) — "
             f"run: chmod 600 {full}"
@@ -176,10 +165,7 @@ def token_for(host: str | None, env: Mapping[str, str] | None = None,
     project = project_for(host, purpose)
     if project is None:
         return ""
-    tok = _read_first_line(token_file(project))
-    if not tok and project == PRODUCTION:
-        tok = _read_first_line(LEGACY_TOKEN_FILE, private=False)
-    return tok
+    return _read_first_line(token_file(project))
 
 
 def where_to_put(host: str | None, purpose: str = CLOUD) -> str:
@@ -188,7 +174,64 @@ def where_to_put(host: str | None, purpose: str = CLOUD) -> str:
     if project is None:
         return (f"{normalize_host(host or '')} is not one of the organisation's boxes — "
                 f"set {ENV_VAR} to its project's token")
-    files = token_file(project)
-    if project == PRODUCTION:
-        files += f" (or the legacy {LEGACY_TOKEN_FILE})"
-    return f"set {ENV_VAR}, or write the {project} project's token to {files} (mode 0600)"
+    return (f"set {ENV_VAR}, or write the {project} project's token to "
+            f"{token_file(project)} (mode 0600)")
+
+
+# ── The admin app's own DNS credential, one per nest ─────────────────────────
+#
+# The credential a nest's admin app keeps for managed DNS rests sealed on the
+# box and in cleartext on every admin device, so it is a zone-project token
+# minted for that nest's admin alone, never one of the fleet's token files
+# (docs/goal/architecture/org-nests.md § One zone, one project; the threat
+# model's token-per-consumer rule). Revoking it on a doubtful admin device then
+# costs nothing fleet-side. Only the provider's console mints one; the dev host
+# keeps it at `app_dns_token_file(host)`. There is no env override: the env
+# carries a fleet token, which is exactly what may not reach an app.
+
+#: Where the dev host keeps each nest's admin-app DNS token, one file per nest.
+APP_DNS_TOKEN_DIR = f"{TOKEN_DIR}/app-dns"
+
+
+class AppTokenReuseError(RuntimeError):
+    """A nest's admin-app DNS token that is one of the fleet's own tokens."""
+
+
+def app_dns_token_file(host: str) -> str:
+    """The dev host's file for host's admin-app DNS token, unexpanded."""
+    h = normalize_host(host)
+    if not _within(h, ORG_ZONE):
+        raise ValueError(f"{h!r} is not one of the organisation's nests under {ORG_ZONE}")
+    return f"{APP_DNS_TOKEN_DIR}/{h}.token"
+
+
+def app_dns_token_for(host: str, env: Mapping[str, str] | None = None) -> str:
+    """The zone-project token host's admin app keeps, or "" when none is kept.
+
+    Raises AppTokenReuseError when it equals `$HETZNER_API_TOKEN` or any of the
+    fleet's project token files, and TokenFileModeError for a file other users
+    can read. Never prints or logs the value."""
+    env = os.environ if env is None else env
+    try:
+        path = app_dns_token_file(host)
+    except ValueError:
+        return ""
+    tok = _read_first_line(path)
+    if not tok:
+        return ""
+    fleet = {f"${ENV_VAR}": env.get(ENV_VAR, "").strip()}
+    fleet.update({token_file(p): _read_first_line(token_file(p)) for p in PROJECTS})
+    for where, value in fleet.items():
+        if value and value == tok:
+            raise AppTokenReuseError(
+                f"{os.path.expanduser(path)} holds the same token as {where}: the admin "
+                f"app of {normalize_host(host)} keeps a zone-project token of its own, "
+                "minted for that nest alone")
+    return tok
+
+
+def app_dns_where_to_put(host: str) -> str:
+    """One line for an error message: where host's admin-app DNS token goes."""
+    return (f"mint a Read & Write token in the zone project, named for "
+            f"{normalize_host(host)}'s admin, and write it to {app_dns_token_file(host)} "
+            "(mode 0600) — never a copy of a fleet token file")

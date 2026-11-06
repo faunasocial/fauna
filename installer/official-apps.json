@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "about": "The identities of Fauna's official apps and release artifacts, one entry per identity a user can compare against what they installed. fauna.social/official-apps is rendered from this file and nothing else, and a merge-time check in the development tree refuses a merge whose entry disagrees with the tracked file the identity is pinned in (`source`), or whose tracked signing input this file does not list. Status `live` means the identity is in force today; `pending` means it is not issued or not published yet, and the `pending` sentence says why. A pending entry may still carry the value that will apply once it is tracked in the tree. Owner: docs/goal/architecture/release-integrity.md § Release signing → The official-apps list. A `source` under scripts/publish/public-files/ is published at the repository root (the release workflows live at .github/workflows/ in the public repository).",
+  "about": "The identities of Fauna's official apps and release artifacts, one entry per identity a user can compare against what they installed. fauna.social/apps takes its releases link from this file, and a merge-time check in the development tree refuses a merge whose entry disagrees with the tracked file the identity is pinned in (`source`), or whose tracked signing input this file does not list. Status `live` means the identity is in force today; `pending` means it is not issued or not published yet, and the `pending` sentence says why. A pending entry may still carry the value that will apply once it is tracked in the tree. Owner: docs/goal/architecture/release-integrity.md § Release signing → The official-apps list. A `source` under scripts/publish/public-files/ is published at the repository root (the release workflows live at .github/workflows/ in the public repository).",
   "publisher": {
     "name": "Fauna Social",
     "trademark_policy": "TRADEMARK.md"
@@ -9,14 +9,14 @@
     {
       "id": "web",
       "label": "Web app",
-      "channel": "Served by every nest at its own address under /app/, and later by the project's own hosted origin, which serves the app's code and holds nothing of yours.",
+      "channel": "Served by each nest at its own address under /app/ by default, and later also from the project's own address for the app, which serves the app's code and holds nothing of yours.",
       "identities": [
         {
           "kind": "front-door-app-host",
-          "label": "Hosted web app address",
+          "label": "The project's own address for the app",
           "value": "https://app.fauna.social",
           "status": "pending",
-          "pending": "The hosted web app is not live yet. Until it is, the web app you use comes from the nest you connect to, at that nest's own address.",
+          "pending": "The project's own address for the app is not live yet. Until it is, the web app comes from a nest's own address, which each nest serves by default.",
           "source": "services/fauna-front-door/src/config.rs",
           "how_to_check": "Once live, the address bar reads exactly app.fauna.social. Any other address serving a Fauna app is a nest's own copy or someone else's."
         },
@@ -68,7 +68,7 @@
           "status": "pending",
           "pending": "There is no Mac App Store listing. The macOS app is distributed as a download from the project's releases page.",
           "source": null,
-          "how_to_check": "A Mac App Store entry calling itself Fauna is not the association's."
+          "how_to_check": "A Mac App Store entry presenting itself as Fauna Social's app is not ours."
         }
       ]
     },
@@ -100,7 +100,7 @@
           "status": "pending",
           "pending": "No App Store listing exists yet. The only way to run the iOS app today is to build it from the source yourself.",
           "source": null,
-          "how_to_check": "Until the listing is announced here, an App Store entry calling itself Fauna is not the association's."
+          "how_to_check": "Until the listing is announced here, an App Store entry presenting itself as Fauna Social's app is not ours."
         }
       ]
     },
@@ -124,7 +124,7 @@
           "status": "pending",
           "pending": "The app is in invitation-only internal testing on Google Play; its listing answers only to invited testers until the first public release.",
           "source": null,
-          "how_to_check": "Until the listing is announced here, a Play entry calling itself Fauna is not the association's."
+          "how_to_check": "Until the listing is announced here, a Play entry presenting itself as Fauna Social's app is not ours."
         },
         {
           "kind": "play-app-signing-cert-sha256",
@@ -132,7 +132,7 @@
           "value": null,
           "status": "pending",
           "pending": "The first internal-testing release is out; this fingerprint is published once the certificate an installed copy actually carries has been read.",
-          "source": null,
+          "source": "docs/goal/architecture/installers/android.md",
           "how_to_check": "Compare the installed app's signing certificate fingerprint (`apksigner verify --print-certs`, or a package-inspector app) with the value here."
         }
       ]
@@ -197,7 +197,7 @@
     {
       "id": "linux",
       "label": "Linux",
-      "channel": "Packages published with the releases; not on Flathub.",
+      "channel": "The Linux app as a single program file, one for x64 and one for arm64, published with the pre-releases and releases; no desktop packages yet, and not on Flathub.",
       "identities": [
         {
           "kind": "linux-app-id",
@@ -209,44 +209,41 @@
         },
         {
           "kind": "linux-package-release",
-          "label": "Published desktop packages",
-          "value": null,
-          "status": "pending",
-          "pending": "No desktop packages for Linux have been released yet. Fauna is not on Flathub; a Flathub entry calling itself Fauna is not the association's.",
-          "source": null,
-          "how_to_check": "Packages will be published with the releases under Server and installers below and signed with the same release identity."
+          "label": "Published Linux app",
+          "value": "https://github.com/faunasocial/fauna/releases",
+          "status": "live",
+          "source": ".github/workflows/release.yml",
+          "how_to_check": "Each file is published with the pre-releases and releases under Server and installers below, signed with the same release identity; check it with the command given there. A desktop package (a .deb or a Flatpak) has not been released yet, and a Flathub entry presenting itself as Fauna Social's app is not ours."
         }
       ]
     },
     {
       "id": "tui",
       "label": "Terminal app",
-      "channel": "One archive per operating system and processor with each release (the terminal app plus the sync agent), signed with the same release identity as the server binaries; the macOS archives are also Developer ID-signed and notarized. The same program is included in the macOS package and the Windows installer.",
+      "channel": "One archive per operating system and processor with each release (the terminal app, the sync agent and fauna-cli, the program an AI assistant runs to work in Fauna), signed with the same release identity as the server binaries; the macOS archives, once published, are also Developer ID-signed and notarized. The terminal app and fauna-cli are also included in the macOS package and the Windows installer.",
       "identities": [
         {
           "kind": "tui-release",
-          "label": "Published terminal-app binaries",
-          "value": null,
-          "status": "pending",
-          "pending": "No release has been published yet. Until the first one, build the terminal app from the source.",
-          "source": null,
-          "how_to_check": "Binaries will be published with the releases under Server and installers below and signed with the same release identity."
+          "label": "Published terminal-app archives",
+          "value": "https://github.com/faunasocial/fauna/releases",
+          "status": "live",
+          "source": ".github/workflows/release.yml",
+          "how_to_check": "The archives for Linux and Windows are published with the pre-releases and releases under Server and installers below, signed with the same release identity; check each one with the command given there. There are no macOS archives yet; on a Mac, build the terminal app, its sync agent and fauna-cli from the source."
         }
       ]
     },
     {
       "id": "releases",
       "label": "Server and installers (GitHub releases)",
-      "channel": "The server binaries and the Windows installer are built and signed by the repository's own release workflow.",
+      "channel": "The server binaries, the Linux app, the terminal-app archives for Linux and Windows and the Windows installer are built by the repository's own release workflow, which signs each file it publishes with its release identity.",
       "identities": [
         {
           "kind": "github-release-repo",
           "label": "Release repository",
           "value": "https://github.com/faunasocial/fauna",
-          "status": "pending",
-          "pending": "No release has been published on this repository yet.",
-          "source": null,
-          "how_to_check": "Downloads come from this repository's Releases page and nowhere else."
+          "status": "live",
+          "source": ".github/workflows/release.yml",
+          "how_to_check": "Downloads come from this repository's Releases page and nowhere else, except the server's container image, which is this repository's package ghcr.io/faunasocial/nest."
         },
         {
           "kind": "sigstore-identity",
@@ -255,19 +252,18 @@
             "certificate_identity_regexp": "^https://github\\.com/faunasocial/fauna/",
             "oidc_issuer": "https://token.actions.githubusercontent.com"
           },
-          "status": "pending",
-          "pending": "No signed release has been published yet. There is no key fingerprint to list: the release workflow signs with a short-lived certificate naming this repository, which is what you verify against.",
+          "status": "live",
           "source": ".github/workflows/release.yml",
-          "how_to_check": "Run `cosign verify-blob --certificate-identity-regexp='^https://github\\.com/faunasocial/fauna/' --certificate-oidc-issuer='https://token.actions.githubusercontent.com' --bundle <file>.bundle <file>`: it succeeds only for a file signed by this repository's own workflow."
+          "how_to_check": "There is no key fingerprint to list: the release workflow signs each file with a short-lived certificate naming this repository, which is what you verify against. Run `cosign verify-blob --certificate-identity-regexp='^https://github\\.com/faunasocial/fauna/' --certificate-oidc-issuer='https://token.actions.githubusercontent.com' --bundle <file>.bundle <file>`: it succeeds only for a file signed by this repository's own workflow."
         },
         {
           "kind": "nest-image-signing",
           "label": "Server container image signature",
           "value": null,
           "status": "pending",
-          "pending": "The server image at ghcr.io/faunasocial/nest is not signed yet.",
+          "pending": "The signature on the server image at ghcr.io/faunasocial/nest is not listed here yet; the Test channel's image is signed, the Dev channel's development builds are not, and there is nothing on the Stable channel until the first Stable release is out.",
           "source": null,
-          "how_to_check": "Once signed, the image is verified with cosign against the release identity above."
+          "how_to_check": "The Test channel's image, and the Stable channel's once there is one, is verified with cosign against the release identity above; the Dev channel's development builds are not signed."
         }
       ]
     }

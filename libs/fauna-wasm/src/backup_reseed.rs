@@ -34,11 +34,11 @@
 use std::sync::Arc;
 
 use fauna_client_backup::reseed::{
-    DeliveredCorpus, DeliveredSet, FolderRehome, HostedLegs, ReseedDeliveryLeg, result_lines,
-    run_reseed,
+    DeliveredCorpus, DeliveredSet, DevicePins, FolderRehome, HostedLegs, PullBackPreflight,
+    ReseedDeliveryLeg, preflight_lines, result_lines, run_reseed,
 };
 use fauna_client_sync::reseed_pull::{
-    NestPullBack, PullBackDestination, PullBackTarget, folder_names_from_coverage,
+    NestPullBack, PullBackDestination, PullBackTarget, folder_names_from_coverage, preflight,
 };
 use fauna_core::crypto::{BackupKey, NestBackupKey, OwnerSealKey};
 use fauna_core::data::{BackupDestination, DestinationKind};
@@ -165,6 +165,21 @@ impl WasmReseedResult {
     }
 }
 
+/// The pull-back's preflight, for JS — the wasm twin of the ffi
+/// `FfiPullBackPreflight` (`client-device-custodian.md` § *What the pull-back
+/// trusts the holder for*, the confirm).
+#[derive(Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct WasmPullBackPreflight {
+    /// Set when the preflight failed: a failed gesture, no confirm opens.
+    stopped: Option<String>,
+    /// `backup-destination-reseed-confirm-modal`'s body lines
+    /// ([`preflight_lines`]), each resolved nested.
+    lines: Vec<LocalizedText>,
+    /// Handed back verbatim to `backupPullBackFromDestination` on confirm.
+    acceptance: String,
+}
+
 #[wasm_bindgen]
 impl WsRpcClient {
     /// Restore the signed-in nest from a surviving **nest-kind** destination's
@@ -178,8 +193,47 @@ impl WsRpcClient {
     /// before the driver's verdict resolves with `stopped` set: nothing was
     /// made live, and a re-run resumes by content address. Rejects only for a
     /// secret that is not 32 hex bytes.
+    ///
+    /// `acceptance` is the string `backupPullBackPreflight` returned for the
+    /// lines the confirm showed; absent (a page whose confirm does not show
+    /// them yet), the run takes a fresh preflight whole.
     #[wasm_bindgen(js_name = backupPullBackFromDestination)]
     pub fn backup_pull_back_from_destination(
+        &self,
+        secret_hex: String,
+        destination_id: String,
+        acceptance: Option<String>,
+    ) -> js_sys::Promise {
+        let client = self.inner_client();
+        future_to_promise(async move {
+            let secret = fauna_core::hex32::decode(&secret_hex).map_err(err_to_js)?;
+            let result = match acceptance.as_deref().map(PullBackPreflight::from_json) {
+                Some(Err(e)) => WasmReseedResult::stopped(e),
+                Some(Ok(accepted)) => pull_back_from_destination(
+                    client,
+                    secret,
+                    &secret_hex,
+                    &destination_id,
+                    Some(accepted),
+                )
+                .await
+                .unwrap_or_else(WasmReseedResult::stopped),
+                None => {
+                    pull_back_from_destination(client, secret, &secret_hex, &destination_id, None)
+                        .await
+                        .unwrap_or_else(WasmReseedResult::stopped)
+                }
+            };
+            to_js(&result)
+        })
+    }
+
+    /// The pull-back's preflight — the press on a nest-kind row's
+    /// `backup-destination-reseed-button`, before the confirm opens
+    /// (`ui/backups.md` § Restore after losing the nest). Resolves to
+    /// `{ stopped, lines, acceptance }`; writes nothing anywhere.
+    #[wasm_bindgen(js_name = backupPullBackPreflight)]
+    pub fn backup_pull_back_preflight(
         &self,
         secret_hex: String,
         destination_id: String,
@@ -187,37 +241,45 @@ impl WsRpcClient {
         let client = self.inner_client();
         future_to_promise(async move {
             let secret = fauna_core::hex32::decode(&secret_hex).map_err(err_to_js)?;
-            let result = pull_back_from_destination(client, secret, &secret_hex, &destination_id)
-                .await
-                .unwrap_or_else(WasmReseedResult::stopped);
+            let result =
+                match pull_back_preflight(client, secret, &secret_hex, &destination_id).await {
+                    Ok(preflight) => WasmPullBackPreflight {
+                        stopped: None,
+                        lines: preflight_lines(&preflight),
+                        acceptance: preflight.to_json(),
+                    },
+                    Err(e) => WasmPullBackPreflight {
+                        stopped: Some(e),
+                        ..WasmPullBackPreflight::default()
+                    },
+                };
             to_js(&result)
         })
     }
 }
 
-/// The browser's composition, in the native host's order: resolve the row,
-/// connect to the destination held to its enrolled identity, name and prepare
-/// the covered folders, run the shared driver over the shared leg, then on a
-/// whole outcome re-enroll the destination to the restored nest.
-async fn pull_back_from_destination(
-    target: InnerClient,
-    secret: [u8; 32],
+/// The destination row `destination_id` names in the box's own list, the
+/// owner's session to it held to its enrolled identity, and the list itself.
+async fn enrolled_destination(
+    target: &InnerClient,
     secret_hex: &str,
     destination_id: &str,
-) -> Result<WasmReseedResult, String> {
+) -> Result<
+    (
+        [u8; 32],
+        fauna_core::backup_state::BackupState,
+        BackupDestination,
+        TokenWsRpcClient,
+    ),
+    String,
+> {
     let js = |e: JsValue| e.as_string().unwrap_or_else(|| format!("{e:?}"));
-    let keypair = ActorKeypair::from_secret(secret);
-    let actor_hex = keypair.actor_id_hex();
-
-    let restored_nest_id = crate::rpc::bound_nest_id(&target)
+    let restored_nest_id = crate::rpc::bound_nest_id(target)
         .await
         .map_err(|e| format!("this nest's identity: {}", js(e)))?
         .0;
-    // The box's own list, as the Backups page reads it: after a rebuild it is
-    // the lost box's (`backup-destinations.md` § *A rebuilt box keeps its list
-    // too*), so its coverage rows name the folders the destination holds.
     let store = crate::account_runtime::backup_seam();
-    let state = fauna_client_config::load_backup_state_refiled(&*store, &target, restored_nest_id)
+    let state = fauna_client_config::load_backup_state_refiled(&*store, target, restored_nest_id)
         .await
         .map_err(|e| format!("reading this nest's backup list: {e}"))?;
     let destination = state
@@ -225,13 +287,13 @@ async fn pull_back_from_destination(
         .destinations
         .iter()
         .find(|d| d.destination_id == destination_id)
+        .cloned()
         .ok_or_else(|| format!("no backup destination {destination_id}"))?;
     if !matches!(destination.kind_view(), DestinationKind::Nest { .. }) {
         return Err(format!(
             "{destination_id} is not a nest, so there is no copy to pull back over the network"
         ));
     }
-
     let url = destination.destination_nest_url.trim_end_matches('/');
     let (proven, _domain, dest) =
         crate::rpc::resolve_and_authorize_destination_inner(secret_hex, url)
@@ -245,6 +307,61 @@ async fn pull_back_from_destination(
             fauna_core::hex32::encode(&destination.destination_actor_pubkey),
         ));
     }
+    Ok((restored_nest_id, state, destination, dest))
+}
+
+/// The browser's preflight: the shared [`preflight`] over the owner's session
+/// to the destination, under the owner's `NestBackupKey`, against this tab's
+/// `localStorage` audit pins.
+async fn pull_back_preflight(
+    target: InnerClient,
+    secret: [u8; 32],
+    secret_hex: &str,
+    destination_id: &str,
+) -> Result<PullBackPreflight, String> {
+    let keypair = ActorKeypair::from_secret(secret);
+    let audit = crate::backup_audit::LocalStorageAuditStateStore::for_actor(keypair.actor_id_hex());
+    let pins = DevicePins::from_store(&audit, destination_id)?;
+    let (_, _, destination, dest) =
+        enrolled_destination(&target, secret_hex, destination_id).await?;
+    let seam = PullBackDestinationNest {
+        client: fauna_client_backup::BackupClient::new(dest),
+    };
+    let fetcher = fauna_core::file_download::WasmPublicChunkFetcher::new(
+        destination.destination_nest_url.trim_end_matches('/'),
+    );
+    preflight(
+        &PullBackDestination {
+            seam: &seam,
+            bytes: &fetcher,
+        },
+        &FileDownloadKeys::owner(NestBackupKey::derive(&secret)),
+        keypair.actor_id().0,
+        &pins,
+    )
+    .await
+}
+
+/// The browser's composition, in the native host's order: resolve the row,
+/// connect to the destination held to its enrolled identity, name and prepare
+/// the covered folders, run the shared driver over the shared leg, then on a
+/// whole outcome re-enroll the destination to the restored nest.
+async fn pull_back_from_destination(
+    target: InnerClient,
+    secret: [u8; 32],
+    secret_hex: &str,
+    destination_id: &str,
+    accepted: Option<PullBackPreflight>,
+) -> Result<WasmReseedResult, String> {
+    let keypair = ActorKeypair::from_secret(secret);
+    let actor_hex = keypair.actor_id_hex();
+    let audit = crate::backup_audit::LocalStorageAuditStateStore::for_actor(actor_hex.clone());
+    let pins = DevicePins::from_store(&audit, destination_id)?;
+    let (restored_nest_id, state, destination, dest) =
+        enrolled_destination(&target, secret_hex, destination_id).await?;
+    let destination = &destination;
+    let store = crate::account_runtime::backup_seam();
+    let url = destination.destination_nest_url.trim_end_matches('/');
     let device_hex = crate::rpc::this_browsers_device_id(&actor_hex).map_err(|e| e.to_string())?;
 
     let seal = FileDownloadKeys::owner(OwnerSealKey::Client(BackupKey::derive(&secret)));
@@ -270,26 +387,30 @@ async fn pull_back_from_destination(
         nest: target.clone(),
     };
     let custody: Arc<dyn fauna_client_folders::FolderKeyReader> = folder_keys;
-    let leg = WasmPullBackLeg(
-        NestPullBack::new(
-            PullBackDestination {
-                seam: &seam,
-                bytes: &fetcher,
-            },
-            PullBackTarget {
-                bytes: &sink,
-                nest: &target,
-                device_id: device_hex,
-            },
-            keypair.actor_id().0,
-        )
-        .with_folder_names(names)
-        .with_rehome_signing(fauna_client_folders::record_signing(
-            target.clone(),
-            &keypair,
-            custody,
-        )),
-    );
+    let mut pull = NestPullBack::new(
+        PullBackDestination {
+            seam: &seam,
+            bytes: &fetcher,
+        },
+        PullBackTarget {
+            bytes: &sink,
+            nest: &target,
+            device_id: device_hex,
+        },
+        keypair.actor_id().0,
+        FileDownloadKeys::owner(NestBackupKey::derive(&secret)),
+    )
+    .with_pins(pins)
+    .with_folder_names(names)
+    .with_rehome_signing(fauna_client_folders::record_signing(
+        target.clone(),
+        &keypair,
+        custody,
+    ));
+    if let Some(accepted) = accepted {
+        pull = pull.with_acceptance(accepted);
+    }
+    let leg = WasmPullBackLeg(pull);
 
     let nest_key = NestBackupKey::derive(&secret);
     let outcome = run_reseed(
@@ -306,6 +427,9 @@ async fn pull_back_from_destination(
         dest,
         &*store,
         secret,
+        restored_nest_id,
+        // The box this ceremony replaced: the one whose list holds the row,
+        // read under this nest's identity above (as the native host does).
         restored_nest_id,
         destination,
         &outcome,

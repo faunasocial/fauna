@@ -854,6 +854,7 @@ impl<P: BlobPushSink, R: RpcRequester> ReseedDelivery<'_, P, R> {
             sidecarless_segments: report.sidecarless_segments,
             folder_paths_without_seal: report.folder_paths_without_seal,
             plaintext_bytes: report.plaintext_bytes,
+            ..DeliveredCorpus::default()
         })
     }
 

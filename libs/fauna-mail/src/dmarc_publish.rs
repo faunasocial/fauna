@@ -164,20 +164,31 @@ pub fn apply_overrides_json(base: DmarcPublishPolicy, json: Option<&str>) -> Dma
 /// (`mail_domains.dmarc_overrides`) and return the new column value — the
 /// per-domain policy select's write (`dmarc-reporting.md` § Multi-domain
 /// deployments). `mode` sets `policy_mode` and `subdomain_policy_mode` together
-/// (softening a domain means the whole domain); the deployment default
-/// (`p=reject`) removes both keys rather than storing them. Every other key in
-/// the stored object survives — including one this version does not know, so a
-/// newer nest's override is never lost on a round-trip. A stored value that is
-/// not a JSON object already reads as no override ([`parse_stored_overrides`])
-/// and is replaced. `None` = no keys left (the column's canonical empty state).
-pub fn set_policy_mode_json(json: Option<&str>, mode: DmarcMode) -> Option<String> {
+/// (choosing a policy for a domain means the whole domain). `base` is the
+/// EFFECTIVE deployment-wide policy the domain's partial is overlaid onto
+/// (`DmarcPolicyOverrides::publish_base` on the nest — the catalog over the
+/// shipped default, which an admin may itself have softened): a `mode` that
+/// `base` already publishes for both `p=` and `sp=` removes both keys, so the
+/// domain inherits the deployment policy; any other `mode` — a STRICTER one
+/// than a softened base included — is stored, so the published record always
+/// carries the admin's choice. Every other key in the stored object survives —
+/// including one this version does not know, so a newer nest's override is
+/// never lost on a round-trip. A stored value that is not a JSON object already
+/// reads as no override ([`parse_stored_overrides`]) and is replaced. `None` =
+/// no keys left (the column's canonical empty state).
+pub fn set_policy_mode_json(
+    json: Option<&str>,
+    mode: DmarcMode,
+    base: &DmarcPublishPolicy,
+) -> Option<String> {
     use serde_json::{Map, Value};
     let mut map = match json.map(serde_json::from_str::<Value>) {
         Some(Ok(Value::Object(map))) => map,
         _ => Map::new(),
     };
+    let inherits = mode == base.policy_mode && mode == base.subdomain_policy_mode;
     for key in ["policy_mode", "subdomain_policy_mode"] {
-        if mode == DmarcPublishPolicy::default().policy_mode {
+        if inherits {
             map.remove(key);
         } else {
             map.insert(key.to_string(), Value::from(mode.as_tag()));
@@ -269,7 +280,12 @@ mod tests {
     #[test]
     fn set_policy_mode_softens_the_whole_domain_and_keeps_other_keys() {
         let stored = r#"{"pct":50,"future_key":"kept"}"#;
-        let out = set_policy_mode_json(Some(stored), DmarcMode::Quarantine).unwrap();
+        let out = set_policy_mode_json(
+            Some(stored),
+            DmarcMode::Quarantine,
+            &DmarcPublishPolicy::default(),
+        )
+        .unwrap();
         let v: serde_json::Value = serde_json::from_str(&out).unwrap();
         assert_eq!(v["policy_mode"], "quarantine");
         assert_eq!(v["subdomain_policy_mode"], "quarantine");
@@ -285,7 +301,8 @@ mod tests {
 
     #[test]
     fn set_policy_mode_default_clears_both_keys() {
-        let softened = set_policy_mode_json(None, DmarcMode::None).unwrap();
+        let softened =
+            set_policy_mode_json(None, DmarcMode::None, &DmarcPublishPolicy::default()).unwrap();
         assert_eq!(
             parse_stored_overrides(Some(&softened)).policy_mode,
             Some(DmarcMode::None)
@@ -293,23 +310,79 @@ mod tests {
         // Back to the default: both keys go, and an otherwise-empty partial is
         // the column's NULL.
         assert_eq!(
-            set_policy_mode_json(Some(&softened), DmarcMode::Reject),
+            set_policy_mode_json(
+                Some(&softened),
+                DmarcMode::Reject,
+                &DmarcPublishPolicy::default()
+            ),
             None
         );
         let with_pct = r#"{"policy_mode":"none","subdomain_policy_mode":"none","pct":50}"#;
         assert_eq!(
-            set_policy_mode_json(Some(with_pct), DmarcMode::Reject).as_deref(),
+            set_policy_mode_json(
+                Some(with_pct),
+                DmarcMode::Reject,
+                &DmarcPublishPolicy::default()
+            )
+            .as_deref(),
             Some(r#"{"pct":50}"#)
         );
     }
 
     #[test]
     fn set_policy_mode_replaces_a_malformed_stored_value() {
-        let out = set_policy_mode_json(Some("not json"), DmarcMode::None).unwrap();
+        let out = set_policy_mode_json(
+            Some("not json"),
+            DmarcMode::None,
+            &DmarcPublishPolicy::default(),
+        )
+        .unwrap();
         assert_eq!(
             parse_stored_overrides(Some(&out)).subdomain_policy_mode,
             Some(DmarcMode::None)
         );
-        assert_eq!(set_policy_mode_json(Some("[1]"), DmarcMode::Reject), None);
+        assert_eq!(
+            set_policy_mode_json(
+                Some("[1]"),
+                DmarcMode::Reject,
+                &DmarcPublishPolicy::default()
+            ),
+            None
+        );
+    }
+
+    /// 2026-11-05 fix: under a softened deployment policy, choosing
+    /// `reject` for one domain must STORE it — clearing it would leave the
+    /// domain publishing the deployment's `p=none` while the admin chose reject.
+    #[test]
+    fn set_policy_mode_stricter_than_a_softened_base_is_stored() {
+        let soft_base = DmarcPublishPolicy {
+            policy_mode: DmarcMode::None,
+            subdomain_policy_mode: DmarcMode::None,
+            ..DmarcPublishPolicy::default()
+        };
+        let out = set_policy_mode_json(None, DmarcMode::Reject, &soft_base)
+            .expect("a choice stricter than the base is stored");
+        let body = apply_overrides_json(soft_base.clone(), Some(&out)).to_txt_body("example.org");
+        assert!(body.contains("p=reject; sp=reject;"), "{body}");
+        // Choosing what the base already publishes inherits again.
+        assert_eq!(
+            set_policy_mode_json(Some(&out), DmarcMode::None, &soft_base),
+            None
+        );
+    }
+
+    /// A base whose `p=` and `sp=` differ inherits neither key from a choice
+    /// matching only one of them: the domain publishes the choice for both.
+    #[test]
+    fn set_policy_mode_matching_only_the_base_p_still_stores_both() {
+        let mixed = DmarcPublishPolicy {
+            policy_mode: DmarcMode::Quarantine,
+            subdomain_policy_mode: DmarcMode::Reject,
+            ..DmarcPublishPolicy::default()
+        };
+        let out = set_policy_mode_json(None, DmarcMode::Quarantine, &mixed).unwrap();
+        let body = apply_overrides_json(mixed, Some(&out)).to_txt_body("example.org");
+        assert!(body.contains("p=quarantine; sp=quarantine;"), "{body}");
     }
 }

@@ -41,6 +41,63 @@ _HELPERS_DIR = os.path.dirname(os.path.abspath(__file__))
 _FAKE_WATCHER = os.path.join(_HELPERS_DIR, "fake_status_notifier_watcher.py")
 
 
+class FakeWatcher:
+    """A fake `org.kde.StatusNotifierWatcher` on the session bus at `address` —
+    any private bus a test owns: a :class:`TrayBus`'s, or the one a linux
+    keyring launch already rides (`common/cred_store.py::LibsecretCredStore`).
+    """
+
+    def __init__(self, address: str):
+        self.address = address
+        self._proc = None
+
+    def start(self, timeout: float = 5.0) -> "FakeWatcher":
+        """Own the name (host becomes present). Blocks until it is owned, so the
+        caller can launch the client and rely on `watcher_online` firing during
+        the client's tray startup."""
+        if self._proc is not None:
+            return self
+        env = dict(os.environ)
+        env["DBUS_SESSION_BUS_ADDRESS"] = self.address
+        self._proc = subprocess.Popen(
+            [sys.executable, _FAKE_WATCHER],
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            **popen_group_kwargs(),
+        )
+        track_process(self._proc)
+        deadline = time.monotonic() + timeout
+        # Keep every line read: the failure reason (a missing `jeepney`, a bus that
+        # rejected the name) arrives on the SAME stream, so discarding what we read
+        # while waiting would report a bare '' and hide the traceback that explains it.
+        seen: list[str] = []
+        while time.monotonic() < deadline:
+            line = self._proc.stdout.readline()
+            if line.startswith("OWNED"):
+                return self
+            if line:
+                seen.append(line)
+            elif self._proc.poll() is not None:
+                break
+        try:
+            seen.append(self._proc.stdout.read() or "")
+        except Exception:
+            pass
+        raise RuntimeError(
+            "fake StatusNotifierWatcher never owned the name "
+            f"(rc={self._proc.poll()}); output:\n{''.join(seen).strip()!r}"
+        )
+
+    def stop(self) -> None:
+        """Release the name (host disappears at runtime → drives `watcher_offine`)."""
+        proc, self._proc = self._proc, None
+        if proc is not None:
+            terminate_tree(proc)
+            untrack_process(proc)
+
+
 class TrayBus(PrivateSessionBus):
     """A private session bus with an optional fake StatusNotifierWatcher."""
 
@@ -50,54 +107,16 @@ class TrayBus(PrivateSessionBus):
 
     # -- watcher (host-present) ----------------------------------------------
     def start_watcher(self, timeout: float = 5.0) -> None:
-        """Own `org.kde.StatusNotifierWatcher` on the bus (host becomes present).
-
-        Blocks until the name is owned so the caller can launch the client and
-        rely on `watcher_online` firing during the client's tray startup.
-        """
+        """Own `org.kde.StatusNotifierWatcher` on the bus (host becomes present)."""
         assert self.address, "start() the bus first"
-        if self._watcher is not None:
-            return
-        env = dict(os.environ)
-        env["DBUS_SESSION_BUS_ADDRESS"] = self.address
-        self._watcher = subprocess.Popen(
-            [sys.executable, _FAKE_WATCHER],
-            env=env,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            **popen_group_kwargs(),
-        )
-        track_process(self._watcher)
-        deadline = time.monotonic() + timeout
-        # Keep every line read: the failure reason (a missing `jeepney`, a bus that
-        # rejected the name) arrives on the SAME stream, so discarding what we read
-        # while waiting would report a bare '' and hide the traceback that explains it.
-        seen: list[str] = []
-        while time.monotonic() < deadline:
-            line = self._watcher.stdout.readline()
-            if line.startswith("OWNED"):
-                return
-            if line:
-                seen.append(line)
-            elif self._watcher.poll() is not None:
-                break
-        try:
-            seen.append(self._watcher.stdout.read() or "")
-        except Exception:
-            pass
-        raise RuntimeError(
-            "fake StatusNotifierWatcher never owned the name "
-            f"(rc={self._watcher.poll()}); output:\n{''.join(seen).strip()!r}"
-        )
+        if self._watcher is None:
+            self._watcher = FakeWatcher(self.address).start(timeout)
 
     def stop_watcher(self) -> None:
         """Release the name (host disappears at runtime → drives `watcher_offine`)."""
-        w = self._watcher
-        self._watcher = None
-        if w is not None:
-            terminate_tree(w)
-            untrack_process(w)
+        watcher, self._watcher = self._watcher, None
+        if watcher is not None:
+            watcher.stop()
 
     # -- teardown -------------------------------------------------------------
     def stop(self) -> None:

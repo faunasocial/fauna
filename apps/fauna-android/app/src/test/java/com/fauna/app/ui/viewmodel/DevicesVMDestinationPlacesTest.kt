@@ -69,7 +69,7 @@ class DevicesVMDestinationPlacesTest {
         val api: ApiClient,
     )
 
-    private fun makeVm(): Fixture {
+    private fun makeVm(reconnect: MutableSharedFlow<Unit> = MutableSharedFlow()): Fixture {
         val api = mock(ApiClient::class.java)
         val resolveService = mock(ResolveService::class.java)
         val secureStorage = mock(SecureStorage::class.java)
@@ -84,7 +84,8 @@ class DevicesVMDestinationPlacesTest {
         // invalidates).
         val tick = MutableSharedFlow<Unit>(replay = 0, extraBufferCapacity = 1)
         whenever(api.folderChangedTick).thenReturn(tick)
-        whenever(api.reconnectTick).thenReturn(MutableSharedFlow())
+        whenever(api.reconnectTick).thenReturn(reconnect)
+        whenever(api.devicesStaleTick).thenReturn(MutableSharedFlow())
         whenever(api.storeChangedTick).thenReturn(MutableSharedFlow())
         val vm = DevicesVM(api, resolveService, secureStorage, appContext, OfflineShareHost(appContext), FakeOnDemandToggle())
         return Fixture(vm, api)
@@ -120,14 +121,64 @@ class DevicesVMDestinationPlacesTest {
     }
 
     @Test
-    fun aFailedReadDegradesToAnEmptyListNotAPageError() = runTest {
+    fun aFailedReadDegradesToAnEmptyListAndSaysSo() = runTest {
         val (vm, api) = makeVm()
         whenever(api.folderDestinationsList(7L)).thenThrow(RuntimeException("boom"))
 
         vm.setFolderExpanded("photos", 7L, true)
 
         assertEquals(emptyList<FfiFolderDestinationPlace>(), vm.folderDestinationPlaces.value["photos"])
-        // A read failure is not a page error — same posture as device activity.
+        assertEquals("fauna.backup.destination.list: boom", vm.sharingError.value)
+    }
+
+    @Test
+    fun aRowReadsErrorRetiresWhenTheReconnectsReadAnswers() = runTest {
+        val reconnect = MutableSharedFlow<Unit>(replay = 0, extraBufferCapacity = 1)
+        val (vm, api) = makeVm(reconnect)
+        whenever(api.folderDestinationsList(7L))
+            .thenThrow(RuntimeException("boom"))
+            .thenReturn(emptyList())
+
+        vm.setFolderExpanded("photos", 7L, true)
+        assertEquals("fauna.backup.destination.list: boom", vm.sharingError.value)
+
+        reconnect.emit(Unit)
+        assertNull(vm.sharingError.value)
+    }
+
+    @Test
+    fun aGoodRowReadLeavesAGesturesErrorStanding() = runTest {
+        val reconnect = MutableSharedFlow<Unit>(replay = 0, extraBufferCapacity = 1)
+        val (vm, api) = makeVm(reconnect)
+        whenever(api.folderDestinationsList(7L)).thenReturn(emptyList())
+        whenever(api.folderDestinationAttach(7L, "dest-1")).thenThrow(RuntimeException("nest unreachable"))
+
+        vm.setFolderExpanded("photos", 7L, true)
+        vm.attachFolderDestination("photos", 7L, "dest-1")
+        val gesture = vm.sharingError.value
+        reconnect.emit(Unit)
+
+        assertEquals(gesture, vm.sharingError.value)
+    }
+
+    @Test
+    fun aClosedRowTakesItsReadsErrorWithIt() = runTest {
+        val (vm, api) = makeVm()
+        whenever(api.folderDestinationsList(7L)).thenThrow(RuntimeException("boom"))
+
+        vm.setFolderExpanded("photos", 7L, true)
+        vm.setFolderExpanded("photos", 7L, false)
+
+        assertNull(vm.sharingError.value)
+    }
+
+    @Test
+    fun aCollapsedRowsReadStaysOffTheBanner() = runTest {
+        val (vm, api) = makeVm()
+        whenever(api.folderActorMembers("photos")).thenThrow(RuntimeException("boom"))
+
+        vm.loadFolderActors("photos")
+
         assertNull(vm.sharingError.value)
     }
 

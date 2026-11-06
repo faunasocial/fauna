@@ -1,9 +1,9 @@
 """tier_4 (live-remote, OPT-IN, NON-DESTRUCTIVE): the ActivityPub serving
 surface on an already-deployed production nest (the live nest), driven through
-the linux app UI for every mutation and plain public HTTPS GETs (stdlib
+the app UI (every app's driver; the CD gate runs it on tui) for every mutation and plain public HTTPS GETs (stdlib
 ``urllib.request``, the suite's convention) for every assertion.
 
-No nest APIs anywhere: every mutation is a linux app UI action (sign in,
+No nest APIs anywhere: every mutation is an app UI action (sign in,
 link the bridge, create a post, delete the post) and every observation is an
 unauthenticated HTTPS read of a route any fediverse crawler or peer could
 make (nodeinfo, WebFinger, the actor document, a note, the outbox).
@@ -99,7 +99,6 @@ from urllib.parse import urlencode
 import pytest
 
 from helpers import live_box_door
-from helpers.app_surface import skip_unbuilt
 from helpers.live_admin import dump, reach_admin_shell, wait_connected
 from helpers.live_handle import derive_handle
 
@@ -391,12 +390,13 @@ def _assert_handle_unfingerable(context: str, handle: str) -> None:
 
 
 def _open_ap_bridge_detail(app) -> None:
-    """linux: open the ActivityPub row's detail pane — the same one-line
-    click ``BridgesActions._open_bridge`` performs — WITHOUT committing to
-    either the link or unlink action, so the button's current label can be
-    read as a pure precondition check."""
+    """Bring the ActivityPub bridge's action button on screen
+    (``BridgesActions._open_bridge`` — linux opens the row's detail pane, the
+    inline apps need nothing) WITHOUT committing to either the link or unlink
+    action, so the button's current label can be read as a pure precondition
+    check."""
     app.bridges.navigate()
-    app.driver.click("activitypub", wait_for_child="bridge-action-button")
+    app.bridges._open_bridge("activitypub")
     app.driver.wait_for("bridge-action-button")
 
 
@@ -409,15 +409,6 @@ def _bridge_action_label(app) -> str:
 
 @pytest.mark.feature("fediverse")
 def test_activitypub_live_serving_surface(app):
-    if not app.driver.is_linux():
-        skip_unbuilt(
-            app.driver,
-            surface="the live ActivityPub serving-surface + bridges-page drive",
-            detail="drives the linux Fauna app UI + bridges page; the "
-            "other apps are the remaining cross-app follow-on",
-            tracked="docs/goal/behavior/activitypub.md",
-        )
-
     # -1) Preflight: is the box even set up for this run? A box that does not
     #    know the admin seed (unclaimed / reset / the wrong box) skips as
     #    environment instead of failing the serving assertions below, which would

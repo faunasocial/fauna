@@ -132,6 +132,11 @@ export interface FileVersionSummary {
    *  recorder's handle, else their actor id's `short_id`
    *  (`fauna_core::format::account_display_label`). */
   author_display: string;
+  /** The depositing connected app's hex writer key on a version a connected
+   *  app deposited and the owner's device adopted (`folder-deposit.md`
+   *  ruling 3); `null`/absent on every other version. The author line names
+   *  the app through the connected-apps machine's `versionAuthorJson`. */
+  deposited_by?: string | null;
   /** Whether this row is soft-pruned — only present (and only ever `true`) on
    *  an `include_pruned` listing (`file-versions.md` § Retention (3), apps row
    *  323). Drives `file-version-pruned-badge` + `file-version-undelete-button`,
@@ -142,6 +147,11 @@ export interface FileVersionSummary {
    *  restore records into the version's own set (media.md § Encryption at
    *  rest → *A set is addressed by its row*). */
   folder_id?: number | null;
+  /** The version's thumbnail manifest (hex; `null` when the row names
+   *  none) — opaque here, round-tripped into `restoreVersion()` so the
+   *  restored head keeps its tile (media.md § Encryption at rest → *A
+   *  thumbnail rests as its file rests*). */
+  thumbnail_hash?: string | null;
 }
 
 /** One followed public folder, as `media-folder-filter` offers it — a browse

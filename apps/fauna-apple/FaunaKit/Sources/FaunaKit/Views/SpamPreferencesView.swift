@@ -10,6 +10,8 @@ import SwiftUI
 /// See `docs/goal/ui/settings.md` § Spam threshold slider labels.
 public struct SpamPreferencesView: View {
     @Bindable var vm: PrivacySettingsVM
+    /// The render's content-policy inputs, re-bound on save (`nil` in a preview).
+    @Environment(ContentPolicyStore.self) private var contentPolicy: ContentPolicyStore?
 
     public init(vm: PrivacySettingsVM) {
         self.vm = vm
@@ -94,6 +96,6 @@ public struct SpamPreferencesView: View {
     /// Save spam preferences. Extracted so the `save-spam-prefs` Button and its
     /// `automationActivate` sibling invoke the exact same path (no drift).
     private func saveSpam() {
-        Task { await vm.saveSpamPreferences() }
+        Task { await vm.saveSpamPreferences(rebinding: contentPolicy) }
     }
 }

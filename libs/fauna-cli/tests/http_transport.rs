@@ -62,6 +62,28 @@ async fn exchange(
     origin: Option<&str>,
     body: &str,
 ) -> (u16, String) {
+    exchange_typed(
+        port,
+        method,
+        path,
+        host,
+        origin,
+        Some("application/json"),
+        body,
+    )
+    .await
+}
+
+/// [`exchange`] with the `Content-Type` sent as given (`None` omits it).
+async fn exchange_typed(
+    port: u16,
+    method: &str,
+    path: &str,
+    host: Option<&str>,
+    origin: Option<&str>,
+    content_type: Option<&str>,
+    body: &str,
+) -> (u16, String) {
     let mut stream = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
     let mut request = format!("{method} {path} HTTP/1.1\r\n");
     if let Some(host) = host {
@@ -70,10 +92,10 @@ async fn exchange(
     if let Some(origin) = origin {
         request.push_str(&format!("Origin: {origin}\r\n"));
     }
-    request.push_str(&format!(
-        "Content-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
-        body.len()
-    ));
+    if let Some(content_type) = content_type {
+        request.push_str(&format!("Content-Type: {content_type}\r\n"));
+    }
+    request.push_str(&format!("Content-Length: {}\r\n\r\n{body}", body.len()));
     stream.write_all(request.as_bytes()).await.unwrap();
     let mut raw = Vec::new();
     stream.read_to_end(&mut raw).await.unwrap();
@@ -150,7 +172,7 @@ async fn a_loopback_host_gets_the_same_catalog_over_http() {
             "POST",
             "/mcp",
             Some(&format!("localhost:{port}")),
-            Some("http://localhost:3000"),
+            Some(&format!("http://localhost:{port}")),
             &rpc(
                 3,
                 "tools/call",
@@ -227,6 +249,58 @@ async fn a_foreign_host_or_origin_never_reaches_the_method_layer() {
                 .0,
             405
         );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn a_cross_origin_simple_request_never_reaches_the_method_layer() {
+    with_listener(|port| async move {
+        let host = format!("127.0.0.1:{port}");
+        let call = rpc(
+            1,
+            "tools/call",
+            json!({ "name": "connect", "arguments": { "handle": "alice.example" } }),
+        );
+        // A `text/plain` POST is a CORS "simple" request: a browser
+        // sends it cross-origin with no preflight, so the listener must refuse
+        // anything but JSON itself.
+        for content_type in [
+            Some("text/plain"),
+            Some("text/plain;charset=UTF-8"),
+            Some("application/x-www-form-urlencoded"),
+            Some("multipart/form-data; boundary=x"),
+            Some("application/jsonx"),
+            None,
+        ] {
+            let (status, body) =
+                exchange_typed(port, "POST", "/mcp", Some(&host), None, content_type, &call).await;
+            assert_eq!(status, 415, "content type {content_type:?}: {body}");
+            assert!(
+                !body.contains("jsonrpc"),
+                "refused before the method layer: {body}"
+            );
+        }
+        // A loopback page on ANOTHER port is refused even with a JSON type.
+        let other = format!("http://localhost:{}", port.wrapping_add(1));
+        let (status, body) = exchange(port, "POST", "/mcp", Some(&host), Some(&other), &call).await;
+        assert_eq!(status, 403, "{body}");
+        assert!(
+            !body.contains("jsonrpc"),
+            "refused before the method layer: {body}"
+        );
+        // A real host's `application/json; charset=utf-8` is still served.
+        let (status, _) = exchange_typed(
+            port,
+            "POST",
+            "/mcp",
+            Some(&host),
+            None,
+            Some("Application/JSON; charset=utf-8"),
+            &rpc(2, "ping", json!({})),
+        )
+        .await;
+        assert_eq!(status, 200);
     })
     .await;
 }

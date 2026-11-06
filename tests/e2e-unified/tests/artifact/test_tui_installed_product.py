@@ -38,6 +38,7 @@ and the throwaway `XDG_CONFIG_HOME` every invocation carries.
 
 import os
 import re
+import shutil
 import stat
 import subprocess
 from pathlib import Path
@@ -71,31 +72,11 @@ pytestmark = [pytest.mark.tier_4, pytest.mark.tui, pytest.mark.installed_product
 
 
 @pytest.fixture(scope="session")
-def cli_debug_binary(tui_app_path):
-    """The cli app's device shell, built through its build-if-stale recipe into
-    the SAME debug dir `tui_app_path` names — the third binary the archive
-    carries. `just cli-debug` is the e2e flavor the cli's own tier_3 journey
-    drives (`test_cli_mcp.py::cli_binary`, the same shape); a failed build fails
-    the module — it is part of the product under test, never an environment
-    skip. Depends on `tui_app_path` only for the ordering: both builds run
-    before any staging."""
-    repo = Path(get_repo_root())
-    built = subprocess.run(["just", "cli-debug"], cwd=repo, capture_output=True, text=True)
-    binary = Path(tui_app_path).parent / ("fauna-cli.exe" if os.name == "nt" else "fauna-cli")
-    if built.returncode != 0 or not binary.exists():
-        pytest.fail(
-            f"`just cli-debug` did not build the device shell at {binary}:\n"
-            f"{built.stdout[-2000:]}\n{built.stderr[-2000:]}"
-        )
-    return str(binary)
-
-
-@pytest.fixture(scope="session")
-def installed_product(tui_app_path, cli_debug_binary):
+def installed_product(tui_app_path, cli_binary):
     """Stage the archive with the real `assemble-archive.sh`, run its real
     `install.sh`, yield the installed app, then uninstall it.
 
-    `tui_app_path` and `cli_debug_binary` are the ordering that matters: they
+    `tui_app_path` and `cli_binary` are the ordering that matters: they
     BUILD the debug binaries (`just tui-debug` builds `fauna-tui` and
     `fauna-sync-agent` together, `just cli-debug` the cli beside them), so the
     staging always has all three to carry. Session-scoped because the tui
@@ -275,3 +256,90 @@ def test_the_installer_reads_the_environment_this_module_hands_it():
         "install.sh no longer resolves the agent unit through XDG_CONFIG_HOME, so "
         "redirecting it no longer isolates the uninstall."
     )
+
+
+_LAUNCH_AGENT = "social.fauna.sync-agent"
+
+
+def _launch_agent_plist(target: str) -> str:
+    """The shape the shared launchd writer renders (`agent_spawner.rs`)."""
+    return (
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"\n'
+        '  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n'
+        '<plist version="1.0">\n<dict>\n'
+        f"    <key>Label</key>\n    <string>{_LAUNCH_AGENT}</string>\n"
+        "    <key>ProgramArguments</key>\n    <array>\n"
+        f"        <string>{target}</string>\n    </array>\n"
+        "    <key>RunAtLoad</key>\n    <true/>\n"
+        "    <key>KeepAlive</key>\n    <true/>\n</dict>\n</plist>\n"
+    )
+
+
+# The LaunchAgent is the macOS arm (e2e-conventions.md convention 7, the fourth skip kind).
+@pytest.mark.host_platform("macos")
+@pytest.mark.parametrize("targets_prefix", [True, False], ids=["prefix-agent", "elsewhere"])
+def test_uninstall_boots_out_only_a_launch_agent_running_the_prefix_agent(
+    tmp_path, targets_prefix
+):
+    """`install.sh --uninstall` on macOS: a LaunchAgent plist whose
+    `ProgramArguments` names THIS prefix's agent is booted out and removed —
+    launchd has no ExecCondition, so a plist left naming a removed binary is
+    KeepAlive-retried for ever — while one naming any other copy (the desktop
+    app's bundle, the `.pkg`'s `/usr/local/bin`) is that install's and survives
+    (`sync-agent.md` § Packaging + lifecycle, *A tui-only mac*).
+
+    Runs the shipped script over a stand-in archive (it installs from beside
+    itself and branches on nothing else — the module's seam), under a throwaway
+    `HOME` and with `launchctl` stubbed on `PATH`: the plist's label is the REAL
+    job's, so a real `bootout` would stop the developer's own agent. The stub
+    records its argv; the real `bootstrap`/`bootout` mechanism is witnessed by
+    `real_session/test_sync_agent_launch_agent.py`.
+    """
+    repo = Path(get_repo_root())
+    archive = tmp_path / "archive"
+    archive.mkdir()
+    shutil.copy(repo / "apps" / "fauna-tui" / "packaging" / "install.sh", archive / "install.sh")
+    for name in STAGED_BINARIES:
+        (archive / name).write_text("#!/bin/sh\n")
+        (archive / name).chmod(0o755)
+    prefix = tmp_path / "prefix"
+    home = tmp_path / "home"
+    stub_dir = tmp_path / "stub-bin"
+    stub_dir.mkdir()
+    calls = tmp_path / "launchctl-calls"
+    stub = stub_dir / "launchctl"
+    stub.write_text(f'#!/bin/sh\necho "$@" >> "{calls}"\n')
+    stub.chmod(0o755)
+    env = os.environ.copy()
+    env.pop("BASH_ENV", None)
+    env.update(
+        PREFIX=str(prefix),
+        HOME=str(home),
+        XDG_CONFIG_HOME=str(tmp_path / "xdg"),
+        PATH=f"{stub_dir}{os.pathsep}{env.get('PATH', '')}",
+    )
+
+    def run(*args):
+        return subprocess.run(
+            ["bash", str(archive / "install.sh"), *args],
+            capture_output=True, text=True, timeout=60, env=env,
+        )
+
+    assert run().returncode == 0
+    agent = prefix / "bin" / "fauna-sync-agent"
+    target = str(agent) if targets_prefix else "/Applications/Fauna.app/Contents/MacOS/fauna-sync-agent"
+    plist = home / "Library" / "LaunchAgents" / f"{_LAUNCH_AGENT}.plist"
+    plist.parent.mkdir(parents=True)
+    plist.write_text(_launch_agent_plist(target))
+
+    out = run("--uninstall")
+    assert out.returncode == 0, f"--uninstall failed:\n{out.stdout}\n{out.stderr}"
+    assert not agent.exists(), "the agent binary goes with the terminal app on macOS"
+    recorded = calls.read_text().splitlines() if calls.exists() else []
+    if targets_prefix:
+        assert not plist.exists(), f"a plist running the prefix's agent survived:\n{out.stdout}"
+        assert recorded == [f"bootout gui/{os.getuid()}/{_LAUNCH_AGENT}"], recorded
+    else:
+        assert plist.exists(), f"a plist running another install's agent was removed:\n{out.stdout}"
+        assert recorded == [], f"launchctl was driven for a plist that is not ours: {recorded}"

@@ -518,6 +518,16 @@ impl NestLegSession {
             custodian_signing_key,
             witness,
         );
+        // The mint first, on its own: its verdict IS this constructor's
+        // (refused / reached / unreachable). `connect()` alone returns `Ok`
+        // over a first mint that found no nest — its supervisor retries it —
+        // which would read an unreachable owner as a successful handshake and
+        // clear the pump's refusal mark. The bearer is cached, so `connect()`'s
+        // own mint below is not a second round trip.
+        client
+            .authenticate()
+            .await
+            .map_err(LegConnectError::from_connect)?;
         client
             .connect()
             .await
@@ -604,11 +614,22 @@ impl CustodyLegState {
 
     /// Drop every custodied store this holder opened — the custody leg's half
     /// of the yield to the sync agent (`account-runtime.md` § Multi-instance
-    /// concurrency → *The agent holds the role when present*, part 3). The
-    /// stores reopen lazily from the `custodies-held` rows if this runtime
-    /// ever holds the role again, exactly as at a first pass.
-    pub(crate) fn stand_down(&mut self) {
+    /// concurrency → *The agent holds the role when present*, part 3) and of a
+    /// shutdown — and wait each serve side's connection CLOSED: the pull side
+    /// closes as it drops, on this thread, while the serve side closes on its
+    /// own thread once its last handle is gone. Run after the peer leg's
+    /// stand-down, which drops the server's handles to the same stores
+    /// (`PeerSyncServer::set_custodied`). The stores reopen lazily from the
+    /// `custodies-held` rows if this runtime ever holds the role again,
+    /// exactly as at a first pass.
+    pub(crate) async fn stand_down(&mut self) {
+        let closes = self
+            .held
+            .values()
+            .map(|stores| stores.serve.closed())
+            .collect();
         self.held.clear();
+        crate::peer_leg::await_serve_closes(closes, "custody leg").await;
     }
 
     /// The device principal's public bytes — the custodied stores' writer tag

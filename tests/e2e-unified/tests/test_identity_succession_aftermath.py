@@ -91,7 +91,6 @@ others join as their legs land.
 """
 from __future__ import annotations
 
-import hashlib
 import time
 import uuid
 
@@ -100,15 +99,25 @@ import pytest
 from common.auth import register_user
 from helpers.diagnostics import account_plane_log_lines as _account_plane_log
 from helpers.diagnostics import aftermath_log_lines as _aftermath_log
-from helpers.diagnostics import row_judge_log_lines as _row_judge_log
 from helpers.diagnostics import take_over_log_lines as _take_over_log
 from helpers.diagnostics import mail_burn_line as _mail_burn_line
 from helpers.diagnostics import remint_line as _remint_line
 from helpers.diagnostics import backup_regrant_line as _backup_regrant_line
 from helpers.inherited_corpus import (
     CORPUS_READ_S,
-    FIXTURE_IMAGE,
+    item_versions,
+    restore_the_predecessors_version,
     seed_an_image_in_a_bound_set,
+    seed_under_a_then_succeed,
+    the_owners_host,
+    wait_for_the_take_over,
+)
+from helpers.recovery_restore import (
+    assert_restored_the_same_account,
+    lose_every_device_and_open_restore,
+    qualified_account,
+    sign_in_after_restore,
+    wait_for_restore_landing,
 )
 from helpers.succession_ceremony import (
     require_stolen_gate,
@@ -184,12 +193,12 @@ _PERIOD_ROTATION_S = 120.0
 def _require_recovery_section(app) -> None:
     """Open Recovery Kit, or skip declaring the class if the section never lands.
 
-    Thin wrapper over ``SettingsActions.open_recovery_kit_or_skip`` (lifted
+    Thin wrapper over ``SettingsActions.open_recovery_kit`` (lifted
     there 2026-08-22 so every recovery-kit journey test shares one gate);
     kept as a local alias since every call site in this file already reads
     ``_require_recovery_section(app)``.
     """
-    app.settings.open_recovery_kit_or_skip()
+    app.settings.open_recovery_kit()
 
 
 def _require_member_review_page(app) -> None:
@@ -217,25 +226,11 @@ def _require_member_review_page(app) -> None:
             "member-review-empty"
         )
 
-    try:
-        wait_until(_rendered, _PAGE_RENDER_S, diagnose=lambda: "")
-        return
-    except Exception:
-        pass
-    from helpers.app_surface import skip_unbuilt
-
-    skip_unbuilt(
-        app.driver,
-        surface="member_review",
-        detail=(
-            "succession-propagation.md § Propagation ruling 1, item (iv) — the "
-            "permanent review view; tui leads (2026-08-17) and the other six "
-            "follow in batched trickle-down"
-        ),
-        tracked=(
-            "docs/goal/behavior/succession-propagation.md "
-            "§ Implementation status today (the item-(iv) bullet's Gap)"
-        ),
+    wait_until(
+        _rendered,
+        _PAGE_RENDER_S,
+        diagnose=lambda: "neither member-review-row nor member-review-empty "
+        "painted on an app whose registry entry lists the permanent review page",
     )
 
 
@@ -257,25 +252,14 @@ def _require_ephemeral_review_pass(app) -> None:
     def _rendered() -> bool:
         return app.settings.member_review_defer_visible()
 
-    try:
-        wait_until(_rendered, _ADJUDICATION_S, diagnose=lambda: "")
-        return
-    except Exception:
-        pass
-    from helpers.app_surface import skip_unbuilt
+    from helpers.app_surface import require_surface
 
-    skip_unbuilt(
-        app.driver,
-        surface="member_review_ephemeral_pass",
-        detail=(
-            "succession-propagation.md § Propagation ruling 1, item (ii) — the "
-            "ephemeral kit-side review pass; tui and web lead, the other five "
-            "follow in batched trickle-down"
-        ),
-        tracked=(
-            "docs/goal/behavior/succession-propagation.md "
-            "§ Implementation status today (the item-(ii) bullet's Gap)"
-        ),
+    require_surface(app.driver, "member-review-defer-button")
+    wait_until(
+        _rendered,
+        _ADJUDICATION_S,
+        diagnose=lambda: "member-review-defer-button never painted on an app "
+        "whose registry entry lists the ephemeral review pass",
     )
 
 
@@ -292,19 +276,7 @@ def _navigate_to_witness_or_skip(app) -> None:
     ``skip_unbuilt`` (temporary debt; fails under ``--strict-app``) rather than a
     declared absence: every app owes this page.
     """
-    try:
-        app.muted_words.navigate()
-        return
-    except Exception:
-        pass
-    from helpers.app_surface import skip_unbuilt
-
-    skip_unbuilt(
-        app.driver,
-        surface="muted-words",
-        detail="moderation.md § Muted keywords — the account-plane witness",
-        tracked="docs/goal/behavior/moderation.md § Muted keywords",
-    )
+    app.muted_words.navigate()
 
 
 # `settled_actor_id` — the Status-page actor-id read that every succession
@@ -1032,7 +1004,6 @@ def test_the_successor_is_asked_about_the_trust_it_inherited(app, grant_mint_nes
     which is the right altitude for it. Re-asserting the exact sentence here
     would only duplicate that pin one layer up.
     """
-    app.nest_trust.require_mint_test_setup_supported()
 
     # Sign in as the dedicated nest's admin: Admin ⊇ User covers the tier-create
     # and the mint, and `apply_session_patch` puts the seed in the account
@@ -1236,7 +1207,6 @@ def test_the_successors_first_session_raises_the_member_it_cannot_vouch_for(
         "the group must exist before the ceremony — a succession over zero "
         f"groups raises nobody; error: {app.error_text()!r}"
     )
-    thread_id = thread.thread_id
 
     _run_succession(app)
 
@@ -1250,13 +1220,23 @@ def test_the_successors_first_session_raises_the_member_it_cannot_vouch_for(
     )
 
     # ── The successor reaches its inherited thread ──────────────────────────
+    # By what the group holds, not by `thread_id`: `t-N` is the conversations
+    # store's local handle, and the successor's replica load may hand the same
+    # group another one (linux reads `t-2` where the predecessor read `t-1`).
+    last_read: list = [None]
+    reached: list = [None]
+
     def _thread_visible() -> bool:
         try:
             app.conversations.navigate()
-            return any(
-                t.thread_id == thread_id for t in app.conversations.list_threads()
+            threads = app.conversations.list_threads()
+            last_read[0] = [(t.thread_id, t.snippet) for t in threads]
+            reached[0] = next(
+                (t.thread_id for t in threads if "before the theft" in t.snippet), None
             )
-        except Exception:
+            return reached[0] is not None
+        except Exception as exc:
+            last_read[0] = repr(exc)
             return False
 
     wait_until(
@@ -1267,7 +1247,8 @@ def test_the_successors_first_session_raises_the_member_it_cannot_vouch_for(
             "can be rendered on its member chips — this is leg 3's plane "
             "(succession-aftermath.md § Re-key scope, the BackupKey corpus row's "
             f"__mls half), and it reads mls={app.settings.aftermath_mls_reseal_status()!r} "
-            f"error={app.error_text()!r}"
+            f"error={app.error_text()!r}; last read {last_read[0]!r}; "
+            f"aftermath log: {_aftermath_log(app)}"
         ),
     )
 
@@ -1275,7 +1256,7 @@ def test_the_successors_first_session_raises_the_member_it_cannot_vouch_for(
     def _flagged() -> bool:
         try:
             app.conversations.navigate()
-            app.conversations.open_thread_by_id(thread_id)
+            app.conversations.open_thread_by_id(reached[0])
             return app.conversations.any_member_unattested_mark_visible()
         except Exception:
             return False
@@ -1622,28 +1603,6 @@ def test_the_successors_conversations_unlock_without_a_user_command(
     )
 
 
-def _item_versions(app, name: str) -> list[tuple[str, str]]:
-    """The ``(author, timestamp)`` of every version of the Media item ``name``,
-    read from a fresh visit's item detail — ``[]`` while the item is not
-    listed. The detail's list loads asynchronously, so an empty read is
-    re-tried briefly before it counts as empty."""
-    app.media.navigate()
-    names = app.media.item_names()
-    if name not in names:
-        return []
-    app.media.open_item_detail(names.index(name))
-    try:
-        deadline = time.monotonic() + 10.0
-        while app.media.version_count() < 1 and time.monotonic() < deadline:
-            time.sleep(0.3)
-        return [
-            (app.media.version_author(i), app.media.version_timestamp(i))
-            for i in range(app.media.version_count())
-        ]
-    finally:
-        app.media.close_detail()
-
-
 @pytest.mark.feature("take-your-account-back")
 # The production launch composition on the native apps: what this journey
 # reads after the ceremony is decided by the successor's launch reconcile (the
@@ -1654,12 +1613,35 @@ def _item_versions(app, name: str) -> list[tuple[str, str]]:
 # history — measured green on windows on 2026-10-07 for exactly that reason,
 # while tui (which always runs the real session) reads `[]`.
 @pytest.mark.real_conversations
+@pytest.mark.linux
+@pytest.mark.windows
+@pytest.mark.macos
+@pytest.mark.ios
+@pytest.mark.android
+@pytest.mark.tui
+# The bound set's engine is the sync agent: macOS' production spawner is launchd,
+# which an e2e launch must not bootstrap, so no agent runs (and the seed never
+# uploads) unless this marker swaps in the child spawner
+# (`test_folder_agent_content_sync.py::test_macos_agent_uploads_bound_folder_file`).
+@pytest.mark.real_sync_agent
 def test_the_successor_can_read_the_corpus_it_inherited(
-    ungranted_app, nest_instance, tmp_path
+    succeedable_app, nest_instance, tmp_path, alice_builder_seats
 ):
     """bind a folder, drop an image in → succeed → the take-over re-records it:
     the successor's NAMES render, its BYTES open, and the version its
     predecessor sealed restores.
+
+    **On a phone column a desktop seat is the host, and the phone is the
+    reader, since 2026-10-31.** A phone binds no folder and runs no engine, so
+    the seed, the ceremony and the take-over (``succession-cut.md`` ruling
+    (11)(d)) all happen on the seat (``the_owners_host``); the outcome is what
+    the successor reads, which a phone can do. The phone comes up as the
+    successor from the kit the ceremony showed, the one door a device has onto
+    a fresh identity it was never told about, and then makes every read below.
+    The seat stays up: this is a further device of a living account, where
+    ``test_recovery_kit_restore.py``'s journeys lose it. Every read is the
+    desktop column's, so the phone's take-over wait reads the nest's rows and
+    its restore opens A's version under the seed the kit's blob carried.
 
     **Seeded into a set an engine runs on, since 2026-10-21.** After the succession cut
     (``succession-cut.md`` ruling (11)), a head the predecessor signed under
@@ -1694,19 +1676,19 @@ def test_the_successor_can_read_the_corpus_it_inherited(
     signature may reach and re-seals them under the current one
     (``writer-signed-change-records.md`` ruling (8)(d),
     ``MediaMachine::restore_version`` → ``reseal_inherited_version``, the
-    chunk plane through ``FileDownloadKeys``). The download after it checks the
-    re-sealed bytes are the seeded image's.
+    chunk plane through ``FileDownloadKeys``). A thumbnail rests as its file
+    rests (``media.md`` § Encryption at rest), so the restore re-seals the
+    version's thumbnail with its bytes, and the restored head painting is the
+    successor's thumbnail read under a retired root. The download after it
+    checks the re-sealed bytes are the seeded image's.
 
     § Re-key scope's ``BackupKey`` corpus row names *media, folders and
     backups*, and ``identity-succession.md`` § Implementation status today
-    carries the two bullets this journey is the end-to-end evidence for: *"a
+    carries the bullet this journey is the end-to-end evidence for: *"a
     successor READS its predecessor-sealed corpus"* (the chunk/label planes,
-    ``FileDownloadKeys::predecessor_backup_keys``) and *"a successor READS the
-    raw-AEAD Library plane too"* (``MediaMachine::open_library_blob``, the bare
-    ``BackupKey`` blobs a thumbnail and a Media-page upload's blob-store primary
-    rest under). Both bullets shipped with tier_1 funnel pins and tui call-site
-    pins; **neither has ever been driven by a real successor against a live
-    nest**, which is exactly the gap row 36 was filed for.
+    ``FileDownloadKeys::predecessor_backup_keys``). A thumbnail rests on the
+    chunk plane too since 2026-10-22, so the raw-AEAD Library plane that once
+    held it is retired and this journey's restore leg carries its paint.
 
     **What only a live nest can decide.** A succession re-points corpus
     *ownership* inside one nest-side transaction and moves no *seal*. So the
@@ -1718,8 +1700,8 @@ def test_the_successor_can_read_the_corpus_it_inherited(
     fetch → decrypt → paint), and every link in it is in a different component.
 
     **Two planes, asserted separately, because they are separate funnels** —
-    ``render_sealed_paths``'s label render for the names,
-    ``MediaMachine::open_library_blob`` for the bytes. The goal doc states the
+    ``render_sealed_paths``'s label render for the names, the chunk download
+    walk for the bytes and their thumbnail. The goal doc states the
     stake: *"a successor that opened its bytes but not its names would render an
     empty file list over a corpus it can read"*.
 
@@ -1737,19 +1719,25 @@ def test_the_successor_can_read_the_corpus_it_inherited(
 
     Row 3 is what makes the restore leg non-vacuous, and it reds there with
     ``media.error_restore`` (*"recorded under a previous identity of this
-    account and does not open under any key that identity held"*). It also
-    shows what this journey no longer proves: the paint stays green with no
-    retired root offered, so the raw-AEAD Library plane
-    (``open_library_blob``) has no end-to-end evidence on this seed. The
-    2026-08-11 matrix measured on the Media-page seed is in git history.
+    account and does not open under any key that identity held"*). The paint
+    after the take-over stays green with no retired root offered: it reads
+    the take-over's re-seal, under the successor's own root. The 2026-08-11
+    matrix measured on the Media-page seed is in git history.
+
+    **The restored head's paint, mutation-verified 2026-10-22 on tui:** with
+    the thumbnail's re-seal in ``reseal_inherited_version`` offered no
+    predecessor roots (the file's re-seal untouched), the restore records
+    and downloads green and the paint reds at 0 of 1, so the paint is the
+    thumbnail's own retired-root read, not a shadow of the file's.
 
     ⚠ **The thumbnail paint is the sharp assertion, and it is the reason this
     test seeds an image rather than any file.** A painted ``media-thumbnail``
     on tui is half-block art — the picture *is* the element's characters — so
     counting a painted tile is a direct read of *fetch → decrypt → render*
-    having succeeded on a blob sealed under a key the successor does not hold.
-    A failed tag paints the ``□`` placeholder instead, which is not counted, and
-    is exactly the dark-corpus state. Clients that cannot inspect the paint
+    having succeeded. On the restored head that is a thumbnail the restore
+    could record only by opening it under a key the successor does not hold.
+    A tile with no thumbnail paints the ``□`` placeholder instead, which is
+    not counted, and is exactly the dark-corpus state. Clients that cannot inspect the paint
     return ``None`` and self-skip that half (``MediaActions.painted_thumbnail_count``).
 
     ⚠ **The pre-ceremony assertions are not scaffolding — they are what stops
@@ -1765,22 +1753,39 @@ def test_the_successor_can_read_the_corpus_it_inherited(
     folder bound through the row's binding form, and the file dropped on disk
     where the engine watches. The corpus under test is a user's.
     """
-    app = ungranted_app
+    app, user = succeedable_app
+    host = the_owners_host(app, user, nest_instance, alice_builder_seats)
 
-    # ── Precondition: a BOUND set holding a real image the app's own engine
-    # uploaded, sealed under THIS identity, listed AND painted before the
-    # ceremony — the docstring's non-vacuity bullet, kept once in the shared
-    # helper. Bound, because the take-over runs only in an engine (11)(d).
-    _, inherited_file = seed_an_image_in_a_bound_set(app, tmp_path)
-    before = _item_versions(app, inherited_file)
-    assert before, (
-        "the inherited item must show its predecessor-recorded version before "
-        "the ceremony, or the take-over below has nothing to be told apart "
-        f"from; versions={before!r} error={app.error_text()!r}"
-    )
+    if host is app:
+        # ── Precondition: a BOUND set holding a real image the app's own engine
+        # uploaded, sealed under THIS identity, listed AND painted before the
+        # ceremony — the docstring's non-vacuity bullet, kept once in the shared
+        # helper. Bound, because the take-over runs only in an engine (11)(d).
+        _, inherited_file = seed_an_image_in_a_bound_set(app, tmp_path)
+        before = item_versions(app, inherited_file)
+        assert before, (
+            "the inherited item must show its predecessor-recorded version before "
+            "the ceremony, or the take-over below has nothing to be told apart "
+            f"from; versions={before!r} error={app.error_text()!r}"
+        )
 
-    # ── The ceremony ────────────────────────────────────────────────────────
-    _run_succession(app)
+        # ── The ceremony ────────────────────────────────────────────────────
+        _run_succession(app)
+    else:
+        # ── The seat seeds, succeeds and takes over; the phone joins as B ───
+        # The same precondition and ceremony on the host, the take-over awaited
+        # there. The account is read while the phone is still signed in as A:
+        # the reset below takes it away. The reset is the phone's, and the seat
+        # stays up.
+        account = qualified_account(app, nest_instance)
+        inherited_file, successor_kit, before = seed_under_a_then_succeed(
+            host, tmp_path
+        )
+        lose_every_device_and_open_restore(app, nest_instance)
+        app.onboarding.restore_from_recovery_kit(successor_kit, account=account)
+        wait_for_restore_landing(app)
+        assert_restored_the_same_account(app)
+        sign_in_after_restore(app)
 
     # ── The set survived the ownership re-point ─────────────────────────────
     # ⚠ **This is NOT a read-fallback pin, and a future session must not read
@@ -1821,60 +1826,26 @@ def test_the_successor_can_read_the_corpus_it_inherited(
 
     # ── The NAMES half: the take-over re-recorded the head ──────────────────
     # The item must list AND carry a version the take-over recorded beside the
-    # predecessor's — never the name alone. The launch reconcile's cut lands
-    # some time after the actor switch, and until it does the predecessor's
-    # head is still the admitted head, so "the name lists" alone passed by
-    # reading ahead of the cut (measured 2026-10-21: one green run in 23 s).
-    # The take-over's own version exists only after the cut, so this poll can
-    # be satisfied by nothing earlier (convention 14).
-    # Authors and the count only: a version's timestamp is relative text
-    # ("just now" → "1 min ago") and changes with no new version at all.
-    before_authors = {author for author, _ in before}
-
-    def _taken_over() -> bool:
-        versions = _item_versions(app, inherited_file)
-        return bool(versions) and (
-            len(versions) > len(before)
-            or any(author not in before_authors for author, _ in versions)
-        )
-
-    wait_until(
-        _taken_over,
-        _CORPUS_READ_S,
-        diagnose=lambda: (
-            "the successor must list the media it inherited with the version "
-            "the take-over recorded as itself (succession-cut.md ruling "
-            f"(11)(d)), but lists {app.media.item_names()!r} (expected "
-            f"{inherited_file!r}), versions {_item_versions(app, inherited_file)!r} "
-            f"against {before!r} before the ceremony; error={app.error_text()!r}. "
-            "Absent from the list: the cut made the head history and no "
-            "take-over re-recorded it (the engine never ran for the set, or "
-            "did not hold the path), or no retired root opened its label — "
-            "UNLESS the row judge refused the predecessor-signed rows: row-judge "
-            f"log {_row_judge_log(app)}. Listed with only the predecessor's "
-            "version: the cut has not landed yet, or landed and the take-over "
-            "has not run. Cut and take-over log: "
-            f"{_take_over_log(app)}"
-        ),
-    )
+    # predecessor's — never the name alone (`wait_for_the_take_over`).
+    wait_for_the_take_over(app, inherited_file, before)
     print(
         f"[corpus] versions before {before!r} → after "
-        f"{_item_versions(app, inherited_file)!r}\n  {_take_over_log(app)}"
+        f"{item_versions(app, inherited_file)!r}\n  {_take_over_log(app)}"
     )
     app.media.navigate()
 
-    # ── The BYTES half: the raw-AEAD Library plane opened ───────────────────
-    # This is the assertion that cannot be satisfied by a name that travelled in
-    # the clear. The thumbnail is a single AEAD blob under the *bare* retired
-    # `BackupKey`; painting it means `open_library_blob` tried the current key,
-    # failed, and succeeded on a candidate from the registry walk.
+    # ── The BYTES half: the take-over's head paints ─────────────────────────
+    # A thumbnail rests as its file rests (media.md § Encryption at rest), so
+    # the take-over re-sealed it with the file under the successor's own root:
+    # this paint reads nothing predecessor-sealed. It guards the half-broken
+    # state the two planes are asserted separately to catch — the name listed
+    # and the bytes dark — and the restore leg below is the retired-root read.
     painted_after = app.media.wait_for_painted_thumbnails(1, timeout=_CORPUS_READ_S)
     if painted_after is not None:
         assert painted_after == 1, (
-            "the successor must be able to OPEN the bytes it inherited "
-            "(identity-succession.md § Implementation status today — "
-            "`MediaMachine::open_library_blob` offers each retired root after "
-            f"the current key), but {painted_after} of 1 thumbnails painted; "
+            "the successor must be able to OPEN the bytes it now owns (the "
+            "take-over re-sealed the item and its thumbnail under the "
+            f"successor's root), but {painted_after} of 1 thumbnails painted; "
             f"error={app.error_text()!r}. A 0 here with the name still listed "
             "is precisely the half-broken state the two planes are asserted "
             "separately to catch: the successor can see what it owns and cannot "
@@ -1883,215 +1854,17 @@ def test_the_successor_can_read_the_corpus_it_inherited(
 
     # ── The PREDECESSOR-SEALED half: restore the retired root's own version ──
     # Everything above reads what the take-over re-sealed under the successor's
-    # root, so it stays green with no retired root offered at all. The
-    # predecessor's own version row is the one thing still sealed under the
-    # retired root: the take-over records beside it and supersedes nothing
-    # (succession-cut.md ruling (11)(d)/(f)). Restoring it is the read: a
-    # version another signature recorded, whose bytes rest under an owner root,
-    # is restored only once its bytes have OPENED under a root that signature
-    # may reach and been re-sealed under the current one
-    # (writer-signed-change-records.md ruling (8)(d),
-    # `MediaMachine::restore_version` → `reseal_inherited_version`). With no
-    # retired root offered the open fails and the restore records nothing,
-    # setting `media.error_restore` instead. The download after it then proves
-    # the re-seal carried the predecessor's bytes, not merely some bytes.
-    #
-    # Picked by POSITION, never by author: the successor keeps the account's
-    # name, so both rows read the same `Edited by …` (measured 2026-10-22).
-    # Rows are oldest→newest and the take-over records after the ceremony, so
-    # the predecessor's newest version is the last of the `before` rows.
-    after = _item_versions(app, inherited_file)
-    assert len(after) > len(before), (
-        "the predecessor's own version must still be listed beside the "
-        "take-over's (succession-cut.md ruling (11)(f): the take-over "
-        f"supersedes nothing), but versions {after!r} against {before!r} "
-        "before the ceremony"
-    )
-    predecessor_row = len(before) - 1
-    app.media.navigate()
-    app.media.open_item_detail(app.media.item_names().index(inherited_file))
-    try:
-        app.media.wait_for_version_count(len(after))
-        app.media.restore_version(predecessor_row)
-        # Read in the OPEN detail, which re-lists its rows once the restore
-        # settles: the restore's own version is what makes the head the
-        # re-sealed predecessor bytes (convention 14: wait for the row, not a
-        # time), and its error banner is read here because a later visit's
-        # refresh clears it (measured 2026-10-22: `error=''` after a revisit).
-        wait_until(
-            lambda: app.media.version_count() > len(after) or bool(app.error_text()),
-            _CORPUS_READ_S,
-            diagnose=lambda: (
-                "restoring the predecessor's version must record a new version "
-                f"(file-sync.md § Restore) or report why; {app.media.version_count()} "
-                f"rows against {len(after)} before the restore"
-            ),
-        )
-        restore_error = app.error_text()
-        assert not restore_error and app.media.version_count() > len(after), (
-            "the successor must open the version its predecessor sealed "
-            "(identity-succession.md § Implementation status today — a "
-            "successor READS its predecessor-sealed corpus): restoring it "
-            "opens its bytes under a retired root before re-sealing them "
-            "(writer-signed-change-records.md ruling (8)(d)), but the restore recorded "
-            f"{app.media.version_count() - len(after)} new version(s) and "
-            f"reported {restore_error!r}. A `media.error_restore` here with "
-            "the take-over's version listed is the dark-history state: the "
-            "successor reads what the take-over re-sealed and cannot open "
-            "what its predecessor left."
-        )
-        try:
-            downloaded = app.media.download_open_item(timeout=_CORPUS_READ_S)
-        except AssertionError as exc:
-            raise AssertionError(
-                "the restored predecessor version must download (the head now "
-                f"names its re-sealed bytes), but it never saved: {exc}; "
-                f"error={app.error_text()!r}"
-            ) from exc
-    finally:
-        app.media.close_detail()
-    expected = hashlib.sha256(FIXTURE_IMAGE.read_bytes()).hexdigest()
-    got = hashlib.sha256(downloaded).hexdigest()
-    assert got == expected, (
-        "the restored predecessor version must carry the bytes its "
-        "predecessor sealed (the re-seal moves them under the current root "
-        f"verbatim), but the download of the restored version "
-        f"hashed {got} ({len(downloaded)} bytes) against the seeded image's "
-        f"{expected}; error={app.error_text()!r}"
-    )
-
-
-@pytest.mark.feature("take-your-account-back")
-# Same launch composition as the corpus journey above: the cut and the
-# take-over run inside the real conversations receive loop on a native seat.
-@pytest.mark.real_conversations
-def test_the_successor_paints_the_thumbnail_its_predecessor_sealed(
-    ungranted_app, nest_instance, tmp_path
-):
-    """enable mail, serve a bound folder over WebDAV, drop an image in →
-    succeed → the successor's Media page paints the thumbnail that still rests
-    under the predecessor's bare ``BackupKey``.
-
-    **The raw-AEAD Library plane's end-to-end evidence, since 2026-10-22.** The corpus journey above
-    lost it when it moved to an owner-only bound seed: there the take-over
-    re-seals the item and moves its thumbnail onto the successor's root
-    (``take_over_history_heads`` → ``thumbnail_hash_for_reseal``), so no paint
-    reads a retired root. A set served over WebDAV is content-keyed, and two
-    things follow on it. The engine still seals the thumbnail under the
-    owner's bare ``BackupKey`` (``maybe_upload_thumbnail``, ``Audience::Library``).
-    And the take-over's content-key arm re-signs the head over the SAME
-    manifest and carries the SAME thumbnail pointer, while the owner-root
-    re-seal pass (``reseal_predecessor_sealed``) skips a set with no owner
-    root. So after the take-over the listed head, now signed as the successor,
-    names a thumbnail only a retired root opens, and the paint is
-    ``MediaMachine::open_library_blob`` trying the current key, failing, and
-    opening it under a retired root.
-
-    **The names wait for the take-over's version**, as in the corpus journey:
-    before the cut the predecessor's head is still admitted, and a paint read
-    then would be a read under the predecessor's signature, never the
-    successor's. Waiting for a version the take-over recorded makes the paint
-    the successor-signed head's (convention 14).
-
-    **Mutation-verified 2026-10-22 on tui** (reverted after):
-
-    ===================================================  ====  =====
-    severance                                            name  paint
-    ===================================================  ====  =====
-    none (baseline, three runs in a row)                 pass  pass
-    ``open_library_blob``'s retired-root loop skipped    pass  RED
-    ===================================================  ====  =====
-
-    The take-over logs ``rerecorded=1`` in both rows, so the red is the open,
-    not a missing item.
-
-    ⚠ **The witness rests on the engine recording a thumbnail for a
-    content-keyed set**, which ``media.md`` § Encryption at rest → *Content-keyed
-    sets* says it does not; the Media page records none there. If that drift is
-    settled by the engine recording none too, this journey loses its witness
-    and the retired-root read on this plane needs another (the
-    ``succession-aftermath.md`` status bullet names the open decision).
-    """
-    app = ungranted_app
-
-    # ── Precondition: mail, so the folder can be served (the MSEK) ──────────
-    app.mail_settings.navigate()
-    _require_mail_settings(app)
-    app.mail_settings.ensure_mail_enabled()
-
-    # ── A served, bound set holding a real image, listed and painted ────────
-    _, inherited_file = seed_an_image_in_a_bound_set(
-        app, tmp_path, serve_over_webdav=True
-    )
-    before = _item_versions(app, inherited_file)
-    assert before, (
-        "the inherited item must show its predecessor-recorded version before "
-        f"the ceremony; versions={before!r} error={app.error_text()!r}"
-    )
-
-    # ── The ceremony ────────────────────────────────────────────────────────
-    _run_succession(app)
-
-    # ── The take-over re-recorded the head as the successor ─────────────────
-    before_authors = {author for author, _ in before}
-
-    def _taken_over() -> bool:
-        versions = _item_versions(app, inherited_file)
-        return bool(versions) and (
-            len(versions) > len(before)
-            or any(author not in before_authors for author, _ in versions)
-        )
-
-    wait_until(
-        _taken_over,
-        _CORPUS_READ_S,
-        diagnose=lambda: (
-            "the successor must list the served set's image with the version "
-            "the take-over recorded as itself (succession-cut.md ruling "
-            f"(11)(d), its content-key arm), but lists {app.media.item_names()!r} "
-            f"(expected {inherited_file!r}), versions "
-            f"{_item_versions(app, inherited_file)!r} against {before!r}; "
-            f"error={app.error_text()!r}. Row-judge log {_row_judge_log(app)}. "
-            f"Cut and take-over log: {_take_over_log(app)}"
-        ),
-    )
-    print(
-        f"[served corpus] versions before {before!r} → after "
-        f"{_item_versions(app, inherited_file)!r}\n  {_take_over_log(app)}"
-    )
-    app.media.navigate()
-
-    # ── The BYTES: a bare-key blob under a retired root opens ───────────────
-    painted = app.media.wait_for_painted_thumbnails(1, timeout=_CORPUS_READ_S)
-    if painted is not None:
-        assert painted == 1, (
-            "the successor must OPEN the thumbnail its predecessor sealed "
-            "under the bare BackupKey (succession-aftermath.md § Implementation "
-            "status today — `MediaMachine::open_library_blob` offers each "
-            f"retired root after the current key), but {painted} of 1 "
-            f"thumbnails painted; error={app.error_text()!r}. The name listed "
-            "and the tile a placeholder is the retired root never offered at "
-            "the opening site."
-        )
+    # root; the predecessor's own version row is the one thing still sealed
+    # under the retired root, and restoring it, then painting and downloading
+    # the restored head, is the read (`restore_the_predecessors_version`).
+    restore_the_predecessors_version(app, inherited_file, before)
 
 
 def _require_mail_settings(app) -> None:
     """Skip, declaring the class, on an app with no mail-settings page."""
-    if app.mail_settings.is_page_visible():
-        return
-    from helpers.app_surface import skip_unbuilt
-
-    skip_unbuilt(
-        app.driver,
-        surface="mail-settings-enabled-toggle",
-        detail=(
-            "mail-settings.md § User actions — the mailbox enable + credential "
-            "list; tui leads and the other six follow in batched trickle-down"
-        ),
-        tracked=(
-            "docs/goal/behavior/mail-credentials.md "
-            "§ Rotation and recovery → Succession"
-        ),
+    assert app.mail_settings.is_page_visible(), (
+        "the mail-settings page is not visible — every app paints "
+        "mail-settings-enabled-toggle (ui.yaml; all seven ui-actual files list it)"
     )
 
 
@@ -2422,6 +2195,7 @@ _NPUB_CONFIRM_S = 120.0
 @pytest.mark.windows
 @pytest.mark.macos
 @pytest.mark.ios
+@pytest.mark.android
 @pytest.mark.feature("take-your-account-back")
 def test_the_successors_subscriber_tier_is_re_keyed(succeedable_app, nest_instance):
     """sell a tier -> succeed -> the key it distributes is one the old identity never had.
@@ -2472,10 +2246,9 @@ def test_the_successors_subscriber_tier_is_re_keyed(succeedable_app, nest_instan
     ``open_key_blob`` raising on a missing entry is load-bearing here, not a
     convenience.
 
-    marked ``tui`` + ``linux`` + ``web`` + ``windows`` + ``macos`` + ``ios``:
-    the apps that both drive the aftermath and have the Slice-A author page
-    today. android extends this test as its trickle-down lands, exactly as the
-    ``__drafts`` journey above says.
+    marked on all seven apps: android's author page (tiers tab, pending
+    requests, approve) is built, so the journey runs there unchanged. The android
+    witness has not been run yet — it needs the android venue.
     """
     from actions.api_actor import ApiActor
     from common.auth import create_actor_and_register
@@ -2673,6 +2446,9 @@ def test_the_successor_is_asked_to_confirm_its_npub(ungranted_app, nest_instance
 @pytest.mark.linux
 @pytest.mark.android
 @pytest.mark.web
+@pytest.mark.macos
+@pytest.mark.ios
+@pytest.mark.feature("take-your-account-back")
 def test_the_successors_burned_signer_connection_reads_revoked(
     ungranted_app, nest_instance
 ):
@@ -2682,7 +2458,7 @@ def test_the_successors_burned_signer_connection_reads_revoked(
     connection at the succession and lists it to the successor, and the shared
     machine composes it not connected with ``signer_burned`` set; the paint is
     the mail row's — the ``revoked`` attribute and the revoked line under the
-    name. tui, linux, web and android; the Apple and windows apps ride the
+    name. tui, linux, web, android, macos and ios; windows rides the
     trickle-down.
 
     ⚠ **The pre-ceremony connection is the whole test.** A succession over an
@@ -2804,42 +2580,6 @@ def test_the_successor_can_dismiss_npub_confirm_into_a_fresh_key(
 _FILTER_RAISE_S = 60.0
 
 
-def _require_inherited_filters_review(app) -> None:
-    """Skip, declaring the class, on an app that has not built the inherited-rule
-    review — the Account section's line, the mark on each rule and its Keep button.
-
-    Polls rather than reading once (`_require_member_review_page`'s reason: a
-    point-in-time read taken while the section's chain read is in flight would
-    declare a built section unbuilt). Without this declaration an app that lacks
-    the surface graded as a bare 60 s timeout naming a line that "reads ''" —
-    indistinguishable from a built app whose raise is broken, and invisible to the
-    `skip_unbuilt` accounting that exists to say which.
-    """
-
-    def _rendered() -> bool:
-        app.settings.navigate()
-        app.settings.open_recovery_kit()
-        return app.is_visible("recovery-kit-inherited-filters-status")
-
-    try:
-        wait_until(_rendered, _FILTER_RAISE_S, diagnose=lambda: "")
-        return
-    except Exception:
-        pass
-    from helpers.app_surface import skip_unbuilt
-
-    skip_unbuilt(
-        app.driver,
-        surface="recovery-kit-inherited-filters-status",
-        detail=(
-            "succession-aftermath.md § Adjudicating what the aftermath carries "
-            "across — the Account line, the per-rule mark and its Keep button; "
-            "tui leads and the other apps follow in batched trickle-down"
-        ),
-        tracked="docs/goal/behavior/succession-aftermath.md § Implementation status today",
-    )
-
-
 @pytest.mark.feature("take-your-account-back")
 def test_mail_rules_from_before_the_recovery_are_flagged_to_keep_or_remove(
     ungranted_app, nest_instance
@@ -2867,7 +2607,6 @@ def test_mail_rules_from_before_the_recovery_are_flagged_to_keep_or_remove(
     )
 
     _run_succession(app)
-    _require_inherited_filters_review(app)
 
     # ── The route: the Account section names the backlog and where it is ──
     expected_line = S.settings.recovery_kit.inherited_filters(count="1")

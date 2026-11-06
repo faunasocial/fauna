@@ -50,7 +50,14 @@ struct ConversationDetailView: View {
         // Selecting the thread is what reads it (the shared manager decides
         // that); going back to the list must close it — a single-pane shell's
         // one duty (conversations.md § State & data shape → When a thread is read).
-        .onAppear { vm.selectThread(threadId) }
-        .onDisappear { vm.clearSelection() }
+        // A thread already selected keeps its selection: a plain select clears the
+        // selected message a Search hit opened it on. Closing leaves a selection
+        // that has already moved to another thread alone.
+        .onAppear {
+            if vm.selectedThreadId != threadId { vm.selectThread(threadId) }
+        }
+        .onDisappear {
+            if vm.selectedThreadId == threadId { vm.clearSelection() }
+        }
     }
 }

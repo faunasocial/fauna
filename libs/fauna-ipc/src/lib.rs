@@ -9,9 +9,10 @@ pub mod sync_pipe_client;
 #[cfg(unix)]
 pub mod unix_transport;
 
-// The named-pipe transport (pipe DACL + accept loop + client handler) — the
-// server half of the windows path, whose client already lives in
-// `sync_pipe_client`. The per-user sync agent serves through it, owner-only.
+// The named-pipe transport (pipe DACL + listener + accept loop + client
+// handler, and the named-mutex instance lock) — the server half of the windows
+// path, whose client already lives in `sync_pipe_client`. The per-user sync
+// agent and the conversations oracle's door serve through it, owner-only.
 #[cfg(windows)]
 pub mod pipe_transport;
 
@@ -20,6 +21,13 @@ pub mod pipe_transport;
 // see the module docs for why it exists as one owner rather than three copies.
 #[cfg(windows)]
 pub mod win_token;
+
+// Owner-only file/directory ACLs — the windows twin of a unix `0o600` file /
+// `0o700` directory, granting the same trustee the pipe DACL does (the
+// current token user, nobody else). `fauna-provisioning`'s SSH door key is the
+// first consumer; see the module docs for why inheritance is not enough.
+#[cfg(windows)]
+pub mod win_acl;
 
 // The shared Windows SCM service-entry-point ceremony — both FaunaNest and
 // FaunaBridge register a service and run an inner loop the same way; see the
@@ -125,7 +133,6 @@ pub trait RefuseUndecodedRequest {
 }
 
 /// IPC protocol constants.
-pub const PIPE_NAME: &str = r"\\.\pipe\fauna-service";
 pub const MAX_FRAME_SIZE: u32 = 16 * 1024 * 1024; // 16 MiB
 
 /// Validate a frame's little-endian length prefix against [`MAX_FRAME_SIZE`],

@@ -22,12 +22,14 @@ uniffi::setup_scaffolding!("fauna_client_connected_apps");
 
 pub mod client;
 pub mod compose;
+pub mod gesture;
 pub mod machine;
 pub mod nest_api;
 pub mod observer;
 pub mod snapshots;
 
 pub use client::ConnectedAppsClient;
+pub use gesture::ConnectedAppsGesture;
 pub use machine::ConnectedAppsMachine;
 #[cfg(feature = "rpc-glue")]
 pub use nest_api::build_connected_apps_machine;

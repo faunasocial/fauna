@@ -67,19 +67,46 @@ internal static class ComposeMarkdownDecorator
     /// offsets always fall on a char boundary, so this lands exactly; clamps to the string
     /// length defensively.
     /// </summary>
-    internal static int Utf8ByteToUtf16Index(string text, long byteOffset)
+    internal static int Utf8ByteToUtf16Index(string text, long byteOffset) =>
+        new Utf8ToUtf16Cursor(text).Seek(byteOffset);
+
+    /// <summary>
+    /// A forward-moving <see cref="Utf8ByteToUtf16Index"/>: ascending offsets resume from the
+    /// previous lookup's position, so converting N ascending offsets costs one pass over the
+    /// string, not N. A lookup below the previous one restarts from the head (still correct,
+    /// just not fast), so callers need not prove their offsets ascend.
+    /// </summary>
+    private struct Utf8ToUtf16Cursor
     {
-        if (byteOffset <= 0) return 0;
-        int bytes = 0;
-        int i = 0;
-        while (i < text.Length)
+        private readonly string _text;
+        private int _bytes;
+        private int _index;
+        private long _last;
+
+        public Utf8ToUtf16Cursor(string text)
         {
-            if (bytes >= byteOffset) break;
-            int cp = char.ConvertToUtf32(text, i);
-            bytes += Utf8Len(cp);
-            i += char.IsSurrogatePair(text, i) ? 2 : 1;
+            _text = text;
+            _bytes = 0;
+            _index = 0;
+            _last = 0;
         }
-        return i;
+
+        public int Seek(long byteOffset)
+        {
+            if (byteOffset <= 0) return 0;
+            if (byteOffset < _last)
+            {
+                _bytes = 0;
+                _index = 0;
+            }
+            _last = byteOffset;
+            while (_index < _text.Length && _bytes < byteOffset)
+            {
+                _bytes += Utf8Len(char.ConvertToUtf32(_text, _index));
+                _index += char.IsSurrogatePair(_text, _index) ? 2 : 1;
+            }
+            return _index;
+        }
     }
 
     /// <summary>
@@ -168,10 +195,11 @@ internal static class ComposeMarkdownDecorator
             runs.Add(new ComposeRun(start, length, style, headingLevel));
         }
 
+        var offsets = new Utf8ToUtf16Cursor(text);
         foreach (var d in decorations)
         {
-            int s = Utf8ByteToUtf16Index(text, (long)d.start);
-            int e = Utf8ByteToUtf16Index(text, (long)d.end);
+            int s = offsets.Seek((long)d.start);
+            int e = offsets.Seek((long)d.end);
             if (e <= s || s < cursor) continue; // skip degenerate / overlapping ranges
 
             if (s > cursor) Emit(cursor, s - cursor, ComposeRunStyle.Plain, 0); // plain gap
@@ -220,22 +248,25 @@ internal static class ComposeMarkdownDecorator
         if (string.IsNullOrEmpty(text)) return runs;
 
         // Content styling from decoration_map (markers skipped — the plan owns their visibility).
+        var contentOffsets = new Utf8ToUtf16Cursor(text);
         foreach (var d in decorations)
         {
             if (ContentStyle(d.kind) is not ComposeRunStyle content) continue;
-            int s = Utf8ByteToUtf16Index(text, (long)d.start);
-            int e = Utf8ByteToUtf16Index(text, (long)d.end);
+            int s = contentOffsets.Seek((long)d.start);
+            int e = contentOffsets.Seek((long)d.end);
             if (e > s)
                 runs.Add(new ComposeRun(s, e - s, content, content == ComposeRunStyle.Heading ? d.level : 0));
         }
 
-        // Marker visibility from the shared plan: hide → conceal, dim → dimmed.
+        // Marker visibility from the shared plan: hide → conceal, dim → dimmed. Each list is
+        // ascending, so each gets its own cursor (one pass per list).
         void EmitMarkers(FfiRevealSpan[] spans, ComposeRunStyle style)
         {
+            var markerOffsets = new Utf8ToUtf16Cursor(text);
             foreach (var r in spans)
             {
-                int s = Utf8ByteToUtf16Index(text, (long)r.start);
-                int e = Utf8ByteToUtf16Index(text, (long)r.end);
+                int s = markerOffsets.Seek((long)r.start);
+                int e = markerOffsets.Seek((long)r.end);
                 if (e > s) runs.Add(new ComposeRun(s, e - s, style, 0));
             }
         }

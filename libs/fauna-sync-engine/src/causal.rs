@@ -38,7 +38,10 @@ pub struct CausalStamp {
 impl CausalStamp {
     /// Honestly-unknown causality — the row will be read exactly like a
     /// pre-ruling row (the `local == base` heuristic). The right stamp for
-    /// writers that hold no catch-up anchor.
+    /// writers that hold no catch-up anchor. An engine's record of a new head
+    /// never carries it, which is how a resident root tells a record another
+    /// door made under its device id (`file-versions.md` § Restore, ordering 1);
+    /// the thumbnail backfill does, re-recording the head its row stands at.
     pub fn unknown() -> Self {
         Self::default()
     }

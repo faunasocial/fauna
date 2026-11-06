@@ -398,9 +398,14 @@ fun AtprotoSettingsContent(
                     onMint = { dmAllowed -> scope.launch { onMint(formatNamed(defaultCredentialLabelTemplate, listOf(snapshot.credentials.size + 1)), dmAllowed)?.let { (id, secret) -> revealed[id] = secret } } },
                     onRevealSecret = { id -> scope.launch { onRevealSecret(id)?.let { revealed[id] = it } } },
                     onRevoke = onRevoke,
-                    onAuthorizeExternalApps = onAuthorizeExternalApps,
-                    onDeauthorizeExternalApps = onDeauthorizeExternalApps,
                 )
+            }
+
+            // The D10 authoring-delegation row is gated on the delegation, not
+            // the level (`atproto.md` § Layout & flow): a held row renders at
+            // every level; the empty state (null) only at full PDS.
+            if (snapshot.level == "hosted_full" || snapshot.delegation != null) {
+                DelegationRowSection(snapshot.delegation, onAuthorizeExternalApps, onDeauthorizeExternalApps)
             }
         }
     }
@@ -691,9 +696,9 @@ private fun DidMethodRung(id: String, titleRes: Int, descRes: Int, selected: Boo
     }
 }
 
-/** The F1 login-plane surface: app credentials and the D10
- *  authoring-delegation row — in that order. Gated by the caller on level =
- *  `hosted_full`. The consent card and the connected-app rows moved to the
+/** The F1 login-plane surface: app credentials. Gated by the caller on level =
+ *  `hosted_full` (the D10 authoring-delegation row follows it, gated
+ *  separately). The consent card and the connected-app rows moved to the
  *  Connected apps page (`connected-apps.md` § Architectural rules) — a row
  *  moves, it is never shown twice. */
 @Composable
@@ -704,8 +709,6 @@ private fun FullPdsPanel(
     onMint: (dmAllowed: Boolean) -> Unit,
     onRevealSecret: (String) -> Unit,
     onRevoke: (String) -> Unit,
-    onAuthorizeExternalApps: () -> Unit,
-    onDeauthorizeExternalApps: () -> Unit,
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Column(modifier = Modifier.testTag(Ids.ATPROTO_APP_CREDENTIALS_LIST), verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -739,8 +742,6 @@ private fun FullPdsPanel(
             }
             DisabledControlReasonText(mintGate.reason)
         }
-
-        DelegationRowSection(snapshot.delegation, onAuthorizeExternalApps, onDeauthorizeExternalApps)
     }
 }
 

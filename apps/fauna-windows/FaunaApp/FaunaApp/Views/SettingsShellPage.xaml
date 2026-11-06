@@ -65,6 +65,8 @@
             <NavigationViewItem x:Name="SubWeb" Tag="web" Content="{loc:Localize Key=web_settings/title}" />
             <NavigationViewItem x:Name="SubSubscriptions" Tag="subscription-settings" Content="{loc:Localize Key=subscriptions/title}" />
             <NavigationViewItem x:Name="SubDevices" Tag="devices" Content="{loc:Localize Key=devices/title}" />
+            <!-- Directly after Devices (ui/sessions.md § The ruling, item 1). -->
+            <NavigationViewItem x:Name="SubSessions" Tag="sessions" Content="{loc:Localize Key=sessions/title}" />
             <NavigationViewItem x:Name="SubFolders" Tag="folders" Content="{loc:Localize Key=folders/title}" />
             <!-- The standalone Nostr page (nostr.md § Page structure) — its own rail
                  entry like mail, never a row on the unified Bridges page. Its id is
@@ -80,6 +82,8 @@
             <NavigationViewItem x:Name="SubMailSpam" Tag="mail-spam" Content="{loc:Localize Key=mail_spam/title}" />
             <NavigationViewItem x:Name="SubMailExport" Tag="mail-export" Content="{loc:Localize Key=mail_export/title}" />
             <NavigationViewItem x:Name="SubMailImport" Tag="mail-import" Content="{loc:Localize Key=mail_import/title}" />
+            <!-- Import from other services (archive-import.md) — directly after Mail import. -->
+            <NavigationViewItem x:Name="SubArchiveImport" Tag="archive-import" Content="{loc:Localize Key=archive_import/title}" />
             <NavigationViewItem x:Name="SubMailLists" Tag="mail-lists" Content="{loc:Localize Key=mail_lists/title}" />
             <NavigationViewItem x:Name="SubMailListMembers" Tag="mail-list-members" Content="{loc:Localize Key=mail_lists/members_title}" />
             <NavigationViewItem x:Name="SubLinkedNests" Tag="nests" Content="{loc:Localize Key=nests/title}" />

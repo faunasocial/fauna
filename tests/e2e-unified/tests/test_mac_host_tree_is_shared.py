@@ -163,8 +163,10 @@ def test_the_five_slice_recipe_keeps_its_explicit_darwin_slice():
     implicit-host rule does not "finish the job" without re-measuring — and so
     that, if it ever IS converted, this pin is the place that says why it was
     left alone. Deleting it then is correct; deleting it silently is not."""
-    code = _code(_recipe_body(_justfile(), "_apple-ffi-flavor"))
-    assert _HOST_TRIPLE_FLAG in code, (
+    # the slice loop lives in `_apple-ffi-build-impl` since the flavor recipe was
+    # split (it names the triples in each shape's SLICE_TRIPLES list)
+    code = _code(_recipe_body(_justfile(), "_apple-ffi-build-impl"))
+    assert "aarch64-apple-darwin" in code and "--target \"$triple\"" in code, (
         "the 5-slice apple-ffi recipe no longer builds an explicit darwin "
         "slice — if that was deliberate, re-measure the unit sharing and "
         "update the host-tree layout notes, "

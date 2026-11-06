@@ -50,6 +50,8 @@ public struct AdminUsersHubView: View {
     @State private var admitActorInput: String = ""
     @State private var admitHandleInput: String = ""
     @State private var admitTierDraft: String = ""
+    @State private var admitGuardian: String = ""
+    @State private var admitAgeBand: String = ageBandNotSetValue()
 
     public init(vm: AdminVM, reloadToken: Int = 0) {
         self.vm = vm
@@ -361,7 +363,7 @@ public struct AdminUsersHubView: View {
             automationText(Ids.adminUsersAdmitSection, L.admin.usersPage.sectionAdmit)
                 .font(.headline)
 
-            HStack(spacing: 12) {
+            admitControlsLayout {
                 TextField(L.admin.usersPage.admitActorLabel, text: $admitActorInput)
                     .textFieldStyle(.roundedBorder)
                     .font(.caption.monospaced())
@@ -378,6 +380,19 @@ public struct AdminUsersHubView: View {
                     current: { admitTierDraft }
                 ) { admitTierDraft = $0 }
 
+                // Admitting with a guardian makes the account supervised in the
+                // same transaction; a band presupposes a guardian, so clearing
+                // one resets the other (family-safety.md § The guardianship link).
+                guardianMenu(id: "admin-users-admit-guardian-select",
+                             current: { admitGuardian }) { picked in
+                    if picked.isEmpty { admitAgeBand = ageBandNotSetValue() }
+                    admitGuardian = picked
+                }
+
+                ageBandMenu(id: Ids.adminUsersAdmitAgeBandSelect,
+                            current: { admitAgeBand },
+                            enabled: { !admitGuardian.isEmpty }) { admitAgeBand = $0 }
+
                 Button(L.admin.usersPage.admitButton) {
                     admitUser()
                 }
@@ -392,12 +407,32 @@ public struct AdminUsersHubView: View {
         }
     }
 
+    /// The Admit controls in one row on macOS, stacked on iOS: six controls plus
+    /// a guardian menu that shows the picked account's label overflow a phone's
+    /// width in a row, which pushed the age-band select and the Admit button off
+    /// the screen (out of the accessibility tree) once a guardian was picked.
+    @ViewBuilder
+    private func admitControlsLayout<Content: View>(
+        @ViewBuilder _ content: () -> Content
+    ) -> some View {
+        #if os(iOS)
+        VStack(alignment: .leading, spacing: 12) { content() }
+        #else
+        HStack(spacing: 12) { content() }
+        #endif
+    }
+
     /// Admit action — shared by the `Button` and `automationActivate`. Local
     /// hex validation happens in `AdminVM.admitUser` (mirrors
     /// `approveRequest`/`denyRequest`'s thin pass-through of raw drafts).
     private func admitUser() {
         let tier = admitTierDraft.isEmpty ? (vm.tierNames.first ?? defaultInviteTier()) : admitTierDraft
-        Task { await vm.admitUser(actorHex: admitActorInput, handle: admitHandleInput, tier: tier) }
+        let guardian = vm.guardianActorId(forLabel: admitGuardian)
+        let band = admitAgeBand
+        Task {
+            await vm.admitUser(actorHex: admitActorInput, handle: admitHandleInput, tier: tier,
+                               guardian: guardian, ageBand: band)
+        }
     }
 
     // MARK: - Section 4: Invite
@@ -820,7 +855,10 @@ public struct AdminUsersHubView: View {
         // as its localized label, matching every other app's picker.
         .automationSelect(
             id,
-            value: { current().isEmpty ? L.admin.usersPage.guardianNone : current() }
+            value: { current().isEmpty ? L.admin.usersPage.guardianNone : current() },
+            // The painted set, live: the driver's `option_texts` reads it, and a
+            // picker that omits it reads as one offering nobody.
+            options: { [L.admin.usersPage.guardianNone] + vm.guardianOptions.map(vm.guardianLabel) }
         ) { picked in
             onPick(picked == L.admin.usersPage.guardianNone ? "" : picked)
         }

@@ -15,6 +15,7 @@ use std::time::Duration;
 
 use fauna_calendar::segments::CalFloorMetadata;
 use fauna_calendar::segments::placement::CalPlacementRecord;
+use fauna_mls::wrapped_blob::{RecordKind, SealedRecordBytes};
 use fauna_protocol::{
     RpcError,
     bridge_routing::{
@@ -179,11 +180,13 @@ fn provision_calendar_handler() -> crate::rpc_router::RpcHandler {
                 crate::rpc_errors::require_bytes32("calendar_id", req.calendar_id.as_slice())
                     .map_err(malformed)?;
 
-            // Validate: encrypted_metadata must be non-empty (the client must
-            // seal *something* even if just a `{}`-equivalent ciphertext).
-            if req.encrypted_metadata.is_empty() {
-                return Err(malformed("encrypted_metadata must not be empty"));
-            }
+            // The metadata rests sealed to the calendar key: anything but a
+            // `calendar-record` envelope — raw bytes, the empty slice, a mail
+            // or card record — is refused before any state is touched
+            // (`owner-key-material.md` § Path B-sibling-5 → *AEAD and
+            // envelope*).
+            SealedRecordBytes::verify_of_kind(req.encrypted_metadata.clone(), RecordKind::Calendar)
+                .map_err(|_| malformed("encrypted_metadata is not a sealed calendar record"))?;
 
             // Branch on `update_metadata`: false = MKCOL-style insert, true =
             // PROPPATCH-style metadata overwrite. The two paths have disjoint
@@ -191,55 +194,68 @@ fn provision_calendar_handler() -> crate::rpc_router::RpcHandler {
             // Updated/NotFound), so the same `ProvisionOutcome` enum routes
             // both with no ambiguity.
             let reply = if req.update_metadata {
-                let outcome_before = state
-                    .db
-                    .caldav_calendar_highestmodseq(&target, &cal)
-                    .await
-                    .map_err(internal)?;
-                let outcome = state
-                    .db
-                    .update_bridge_caldav_calendar_metadata(&target, &cal, &req.encrypted_metadata)
-                    .await
-                    .map_err(internal)?;
-                match outcome {
-                    ProvisionOutcome::Updated => {
-                        // Emit only when bytes actually changed. The DB layer
-                        // signals byte-identical retries by leaving
-                        // highestmodseq unchanged; the placement journal must
-                        // mirror that no-op (matches MKCOL AlreadyExists).
-                        let hms_after = state
-                            .db
-                            .caldav_calendar_highestmodseq(&target, &cal)
-                            .await
-                            .map_err(internal)?;
-                        if outcome_before != hms_after
-                            && let Some(new_hms) = hms_after
-                        {
-                            let record = CalPlacementRecord::UpdateCalendarMetadata {
-                                calendar_id: cal,
-                                encrypted_metadata: req.encrypted_metadata.clone(),
-                                modseq: new_hms as u64,
-                            };
-                            state
-                                .cal_placement
-                                .append_event(&target, &record)
-                                .await
-                                .map_err(placement_journal_diverged)?;
-                            notify_calendar_changed(&state, &target, &cal);
-                        }
-                        ProvisionCalendarReply::Updated
-                    }
-                    ProvisionOutcome::NotFound => ProvisionCalendarReply::NotFound,
-                    other => unreachable!(
-                        "update_bridge_caldav_calendar_metadata cannot return {:?}",
-                        other,
-                    ),
-                }
+                update_calendar_metadata(&state, target, cal, &req.encrypted_metadata).await?
             } else {
                 insert_calendar(&state, target, cal, &req.encrypted_metadata).await?
             };
             encode_reply(&reply)
         })
+    })
+}
+
+/// Overwrite `target`'s calendar `cal`'s sealed metadata — the PROPPATCH half
+/// of `provision_calendar`, shared with the pre-split boot pass
+/// (`crate::dav_pre_split`), which blanks a metadata blob no app can open. The
+/// caller has checked the bytes' kind.
+pub(crate) async fn update_calendar_metadata(
+    state: &Arc<AppState>,
+    target: [u8; 32],
+    cal: [u8; 32],
+    encrypted_metadata: &[u8],
+) -> Result<ProvisionCalendarReply, RpcError> {
+    let outcome_before = state
+        .db
+        .caldav_calendar_highestmodseq(&target, &cal)
+        .await
+        .map_err(internal)?;
+    let outcome = state
+        .db
+        .update_bridge_caldav_calendar_metadata(&target, &cal, encrypted_metadata)
+        .await
+        .map_err(internal)?;
+    Ok(match outcome {
+        ProvisionOutcome::Updated => {
+            // Emit only when bytes actually changed. The DB layer signals
+            // byte-identical retries by leaving highestmodseq unchanged; the
+            // placement journal must mirror that no-op (matches MKCOL
+            // AlreadyExists).
+            let hms_after = state
+                .db
+                .caldav_calendar_highestmodseq(&target, &cal)
+                .await
+                .map_err(internal)?;
+            if outcome_before != hms_after
+                && let Some(new_hms) = hms_after
+            {
+                let record = CalPlacementRecord::UpdateCalendarMetadata {
+                    calendar_id: cal,
+                    encrypted_metadata: encrypted_metadata.to_vec(),
+                    modseq: new_hms as u64,
+                };
+                state
+                    .cal_placement
+                    .append_event(&target, &record)
+                    .await
+                    .map_err(placement_journal_diverged)?;
+                notify_calendar_changed(state, &target, &cal);
+            }
+            ProvisionCalendarReply::Updated
+        }
+        ProvisionOutcome::NotFound => ProvisionCalendarReply::NotFound,
+        other => unreachable!(
+            "update_bridge_caldav_calendar_metadata cannot return {:?}",
+            other,
+        ),
     })
 }
 
@@ -456,14 +472,23 @@ fn put_event_ciphertext_handler() -> crate::rpc_router::RpcHandler {
             // the caller. Every production caller already seals both halves
             // (Go MDA `caldav/put.go`, client `seal_and_put_event`); anything
             // else is refused before any state is touched. The typed values
-            // are the only currency `segments::cal` appends accept.
+            // are the only currency `segments::cal` appends accept. The body
+            // and the sidecar are calendar records, sealed to the calendar key
+            // (`owner-key-material.md` § Path B-sibling-5 → *AEAD and
+            // envelope*); the hint seals to the index key when one is
+            // registered, so its kind is the sealer's.
             let sealed_body =
-                fauna_mls::wrapped_blob::SealedRecordBytes::verify(req.encrypted_body.clone())
-                    .map_err(|_| malformed("encrypted_body is not a sealed recipient envelope"))?;
-            let sealed_hint = fauna_mls::wrapped_blob::SealedRecordBytes::verify(
-                req.encrypted_index_hint.clone(),
-            )
-            .map_err(|_| malformed("encrypted_index_hint is not a sealed recipient envelope"))?;
+                SealedRecordBytes::verify_of_kind(req.encrypted_body.clone(), RecordKind::Calendar)
+                    .map_err(|_| malformed("encrypted_body is not a sealed calendar record"))?;
+            let sealed_hint =
+                SealedRecordBytes::verify(req.encrypted_index_hint.clone()).map_err(|_| {
+                    malformed("encrypted_index_hint is not a sealed recipient envelope")
+                })?;
+            if let Some(ext) = req.encrypted_fauna_ext.as_ref() {
+                SealedRecordBytes::verify_of_kind(ext.clone(), RecordKind::Calendar).map_err(
+                    |_| malformed("encrypted_fauna_ext is not a sealed calendar record"),
+                )?;
+            }
 
             let reply =
                 store_sealed_event(&state, target, cal, &req, sealed_body, sealed_hint).await?;
@@ -778,72 +803,13 @@ fn delete_event_handler() -> crate::rpc_router::RpcHandler {
 
             let reply = match outcome {
                 DeleteCaldavEventOutcome::Deleted { event_id, modseq } => {
-                    // Spec § D2 (DeleteEvent record shape):
-                    // `calendar_id` + `uid_hash` + `modseq`. The
-                    // manifest-side apply drops the event placement
-                    // and pushes a tombstone (`EventTombstoneRef`)
-                    // unconditionally — even if the local manifest
-                    // is drifted vs the upstream store — so that
-                    // WebDAV-Sync REPORT surfaces the deletion to
-                    // the client (see `apply_record_to_manifest`
-                    // in `segments/cal_placement.rs`).
-                    //
-                    // Spec § D6 (ε) atomic-with-SQL: the SQLite
-                    // transaction inside
-                    // `delete_caldav_event_by_uid` (the row DELETE
-                    // + tombstone insert + modseq bump) has
-                    // committed by the time the placement append
-                    // below runs. The narrow commit-then-append
-                    // crash window is closed by Plan 2 T9's
-                    // divergence detection at sync-collection /
-                    // REPORT time — same pattern as T7 / T8 / T9
-                    // / T9.5.
-                    //
-                    // No emit on NotFound / PreconditionFailed:
-                    // neither path mutates the DB.
-                    let record = CalPlacementRecord::DeleteEvent {
-                        calendar_id: cal,
-                        uid_hash: req
-                            .uid_hash
-                            .as_slice()
-                            .try_into()
-                            .expect("uid_hash validated to length 32 above"),
-                        modseq: modseq as u64,
-                        // v2 (S6.9): the deleted row's content-record id
-                        // (restore rebuilds the `bridge_caldav_expunged` row
-                        // from it) + the delete time that makes the S6.8d2
-                        // retention prune possible.
-                        event_id,
-                        deleted_at: now,
-                    };
-                    state
-                        .cal_placement
-                        .append_event(&target, &record)
-                        .await
-                        .map_err(placement_journal_diverged)?;
-                    // S6.8d2 — age out tombstones for UIDs deleted long ago
-                    // and never re-added, below the same effective retention
-                    // window the sync-collection serve path enforces on
-                    // `bridge_caldav_expunged` (past it a client is told
-                    // `stale` and full-resyncs, so the prune is
-                    // unobservable). Piggybacked on DELETE because it is the
-                    // only operation that grows the tombstone set.
-                    let retention_days = i64::from(
-                        state
-                            .db
-                            .get_imap_policy()
-                            .await
-                            .map_err(internal)?
-                            .effective()
-                            .tombstone_retention_days
-                            .max(7),
-                    );
-                    state
-                        .cal_placement
-                        .prune_tombstones(&target, now - retention_days * 86_400)
-                        .await
-                        .map_err(internal)?;
-                    notify_calendar_changed(&state, &target, &cal);
+                    let uid_hash: [u8; 32] = req
+                        .uid_hash
+                        .as_slice()
+                        .try_into()
+                        .expect("uid_hash validated to length 32 above");
+                    journal_event_delete(&state, target, cal, uid_hash, event_id, modseq, now)
+                        .await?;
                     DeleteEventReply::Deleted {
                         event_id: event_id.to_vec(),
                         modseq,
@@ -857,6 +823,74 @@ fn delete_event_handler() -> crate::rpc_router::RpcHandler {
             encode_reply(&reply)
         })
     })
+}
+
+/// The post-delete half of `delete_event`, shared with the pre-split boot pass
+/// (`crate::dav_pre_split`): journal the `DeleteEvent` placement record for a
+/// row [`crate::db::CacheDb::delete_caldav_event_by_uid`] just removed, prune
+/// aged tombstones and wake the calendar's subscribers.
+pub(crate) async fn journal_event_delete(
+    state: &Arc<AppState>,
+    target: [u8; 32],
+    cal: [u8; 32],
+    uid_hash: [u8; 32],
+    event_id: [u8; 32],
+    modseq: i64,
+    now: i64,
+) -> Result<(), RpcError> {
+    // Spec § D2 (DeleteEvent record shape): `calendar_id` + `uid_hash` +
+    // `modseq`. The manifest-side apply drops the event placement and pushes a
+    // tombstone (`EventTombstoneRef`) unconditionally — even if the local
+    // manifest is drifted vs the upstream store — so that WebDAV-Sync REPORT
+    // surfaces the deletion to the client (see `apply_record_to_manifest` in
+    // `segments/cal_placement.rs`).
+    //
+    // Spec § D6 (ε) atomic-with-SQL: the SQLite transaction inside
+    // `delete_caldav_event_by_uid` (the row DELETE + tombstone insert + modseq
+    // bump) has committed by the time the placement append below runs. The
+    // narrow commit-then-append crash window is closed by Plan 2 T9's
+    // divergence detection at sync-collection / REPORT time — same pattern as
+    // T7 / T8 / T9 / T9.5.
+    //
+    // No emit on NotFound / PreconditionFailed: neither path mutates the DB.
+    let record = CalPlacementRecord::DeleteEvent {
+        calendar_id: cal,
+        uid_hash,
+        modseq: modseq as u64,
+        // v2 (S6.9): the deleted row's content-record id (restore rebuilds the
+        // `bridge_caldav_expunged` row from it) + the delete time that makes
+        // the S6.8d2 retention prune possible.
+        event_id,
+        deleted_at: now,
+    };
+    state
+        .cal_placement
+        .append_event(&target, &record)
+        .await
+        .map_err(placement_journal_diverged)?;
+    // S6.8d2 — age out tombstones for UIDs deleted long ago and never
+    // re-added, below the same effective retention window the sync-collection
+    // serve path enforces on `bridge_caldav_expunged` (past it a client is
+    // told `stale` and full-resyncs, so the prune is unobservable).
+    // Piggybacked on DELETE because it is the only operation that grows the
+    // tombstone set.
+    let retention_days = i64::from(
+        state
+            .db
+            .get_imap_policy()
+            .await
+            .map_err(internal)?
+            .effective()
+            .tombstone_retention_days
+            .max(7),
+    );
+    state
+        .cal_placement
+        .prune_tombstones(&target, now - retention_days * 86_400)
+        .await
+        .map_err(internal)?;
+    notify_calendar_changed(state, &target, &cal);
+    Ok(())
 }
 
 // ── sync_calendar_since ───────────────────────────────────────────
@@ -1090,6 +1124,7 @@ pub(crate) async fn place_sealed_invite(
         )
         .map_err(internal)?;
         let metadata = crate::bridge_routing_handlers::seal_recipient_blob(
+            fauna_mls::wrapped_blob::RecordKind::Calendar,
             &metadata,
             &keys.mls_pubkey,
             Some(keys.mlkem_ek.as_slice()),
@@ -1144,16 +1179,17 @@ pub(crate) async fn place_sealed_invite(
     }
 }
 
-/// The keys a calendar object for `target` seals to — the actor's non-epoch
-/// recipient key, the one a CalDAV PUT's body and the calendar metadata seal to
-/// (the MDA reads the same row at AUTH).
+/// The keys a calendar object for `target` seals to — the actor's standing
+/// calendar key (`owner-key-material.md` § Path B-sibling-5), the one a CalDAV
+/// PUT's body and the calendar metadata seal to (the MDA reads the same row at
+/// AUTH).
 async fn recipient_calendar_keys(
     state: &Arc<AppState>,
     target: &[u8; 32],
 ) -> Result<crate::db::bridge_routing::RecipientSealKey, RpcError> {
     state
         .db
-        .get_recipient_seal_key(target)
+        .get_recipient_calendar_seal_key(target)
         .await
         .map_err(internal)?
         .ok_or_else(|| internal("recipient has no calendar key on file"))
@@ -1179,30 +1215,39 @@ pub(crate) async fn place_local_invite(
     };
     let outcome = async {
         let keys = recipient_calendar_keys(state, target).await?;
-        let index_key = state
+        let registered_index_key = state
             .db
             .get_actor_index_pubkey(target)
             .await
-            .map_err(internal)?
-            .unwrap_or(keys.mls_pubkey);
-        // The hint goes post-quantum only when it seals to the same key as the
-        // body — the MDA's `IndexHintMlkemEk` rule.
-        let hint_ek = (index_key == keys.mls_pubkey).then_some(keys.mlkem_ek.as_slice());
+            .map_err(internal)?;
+        // With a nest-side index key registered the hint seals to it as it
+        // always has (a `mail-record`, the index key's own kind); without one
+        // it seals to the calendar key, as a `calendar-record`, post-quantum
+        // like the body — the MDA's `IndexHintMlkemEk` rule.
+        let (index_key, hint_kind, hint_ek) = match registered_index_key {
+            Some(k) => (k, RecordKind::Mail, None),
+            None => (
+                keys.mls_pubkey,
+                RecordKind::Calendar,
+                Some(keys.mlkem_ek.as_slice()),
+            ),
+        };
         let seal = crate::bridge_routing_handlers::seal_recipient_blob;
         let body = seal(
+            RecordKind::Calendar,
             invite.ics.as_bytes(),
             &keys.mls_pubkey,
             Some(keys.mlkem_ek.as_slice()),
             "invite body",
         )?;
         let tokens = fauna_mail::tokenizer::tokenize(&invite.ics).canonical_bytes;
-        let hint = seal(&tokens, &index_key, hint_ek, "invite index-hint")?;
+        let hint = seal(hint_kind, &tokens, &index_key, hint_ek, "invite index-hint")?;
         place_sealed_invite(
             state,
             *target,
             fauna_protocol::dav_identity::uid_hash(&invite.uid),
-            fauna_mls::wrapped_blob::SealedRecordBytes::verify(body).map_err(internal)?,
-            fauna_mls::wrapped_blob::SealedRecordBytes::verify(hint).map_err(internal)?,
+            SealedRecordBytes::verify_of_kind(body, RecordKind::Calendar).map_err(internal)?,
+            SealedRecordBytes::verify(hint).map_err(internal)?,
             now,
             ingress,
         )
@@ -1236,13 +1281,12 @@ fn place_inbound_invite_handler() -> crate::rpc_router::RpcHandler {
                     .map_err(malformed)?;
             // The same wire-edge proof `put_event_ciphertext` demands: everything
             // this kind stores rests sealed, so it is verified here rather than
-            // assumed of the caller.
-            let sealed = |bytes: Vec<u8>, what: &str| {
-                fauna_mls::wrapped_blob::SealedRecordBytes::verify(bytes)
-                    .map_err(|_| malformed(format!("{what} is not a sealed recipient envelope")))
-            };
-            let body = sealed(req.encrypted_body, "encrypted_body")?;
-            let hint = sealed(req.encrypted_index_hint, "encrypted_index_hint")?;
+            // assumed of the caller — the body as a calendar record.
+            let body = SealedRecordBytes::verify_of_kind(req.encrypted_body, RecordKind::Calendar)
+                .map_err(|_| malformed("encrypted_body is not a sealed calendar record"))?;
+            let hint = SealedRecordBytes::verify(req.encrypted_index_hint).map_err(|_| {
+                malformed("encrypted_index_hint is not a sealed recipient envelope")
+            })?;
             let reply = place_sealed_invite(
                 &state,
                 target,
@@ -1352,7 +1396,7 @@ mod tests {
         approve_bridge(&state.db, &mda, BridgeRole::Mda).await;
         let actor = [20u8; 32];
         let cal_id = [30u8; 32];
-        let meta = b"sealed-calendar-metadata".to_vec();
+        let meta = meta_rec(b"sealed-calendar-metadata");
 
         let req = ProvisionCalendarRequest {
             actor_id: actor.to_vec(),
@@ -1383,7 +1427,7 @@ mod tests {
         approve_bridge(&state.db, &mda, BridgeRole::Mda).await;
         let actor = [21u8; 32];
         let cal_id = [31u8; 32];
-        let meta = b"same-metadata".to_vec();
+        let meta = meta_rec(b"same-metadata");
 
         let make_payload = || {
             let req = ProvisionCalendarRequest {
@@ -1425,8 +1469,8 @@ mod tests {
         approve_bridge(&state.db, &mda, BridgeRole::Mda).await;
         let actor = [22u8; 32];
         let cal_id = [32u8; 32];
-        let meta_orig = b"original-metadata".to_vec();
-        let meta_new = b"different-metadata".to_vec();
+        let meta_orig = meta_rec(b"original-metadata");
+        let meta_new = meta_rec(b"different-metadata");
 
         let make_payload = |meta: Vec<u8>| {
             let req = ProvisionCalendarRequest {
@@ -1474,7 +1518,7 @@ mod tests {
         let req = ProvisionCalendarRequest {
             actor_id: actor.to_vec(),
             calendar_id: cal_id.to_vec(),
-            encrypted_metadata: b"meta-v1".to_vec(),
+            encrypted_metadata: meta_rec(b"meta-v1"),
             ..Default::default()
         };
         let payload = Bytes::from(encode_canonical(&req).unwrap().to_vec());
@@ -1488,7 +1532,7 @@ mod tests {
         let req = ProvisionCalendarRequest {
             actor_id: actor.to_vec(),
             calendar_id: cal_id.to_vec(),
-            encrypted_metadata: b"meta-v2-resealed".to_vec(),
+            encrypted_metadata: meta_rec(b"meta-v2-resealed"),
             update_metadata: true,
         };
         let payload = Bytes::from(encode_canonical(&req).unwrap().to_vec());
@@ -1500,7 +1544,7 @@ mod tests {
 
         let rows = state.db.list_bridge_caldav_calendars(&actor).await.unwrap();
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].encrypted_metadata, b"meta-v2-resealed");
+        assert_eq!(rows[0].encrypted_metadata, meta_rec(b"meta-v2-resealed"));
     }
 
     #[tokio::test]
@@ -1512,7 +1556,7 @@ mod tests {
         let req = ProvisionCalendarRequest {
             actor_id: vec![29u8; 32],
             calendar_id: vec![29u8; 32],
-            encrypted_metadata: b"meta-resealed".to_vec(),
+            encrypted_metadata: meta_rec(b"meta-resealed"),
             update_metadata: true,
         };
         let payload = Bytes::from(encode_canonical(&req).unwrap().to_vec());
@@ -1540,7 +1584,7 @@ mod tests {
         let req = ProvisionCalendarRequest {
             actor_id: vec![1u8; 32],
             calendar_id: vec![1u8; 16], // wrong length
-            encrypted_metadata: b"some-metadata".to_vec(),
+            encrypted_metadata: meta_rec(b"some-metadata"),
             ..Default::default()
         };
         let payload = Bytes::from(encode_canonical(&req).unwrap().to_vec());
@@ -1578,7 +1622,7 @@ mod tests {
         let req = ProvisionCalendarRequest {
             actor_id: vec![1u8; 16], // wrong length
             calendar_id: vec![1u8; 32],
-            encrypted_metadata: b"some-metadata".to_vec(),
+            encrypted_metadata: meta_rec(b"some-metadata"),
             ..Default::default()
         };
         let payload = Bytes::from(encode_canonical(&req).unwrap().to_vec());
@@ -1604,7 +1648,7 @@ mod tests {
         let req = ProvisionCalendarRequest {
             actor_id: user_actor.to_vec(),
             calendar_id: cal_id.to_vec(),
-            encrypted_metadata: b"user-sealed-meta".to_vec(),
+            encrypted_metadata: meta_rec(b"user-sealed-meta"),
             ..Default::default()
         };
         let payload = Bytes::from(encode_canonical(&req).unwrap().to_vec());
@@ -1624,7 +1668,7 @@ mod tests {
         let req = ProvisionCalendarRequest {
             actor_id: vec![1u8; 32],
             calendar_id: vec![2u8; 32],
-            encrypted_metadata: b"meta".to_vec(),
+            encrypted_metadata: meta_rec(b"meta"),
             ..Default::default()
         };
         let payload = Bytes::from(encode_canonical(&req).unwrap().to_vec());
@@ -1648,7 +1692,7 @@ mod tests {
         let req = ProvisionCalendarRequest {
             actor_id: vec![1u8; 32], // a DIFFERENT actor
             calendar_id: vec![2u8; 32],
-            encrypted_metadata: b"meta".to_vec(),
+            encrypted_metadata: meta_rec(b"meta"),
             ..Default::default()
         };
         let payload = Bytes::from(encode_canonical(&req).unwrap().to_vec());
@@ -1669,7 +1713,7 @@ mod tests {
         let req = ProvisionCalendarRequest {
             actor_id: admin_actor.to_vec(), // SELF
             calendar_id: [2u8; 32].to_vec(),
-            encrypted_metadata: b"admin-own-meta".to_vec(),
+            encrypted_metadata: meta_rec(b"admin-own-meta"),
             ..Default::default()
         };
         let payload = Bytes::from(encode_canonical(&req).unwrap().to_vec());
@@ -1693,7 +1737,7 @@ mod tests {
         let req = ProvisionCalendarRequest {
             actor_id: vec![99u8; 32], // a DIFFERENT actor
             calendar_id: vec![2u8; 32],
-            encrypted_metadata: b"meta".to_vec(),
+            encrypted_metadata: meta_rec(b"meta"),
             ..Default::default()
         };
         let payload = Bytes::from(encode_canonical(&req).unwrap().to_vec());
@@ -1741,8 +1785,8 @@ mod tests {
         let actor = [93u8; 32];
         let cal_1 = [101u8; 32];
         let cal_2 = [102u8; 32];
-        let meta_1 = b"sealed-meta-cal-1".to_vec();
-        let meta_2 = b"sealed-meta-cal-2".to_vec();
+        let meta_1 = meta_rec(b"sealed-meta-cal-1");
+        let meta_2 = meta_rec(b"sealed-meta-cal-2");
         let now_ts = 1_700_000_000i64;
 
         // Provision two calendars.
@@ -2308,7 +2352,7 @@ mod tests {
         let req = ProvisionCalendarRequest {
             actor_id: actor.to_vec(),
             calendar_id: cal_id.to_vec(),
-            encrypted_metadata: b"sealed-meta".to_vec(),
+            encrypted_metadata: meta_rec(b"sealed-meta"),
             ..Default::default()
         };
         let payload = Bytes::from(encode_canonical(&req).unwrap().to_vec());
@@ -2325,12 +2369,22 @@ mod tests {
     /// encapsulation is randomized) — seal once and reuse the returned bytes
     /// when a test needs the same body twice (idempotency/retry paths).
     fn sealed(plaintext: &[u8]) -> Vec<u8> {
-        use fauna_mls::wrapped_blob::{derive_recipient_hpke_keypair, seal_to_recipient};
-        let (_secret, pubkey) = derive_recipient_hpke_keypair(&[0x5Eu8; 32]);
-        seal_to_recipient(plaintext, &pubkey)
+        use fauna_mls::wrapped_blob::{
+            DavKind, derive_dav_root, derive_recipient_dav_hpke_keypair, seal_record_to_recipient,
+        };
+        let root = derive_dav_root(DavKind::Calendar, &[0x5Eu8; 32]);
+        let (_secret, pubkey) = derive_recipient_dav_hpke_keypair(DavKind::Calendar, &root);
+        seal_record_to_recipient(RecordKind::Calendar, plaintext, &pubkey)
             .expect("seal test fixture")
             .to_canonical_bytes()
             .expect("canonical test fixture")
+    }
+
+    /// A calendar-record collection metadata blob (or sidecar) — the only
+    /// shape the per-kind put path stores (`owner-key-material.md` § Path
+    /// B-sibling-5 → *AEAD and envelope*); deterministic per label.
+    fn meta_rec(label: &[u8]) -> Vec<u8> {
+        crate::test_support::fixture_record(RecordKind::Calendar, label)
     }
 
     fn make_put_payload(
@@ -3318,6 +3372,106 @@ mod tests {
         assert_eq!(
             records, 0,
             "a rejected PUT must not leave an orphan content record"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_calendar_put_paths_refuse_a_record_of_another_kind() {
+        // A sealed record of the wrong kind is refused like raw bytes: the
+        // calendar store takes calendar records only — body, sidecar and
+        // collection metadata alike — and an emailed invitation's body too
+        // (`owner-key-material.md` § Path B-sibling-5 → *AEAD and envelope*:
+        // the envelope kind is plaintext, so the nest enforces it with no key).
+        let state = fixture_state().await;
+        let mda = [208u8; 32];
+        approve_bridge(&state.db, &mda, BridgeRole::Mda).await;
+        let actor = [209u8; 32];
+        let cal_id = [210u8; 32];
+        provision_one(&state, &mda, &actor, &cal_id).await;
+        let foreign = [
+            crate::test_support::fixture_record(RecordKind::Mail, b"BEGIN:VCALENDAR"),
+            crate::test_support::fixture_record(RecordKind::Card, b"BEGIN:VCALENDAR"),
+        ];
+        let mta = [215u8; 32];
+        approve_bridge(&state.db, &mta, BridgeRole::Mta).await;
+        for wrong in &foreign {
+            // The body.
+            let payload = make_put_payload(
+                &actor,
+                &cal_id,
+                &[211u8; 32],
+                wrong,
+                &sealed(b"hint"),
+                1_700_000_000,
+                None,
+            );
+            let err = put_event_ciphertext_handler()(state.clone(), mda, payload)
+                .await
+                .unwrap_err();
+            assert_eq!(err.code, "fauna.protocol.malformed");
+            // The sidecar, beside a calendar-record body.
+            let body = sealed(b"BEGIN:VCALENDAR");
+            let req = PutEventCiphertextRequest {
+                actor_id: actor.to_vec(),
+                calendar_id: cal_id.to_vec(),
+                uid_hash: vec![212u8; 32],
+                ciphertext_size: body.len() as u32,
+                encrypted_body: body,
+                encrypted_index_hint: sealed(b"hint"),
+                timestamp: 1_700_000_000,
+                encrypted_fauna_ext: Some(wrong.clone()),
+                ..Default::default()
+            };
+            let err = put_event_ciphertext_handler()(
+                state.clone(),
+                mda,
+                Bytes::from(encode_canonical(&req).unwrap().to_vec()),
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(err.code, "fauna.protocol.malformed");
+            // The collection metadata.
+            let req = ProvisionCalendarRequest {
+                actor_id: actor.to_vec(),
+                calendar_id: [213u8; 32].to_vec(),
+                encrypted_metadata: wrong.clone(),
+                ..Default::default()
+            };
+            let err = provision_calendar_handler()(
+                state.clone(),
+                mda,
+                Bytes::from(encode_canonical(&req).unwrap().to_vec()),
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(err.code, "fauna.protocol.malformed");
+            // An emailed invitation's body.
+            let req = PlaceInboundInviteRequest {
+                actor_id: actor.to_vec(),
+                uid_hash: [214u8; 32].to_vec(),
+                encrypted_body: wrong.clone(),
+                encrypted_index_hint: sealed(b"hint"),
+                timestamp: 1_700_000_000,
+                sender_address: "a@example.com".into(),
+                extra: Default::default(),
+            };
+            let err = place_inbound_invite_handler()(
+                state.clone(),
+                mta,
+                Bytes::from(encode_canonical(&req).unwrap().to_vec()),
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(err.code, "fauna.protocol.malformed");
+        }
+        let events = state
+            .db
+            .query_caldav_events(&actor, &cal_id, None, None, 10)
+            .await
+            .unwrap();
+        assert!(
+            events.events.is_empty(),
+            "nothing of another kind was stored"
         );
     }
 
@@ -4423,7 +4577,7 @@ mod tests {
         approve_bridge(&state.db, &mda, BridgeRole::Mda).await;
         let actor = [33u8; 32];
         let cal_id = [101u8; 32];
-        let meta = b"sealed-calendar-metadata-v1".to_vec();
+        let meta = meta_rec(b"sealed-calendar-metadata-v1");
 
         let req = ProvisionCalendarRequest {
             actor_id: actor.to_vec(),
@@ -4463,7 +4617,7 @@ mod tests {
         approve_bridge(&state.db, &mda, BridgeRole::Mda).await;
         let actor = [34u8; 32];
         let cal_id = [102u8; 32];
-        let meta = b"identical-metadata".to_vec();
+        let meta = meta_rec(b"identical-metadata");
 
         let make_payload = || {
             let req = ProvisionCalendarRequest {
@@ -4533,7 +4687,7 @@ mod tests {
         let req = ProvisionCalendarRequest {
             actor_id: actor.to_vec(),
             calendar_id: cal_id.to_vec(),
-            encrypted_metadata: b"resealed-meta-v2".to_vec(),
+            encrypted_metadata: meta_rec(b"resealed-meta-v2"),
             update_metadata: true,
         };
         let payload = Bytes::from(encode_canonical(&req).unwrap().to_vec());
@@ -4550,7 +4704,8 @@ mod tests {
             "manifest carries exactly one CalendarState for this calendar",
         );
         assert_eq!(
-            manifest_after_update.calendars[0].encrypted_metadata, b"resealed-meta-v2",
+            manifest_after_update.calendars[0].encrypted_metadata,
+            meta_rec(b"resealed-meta-v2"),
             "manifest must carry the new metadata after UpdateCalendarMetadata apply",
         );
         assert!(
@@ -4580,7 +4735,7 @@ mod tests {
             let req = ProvisionCalendarRequest {
                 actor_id: actor.to_vec(),
                 calendar_id: cal_id.to_vec(),
-                encrypted_metadata: b"identical-resealed-meta".to_vec(),
+                encrypted_metadata: meta_rec(b"identical-resealed-meta"),
                 update_metadata: true,
             };
             Bytes::from(encode_canonical(&req).unwrap().to_vec())
@@ -4693,7 +4848,7 @@ mod tests {
             timestamp,
             ciphertext_size: body1.len() as u32,
             if_match: None,
-            encrypted_fauna_ext: Some(b"fauna-sidecar".to_vec()),
+            encrypted_fauna_ext: Some(meta_rec(b"fauna-sidecar")),
             ..Default::default()
         };
         let bytes = put_event_ciphertext_handler()(
@@ -4717,7 +4872,7 @@ mod tests {
         );
         assert_eq!(
             m.events[0].encrypted_fauna_ext,
-            Some(b"fauna-sidecar".to_vec())
+            Some(meta_rec(b"fauna-sidecar"))
         );
 
         // MUA re-PUT: new body, NO sidecar on the wire — the row preserves
@@ -4751,7 +4906,7 @@ mod tests {
         );
         assert_eq!(
             m.events[0].encrypted_fauna_ext,
-            Some(b"fauna-sidecar".to_vec()),
+            Some(meta_rec(b"fauna-sidecar")),
             "the EFFECTIVE (preserved) sidecar, not the request's None"
         );
     }
@@ -5073,7 +5228,7 @@ mod tests {
         let req = ProvisionCalendarRequest {
             actor_id: actor.to_vec(),
             calendar_id: work_cal.to_vec(),
-            encrypted_metadata: vec![1u8],
+            encrypted_metadata: meta_rec(&[1u8]),
             ..Default::default()
         };
         let bytes = provision_calendar_handler()(
@@ -5090,7 +5245,7 @@ mod tests {
         let req = ProvisionCalendarRequest {
             actor_id: actor.to_vec(),
             calendar_id: personal_cal.to_vec(),
-            encrypted_metadata: vec![2u8],
+            encrypted_metadata: meta_rec(&[2u8]),
             ..Default::default()
         };
         let bytes = provision_calendar_handler()(
@@ -5618,7 +5773,7 @@ mod tests {
         let prov = ProvisionCalendarRequest {
             actor_id: user_actor.to_vec(),
             calendar_id: cal_id.to_vec(),
-            encrypted_metadata: b"sealed-personal-meta".to_vec(),
+            encrypted_metadata: meta_rec(b"sealed-personal-meta"),
             ..Default::default()
         };
         let payload = Bytes::from(encode_canonical(&prov).unwrap().to_vec());
@@ -5679,6 +5834,40 @@ mod tests {
         }
     }
 
+    /// Turning mail off stops mail, and only mail (`mail-credentials.md`
+    /// § Trigger taxonomy, the Disable-mail row): with the actor's mail-off
+    /// flag set, the MDA still serves the actor's calendar to a CalDAV client.
+    #[tokio::test]
+    async fn caldav_mda_path_serves_while_the_actors_mail_is_off() {
+        let state = fixture_state().await;
+        let mda = [14u8; 32];
+        approve_bridge(&state.db, &mda, BridgeRole::Mda).await;
+        let user_a = [44u8; 32];
+        let cal_id = [45u8; 32];
+        state.db.create_user(&user_a, "free", "test").await.unwrap();
+        let prov = ProvisionCalendarRequest {
+            actor_id: user_a.to_vec(),
+            calendar_id: cal_id.to_vec(),
+            encrypted_metadata: meta_rec(b"sealed-meta"),
+            ..Default::default()
+        };
+        let payload = Bytes::from(encode_canonical(&prov).unwrap().to_vec());
+        provision_calendar_handler()(state.clone(), user_a, payload)
+            .await
+            .expect("user provisions own calendar");
+
+        state
+            .db
+            .set_actor_mail_enabled(&user_a, false)
+            .await
+            .unwrap();
+
+        let q = make_query_events_payload(&user_a, &cal_id, None, None, 0);
+        query_events_handler()(state.clone(), mda, q)
+            .await
+            .expect("the MDA serves A's calendar while A's mail is off");
+    }
+
     /// Slice 2 (deployment-home-with-public-relay.md § MUA reach): the per-actor
     /// serving opt-out gates ONLY the MDA-serving path. After actor A disables
     /// serving, the MDA is refused (`mail_serving_disabled`), but A's OWN Fauna
@@ -5698,7 +5887,7 @@ mod tests {
         let prov = ProvisionCalendarRequest {
             actor_id: user_a.to_vec(),
             calendar_id: cal_id.to_vec(),
-            encrypted_metadata: b"sealed-meta".to_vec(),
+            encrypted_metadata: meta_rec(b"sealed-meta"),
             ..Default::default()
         };
         let payload = Bytes::from(encode_canonical(&prov).unwrap().to_vec());
@@ -6074,7 +6263,7 @@ mod tests {
             let req = ProvisionCalendarRequest {
                 actor_id: actor.to_vec(),
                 calendar_id: cal_id.to_vec(),
-                encrypted_metadata: b"sealed-meta".to_vec(),
+                encrypted_metadata: meta_rec(b"sealed-meta"),
                 ..Default::default()
             };
             Bytes::from(encode_canonical(&req).unwrap().to_vec())

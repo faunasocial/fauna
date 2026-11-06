@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import time
 
-from helpers.e2e_session import E2E_LOGIN_DEVICE_ID
+from helpers.e2e_session import e2e_login_device_id
 from helpers.mail_aliases import add_exact_alias
 
 # Local part aliased to the admin actor so it has a routable mail address. Any
@@ -55,16 +55,25 @@ def login_as_nest_admin(app, nest, node_url) -> None:
                 # was never reached and every dispatch silently no-opped behind an
                 # empty error banner. The agents now default it too (belt and
                 # braces), but a real session carries a real device id.
-                "device_id": E2E_LOGIN_DEVICE_ID,
+                "device_id": e2e_login_device_id(app),
             },
             "nav": {"stack": [{"view": "admin"}]},
         }
     )
+    # The connection barrier every login seam owes (convention 14; the reasoning
+    # is at `conftest.py`'s own). The shell painting says nothing about the
+    # transport, and these tests go straight on to `OnlineOnly` controls, which
+    # every app greys while the word is offline.
+    from helpers.connection import wait_until_online
+
+    wait_until_online(app.driver)
     if app.driver.is_web():
-        # The web SPA's WASM auth + WS-RPC connect to the dedicated nest settle
-        # asynchronously; the admin_app fixture sleeps here for the same reason
-        # before the test drives any nest-backed UI (enable-mail).
-        time.sleep(8)
+        # On a page still in onboarding (a fresh seat, or one a previous test
+        # reset), the patch's `goto('/app/admin')` races the SPA's own launch,
+        # which ends its silent challenge with `goto('/app/feed')` and so
+        # overrides the landing the patch asked for. The launch has ended now
+        # that the connection is live, so assert the admin landing again.
+        app.driver.set_state({"nav": {"stack": [{"view": "admin"}]}})
     app.driver.wait_for("admin-dashboard-heading", timeout=15.0)
 
 

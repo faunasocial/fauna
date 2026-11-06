@@ -45,6 +45,26 @@ pub fn requested_bound_account() -> Option<String> {
     fauna_client_accounts::requested_bound_account()
 }
 
+/// [`fauna_client_accounts::KeySyncScope`] over the FFI.
+#[derive(uniffi::Enum, Clone, Copy, PartialEq, Eq, Debug)]
+pub enum FfiKeySyncScope {
+    Identity,
+    Device,
+}
+
+/// The sync scope of a logical secret-store key — which rows a platform's
+/// copy across a person's devices may carry
+/// ([`fauna_client_accounts::key_sync_scope`]; device-scoped unless named).
+/// The classification is here rather than on [`FfiSecretStore`], which stays
+/// a policy-free key/value map; only a store with such a copy ever asks.
+#[uniffi::export]
+pub fn key_sync_scope(key: String) -> FfiKeySyncScope {
+    match fauna_client_accounts::key_sync_scope(&key) {
+        fauna_client_accounts::KeySyncScope::Identity => FfiKeySyncScope::Identity,
+        fauna_client_accounts::KeySyncScope::Device => FfiKeySyncScope::Device,
+    }
+}
+
 /// Held (OS login, account) single-instance lock
 /// (`fauna_client_accounts::AccountInstanceLock`; `account-scoping.md`
 /// § Concurrent instances). RAII: the platform holds it for the session's
@@ -69,6 +89,17 @@ impl FfiAccountInstanceLock {
     /// proceeds unguarded (and should log so a silent guard gap is visible).
     pub fn is_held(&self) -> bool {
         self.holder().holds_lock()
+    }
+
+    /// Let go of both locks now — the instance lock and its store-root
+    /// declaration — **whoever else still holds this object**. Call it where
+    /// the window stops serving the account (a sign-out, a reset, the swap to
+    /// another account's lock): dropping the platform's own reference is not
+    /// enough while a view still holds one, and a lock left up that way is a
+    /// "sibling" the next session's sign-out probe cannot tell from a real one.
+    /// Idempotent; `serving_actor` reads `None` afterwards.
+    pub fn release(&self) {
+        self.holder().release();
     }
 }
 
@@ -464,6 +495,18 @@ pub fn become_process_session_instance(
         mode.into(),
     )
     .into()
+}
+
+/// Stop serving: put down the process holder's instance lock and its
+/// shared-root serving lock, and forget the account
+/// ([`fauna_client_accounts::release_process_session_instance`]). The
+/// [`become_process_session_instance`] seat calls it at every erasing gesture
+/// that keeps the process alive — sign-out, reset — **after** the erase, never
+/// at a remove-account of another account (`account-scoping.md` § Concurrent
+/// instances → *An erase refuses while a sibling serves the account*).
+#[uniffi::export]
+pub fn release_process_session_instance() {
+    fauna_client_accounts::release_process_session_instance();
 }
 
 /// The per-platform logical-keyed secret store, as a UniFFI callback
@@ -1598,7 +1641,7 @@ mod tests {
     /// the one a live read hands an app.
     fn supervised_ffi_status() -> crate::FfiFamilyStatus {
         use fauna_client_family::family::{FamilyGuardianInfo, FamilyStatusReply, ReachPolicy};
-        use fauna_core::obligation::{ContentFloor, ContentPolicy};
+        use fauna_core::obligation::ContentPolicy;
         use fauna_core::screen_time::ScreenTimePolicy;
         FamilyStatusReply {
             supervised_by: Some(FamilyGuardianInfo {
@@ -1607,10 +1650,10 @@ mod tests {
                 ..Default::default()
             }),
             policy: Some(ReachPolicy {
-                content_policy: Some(ContentPolicy {
-                    nsfw: ContentFloor::Block,
-                    ..Default::default()
-                }),
+                content_policy: Some(fauna_core::obligation::ContentPolicy::category_rules(&[(
+                    "nsfw",
+                    fauna_core::content_policy::ContentVerdict::Block,
+                )])),
                 screen_time: Some(ScreenTimePolicy {
                     window_start: Some(1260),
                     window_end: Some(420),
@@ -1649,9 +1692,11 @@ mod tests {
             vec![0xab, 0xcd, 0x01],
             "the guardian id survives the hex round trip"
         );
-        assert_eq!(
-            snap.content_policy.expect("the floor restores").nsfw,
-            "block"
+        assert!(
+            snap.content_policy
+                .expect("the guardian's rules restore")
+                .document
+                .is_some()
         );
         assert!(
             snap.content_notify,

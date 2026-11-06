@@ -59,6 +59,14 @@ struct MacEventFormView: View {
             }
             // The form's one commit; every field above it is the buffer.
             .faunaGate("fauna.bridges.put_event_ciphertext")
+
+            Button(L.events.discardEvent) {
+                vm.discardCompose()
+            }
+            .accessibilityIdentifier(Ids.eventFormDiscard)
+            .automationActivate(Ids.eventFormDiscard) {
+                vm.discardCompose()
+            }
         }
         .padding(.vertical, 8)
         .onAppear {

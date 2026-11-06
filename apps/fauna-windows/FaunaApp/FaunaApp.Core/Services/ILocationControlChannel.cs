@@ -15,7 +15,8 @@ namespace FaunaApp.Core.Services;
 ///
 /// <para>Narrow on purpose: the provisioner also owns start/poke/unprovision/health, none
 /// of which the bindings UI may touch — a VM handed the whole provisioner could stop the
-/// agent. It is also why a fake is four short methods rather than the provisioner's nine.</para>
+/// agent. It is also why a fake is a handful of short methods rather than the whole
+/// provisioner.</para>
 ///
 /// <para><b>These throw; they are not the old best-effort <c>Try*</c> pipe verbs.</b> That
 /// is load-bearing for the optimistic model (<c>FfiLocationBindingsModel</c>): a failed push
@@ -57,6 +58,26 @@ internal interface ILocationControlChannel
     /// count. delete-propagation.md § A wholesale-vanished folder is infrastructure
     /// failure.</summary>
     Task<FfiHeldDeletesApplied> ApplyHeldDeletesAsync(string folder);
+
+    /// <summary><i>Free up space</i> for the bound on-demand folder at <paramref name="path"/>
+    /// (<c>FreeLocationSpace</c>, <c>folder-location-free-space-button</c>; on-demand-files.md
+    /// § The free-up-space gesture where the OS offers none). The agent answers once it has
+    /// accepted the sweep and frees, file by file, every file on this device that is not kept
+    /// and is provably recorded; the outcome is re-read off <see cref="ListLocationsAsync"/>,
+    /// never assumed. Throws the agent's refusal.</summary>
+    Task FreeLocationSpaceAsync(string path);
+
+    /// <summary>Re-read the review list of every group set <paramref name="model"/> holds a
+    /// binding to and fold the readings into it (<c>RefreshSetConflicts</c>); <c>true</c>
+    /// when what the page shows moved. A read the agent cannot answer folds nothing, so the
+    /// rows stay as last read (group-set.md § Build design — the group set, decision 9).</summary>
+    Task<bool> RefreshSetConflictsAsync(FfiLocationBindingsModel model);
+
+    /// <summary><i>Use the other version</i> on the group set <paramref name="folderId"/>'s
+    /// review row <paramref name="conflictId"/> (<c>RestoreRetainedVersion</c>). Throws the
+    /// agent's refusal, in which case the row stands and nothing was written. The nest
+    /// machine's own <i>use the other version</i> does not know these rows.</summary>
+    Task RestoreRetainedVersionAsync(string folderId, long conflictId);
 }
 
 /// <summary>
@@ -83,6 +104,14 @@ internal sealed class AgentLocationControlChannel : ILocationControlChannel
 
     public Task<FfiHeldDeletesApplied> ApplyHeldDeletesAsync(string folder) =>
         _agent.ApplyHeldDeletes(folder);
+
+    public Task FreeLocationSpaceAsync(string path) => _agent.FreeLocationSpace(path);
+
+    public Task<bool> RefreshSetConflictsAsync(FfiLocationBindingsModel model) =>
+        _agent.RefreshSetConflicts(model);
+
+    public Task RestoreRetainedVersionAsync(string folderId, long conflictId) =>
+        _agent.RestoreRetainedVersion(folderId, conflictId);
 }
 
 /// <summary>
@@ -114,4 +143,11 @@ internal sealed class UnreachableLocationControlChannel : ILocationControlChanne
     public Task<FfiHeldDeletesApplied> ApplyHeldDeletesAsync(string folder) =>
         Task.FromException<FfiHeldDeletesApplied>(
             new InvalidOperationException("no sync-agent session"));
+
+    public Task FreeLocationSpaceAsync(string path) => Fail();
+
+    public Task<bool> RefreshSetConflictsAsync(FfiLocationBindingsModel model) =>
+        Task.FromException<bool>(new InvalidOperationException("no sync-agent session"));
+
+    public Task RestoreRetainedVersionAsync(string folderId, long conflictId) => Fail();
 }

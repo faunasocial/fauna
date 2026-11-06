@@ -1,0 +1,23 @@
+<UserControl
+    x:Class="FaunaApp.Controls.TermsNotice"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:loc="using:FaunaApp.Markup"
+    xmlns:ids="using:FaunaApp.UiIds">
+    <!--
+        The by-continuing notice (terms-and-content-guidelines.md § The decisions,
+        item 3): the sentence and the link are siblings, so get_text on the notice
+        reads the sentence alone. The link's target is the shared
+        fauna_ffi_terms_url() — no URL literal here.
+    -->
+    <StackPanel Spacing="2" Margin="0,8,0,0">
+        <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.OnboardingTermsNotice}"
+                   Text="{loc:Localize Key=onboarding/terms/notice}"
+                   TextWrapping="Wrap"
+                   Opacity="0.7" />
+        <HyperlinkButton AutomationProperties.AutomationId="{x:Bind ids:Ids.OnboardingTermsLink}"
+                         Padding="0"
+                         Content="{loc:Localize Key=settings/terms_link}"
+                         Click="Link_Click" />
+    </StackPanel>
+</UserControl>

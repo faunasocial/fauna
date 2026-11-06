@@ -15,74 +15,111 @@ three ids and was corrected in the same commit as this test). The
 `mail-settings-mua-*` rows stay per-protocol: IMAP/SMTP on `enabled`, CalDAV host/
 port on `caldav_enabled`.
 
-Why this is worth a dedicated assertion even though the CalDAV-only flow is
-already proven end-to-end (8/8 tier_3 `dedicated_mail_nest`-family
-files green on macOS, including CalDAV round-trips minted via this same
-`enable_caldav_mailbox` command): those tests drive a raw CalDAV MUA over the
-wire and never read the mail-settings PAGE itself, so a regression in the
-page's per-row visibility gate (e.g. a client re-introducing a stale
-`enabled`-only check, the exact bug class `mail-settings.md`'s CalDAV-only
-lift fixed) would pass every existing CalDAV test and go unnoticed. This test
-reads the page directly.
+How the credential arrives: the user's own **Add credential** gesture. On a
+deployment serving CalDAV with mail off, an account holding no MSEK still sees
+the credential-management section, and its first Add credential IS the enable —
+the read recipe, no submission token (`mail-settings.md` § Layout & flow →
+*CalDAV-only mailbox*; `mail-credentials.md` § Trigger taxonomy, *The
+calendar-only credential*, path (3)). Until 2026-10-26 this file minted through
+the `enable_caldav_mailbox` test-agent command
+(`helpers/mail_dedicated_nest.py::mint_caldav_mailbox`), which stays green with
+that production path broken; the raw-protocol CalDAV tests keep that seam, this
+file drives the page.
 
-Scoped to the apps whose test agent implements `enable_caldav_mailbox`
-(`helpers/mail_dedicated_nest.py::mint_caldav_mailbox`): linux, macos, tui,
-web (`#lib/mail-caldav-e2e`), windows — and **ios, which joined 2026-09-21**.
-iOS was never short of anything here: its shell dispatches the very same shared
-`CaldavMailboxTestCommand` macOS does (`Fauna-iOS/App/FaunaApp.swift`), and the
-page under test is the shared FaunaKit `MailSettingsView`, so both apple targets
-render one set of ids off one `credential_management_reachable` disjunction.
-Nothing here speaks a mail protocol — the mint is a test-agent command and the
-assertions read the settings PAGE — so this outcome sits on the near side of the
-Go-bridge build wall that holds the rest of the CalDAV family on macOS.
+Why this is worth a dedicated assertion even though the CalDAV-only flow is
+proven end-to-end elsewhere: those tests drive a raw CalDAV MUA over the wire
+and never read the mail-settings PAGE itself, so a regression in the page's
+per-row visibility gate (e.g. a client re-introducing a stale `enabled`-only
+check, the exact bug class `mail-settings.md`'s CalDAV-only lift fixed) would
+pass every existing CalDAV test and go unnoticed. This file reads the page.
+
+Two tests:
+
+- `test_caldav_only_mail_settings_render_gate` — every app: the gesture on a
+  domainless box, then the per-row gate (the CalDAV row's host is the nest's own
+  locator, the email rows stay hidden, the credential section renders). Every
+  app reads the one shared `MailSettingsMachine`, whose `AddCredential` mints
+  the first credential (§ Implementation status today), so no app is scoped out.
+- `test_a_bare_account_mints_its_first_credential_from_add_credential` — tui:
+  the same gesture on a CalDAV-only box running a real MDA, with a chosen
+  password a stock CalDAV client then signs in with — proof the first
+  credential the page mints is a real one.
 """
 
 from __future__ import annotations
 
+import secrets
 import time
 from urllib.parse import urlparse
 
 import pytest
 
 from clients.ws_rpc_admin_client import WsRpcAdminClient
-from helpers.mail_dedicated_nest import mint_caldav_mailbox
 
-pytestmark = [
-    pytest.mark.tier_3,
-    pytest.mark.linux,
-    pytest.mark.macos,
-    pytest.mark.tui,
-    pytest.mark.web,
-    pytest.mark.windows,
-    pytest.mark.ios,
-]
+pytestmark = [pytest.mark.tier_3]
+# App marks live on each TEST: the two run on different columns, and a
+# module-level app mark credits each test with a witness on every app listed.
+
+# The first credential's display name. "Default" derives the credential id
+# `default`, whose username is the bare `<handle>@<domain>`
+# (`mail-credentials.md` § MUA-username).
+_FIRST_CREDENTIAL = "Default"
+
+
+def _add_first_credential(app, password: str) -> None:
+    """The user's gesture: Add credential on an account holding no MSEK, with a
+    chosen password — then wait for the row it mints."""
+    app.mail_settings.add_credential_plain(_FIRST_CREDENTIAL, password)
+    assert app.mail_settings.wait_for_credential_count(
+        1, timeout=app.mail_settings.ENABLE_SETTLE_S
+    ), (
+        "Add credential on an MSEK-less account of a CalDAV-serving, mail-off "
+        "deployment must mint exactly one app password (mail-settings.md § Layout "
+        f"& flow → CalDAV-only mailbox); got {app.mail_settings.credential_count()}. "
+        f"mail-page error: {app.mail_settings.page_error_text(timeout=3.0)!r}; "
+        f"app error: {app.error_text()!r}"
+    )
 
 
 @pytest.mark.feature("turn-on-mail")
 @pytest.mark.feature("calendar-in-standard-apps")
+@pytest.mark.android
+@pytest.mark.linux
+@pytest.mark.macos
+@pytest.mark.tui
+@pytest.mark.web
+@pytest.mark.windows
+@pytest.mark.ios
 def test_caldav_only_mail_settings_render_gate(dedicated_no_mail_app, dedicated_no_mail_nest):
-    """Seed caldav-on + email-off on a dedicated fresh actor (never enabled mail),
-    then assert the mail-settings page's per-row visibility gate: the CalDAV MUA
-    row + the shared credential-management controls show; the email-only IMAP/SMTP
+    """Turn the deployment's CalDAV on with mail off, let a dedicated fresh actor
+    (never enabled mail) mint its first credential from Add credential, then
+    assert the mail-settings page's per-row visibility gate: the CalDAV MUA row +
+    the shared credential-management controls show; the email-only IMAP/SMTP
     rows stay hidden.
     """
     app = dedicated_no_mail_app
     driver = app.driver
+    admin = dedicated_no_mail_nest["admin"]
 
-    # Seed BEFORE navigating: the mail-settings page's MailSettingsMachine snapshot
-    # is built once when the page first mounts (no live resubscription to a
-    # mutation from a separate machine instance — that's the same "throwaway VM"
-    # snapshot-staleness class documented elsewhere in this suite), so minting
-    # after navigating would race the already-mounted page's stale snapshot rather
-    # than exercising the render gate itself. Sibling CalDAV tests
-    # (test_caldav_admin_port_rebind.py, test_caldav_autoschedule_mailbox_less.py)
-    # mint before touching any client UI for the same reason.
-    mint_caldav_mailbox(driver, password=None)
+    # Fixture setup, not behaviour under test: the deployment's CalDAV toggle is
+    # the admin's choice, made over the admin's own wire kind. Set BEFORE the
+    # page mounts — its machine reads the deployment's toggles from
+    # `fauna.setup.status` at hydrate.
+    with WsRpcAdminClient(
+        dedicated_no_mail_nest["url"],
+        actor_id=bytes(admin["signing_key"].verify_key),
+        signing_key=bytes(admin["signing_key"]),
+    ) as client:
+        assert client.call("fauna.bridges.set_caldav_enabled", {"enabled": True}).get("ok") is True
+
     app.mail_settings.navigate()
+    # The way in exists before any credential does: the reachability predicate's
+    # DAV arm (`mail-settings.md` § Credential-management reachability).
+    driver.wait_for("mail-settings-add-credential-button", timeout=20.0)
+    _add_first_credential(app, "CaldavOnlyRenderGatePw01Ab")
 
-    # Settle signal: the CalDAV row is gated on `caldav_enabled`, which the mint
-    # just flipped — wait for it rather than the credential list (which may take
-    # an extra snapshot round-trip to reflect the freshly-minted `default` row).
+    # The CalDAV row is gated on the deployment's `caldav_enabled`, read at
+    # hydrate; the credential above has landed, so the block is rendered.
     driver.wait_for("mail-settings-mua-caldav-host", timeout=20.0)
 
     # `is_visible_scrolled`: the port is the second line of the MUA block, which
@@ -101,7 +138,6 @@ def test_caldav_only_mail_settings_render_gate(dedicated_no_mail_app, dedicated_
     # exposure; the shared `MuaInstructions::for_node_url` +
     # `apply_admin_caldav_port`).
     locator = urlparse(dedicated_no_mail_nest["url"]).hostname
-    admin = dedicated_no_mail_nest["admin"]
     with WsRpcAdminClient(
         dedicated_no_mail_nest["url"],
         actor_id=bytes(admin["signing_key"].verify_key),
@@ -154,7 +190,55 @@ def test_caldav_only_mail_settings_render_gate(dedicated_no_mail_app, dedicated_
         "section is reachable via caldav_enabled"
     )
     assert app.mail_settings.credential_count() == 1, (
-        "enable_caldav_mailbox mints exactly one shared `default` credential "
+        "the first Add credential mints exactly one shared `default` credential "
         f"(no separate CalDAV credential); got "
         f"{app.mail_settings.credential_count()} rows"
+    )
+
+
+_BARE_ACCOUNT_PASSWORD = "BareAccountFirstCredentialPw01Ab"
+
+
+@pytest.mark.feature("calendar-in-standard-apps")
+@pytest.mark.tui
+def test_a_bare_account_mints_its_first_credential_from_add_credential(
+    app, dedicated_caldav_only_nest, request
+):
+    """An account that onboarded before its deployment served CalDAV — signed
+    in, no MSEK, never through a first setup on this box — gets its calendar
+    credential from the page: Add credential, a chosen password, and a stock
+    CalDAV client signs in with it against the real MDA (`mail-credentials.md`
+    § Trigger taxonomy, *The calendar-only credential*, path (3)).
+
+    The box is `dedicated_caldav_only_nest`: CalDAV on, mail never enabled, an
+    MDA bound to CalDAV alone. The account is self-registered and signed in by
+    session injection, so the wizard's first-setup auto-mint never ran for it —
+    the bare account the path exists for.
+    """
+    from helpers.admin_wire import admit_adult
+    from conftest import _login_app_as
+    from helpers.caldav_client import sign_in_round_trip
+
+    handle = dedicated_caldav_only_nest
+    nest = handle.nest
+    localpart = "bare" + secrets.token_hex(3)
+    user = admit_adult(nest, localpart, domain=handle.domain, token=True)
+    _login_app_as(app, request, nest, user)
+
+    app.mail_settings.navigate()
+    app.driver.wait_for("mail-settings-add-credential-button", timeout=20.0)
+    assert app.mail_settings.credential_count() == 0, (
+        "fixture setup failed: the bare account must start with no app password"
+    )
+    _add_first_credential(app, _BARE_ACCOUNT_PASSWORD)
+    app.driver.wait_for("mail-settings-mua-caldav-host", timeout=20.0)
+    assert app.mail_settings.enabled_toggle_state() == "off", (
+        "a calendar-only credential is not an email enable: the toggle must stay "
+        f"off, but reads {app.mail_settings.enabled_toggle_state()!r}"
+    )
+
+    sign_in_round_trip(
+        f"https://127.0.0.1:{handle.caldav_port}",
+        f"{localpart}@{handle.domain}",
+        _BARE_ACCOUNT_PASSWORD,
     )

@@ -496,6 +496,10 @@ pub struct DmarcPolicyOverrides {
     pub record: DmarcOverrides,
     pub aggregate_retention_days: Option<u32>,
     pub forensic_retention_days: Option<u32>,
+    /// `mail.dmarc.outbound_aggregate_enabled` (`dmarc-reporting.md`
+    /// § Generation is on by default), read by the daily sender
+    /// (`outbound_dmarc::run_one_emit_pass`); absent ⇒ on.
+    pub outbound_aggregate_enabled: Option<bool>,
 }
 
 impl DmarcPolicyOverrides {
@@ -528,6 +532,9 @@ impl DmarcPolicyOverrides {
             forensic_retention_days: self
                 .forensic_retention_days
                 .unwrap_or(d.forensic_retention_days),
+            outbound_aggregate_enabled: self
+                .outbound_aggregate_enabled
+                .unwrap_or(d.outbound_aggregate_enabled),
             // Forward-compat catch-all (transport.md rule 4): nest-minted, no
             // peer `extra` to carry forward.
             extra: Default::default(),
@@ -1127,6 +1134,7 @@ mod tests {
             },
             aggregate_retention_days: Some(120),
             forensic_retention_days: None,
+            outbound_aggregate_enabled: Some(false),
         };
         db.put_dmarc_policy(put.clone()).await.unwrap();
         let stored = db.get_dmarc_policy().await.unwrap();
@@ -1141,6 +1149,13 @@ mod tests {
         assert_eq!(
             eff.forensic_retention_days,
             DmarcReportingPolicy::default().forensic_retention_days
+        );
+        assert!(!eff.outbound_aggregate_enabled);
+        // Absent ⇒ the shipped default, on.
+        assert!(
+            DmarcPolicyOverrides::default()
+                .effective()
+                .outbound_aggregate_enabled
         );
         // The opt-in reaches the published record through the base.
         assert_eq!(

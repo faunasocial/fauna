@@ -55,6 +55,7 @@ use fauna_protocol::{
 
 use crate::adapter::{GlooAdapter, ReconnectSignal};
 use crate::error::WsRpcError;
+use crate::reach_hint;
 use crate::shared_port::SharedPort;
 
 const INITIAL_BACKOFF: Duration = Duration::from_secs(1);
@@ -315,10 +316,13 @@ struct Inner {
     /// `connection_id`.
     nest_info: fauna_protocol::NestInfoMemo,
     /// `false` until the first successful connect, then permanently `true`. Gates
-    /// `on_reconnected` so the initial connect doesn't count as a reconnect
-    /// (mirrors native's watch, which bumps on every `Connected` *after the
-    /// first*).
+    /// `on_reconnected` so a clean initial connect doesn't count as a reconnect
+    /// (mirrors native's watch, `derive_reconnects`).
     has_connected: Cell<bool>,
+    /// Whether an attempt failed (`Disconnected` / `Unreachable` reported)
+    /// before the first connect — which makes that late first `Connected` a
+    /// reconnect too ([`mark_connected`]; native's `derive_reconnects`).
+    failed_before_first: Cell<bool>,
     /// Set once by [`WsRpcClient::close`]; the reconnect loop observes it and
     /// exits instead of reconnecting, and `request` fails fast instead of
     /// waiting out its deadline on a dispatcher that will never return.
@@ -412,6 +416,7 @@ impl Inner {
             proven_identity: ProvenIdentityMemo::new(),
             nest_info: fauna_protocol::NestInfoMemo::new(),
             has_connected: Cell::new(false),
+            failed_before_first: Cell::new(false),
             closed: Cell::new(false),
             stopped_by: Cell::new(None),
             close_tx: RefCell::new(None),
@@ -932,6 +937,18 @@ impl RpcRequester for WsRpcClient {
         self.live_connection()
     }
 
+    /// The in-gap wait every request makes ([`dispatcher_within_deadline`],
+    /// at `fauna.nest.info`'s own deadline — the read it tickets), then the
+    /// number of the connection it found — the twin of native `NestClient`'s.
+    /// `None` on a port-built client.
+    async fn ready_connection_id(&self) -> Option<u64> {
+        let inner = self.own()?;
+        dispatcher_within_deadline(inner, "fauna.nest.info")
+            .await
+            .ok()
+            .map(|(dispatcher, _)| dispatcher.connection_id())
+    }
+
     /// `None` on a port-built client: its socket is the owner's, so its
     /// readers read on every call.
     fn nest_info_memo(&self) -> Option<&fauna_protocol::NestInfoMemo> {
@@ -1075,6 +1092,12 @@ fn set_state(inner: &Inner, state: ConnectionState) {
     // the stickiness proof must see past (`fauna_e2e_agent::CONNECTION_REPORTS_KEY`).
     #[cfg(feature = "test-helpers")]
     CONNECTION_REPORTS.with_borrow_mut(|r| r.observe(state.as_js_str()));
+    if matches!(
+        state,
+        ConnectionState::Disconnected | ConnectionState::Unreachable
+    ) {
+        inner.failed_before_first.set(true);
+    }
     // Update first, recording whether this is a genuine transition (the loop
     // re-asserts `Connecting` on each retry, so dedup keeps the callback from
     // firing redundantly). Drop the borrow before any JS call — the SPA's
@@ -1094,14 +1117,15 @@ fn set_state(inner: &Inner, state: ConnectionState) {
 }
 
 /// Mark the socket `Connected` and, if this is a *reconnect* (a `Connected`
-/// after the first connect), fire the SPA's re-hydrate callback. The initial
-/// connect only flips `has_connected` — it doesn't fire — matching native's
-/// `subscribe_reconnects`, which bumps on every `Connected` *after the first*.
-/// The callback is cloned out before invocation so we never hold the `RefCell`
-/// borrow across the JS call (it re-enters wasm via the surface re-fetches).
+/// after an earlier connection, or after failed attempts before the first),
+/// fire the SPA's re-hydrate callback. A first connect that met no failure only
+/// flips `has_connected` — it doesn't fire — matching native's
+/// `subscribe_reconnects` (`derive_reconnects`). The callback is cloned out
+/// before invocation so we never hold the `RefCell` borrow across the JS call
+/// (it re-enters wasm via the surface re-fetches).
 fn mark_connected(inner: &Inner) {
     set_state(inner, ConnectionState::Connected);
-    if inner.has_connected.replace(true) {
+    if inner.has_connected.replace(true) || inner.failed_before_first.get() {
         inner.reconnects.send_modify(|n| *n = n.wrapping_add(1));
         let cb = inner.on_reconnected.borrow().clone();
         if let Some(cb) = cb {
@@ -1309,7 +1333,17 @@ async fn run_reconnect_loop(inner: Rc<Inner>, mut close_rx: oneshot::Receiver<()
     // same due time. Native twin: `run_supervisor`'s `curve_due`/`demand_dial`.
     let mut curve_due: Option<f64> = None;
     let mut demand_dial = false;
-    let mut extra_dial: bool;
+    let mut extra_dial = false;
+    // Set on a domain dial that reached nothing while the reach table holds a
+    // hint for the domain: the next pass is the second half of the SAME logical
+    // dial, over the hint, on this same bearer. The pair counts one attempt, as
+    // native's does (`dial_ws_trusted`), and the hint's own refusal takes the
+    // nap: no re-mint between the two, no failure counted for the domain alone.
+    // That pass dials the hint only by spending the entry's one-shot proof
+    // (`reach_hint::spend_bearer_dial`), so this bearer rides to the address
+    // only if a pinned ceremony over it vouched for exactly this dial; with no
+    // live proof the pass is a refusal and the next attempt re-mints.
+    let mut hint_bearer: Option<String> = None;
     // The nap after a REFUSED attempt — a failed token fetch, a failed handle
     // creation, or a socket that died inside the establish probe — the one
     // kind of failure a waiting request's dials are for (`transport-connection.md`
@@ -1358,9 +1392,15 @@ async fn run_reconnect_loop(inner: Rc<Inner>, mut close_rx: oneshot::Receiver<()
             return;
         }
         report!(ConnectionState::Connecting);
-        extra_dial = std::mem::take(&mut demand_dial);
+        // The hint half of a dial stays whatever kind of dial its domain half was.
+        extra_dial = std::mem::take(&mut demand_dial) || (hint_bearer.is_some() && extra_dial);
 
-        let token = match inner.token_provider.fetch(force_refresh).await {
+        let hint_turn = hint_bearer.is_some();
+        let fetched = match hint_bearer.take() {
+            Some(bearer) => Ok(bearer),
+            None => inner.token_provider.fetch(force_refresh).await,
+        };
+        let token = match fetched {
             Ok(t) => t,
             // The nest refused the re-mint outright: no bearer will ever come
             // for this identity here, so stop for good — with why — instead of
@@ -1402,7 +1442,30 @@ async fn run_reconnect_loop(inner: Rc<Inner>, mut close_rx: oneshot::Receiver<()
         }
 
         let nest_url = inner.nest_url.borrow().clone();
-        let adapter = match GlooAdapter::connect(&nest_url, &inner.actor_id_hex, &token) {
+        // The hint moves the socket and nothing else: `dial_url` opens it, and
+        // `nest_url`, the domain, stays this client's identity everywhere else
+        // (`onboarding-provisioning.md` § Reach hint → *The web session's half*).
+        // The bearer rides to the hint only on a live proof, which this read
+        // spends: a pinned ceremony over the hint on this page vouches for one
+        // bearer dial and no more (§ *Trust*). No proof — spent, lapsed, or the
+        // entry cleared since the domain dial — is no fallback: the attempt is
+        // refused, and the next one re-mints so its ceremony can re-arm it.
+        let hint_dial = if hint_turn {
+            match reach_hint::spend_bearer_dial(&nest_url) {
+                Some(dial) => Some(dial),
+                None => {
+                    force_refresh = true;
+                    refused_nap!("the reach hint holds no live proof for this bearer");
+                }
+            }
+        } else {
+            None
+        };
+        let over_hint = hint_dial.is_some();
+        let dial_url = hint_dial
+            .as_ref()
+            .map_or(nest_url.as_str(), |dial| dial.dial_url());
+        let adapter = match GlooAdapter::connect(dial_url, &inner.actor_id_hex, &token) {
             Ok(a) => a,
             Err(e) => {
                 // SRV self-heal: an admin may have changed the nest's client-facing
@@ -1410,7 +1473,7 @@ async fn run_reconnect_loop(inner: Rc<Inner>, mut close_rx: oneshot::Receiver<()
                 // `_fauna._tcp` via DoH and, if it now points elsewhere, retry
                 // immediately on the new port (nest/common.md § Serving ports,
                 // path 2 — the wasm twin of native `ClientChannel::recover_endpoint`).
-                if try_srv_recover(&inner).await {
+                if !over_hint && try_srv_recover(&inner).await {
                     tracing::info!(
                         "ws connect failed: {e}; endpoint re-resolved via SRV (serving-port \
                          change); retrying immediately"
@@ -1418,6 +1481,10 @@ async fn run_reconnect_loop(inner: Rc<Inner>, mut close_rx: oneshot::Receiver<()
                     consecutive_failures = consecutive_failures.saturating_add(1);
                     report!(ConnectionState::Disconnected);
                     backoff.reset();
+                    continue;
+                }
+                if !over_hint && reach_hint::hint_dial(&nest_url).is_some() {
+                    hint_bearer = Some(token);
                     continue;
                 }
                 refused_nap!(format!("ws connect failed: {e}"));
@@ -1435,6 +1502,7 @@ async fn run_reconnect_loop(inner: Rc<Inner>, mut close_rx: oneshot::Receiver<()
         // just pays one extra (cheap) handshake.
 
         let signal_cell = adapter.signal_cell();
+        let socket_open = adapter.socket_open();
         let (dispatcher, driver) = RpcDispatcher::new(adapter);
         // Re-attached on every reconnect, because the dispatcher is rebuilt per
         // connection: the wire `replay_forbidden` hint comes off this registry,
@@ -1473,6 +1541,20 @@ async fn run_reconnect_loop(inner: Rc<Inner>, mut close_rx: oneshot::Receiver<()
             Pin::new(&mut close_rx),
         )
         .await;
+        // A domain dial still connecting when the probe elapses has opened
+        // nothing: with a hint to try it is abandoned as a refused one, the
+        // timed-out case of the dial rule, which a browser would otherwise take
+        // tens of seconds to report. Without a hint it reads as it always has.
+        let verdict = match verdict {
+            Establish::Established
+                if !over_hint
+                    && !socket_open.is_open()
+                    && reach_hint::hint_dial(&nest_url).is_some() =>
+            {
+                Establish::Died
+            }
+            verdict => verdict,
+        };
 
         // Whether the handle never came up: a refused attempt, as opposed to a
         // proven connection that later dropped.
@@ -1507,6 +1589,12 @@ async fn run_reconnect_loop(inner: Rc<Inner>, mut close_rx: oneshot::Receiver<()
                 // counting from zero.
                 consecutive_failures = 0;
                 mark_connected(&inner);
+                // The first bearer socket open over the domain itself spends
+                // the hint. Read open, not merely outliving the probe: only a
+                // completed upgrade is the domain answering.
+                if !over_hint && socket_open.is_open() {
+                    reach_hint::domain_reached(&nest_url);
+                }
                 // Every proven connection announces this install's push device,
                 // as native `ClientChannel::on_connect` does: the tag lasts as
                 // long as the connection, so a reconnect must say it again.
@@ -1531,6 +1619,14 @@ async fn run_reconnect_loop(inner: Rc<Inner>, mut close_rx: oneshot::Receiver<()
         // That nap reports the attempt itself, once counted, so the threshold
         // attempt goes straight to `Unreachable`.
         let refused = died && matches!(signal, ReconnectSignal::Retry);
+        // The rule's fallback: a domain dial that reached nothing, and only
+        // that. A browser reports every such failure alike, so the class cannot
+        // be narrowed as native's is; a close code here is a nest that answered,
+        // which takes its own arm below, never a second dial.
+        if refused && !over_hint && reach_hint::hint_dial(&nest_url).is_some() {
+            hint_bearer = Some(token);
+            continue;
+        }
         if died && !refused {
             consecutive_failures = consecutive_failures.saturating_add(1);
         }
@@ -1808,6 +1904,79 @@ mod tests {
             return new Float64Array(__gap_dials.get(String(port)) ?? []);
         }
 
+        // The reach fake: a behaviour per dialled `host:port`, set before the
+        // dial, and a log of every dial per port, so a test reads the order the
+        // loop dialled in, the bearer it offered and the path it asked for.
+        // `refuse` is a 1006 close (the browser's face of an unresolvable,
+        // refused or untrusted dial), `open` opens and stays open, `hang` stays
+        // CONNECTING for good, and a number closes with that code.
+        const __reach_modes = new Map();
+        const __reach_dials = new Map();
+
+        export function install_reach_ws() {
+            if (__real_ws === null) {
+                __real_ws = globalThis.WebSocket;
+            }
+            class ReachWebSocket extends EventTarget {
+                constructor(url, protocols) {
+                    super();
+                    this.url = url;
+                    this.protocol = "";
+                    this.binaryType = "blob";
+                    this.readyState = ReachWebSocket.CONNECTING;
+                    const parsed = new URL(url);
+                    if (!__reach_dials.has(parsed.port)) __reach_dials.set(parsed.port, []);
+                    __reach_dials.get(parsed.port).push(
+                        `${parsed.hostname} ${parsed.pathname} ${[...protocols].join(",")}`,
+                    );
+                    const mode = __reach_modes.get(parsed.host) ?? "refuse";
+                    for (const ev of ["open", "close", "message", "error"]) {
+                        let handler = null;
+                        Object.defineProperty(this, "on" + ev, {
+                            get: () => handler,
+                            set: (fn) => {
+                                if (handler) this.removeEventListener(ev, handler);
+                                handler = fn;
+                                if (fn) this.addEventListener(ev, fn);
+                            },
+                        });
+                    }
+                    Promise.resolve().then(() => {
+                        if (mode === "hang") return;
+                        if (mode === "open") {
+                            this.readyState = ReachWebSocket.OPEN;
+                            this.dispatchEvent(new Event("open"));
+                            return;
+                        }
+                        this.readyState = ReachWebSocket.CLOSED;
+                        const code = mode === "refuse" ? 1006 : Number(mode);
+                        this.dispatchEvent(new CloseEvent("close", {
+                            code,
+                            reason: "",
+                            wasClean: false,
+                        }));
+                    });
+                }
+                send(_data) {}
+                close(_code, _reason) {
+                    this.readyState = ReachWebSocket.CLOSED;
+                }
+            }
+            ReachWebSocket.CONNECTING = 0;
+            ReachWebSocket.OPEN = 1;
+            ReachWebSocket.CLOSING = 2;
+            ReachWebSocket.CLOSED = 3;
+            globalThis.WebSocket = ReachWebSocket;
+        }
+
+        export function set_reach_mode(host, mode) {
+            __reach_modes.set(host, mode);
+        }
+
+        export function reach_dials(port) {
+            return __reach_dials.get(String(port)) ?? [];
+        }
+
         export function restore_real_ws() {
             if (__real_ws !== null) {
                 globalThis.WebSocket = __real_ws;
@@ -1820,6 +1989,9 @@ mod tests {
         fn install_gap_ws();
         fn set_gap_up(port: u16);
         fn gap_dial_times(port: u16) -> Vec<f64>;
+        fn install_reach_ws();
+        fn set_reach_mode(host: &str, mode: &str);
+        fn reach_dials(port: u16) -> js_sys::Array;
         fn restore_real_ws();
     }
 
@@ -1910,6 +2082,361 @@ mod tests {
         client.request("fauna.protocol.echo", ()).await
     }
 
+    /// The domain a reach test dials on `port`, and the hint standing in for it.
+    fn reach_domain(port: u16) -> String {
+        format!("reach-{port}.example:{port}")
+    }
+
+    fn reach_hint_ip(port: u16) -> String {
+        format!("203.0.113.{}", port % 200 + 1)
+    }
+
+    /// How a reach test's mints treat the hint's proof.
+    #[derive(Clone, Copy, PartialEq)]
+    enum Mints {
+        /// No mint proves the hint: only the launch's install armed it.
+        Plain,
+        /// Every forced mint re-arms the proof, as a mint whose ceremony over
+        /// the hint succeeded does (`challengeVerify`'s fallback,
+        /// `reach_hint::prove`), through a Rust closure the JS provider calls.
+        /// An unforced fetch hands back the cached bearer and runs no ceremony.
+        Proving,
+    }
+
+    /// A client of the reach fake on `port`, paced fast and counting its mints
+    /// (`n`) and the `force` each was asked with (`forces`), its domain's hint
+    /// installed — its proof armed, as the launch's install arms it — unless
+    /// `hint` is false. The second value counts the deleter's runs.
+    fn reach_client(
+        port: u16,
+        hint: bool,
+        minting: Mints,
+    ) -> (WsRpcClient, Rc<Cell<u32>>, js_sys::Object) {
+        FIXED_JITTER.set(Some(1.0));
+        let nest_url = format!("http://{}", reach_domain(port));
+        let deletions = Rc::new(Cell::new(0));
+        if hint {
+            let count = Rc::clone(&deletions);
+            reach_hint::install(&nest_url, &reach_hint_ip(port), move || {
+                count.set(count.get() + 1)
+            });
+        }
+        let prove = match minting {
+            Mints::Plain => JsValue::NULL,
+            Mints::Proving => {
+                let url = nest_url.clone();
+                wasm_bindgen::closure::Closure::<dyn FnMut()>::new(move || {
+                    if let Some(dial) = reach_hint::hint_dial(&url) {
+                        reach_hint::prove(&dial);
+                    }
+                })
+                .into_js_value()
+            }
+        };
+        let mints = js_sys::Object::new();
+        let provider = js_sys::Function::new_with_args(
+            "mints, prove, force",
+            "mints.n = (mints.n ?? 0) + 1; (mints.forces ??= []).push(force); \
+             if (prove && force) prove(); return 'bearer-' + mints.n;",
+        )
+        .bind2(&JsValue::NULL, &mints, &prove);
+        let client = WsRpcClient::connect(
+            nest_url,
+            "00".repeat(32),
+            wasm_bindgen::JsCast::unchecked_into(provider),
+        );
+        inner_of(&client)
+            .backoff_override
+            .set(Some((Duration::from_millis(50), Duration::from_secs(60))));
+        (client, deletions, mints)
+    }
+
+    fn end_reach(client: &WsRpcClient, port: u16) {
+        client.close();
+        restore_real_ws();
+        FIXED_JITTER.set(None);
+        reach_hint::clear(&format!("http://{}", reach_domain(port)));
+    }
+
+    /// The dials made on `port`, each `host path protocols`.
+    fn reach_log(port: u16) -> Vec<String> {
+        reach_dials(port)
+            .iter()
+            .filter_map(|d| d.as_string())
+            .collect()
+    }
+
+    /// The dialled hosts alone, in order.
+    fn reach_hosts(port: u16) -> Vec<String> {
+        reach_log(port)
+            .iter()
+            .filter_map(|d| d.split(' ').next().map(str::to_string))
+            .collect()
+    }
+
+    fn mints_of(mints: &js_sys::Object) -> f64 {
+        js_sys::Reflect::get(mints, &JsValue::from_str("n"))
+            .ok()
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0)
+    }
+
+    /// Bounded well past the establish probe; the bound is a hang backstop, not
+    /// the pass condition (convention 14).
+    const REACH_WAIT_MS: f64 = ESTABLISH_PROBE_MS as f64 * 3.0 + 1_000.0;
+
+    /// **A domain dial that reached nothing is followed at once by a dial of the
+    /// hint**, in the same attempt: the same bearer, the same actor path, the
+    /// domain's own port, no nap and no second mint. A hint that carried the
+    /// connection spends nothing, and the client's URL stays the domain, which
+    /// is what every later dial and every identity reading keys on.
+    #[wasm_bindgen_test]
+    async fn a_refused_domain_dial_falls_back_to_the_hint() {
+        const PORT: u16 = 30;
+        install_reach_ws();
+        let hint_host = format!("{}:{PORT}", reach_hint_ip(PORT));
+        set_reach_mode(&hint_host, "open");
+        let (client, deletions, mints) = reach_client(PORT, true, Mints::Plain);
+        let took = connected_within(&client, REACH_WAIT_MS).await;
+        let log = reach_log(PORT);
+        let nest_url = client.nest_url();
+        let (mint_count, spent) = (mints_of(&mints), deletions.get());
+        let still_held = reach_hint::hint_dial(&nest_url).is_some();
+        end_reach(&client, PORT);
+
+        assert!(took.is_some(), "the hint never connected: {log:?}");
+        let path = format!("/api/v1/ws/{} fauna.v1,bearer.bearer-1", "00".repeat(32));
+        assert_eq!(
+            log,
+            vec![
+                format!("reach-{PORT}.example {path}"),
+                format!("{} {path}", reach_hint_ip(PORT)),
+            ]
+        );
+        assert_eq!(mint_count, 1.0, "the pair is one dial on one bearer");
+        assert_eq!(nest_url, format!("http://{}", reach_domain(PORT)));
+        assert_eq!(spent, 0, "a hint-carried socket deletes nothing");
+        assert!(still_held);
+    }
+
+    /// **The first bearer socket open over the domain spends the hint**, and the
+    /// hint is not dialled on the way there.
+    #[wasm_bindgen_test]
+    async fn a_domain_success_spends_the_hint_once() {
+        const PORT: u16 = 31;
+        install_reach_ws();
+        set_reach_mode(&reach_domain(PORT), "open");
+        let (client, deletions, _mints) = reach_client(PORT, true, Mints::Plain);
+        let took = connected_within(&client, REACH_WAIT_MS).await;
+        let hosts = reach_hosts(PORT);
+        let spent = deletions.get();
+        let held = reach_hint::hint_dial(&client.nest_url()).is_some();
+        end_reach(&client, PORT);
+
+        assert!(took.is_some(), "the domain never connected: {hosts:?}");
+        assert_eq!(hosts, vec![format!("reach-{PORT}.example")]);
+        assert_eq!(spent, 1);
+        assert!(!held, "a spent hint leaves the table");
+    }
+
+    /// **The domain is tried first on every attempt, and a failed fallback
+    /// deletes nothing.** Both refusing, the dials alternate domain then hint
+    /// (each attempt's mint re-arming the proof, as a mint over the hint does);
+    /// when the zone publishes, the domain's success is what spends the hint.
+    #[wasm_bindgen_test]
+    async fn every_attempt_starts_at_the_domain_and_a_failed_hint_is_kept() {
+        const PORT: u16 = 32;
+        install_reach_ws();
+        let (client, deletions, _mints) = reach_client(PORT, true, Mints::Proving);
+        TimeoutFuture::new(300).await;
+        let hosts = reach_hosts(PORT);
+        let kept = deletions.get();
+        set_reach_mode(&reach_domain(PORT), "open");
+        let took = connected_within(&client, REACH_WAIT_MS).await;
+        let spent = deletions.get();
+        end_reach(&client, PORT);
+
+        assert!(hosts.len() >= 4, "too few attempts to read: {hosts:?}");
+        let domain = format!("reach-{PORT}.example");
+        let hint = reach_hint_ip(PORT);
+        for (i, host) in hosts.iter().enumerate() {
+            let wanted = if i % 2 == 0 { &domain } else { &hint };
+            assert_eq!(host, wanted, "dial {i} of {hosts:?}");
+        }
+        assert_eq!(kept, 0, "a failed fallback is not a wrong address");
+        assert!(took.is_some(), "the domain's return was not found");
+        assert_eq!(spent, 1);
+    }
+
+    /// **A nest that answered is never asked again by another address.** A 4401
+    /// on the domain is the nest's own verdict; the reach hint is for a dial
+    /// that reached nothing, and every dial of this run stays on the domain.
+    #[wasm_bindgen_test]
+    async fn a_close_code_from_the_domain_takes_no_fallback() {
+        const PORT: u16 = 33;
+        install_reach_ws();
+        set_reach_mode(&reach_domain(PORT), "4401");
+        let (client, deletions, _mints) = reach_client(PORT, true, Mints::Plain);
+        TimeoutFuture::new(300).await;
+        let hosts = reach_hosts(PORT);
+        let spent = deletions.get();
+        end_reach(&client, PORT);
+
+        assert!(!hosts.is_empty());
+        assert!(
+            hosts.iter().all(|h| *h == format!("reach-{PORT}.example")),
+            "{hosts:?}"
+        );
+        assert_eq!(spent, 0);
+    }
+
+    /// **A domain dial that hangs is a dial that reached nothing.** It outlives
+    /// the establish probe still connecting, so the probe alone would call it
+    /// established and spend the hint; it is abandoned for the hint instead.
+    #[wasm_bindgen_test]
+    async fn a_domain_dial_still_connecting_at_the_probe_falls_back_and_spends_nothing() {
+        const PORT: u16 = 34;
+        install_reach_ws();
+        set_reach_mode(&reach_domain(PORT), "hang");
+        let hint_host = format!("{}:{PORT}", reach_hint_ip(PORT));
+        set_reach_mode(&hint_host, "open");
+        let (client, deletions, _mints) = reach_client(PORT, true, Mints::Plain);
+        let took = connected_within(&client, REACH_WAIT_MS).await;
+        let hosts = reach_hosts(PORT);
+        let spent = deletions.get();
+        end_reach(&client, PORT);
+
+        assert!(took.is_some(), "the hint never connected: {hosts:?}");
+        assert_eq!(
+            hosts,
+            vec![format!("reach-{PORT}.example"), reach_hint_ip(PORT)]
+        );
+        assert_eq!(spent, 0, "a socket that never opened is no domain success");
+    }
+
+    /// **With no hint nothing changes**: the domain alone, on the curve.
+    #[wasm_bindgen_test]
+    async fn no_hint_dials_the_domain_alone() {
+        const PORT: u16 = 35;
+        install_reach_ws();
+        let (client, _deletions, _mints) = reach_client(PORT, false, Mints::Plain);
+        TimeoutFuture::new(200).await;
+        let hosts = reach_hosts(PORT);
+        end_reach(&client, PORT);
+
+        assert!(!hosts.is_empty());
+        assert!(
+            hosts.iter().all(|h| *h == format!("reach-{PORT}.example")),
+            "{hosts:?}"
+        );
+    }
+
+    /// The `force` each mint was asked with, in order.
+    fn forces_of(mints: &js_sys::Object) -> Vec<bool> {
+        js_sys::Reflect::get(mints, &JsValue::from_str("forces"))
+            .ok()
+            .and_then(|v| wasm_bindgen::JsCast::dyn_into::<js_sys::Array>(v).ok())
+            .map(|a| a.iter().map(|f| f.as_bool() == Some(true)).collect())
+            .unwrap_or_default()
+    }
+
+    /// **A bearer rides to the hint once per proof** (§ *Trust*). The launch's
+    /// install vouches for one bearer dial; with no mint over the hint after it,
+    /// every later attempt dials the domain alone and re-mints, however long
+    /// the domain stays dark.
+    #[wasm_bindgen_test]
+    async fn a_bearer_rides_to_the_hint_once_per_proof() {
+        const PORT: u16 = 36;
+        install_reach_ws();
+        let (client, deletions, mints) = reach_client(PORT, true, Mints::Plain);
+        TimeoutFuture::new(400).await;
+        let hosts = reach_hosts(PORT);
+        let forces = forces_of(&mints);
+        let kept = deletions.get();
+        end_reach(&client, PORT);
+
+        let domain = format!("reach-{PORT}.example");
+        let hint = reach_hint_ip(PORT);
+        assert!(hosts.len() >= 4, "too few attempts to read: {hosts:?}");
+        assert_eq!(hosts[..2], [domain.clone(), hint.clone()], "{hosts:?}");
+        assert!(
+            hosts[2..].iter().all(|h| *h == domain),
+            "a spent proof is no fallback: {hosts:?}"
+        );
+        assert_eq!(forces.first(), Some(&false), "{forces:?}");
+        assert!(forces[1..].iter().all(|f| *f), "{forces:?}");
+        assert_eq!(kept, 0);
+    }
+
+    /// **A mint over the hint restores the fallback.** The launch's proof is
+    /// already spent, so the first attempt's hint turn is refused and asks for a
+    /// re-mint; that mint's ceremony re-arms the proof, and the second attempt's
+    /// bearer — the re-minted one — rides to the hint.
+    #[wasm_bindgen_test]
+    async fn a_mint_that_proves_the_hint_restores_the_fallback() {
+        const PORT: u16 = 37;
+        install_reach_ws();
+        let hint_host = format!("{}:{PORT}", reach_hint_ip(PORT));
+        set_reach_mode(&hint_host, "open");
+        let nest_url = format!("http://{}", reach_domain(PORT));
+        let (client, _deletions, mints) = {
+            let made = reach_client(PORT, true, Mints::Proving);
+            // Synchronously after `connect`, before the loop's first poll.
+            assert!(reach_hint::spend_bearer_dial(&nest_url).is_some());
+            made
+        };
+        let took = connected_within(&client, REACH_WAIT_MS).await;
+        let log = reach_log(PORT);
+        let forces = forces_of(&mints);
+        end_reach(&client, PORT);
+
+        assert!(took.is_some(), "the re-armed hint never connected: {log:?}");
+        let path = format!("/api/v1/ws/{}", "00".repeat(32));
+        assert_eq!(
+            log,
+            vec![
+                format!("reach-{PORT}.example {path} fauna.v1,bearer.bearer-1"),
+                format!("reach-{PORT}.example {path} fauna.v1,bearer.bearer-2"),
+                format!("{} {path} fauna.v1,bearer.bearer-2", reach_hint_ip(PORT)),
+            ]
+        );
+        assert_eq!(forces, vec![false, true]);
+    }
+
+    /// **A lapsed proof is no fallback**, even with a live box at the hint: the
+    /// rule holds on the clock alone, and the refusal asks for a re-mint.
+    #[wasm_bindgen_test]
+    async fn a_lapsed_proof_is_no_fallback() {
+        const PORT: u16 = 38;
+        install_reach_ws();
+        let hint_host = format!("{}:{PORT}", reach_hint_ip(PORT));
+        set_reach_mode(&hint_host, "open");
+        let nest_url = format!("http://{}", reach_domain(PORT));
+        let (client, _deletions, mints) = {
+            let made = reach_client(PORT, true, Mints::Plain);
+            reach_hint::lapse_proof_for_test(&nest_url);
+            made
+        };
+        TimeoutFuture::new(300).await;
+        let hosts = reach_hosts(PORT);
+        let forces = forces_of(&mints);
+        let state = client.connection_state();
+        end_reach(&client, PORT);
+
+        assert!(hosts.len() >= 2, "too few attempts to read: {hosts:?}");
+        assert!(
+            hosts.iter().all(|h| *h == format!("reach-{PORT}.example")),
+            "{hosts:?}"
+        );
+        assert_ne!(state, ConnectionState::Connected);
+        assert_eq!(forces.first(), Some(&false), "{forces:?}");
+        assert_eq!(
+            forces.get(1),
+            Some(&true),
+            "the refusal re-mints: {forces:?}"
+        );
+    }
+
     /// **A request on a stopped client fails at once, with why**, for both
     /// endings the loop records, through the request path and the connect
     /// wait. Until 2026-09-15 the loop returned on a 1000 or 4426 close without
@@ -1961,6 +2488,29 @@ mod tests {
             .expect("a request on a stopped client parked instead of failing")
             .expect_err("no nest ever serves this client");
         assert!(matches!(err, WsRpcError::NotConnected), "got {err:?}");
+    }
+
+    /// **A late first connect is a reconnect; a clean one is not** — native's
+    /// `derive_reconnects` rule, on web's twin. A first `Connected` reached
+    /// only after failed attempts fires the re-hydrate signal, because the
+    /// surfaces the SPA loaded at sign-in ran into the failure.
+    #[wasm_bindgen_test]
+    fn a_first_connect_after_a_failed_attempt_is_a_reconnect() {
+        let clean = loopless_client();
+        set_state(inner_of(&clean), ConnectionState::Connecting);
+        mark_connected(inner_of(&clean));
+        assert_eq!(*inner_of(&clean).reconnects.borrow(), 0);
+
+        let late = loopless_client();
+        set_state(inner_of(&late), ConnectionState::Connecting);
+        set_state(inner_of(&late), ConnectionState::Disconnected);
+        set_state(inner_of(&late), ConnectionState::Connecting);
+        mark_connected(inner_of(&late));
+        assert_eq!(
+            *inner_of(&late).reconnects.borrow(),
+            1,
+            "a first connect after a failed attempt must fire the re-hydrate signal"
+        );
     }
 
     /// **A request already parked for a reconnect wakes to the stop.** It is

@@ -182,13 +182,7 @@ pub(crate) fn become_session_instance(
 /// like every other seat's, never joined onto the base.
 fn with_serving_bases<T>(f: impl FnOnce(fauna_client_accounts::ServingBases<'_>) -> T) -> T {
     let base = install_state_base();
-    let store_root = fauna_sync_engine::root::StoreRoot::platform()
-        .inspect_err(|e| tracing::error!("[account-scope] no account-store root: {e:#}"))
-        .ok();
-    f(fauna_client_accounts::ServingBases {
-        state_base: base.as_deref(),
-        store_root: store_root.as_ref().map(|root| root.base()),
-    })
+    fauna_client_accounts::with_platform_serving_bases(base.as_deref(), f)
 }
 
 /// **May this device run its all-accounts erase at all?** — the refusal a
@@ -454,16 +448,9 @@ pub(crate) fn erase_all_known_accounts() -> Vec<PathBuf> {
     sweep.survivors
 }
 
-/// The residue as the `sign-out-residue` view paints it: the install-scoped
-/// record the re-sweep needs, and the one line the user is shown. Twin of
-/// tui's `account_scope::ResidueSurface`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ResidueSurface {
-    pub(crate) record: fauna_client_accounts::SignOutResidue,
-    /// `sign-out-residue-message` — the shared `Rendered` copy, or the retry's
-    /// own refusal while another instance serves one of the residue's accounts.
-    pub(crate) line: String,
-}
+/// The residue as the `sign-out-residue` view paints it — the one shared
+/// [`fauna_client_accounts::ResidueSurface`].
+pub(crate) use fauna_client_accounts::ResidueSurface;
 
 thread_local! {
     /// What the last sign-out left, while it still owes work — read by
@@ -512,10 +499,12 @@ pub(crate) fn record_residue(
     survivors: &[PathBuf],
     credentials: &fauna_client_accounts::CredentialSweep,
 ) {
-    log_residue(survivors, credentials);
-    let record = fauna_client_accounts::SignOutResidue::record(survivors, credentials);
-    persist_residue(&record);
-    set_sign_out_residue(surface_for(record));
+    set_sign_out_residue(fauna_client_accounts::report_residue(
+        survivors,
+        credentials,
+        install_state_base().as_deref(),
+        fauna_i18n::strings::lookup,
+    ));
 }
 
 /// Remove Again (`sign-out-residue-retry-button`): re-sweep what the painted
@@ -558,67 +547,12 @@ fn run_residue_retry(record: fauna_client_accounts::SignOutResidue) -> Option<Re
             crate::client::re_delete_credentials(recorded)
         })
     });
-    match outcome {
-        fauna_client_accounts::ResidueRetry::Blocked(_) => Some(ResidueSurface {
-            record,
-            line: fauna_client_accounts::sign_out_residue_retry_blocked_copy()
-                .resolve(fauna_i18n::strings::lookup),
-        }),
-        fauna_client_accounts::ResidueRetry::Swept(left) => {
-            let paths: Vec<PathBuf> = left.paths.iter().map(|p| p.path.clone()).collect();
-            log_residue(&paths, &left.credentials());
-            persist_residue(&left);
-            surface_for(left)
-        }
-    }
-}
-
-/// The paint for an owing record; `None` for a clean one.
-fn surface_for(record: fauna_client_accounts::SignOutResidue) -> Option<ResidueSurface> {
-    let line = record
-        .view()
-        .copy()
-        .warning?
-        .resolve(fauna_i18n::strings::lookup);
-    Some(ResidueSurface { record, line })
-}
-
-/// Write the record into linux's install base — or remove it, when clean. A
-/// failed write is logged and not fatal: the view still paints for this
-/// process, and the paths are in the log the erase wrote.
-fn persist_residue(record: &fauna_client_accounts::SignOutResidue) {
-    let Some(base) = install_state_base() else {
-        return;
-    };
-    if let Err(e) = record.save(&base) {
-        tracing::warn!(
-            "sign-out: the residue record under {} could not be written: {e}",
-            base.display()
-        );
-    }
-}
-
-/// The residue's log half — paths and key names, which never reach the user.
-fn log_residue(survivors: &[PathBuf], credentials: &fauna_client_accounts::CredentialSweep) {
-    if !survivors.is_empty() {
-        tracing::warn!(
-            "sign-out: {} path(s) SURVIVED the erase and still hold this user's data: {}",
-            survivors.len(),
-            survivors
-                .iter()
-                .map(|p| p.display().to_string())
-                .collect::<Vec<_>>()
-                .join(", ")
-        );
-    }
-    if !credentials.is_clean() {
-        tracing::warn!(
-            "sign-out: sign-in credentials SURVIVED the erase (namespace wipe failed: {}); \
-             still readable: [{}]",
-            credentials.wipe_failed,
-            credentials.survivors.join(", ")
-        );
-    }
+    fauna_client_accounts::settle_residue_retry(
+        record,
+        outcome,
+        install_state_base().as_deref(),
+        fauna_i18n::strings::lookup,
+    )
 }
 
 /// Every actor scope under each of the three bases (`fauna_base` itself, its
@@ -690,17 +624,9 @@ mod tests {
         );
     }
 
-    /// Every account served somewhere → nothing to offer. The chooser renders
-    /// its "all open" explanation rather than an empty list, and its two exits
-    /// still work (pinned in the view's own tests).
-    #[test]
-    fn choosable_accounts_can_be_empty() {
-        let tmp = tempfile::tempdir().unwrap();
-        let _a = fauna_client_accounts::AccountInstanceLock::acquire(tmp.path(), ACTOR_A);
-        let _b = fauna_client_accounts::AccountInstanceLock::acquire(tmp.path(), ACTOR_B);
-        let entries = vec![(ACTOR_A.to_string(), None), (ACTOR_B.to_string(), None)];
-        assert!(choosable_accounts_under(tmp.path(), &entries).is_empty());
-    }
+    // "Every account served somewhere → nothing to offer" is pinned once, in
+    // `fauna_client_accounts::instance_lock`; the view's two exits are pinned
+    // in the view's own tests.
 
     #[test]
     fn resolves_under_the_flat_base_scoped_to_the_actor() {
@@ -744,10 +670,10 @@ mod tests {
         survivors: &[PathBuf],
         credentials: &fauna_client_accounts::CredentialSweep,
     ) -> Option<String> {
-        surface_for(fauna_client_accounts::SignOutResidue::record(
-            survivors,
-            credentials,
-        ))
+        fauna_client_accounts::ResidueSurface::for_record(
+            fauna_client_accounts::SignOutResidue::record(survivors, credentials),
+            fauna_i18n::strings::lookup,
+        )
         .map(|surface| surface.line)
     }
 

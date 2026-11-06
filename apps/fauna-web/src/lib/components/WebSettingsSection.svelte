@@ -241,6 +241,7 @@
       class:on={enabled}
       data-testid={IDS.WEB_SETTINGS_SUBDOMAIN_TOGGLE}
       data-state={enabled ? 'on' : 'off'}
+      disabled={view === null}
       onclick={onToggle}
     >{t.web_settings.subdomain_toggle_label}</button>
     <p class="muted small">{t.web_settings.subdomain_toggle_subtitle}</p>

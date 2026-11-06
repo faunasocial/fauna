@@ -201,6 +201,11 @@ class ApiClient @Inject constructor(
     /** Off-main scope for the fire-and-forget WS teardown in [clearAuth]. */
     private val teardownScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
+    /** The bound on [clearAuth]'s leave-door drafts flush — linux's
+     *  `flush_now_blocking` bound (`feed/drafts.rs`), so no app's sign-out
+     *  waits longer on a dead nest than another's. */
+    private val leaveFlushBoundMs = 2_000L
+
     // -- Reconnect re-hydrate (transport.md § Push events) --
     //
     // Bumped once per WS reconnect-*after-first* (the initial connect never
@@ -264,6 +269,12 @@ class ApiClient @Inject constructor(
     // [calendarChangedTick]'s unfiltered shape.
     private val _folderChangedTick = MutableSharedFlow<Unit>(replay = 0, extraBufferCapacity = 1)
     val folderChangedTick: SharedFlow<Unit> = _folderChangedTick.asSharedFlow()
+
+    // The `devices` surface's push half (`ResyncRequired`; [reconnectTick] is its
+    // reconnect half): no single kind stales it (`transport.md` § Which surfaces
+    // a push invalidates).
+    private val _devicesStaleTick = MutableSharedFlow<Unit>(replay = 0, extraBufferCapacity = 1)
+    val devicesStaleTick: SharedFlow<Unit> = _devicesStaleTick.asSharedFlow()
 
     // Bumped by the shared store-change watch (`setStoreChangeListener`): the
     // account store may have changed — this app's own pump applied another
@@ -545,6 +556,18 @@ class ApiClient @Inject constructor(
         val drafts = draftsSync
         val postsDrafts = postsDraftsSync
         val eventDrafts = eventDraftsSync
+        // The leave door every identity teardown passes (`reserved-folders.md`
+        // § The leave-flush promise: sign-out and account switch are leave doors
+        // on every app): capture each rail's outgoing handle + current snapshot
+        // NOW — the `stop` calls just below null them — and run the saves in
+        // the teardown coroutine before anything is disconnected, so the next
+        // sign-in restores the draft as the user left it. Captured BEFORE
+        // the stops, run before the close.
+        val leaveFlush = listOfNotNull(
+            conversationsManagerHost.captureLeaveFlush(),
+            eventDraftsHost.captureLeaveFlush(),
+            captureFeedLeaveFlush(),
+        )
         // Retire the draft autosave before tearing the handle down (the host
         // cancels its debounce; the FfiDraftsSync is closed below).
         conversationsManagerHost.stopDraftsSync()
@@ -591,6 +614,28 @@ class ApiClient @Inject constructor(
         eventDraftsSync = null
         if (client != null) {
             teardownScope.launch {
+                // The leave-door flush, first: the rails' saves ride this client,
+                // so they run while it is still connected, concurrently and
+                // bounded — a slow or unreachable nest never gates the teardown
+                // (a save that misses the bound is the same loss the debounce
+                // would have had).
+                if (leaveFlush.isNotEmpty()) {
+                    kotlinx.coroutines.withTimeoutOrNull(leaveFlushBoundMs) {
+                        kotlinx.coroutines.coroutineScope {
+                            leaveFlush.forEach { save ->
+                                launch {
+                                    try {
+                                        save()
+                                    } catch (e: kotlinx.coroutines.CancellationException) {
+                                        throw e
+                                    } catch (e: Exception) {
+                                        ShellLog.d("ApiClient", "leave-door drafts flush failed: ${e.message}")
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
                 // Stop hosting the account plane as the DEPARTING account before
                 // anything else is torn down (`account-data-plane.md` § The
                 // account store → *The client-side lifecycle*). `clearAuth` is
@@ -723,6 +768,10 @@ class ApiClient @Inject constructor(
             sessionAccount.resolveDeviceId(),
             accountStores.accountRegistry,
         )
+        // The session built the account's archive links (its archive-signal
+        // sink): drive them from this one login seam (`archive-import.md`
+        // § Linking and merging, ruling 8). No session → no links → a no-op.
+        startArchiveLinks(client)
         // Draft-persistence v2 (file-sync.md § Drafts Sync): build the
         // conversations-rail drafts sync over this connection and hand it to the
         // manager host, which restores the owner's persisted drafts on launch and
@@ -855,6 +904,10 @@ class ApiClient @Inject constructor(
                     exclusion = CloudBackupPosture.exclusion(),
                 ),
                 ownDeviceId,
+                // The app default the engine hosts register under too: the
+                // ceremony names this phone's row `fauna-android`, never the
+                // `fauna` placeholder (`devices.md` § Device names).
+                com.fauna.app.provider.FfiOnDemandSource.DEVICE_LABEL,
                 accountStores.accountRegistry,
             )
         } catch (e: Exception) {
@@ -1008,6 +1061,7 @@ class ApiClient @Inject constructor(
                     // unfiltered shape above.
                     _folderChangedTick.tryEmit(Unit)
                 }
+                if (stale.devices) _devicesStaleTick.tryEmit(Unit)
                 if (stale.knocks || stale.contacts || stale.account || stale.atproto) {
                     // Surfaces with no dedicated push tick on android — knocks
                     // rides its own `FfiKnockSubscription` seam (never `Other`
@@ -1272,7 +1326,7 @@ class ApiClient @Inject constructor(
         val deviceIdBytes = runCatching { HexUtil.hexToBytes(deviceIdHex) }.getOrNull() ?: return null
         val host = runCatching {
             client.syncEngineHost(
-                secretBytes, deviceIdBytes, stateDir, "fauna-android",
+                secretBytes, deviceIdBytes, stateDir, com.fauna.app.provider.FfiOnDemandSource.DEVICE_LABEL,
                 accountStores.accountRegistry,
             )
         }.onFailure { ShellLog.w("ApiClient", "syncEngineHost build failed: ${it.message}") }.getOrNull()
@@ -1296,7 +1350,7 @@ class ApiClient @Inject constructor(
      * uploading into a set the nest doesn't have).
      */
     suspend fun resolvePhotoLibrarySet(deviceIdHex: String, stateDir: String): FfiPhotoLibrarySet =
-        com.fauna.ffi.photoLibrarySet(nestRpc(), stateDir, deviceIdHex, "fauna-android")
+        com.fauna.ffi.photoLibrarySet(nestRpc(), stateDir, deviceIdHex, com.fauna.app.provider.FfiOnDemandSource.DEVICE_LABEL)
 
     /**
      * The user's own folders as ingest targets — each row's name beside its
@@ -1747,6 +1801,35 @@ class ApiClient @Inject constructor(
             backupNest(), backupSecret(), HexUtil.hexToBytes(deviceIdHex), destinationId,
         )
 
+    /**
+     * The pull-back's preflight — the press on a nest row's
+     * `backup-destination-reseed-button`, before its confirm opens
+     * (`backups.md` § Restore after losing the nest). The shared face reads the
+     * destination's ledgers against this device's audit state and returns the
+     * confirm's lines plus the acceptance to hand back; it writes nothing. A
+     * failure comes back in the record's `stopped`, never as an exception.
+     */
+    suspend fun pullBackPreflight(destinationId: String): com.fauna.ffi.FfiPullBackPreflight =
+        com.fauna.ffi.backupPullBackPreflight(
+            backupNest(), backupSecret(), destinationId, accountStores.backupAuditStatePath(),
+        )
+
+    /**
+     * The pull-back the owner confirmed over the preflight's lines: as
+     * [pullBackFromDestination], carrying the [acceptance] [pullBackPreflight]
+     * returned so the run refuses any set the owner was not shown or whose
+     * ledger moved since.
+     */
+    suspend fun pullBackAccepted(
+        deviceIdHex: String,
+        destinationId: String,
+        acceptance: String,
+    ): com.fauna.ffi.FfiReseedResult =
+        com.fauna.ffi.backupPullBackAccepted(
+            backupNest(), backupSecret(), HexUtil.hexToBytes(deviceIdHex), destinationId,
+            accountStores.backupAuditStatePath(), acceptance,
+        )
+
     // ── Subscriptions — profile Tiers-tab author management (monetization.md ──
     // § Pillar 1 / profile.md). Slice A (SELF author mgmt): tier CRUD + pending-
     // request approve/reject + the per-tier subscriber roster + remove. Reads +
@@ -1870,6 +1953,29 @@ class ApiClient @Inject constructor(
         nestRpc().folders().devices(name)
 
     /**
+     * `fauna.folders.members.list` — the enrolled-device roster of the OWN set `name`,
+     * already projected through the one shared rule (`place_rows`) at the FFI boundary:
+     * each seat's label and flag triple are read as given, never re-derived here. The
+     * roster order IS the e2e address (`folder-place-row[j]`). Mirrors apple
+     * `APIClient.folderPlaces`.
+     */
+    suspend fun folderPlaces(name: String): List<com.fauna.ffi.FfiFolderMember> =
+        nestRpc().folders().membersList(name)
+
+    /**
+     * `fauna.folders.places.set` — write one seat's WHOLE flag triple (the shared
+     * write is whole-value, so the caller flips one box and passes the other two
+     * through). `OfflineSafe`, so no gate. Mirrors apple `APIClient.setFolderPlace`.
+     */
+    suspend fun setFolderPlace(
+        name: String,
+        deviceIdHex: String,
+        originates: Boolean,
+        accepts: Boolean,
+        appliesDeletes: Boolean,
+    ) = nestRpc().folders().placesSet(name, deviceIdHex, originates, accepts, appliesDeletes)
+
+    /**
      * The shared enrol (`FfiFoldersClient::ensure_place`): write `deviceIdHex`'s
      * place on the OWN folder `name` at the default point iff it holds none;
      * never rewrites a place the user chose. `true` = enrolled. The
@@ -1883,8 +1989,9 @@ class ApiClient @Inject constructor(
     /**
      * Share an owner-only set with a resolved recipient (hex actor-id): create the MLS
      * group admitting them → bind the genesis content key → deliver the Welcome. Reuses
-     * the live conversations MlsEngine. `member_nest_url` is `null` (same-nest only;
-     * cross-nest share is a follow-on for every app, parity with the linux/apple leads).
+     * the live conversations MlsEngine. `memberNestUrl` is the peer nest URL the
+     * recipient resolved on (`ResolvedRecipient.nestUrl`), `null` for a home-nest member
+     * (`ui/folders.md` § Sharing a folder, *Cross-nest members*).
      * `access` is the share-time grant (`"writer"` for read-write, `null`/`"reader"` for
      * the read-only default — multi-writer Phase 1, folders.md § Sharing).
      */
@@ -1892,6 +1999,7 @@ class ApiClient @Inject constructor(
         name: String,
         memberActorIdHex: String,
         access: String? = null,
+        memberNestUrl: String? = null,
     ): com.fauna.ffi.FfiShareOutcome =
         com.fauna.ffi.foldersShare(
             nestRpc(),
@@ -1899,7 +2007,7 @@ class ApiClient @Inject constructor(
             ownerSecretBytes(),
             name,
             HexUtil.hexToBytes(memberActorIdHex),
-            null,
+            memberNestUrl,
             access,
         )
 
@@ -2249,6 +2357,37 @@ class ApiClient @Inject constructor(
         val nest = nestClient ?: return
         val ownerSecret = secret ?: return
         com.fauna.ffi.wireDevicesForeignSets(devices, nest, HexUtil.hexToBytes(ownerSecret))
+    }
+
+    /**
+     * Inject the followed-public-folders source into [devices] — what fills the
+     * Folders page's `folder-followed-item` rows (`DevicesSnapshot.followed`,
+     * `ui/folders.md` § Following a public folder). Unwired, the list stays
+     * permanently empty and a follow the user just made never paints. MUST run
+     * before the machine's first `refresh()`, beside [wireDevicesForeignSets].
+     * Best-effort like that sibling: no secret / no nest connection ⇒ no followed
+     * rows, never a page error.
+     */
+    fun wireDevicesFollowedFolders(devices: uniffi.fauna_devices_machine.DevicesMachine) {
+        val nest = nestClient ?: return
+        val ownerSecret = secret ?: return
+        runCatching { com.fauna.ffi.wireDevicesFollowedFolders(devices, nest, HexUtil.hexToBytes(ownerSecret)) }
+    }
+
+    /**
+     * Follow a public folder — the owner exactly as typed (a handle, a
+     * `handle@domain`, or a bare 64-hex actor id) plus the folder's plaintext name.
+     * The address rules, the first public fetch that pins the folder id and the
+     * persist are all the shared `follow_ops` recipe's (`folders_follow_public`);
+     * a failure's message is already the shared catalog's wording.
+     */
+    suspend fun followPublicFolder(owner: String, folderName: String) {
+        com.fauna.ffi.foldersFollowPublic(nestRpc(), ownerSecretBytes(), owner, folderName)
+    }
+
+    /** Unfollow — addressed by the follow's pinned identity, never its name. Idempotent. */
+    suspend fun unfollowPublicFolder(homeNestUrl: String, folderId: Long) {
+        com.fauna.ffi.foldersUnfollowPublic(nestRpc(), ownerSecretBytes(), homeNestUrl, folderId)
     }
 
     /**
@@ -3971,6 +4110,18 @@ class ApiClient @Inject constructor(
             accountRpc().amIAdmin()
         } catch (_: Exception) {
             false
+        }
+    }
+
+    /** The gate read that tells "read failed" (`null`) from "not an admin"
+     *  (`false`): the reconnect re-read keeps the last answer on `null`
+     *  (`transport.md` `admin_gate`, [com.fauna.app.ui.viewmodel.applyAdminGateRead]). */
+    suspend fun readAdminGate(): Boolean? {
+        return try {
+            ensureAuthenticated()
+            accountRpc().amIAdmin()
+        } catch (_: Exception) {
+            null
         }
     }
 

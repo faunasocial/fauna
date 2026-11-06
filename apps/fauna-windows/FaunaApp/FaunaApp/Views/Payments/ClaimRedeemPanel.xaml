@@ -4,7 +4,7 @@
   (monetization.md § Pillar 3 Q4 — the universal fallback binding).
 
   ⚠ A payments render, so it lives under Views/Payments/ and nowhere else: the whole
-  directory is dropped from Page and Compile when `/p:FaunaStoreSafe=true`, which is
+  directory is dropped from Page and Compile when `/p:FaunaExcisePayments=true`, which is
   the only construct that removes an AutomationId literal from the artifact (XAML has
   no preprocessor). See PaymentsAuthorSections.xaml's header for the full statement,
   and note the same rule about markup references — SettingsSubscriptionsPage hosts

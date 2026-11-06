@@ -800,19 +800,13 @@ pub fn start(app: &mut App, tx: &UnboundedSender<UiMessage>) {
     });
 }
 
-/// The launch machine's observer: forwards "the machine changed" onto the UI
-/// channel as a payload-free tick. The handler re-reads the machine's snapshot
-/// — a tick carries no state, so a burst of them cannot apply a stale one.
-struct SnapshotRelay {
-    tx: UnboundedSender<UiMessage>,
-}
-
-impl fauna_launch_machine::LaunchObserver for SnapshotRelay {
-    fn on_changed(&self) {
-        let _ = self
-            .tx
-            .send(UiMessage::Data(DataMessage::LaunchMachineChanged));
-    }
+crate::app::tick_observer! {
+    /// The launch machine's observer: forwards "the machine changed" onto the UI
+    /// channel as a payload-free tick. The handler re-reads the machine's snapshot
+    /// — a tick carries no state, so a burst of them cannot apply a stale one.
+    SnapshotRelay,
+    fauna_launch_machine::LaunchObserver,
+    UiMessage::Data(DataMessage::LaunchMachineChanged)
 }
 
 /// `sync-agent.md` § Credential model → *The signed-out reconcile*, shape
@@ -892,6 +886,9 @@ pub fn route(app: &mut App, tx: &UnboundedSender<UiMessage>, snapshot: LaunchSna
             if let Some(machine) = &app.launch_machine {
                 tokio::spawn(Arc::clone(machine).ttl_refresh_loop());
             }
+            // Signed in: the command line's nest hint is spent unused
+            // (`apps/tui.md` § System integration → *The nest hint*).
+            app.drop_pending_nest_hint();
             app.launch = LaunchSurface::Wizard;
         }
         LaunchPhase::WizardAt { entry } => {
@@ -902,6 +899,10 @@ pub fn route(app: &mut App, tx: &UnboundedSender<UiMessage>, snapshot: LaunchSna
             // instances — "launch bound or refuse").
             fauna_client_accounts::refuse_if_bound_from_onboarding("the onboarding wizard");
             route_wizard_entry(app, entry);
+            // The command line's nest hint prefills the handle, once, after
+            // the identity seeding — web's order (`apps/tui.md` § System
+            // integration → *The nest hint*). Every other arm leaves it held.
+            app.apply_pending_nest_hint();
             app.launch = LaunchSurface::Wizard;
             // A residue an earlier sign-out recorded is re-swept silently here,
             // and painted on `identity_choice` only if something is still left
@@ -1948,6 +1949,22 @@ mod tests {
             "must stay empty so the shared renderer falls back to the localized generic \
              retry text, not a raw Debug dump: {error:?}"
         );
+    }
+
+    /// A launch decision that lands on neither the wizard nor a session — here
+    /// the retry surface — leaves the command line's nest hint held for the
+    /// decision that follows (`apps/tui.md` § System integration → *The nest
+    /// hint*).
+    #[test]
+    fn a_retry_decision_leaves_the_nest_hint_held() {
+        let mut app = crate::app::tests::test_app();
+        let tx = app.tx.clone();
+        app.pending_nest_hint = Some("localhost:1".into());
+
+        route(&mut app, &tx, LaunchSnapshot::initial());
+
+        assert!(matches!(app.launch, LaunchSurface::TransientRetry { .. }));
+        assert_eq!(app.pending_nest_hint.as_deref(), Some("localhost:1"));
     }
 
     /// `account-scoping.md` § Concurrent instances → "the colliding

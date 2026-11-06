@@ -88,6 +88,33 @@ public enum ConversationsTestInject {
         }
     }
 
+    /// `conversations_mark_receive_stopped` — stand up the dead receive rail
+    /// (conversations outcome 18, `conversations.md` § Errors & edge cases): the
+    /// state a receive loop that died by panic leaves, so the e2e can assert the
+    /// page's `receive_stopped` notice on `error-message`. Drives the shared
+    /// `mark_receive_stopped_for_test` (claim a generation, mark it stopped).
+    ///
+    /// Answers `"pending"` — and marks nothing — until the session's real
+    /// receive loop has claimed its generation (`receive_loop_begun_for_test`):
+    /// that claim would retire a death marked earlier. The action layer asks
+    /// again until it reads `"marked"`. The tui, windows and android arms answer
+    /// the same words. The shell stashes the returned word in the result slot.
+    @MainActor
+    public static func markReceiveStopped(in manager: ConversationsManager) -> String {
+        guard manager.receiveLoopBegunForTest() else { return "pending" }
+        manager.markReceiveStoppedForTest()
+        return "marked"
+    }
+
+    /// `conversations_begin_receive_loop` — claim a fresh receive-loop
+    /// generation over the same manager, the one call a starting loop makes,
+    /// which retires an earlier loop's death: the notice-retirement half of the
+    /// witness and its cleanup (`begin_receive_loop_for_test`).
+    @MainActor
+    public static func beginReceiveLoop(in manager: ConversationsManager) {
+        manager.beginReceiveLoopForTest()
+    }
+
     /// `conversations_seed_resolved_link_preview` — record a **pre-resolved** D4
     /// link preview for `url`, so a bubble whose body is the standalone
     /// `[url](url)` paragraph folds its `RenderBlock::LinkPreview` block

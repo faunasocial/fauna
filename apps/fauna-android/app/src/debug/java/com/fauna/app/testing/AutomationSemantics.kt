@@ -35,6 +35,9 @@ data class NodeFacts(
      *  the `frame` attribute. Accessibility bounds are CLIPPED to the visible
      *  part, as windows' UIA rects are; `null` when not read. */
     val frame: String? = null,
+    /** `AccessibilityNodeInfo.isSelected` — Compose `semantics { selected = … }`
+     *  (a message's `dm-message-timestamp` marks the selected message). */
+    val isSelected: Boolean = false,
 )
 
 /**
@@ -73,6 +76,11 @@ object AutomationSemantics {
         // what `actions/events.py`'s day-timeline measurement reads (windows
         // publishes the same `"x,y,w,h"` shape off UIA).
         "frame" -> node.frame
+        // `selected`: the node's live selected state spelled `"true"`/`"false"` (a
+        // Compose `semantics { selected }`, always set, so a test tells "not
+        // selected" from "no such attribute"); an explicitly painted value wins,
+        // as for `state`.
+        "selected" -> paintedAttr(node, name) ?: flag(node.isSelected)
         // `options`: a picker's option set lives in its OPENED menu, never on
         // the anchor node, so the bridge answers a select's anchor itself
         // ([optionValue] over the menu, [optionsJson]); every other node

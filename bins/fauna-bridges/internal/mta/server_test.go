@@ -950,6 +950,7 @@ type forwardRecord struct {
 	rawMessage         []byte
 	ruleIDOrForwardAll string
 	copyMode           string
+	authResults        *wsrpc.AuthVerdicts
 }
 
 // ingestRecord captures one ingest_inbound_mail (or
@@ -1314,13 +1315,14 @@ func (m *mockCaller) callFetchRecipientForwardConfig(bodyBytes []byte, reply any
 
 func (m *mockCaller) callForwardMessage(bodyBytes []byte, reply any) error {
 	var req struct {
-		ActorID            []byte `cbor:"actor_id"`
-		OriginalMsgID      string `cbor:"original_msgid"`
-		OriginalSender     string `cbor:"original_sender"`
-		Destination        string `cbor:"destination"`
-		RawMessage         []byte `cbor:"raw_message"`
-		RuleIDOrForwardAll string `cbor:"rule_id_or_forward_all"`
-		CopyMode           string `cbor:"copy_mode"`
+		ActorID            []byte              `cbor:"actor_id"`
+		OriginalMsgID      string              `cbor:"original_msgid"`
+		OriginalSender     string              `cbor:"original_sender"`
+		Destination        string              `cbor:"destination"`
+		RawMessage         []byte              `cbor:"raw_message"`
+		RuleIDOrForwardAll string              `cbor:"rule_id_or_forward_all"`
+		CopyMode           string              `cbor:"copy_mode"`
+		AuthResults        *wsrpc.AuthVerdicts `cbor:"auth_results"`
 	}
 	if err := cbor.Unmarshal(bodyBytes, &req); err != nil {
 		return fmt.Errorf("mockCaller: decode forward_message: %w", err)
@@ -1334,6 +1336,7 @@ func (m *mockCaller) callForwardMessage(bodyBytes []byte, reply any) error {
 		rawMessage:         req.RawMessage,
 		ruleIDOrForwardAll: req.RuleIDOrForwardAll,
 		copyMode:           req.CopyMode,
+		authResults:        req.AuthResults,
 	})
 	id := int64(len(m.forwardRequests)) // 1-based row id
 	forwardErr := m.forwardMessageErr

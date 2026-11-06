@@ -100,6 +100,11 @@ pub(crate) struct HostInputs {
     /// target (`sync-agent-credentials.md` § Credential model, the RULED
     /// 2026-09-28 block, decision 3).
     pub(crate) own_device_id_hex: Option<String>,
+    /// The app's **app default** (`fauna-windows`, `fauna-macos`, `fauna-ios`,
+    /// `fauna-android` — `devices.md` § Device names, class (2)): the same
+    /// constant the app hands its engine host, which the enrollment ceremony's
+    /// register-create names the machine's row with.
+    pub(crate) device_label: String,
     /// The app's account registry, from which this seat resolves the
     /// account's **attested** succeeded-from identities IN RUST, off this
     /// session's own actor: their ids are the generation machinery's
@@ -150,6 +155,12 @@ pub(crate) fn install(
     let actor_id_hex = keypair.actor_id().to_hex();
     #[cfg(feature = "offline-share")]
     let actor = keypair.actor_id();
+    // The group-ring mirror's key — the hosts derive the same from the
+    // `BackupKey` they are built with (`group-set.md` § decision 12).
+    #[cfg(all(feature = "file-provider-host", feature = "offline-share"))]
+    let mirror_key = fauna_core::crypto::GroupRingMirrorKey::derive(
+        &fauna_core::crypto::BackupKey::derive(keypair.secret_bytes()),
+    );
 
     let nest_url = nest.nest_url();
     let reconnects = nest.subscribe_reconnects();
@@ -158,6 +169,7 @@ pub(crate) fn install(
     let HostInputs {
         store_container,
         own_device_id_hex,
+        device_label,
         accounts,
         #[cfg(feature = "recovery-aftermath")]
         ledger_pass,
@@ -212,6 +224,7 @@ pub(crate) fn install(
                     // `fauna-iroh` dependency, which only tui carries today.
                     peer_transport: None,
                     store_container,
+                    device_label: Some(device_label),
                 },
                 Arc::clone(&nest),
                 &nest_url,
@@ -284,6 +297,13 @@ pub(crate) fn install(
                             &crate::offline_share::session_seat_for(actor),
                             handle,
                         );
+                    }
+                    // The group-ring mirror for this process's app-dead
+                    // hosts, kept current from the store itself from here
+                    // on; it ends with the runtime.
+                    #[cfg(all(feature = "file-provider-host", feature = "offline-share"))]
+                    if let Some(handle) = HOST.handle() {
+                        crate::group_ring_mirror::spawn(handle, actor, mirror_key);
                     }
                 }
                 InstallOutcome::Superseded => tracing::info!(
@@ -395,6 +415,10 @@ fn on_store_installed(sessions: &crate::caldav_client::SchedulingSessionHolder) 
     overlay_seam::store_changed();
     #[cfg(feature = "conversations-session")]
     wire_conversation_seams(sessions);
+    // The store edge of the conversations door: a session built before the
+    // store staged it with no runtime to start on.
+    #[cfg(feature = "conversations-session")]
+    start_conversations_door();
     #[cfg(not(feature = "conversations-session"))]
     let _ = sessions;
     #[cfg(feature = "contact-overlays")]
@@ -432,6 +456,22 @@ pub(crate) fn wire_conversation_seams(sessions: &crate::caldav_client::Schedulin
     fauna_client_account_runtime::conversation_seams::wire(&session, store, &rt);
     #[cfg(feature = "contact-overlays")]
     overlay_seam::wired_by_session(&session.manager());
+}
+
+/// Start the conversations door the session factory staged, on the runtime
+/// the store's install recorded (`crate::conversations_door`). Called from
+/// both edges — the store's install and the factory's end — and a no-op until
+/// both a door is staged and a runtime recorded, or once it has started.
+#[cfg(feature = "conversations-session")]
+pub(crate) fn start_conversations_door() {
+    let Some(rt) = STORE_RUNTIME
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+    else {
+        return;
+    };
+    crate::conversations_door::SEAT.start(&rt);
 }
 
 /// The **private contact overlay** seam for a manager that no conversations
@@ -779,6 +819,7 @@ pub(crate) mod tests {
                 peer_transport: None,
                 // The machine's named row — never read here (no nest answers enrollment).
                 enrollment_target_device_id: "ab".repeat(32),
+                enrollment_device_label: None,
             })
             .await
             .expect("the store starts with no nest")
@@ -1034,8 +1075,15 @@ pub(crate) mod tests {
             let delivered = tokio::time::timeout(Duration::from_secs(120), async {
                 let mut n = 0u8;
                 while heard.0.load(Ordering::SeqCst) == 0 {
+                    let prefs = fauna_core::encoding::canonical_encode(
+                        &fauna_core::data::SyncPrefsConfig {
+                            default_conflict_policy: Some(n.to_string()),
+                        },
+                    )
+                    .expect("encode sync prefs")
+                    .to_vec();
                     sibling
-                        .put_preference(fauna_protocol::merge_policy::KIND_MODERATION, vec![n])
+                        .put_preference(fauna_protocol::merge_policy::KIND_SYNC_PREFS, prefs)
                         .await
                         .expect("put on the sibling");
                     n = n.wrapping_add(1);

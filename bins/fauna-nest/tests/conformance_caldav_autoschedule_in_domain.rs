@@ -199,3 +199,87 @@ async fn mda_enqueue_organizer_subaddress_self_loop_delivered_locally() {
         "the organizer's INBOX opens to the exact self-loop iMIP REQUEST",
     );
 }
+
+// ── (c) the placed invitation opens with the app's CALENDAR ring ──────────────
+
+#[tokio::test]
+async fn in_domain_invite_lands_on_the_calendar_sealed_to_the_calendar_key() {
+    // The nest seals the invitation it places and the Personal calendar's
+    // metadata to the attendee's CALENDAR key, as `calendar-record`s
+    // (`owner-key-material.md` § Path B-sibling-5 → *Protects*: the nest's
+    // personal-calendar metadata and local-invite placement are seal sites) —
+    // so the app's calendar ring (`fauna_client_caldav`, which opens nothing
+    // but calendar records) reads both, exactly as it reads an event it
+    // stored itself.
+    let (router, state) = router_and_state().await;
+    let mda: [u8; 32] = [9u8; 32];
+    common::approve_mda(&state, mda).await;
+    let organizer: [u8; 32] = [0x0a; 32];
+    state
+        .db
+        .put_exact_alias(DOMAIN, "organizer", "exact", &organizer)
+        .await
+        .unwrap();
+    let attendee: [u8; 32] = [0x42; 32];
+    let attendee_msek = [0x5e; 32];
+    provision_recipient(&state, attendee, "attendee", attendee_msek).await;
+
+    // A placeable REQUEST needs a DTSTART (`fauna_mail::icalendar::invite_from_mail`).
+    let raw = String::from_utf8(imip_request(
+        "organizer@fauna.test",
+        "attendee@fauna.test",
+        "Calendar Key Proof",
+    ))
+    .unwrap()
+    .replace("SUMMARY:", "DTSTART:20261101T100000Z\r\nSUMMARY:")
+    .into_bytes();
+    enqueue_as_mda(
+        &router,
+        &state,
+        mda,
+        organizer,
+        "organizer@fauna.test",
+        vec!["attendee@fauna.test".into()],
+        raw,
+    )
+    .await;
+
+    let ring = fauna_client_caldav::DavRecipientKeys::derive(
+        fauna_client_caldav::DavKind::Calendar,
+        &attendee_msek,
+    );
+    let cal = fauna_protocol::dav_identity::personal_calendar_id();
+    let calendars = state
+        .db
+        .list_bridge_caldav_calendars(&attendee)
+        .await
+        .unwrap();
+    let personal = calendars
+        .iter()
+        .find(|c| c.calendar_id == cal)
+        .expect("the placement provisions the Personal calendar");
+    fauna_client_caldav::unseal_calendar_metadata(&personal.encrypted_metadata, &ring)
+        .expect("the Personal calendar's metadata opens with the calendar ring");
+
+    let page = state
+        .db
+        .query_caldav_events(&attendee, &cal, None, None, 10)
+        .await
+        .unwrap();
+    assert_eq!(page.events.len(), 1, "the invitation is on the calendar");
+    let body = fauna_nest::segments::cal::load_event_body(
+        &state.cal_segments,
+        &state.db,
+        &attendee,
+        &page.events[0],
+    )
+    .await
+    .unwrap()
+    .expect("the placed event has a body");
+    let ics = fauna_client_caldav::unseal_event_body(&body, &attendee_msek)
+        .expect("the placed invitation opens with the calendar key");
+    assert!(
+        String::from_utf8_lossy(&ics).contains("SUMMARY:Calendar Key Proof"),
+        "the opened body is the invitation's VEVENT"
+    );
+}

@@ -58,6 +58,7 @@ CAT_TEXT = "tabby kitten purring whiskers softly by the warm window"
 
 # fauna_core::scoring::cues — the shared thresholds the engine derives by.
 CUE_DWELL_LONG_S = 8.0  # CUE_DWELL_LONG_MS
+CUE_LONG_DWELL_VISIBLE = 0.75  # CUE_LONG_DWELL_VISIBLE_PM / 1000
 CUES_ROLLUP_FACTOR = "cues:v1"  # CUES_ROLLUP_FACTOR_V1
 
 
@@ -116,11 +117,25 @@ def _quit_through_the_apps_own_leave_door(app) -> None:
     """Quit the way a user of this app does, so the app's own quit-time flushes
     run: linux's window close (the real close-request handler), tui's sidebar
     `exit-tab` (a terminal has no window to close — `apps/tui.md` § Sidebar quit
-    row). Either way the process then exits on its own."""
+    row), windows' window close with Close-to-tray switched off first (it
+    defaults ON — `AppSettingsStore.CloseToTray` — and a close then only hides
+    the window, never reaching `TrayIconService.QuitApplication()`'s bounded
+    flush). Either way the process then exits on its own."""
     if app.driver.is_tui():
         app.driver.click("exit-tab")
-    else:
-        app.driver.window_close()
+        return
+    if app.driver.is_windows():
+        app.driver.set_state(
+            {"nav": {"stack": [{"view": "settings"}, {"view": "settings", "id": "general"}]}}
+        )
+        app.driver.wait_for("close-to-tray-toggle", timeout=10)
+        if app.driver.get_attr("close-to-tray-toggle", "state") == "true":
+            _click_with_retry(app.driver, "close-to-tray-toggle")
+        assert app.driver.get_attr("close-to-tray-toggle", "state") != "true", (
+            "close-to-tray must be OFF for window_close() to reach the real quit "
+            f"path; error={app.error_text()!r}"
+        )
+    app.driver.window_close()
 
 
 def _wait_top_post_contains(app, needle: str, timeout: float = 15.0) -> str:
@@ -143,6 +158,29 @@ def _wait_top_post_contains(app, needle: str, timeout: float = 15.0) -> str:
 # 2026-10-10 ruling: the tracker stamps how an exposure ended, and a skip
 # requires `ScrolledPast`); the journeys therefore hold nothing past a gate,
 # and their staying green is the end-to-end proof the ruling is live.
+
+
+def _restart_leg_diagnosis(app, port: int, actor: dict, factor: str, before: dict) -> str:
+    """What a restart leg's red needs to name its side (convention 6): whether
+    the persisted model moved across the relaunch (a put landing in the
+    teardown), which feed the app had selected, and the order it rendered."""
+    after = ws_api.personalization_model_fetch(port, actor, factor)
+    try:
+        diag = app.driver.get_state("feed.diag")
+    except Exception as exc:  # a platform without the diag block
+        diag = f"<unreadable: {exc}>"
+    try:
+        items = app.driver.get_texts("feed-item")
+    except Exception as exc:
+        items = f"<unreadable: {exc}>"
+    order = [(app.feed.post_text(i) or "")[:40] for i in range(min(app.feed.post_count(), 6))]
+    return (
+        f"model before/after restart: sample_count "
+        f"{before.get('sample_count')}→{after.get('sample_count')}, updated_at "
+        f"{before.get('updated_at')}→{after.get('updated_at')}, blob "
+        f"{'unchanged' if before.get('sealed_blob') == after.get('sealed_blob') else 'CHANGED'}; "
+        f"feed diag={diag!r}; feed-items={items!r}; rendered order={order!r}"
+    )
 
 
 def _open_feed(app, feed_name: str) -> None:
@@ -354,8 +392,24 @@ def _quit_and_wait_for_the_rollup(app, port, actor) -> dict:
     feed-cues.ts`, `CueCapture.stop`), which awaits every `recordObservation`
     — the Layer-A train and its put included — BEFORE `flushCues` puts the
     rollup. Every caller cleared the rollup before its dwell, so the rollup
-    arriving is the same barrier the exit is elsewhere."""
-    if app.driver.is_web():
+    arriving is the same barrier the exit is elsewhere.
+
+    Apple takes the same barrier: leaving the feed cancels its capture
+    `.task`, whose teardown drain (`apps/fauna-apple/FaunaKit/Sources/
+    FaunaKit/Feed/CueViewportObserver.swift`, `run` → `emit`) awaits every
+    `recordObservation` in turn before `flushCues`, the order web keeps — and
+    iOS has no quit door a test can drive at all.
+
+    Android takes it too: leaving the feed cancels the `CueViewportObserver`
+    `LaunchedEffect` (`apps/fauna-android/.../feed/CueViewport.kt`), which
+    drains every tracked card before the rollup flush, and the harness has no
+    quit door to drive."""
+    if (
+        app.driver.is_web()
+        or app.driver.is_macos()
+        or app.driver.is_ios()
+        or app.driver.is_android()
+    ):
         rollup = _wait_model_blob(port, actor, CUES_ROLLUP_FACTOR)
     else:
         _quit_through_the_apps_own_leave_door(app)
@@ -372,6 +426,10 @@ def _quit_and_wait_for_the_rollup(app, port, actor) -> dict:
 @pytest.mark.linux
 @pytest.mark.web
 @pytest.mark.tui
+@pytest.mark.windows
+@pytest.mark.macos
+@pytest.mark.ios
+@pytest.mark.android
 @pytest.mark.feature("learn-from-my-activity")
 def test_a_switched_off_topic_learns_nothing_and_switching_off_keeps_what_it_learned(
     logged_in_app, nest_instance, test_user
@@ -494,6 +552,11 @@ def test_a_switched_off_topic_learns_nothing_and_switching_off_keeps_what_it_lea
 
 
 @pytest.mark.tui
+@pytest.mark.linux
+@pytest.mark.web
+@pytest.mark.macos
+@pytest.mark.ios
+@pytest.mark.windows
 @pytest.mark.feature("learn-from-my-activity")
 def test_what_one_device_collected_informs_the_feeds_on_your_other_device(
     request, logged_in_app, nest_instance, test_user
@@ -565,7 +628,11 @@ def test_what_one_device_collected_informs_the_feeds_on_your_other_device(
     _quit_and_wait_for_the_rollup(app, port, test_user)
 
     # ── Seat B: launched only now, holding nothing it did not fetch ──────
-    seat_b, _driver_b = request.getfixturevalue("alice_second_device")
+    # web's second device is a twin page in its own BrowserContext (fresh
+    # storage, same identity); the native ones a fresh-state-root launch.
+    seat_b, _driver_b = request.getfixturevalue(
+        "alice_second_web_device" if app.driver.is_web() else "alice_second_device"
+    )
     row = seat_b.personalization.wait_for_topic_reopening(
         topic_name,
         # The switch is a later write of the same registry record than the
@@ -629,8 +696,9 @@ def test_engagement_dwell_derives_watch_complete_via_navigate_away_flush(
     (task-6 of the personalization-port plan):
     the windows capture shell (`FaunaApp.Feed.CueViewportObserver`, a
     geometry-poll port of linux's `apps/fauna-linux/src/feed/viewport.rs`)
-    samples a REAL, honest viewport dwell — no injected observation, no clock
-    shortcut — and the shared `CueEngine` derives the identical non-media
+    samples a REAL, honest viewport dwell — no injected observation; the dwell
+    is advanced on the frozen cue clock (convention 14), the geometry the
+    app's own — and the shared `CueEngine` derives the identical non-media
     `watch-complete` verdict from it, weak-training the composed topic. This
     proves the SAMPLING MECHANISM end-to-end (real geometry → real credit
     accumulation → real `RecordObservation` call), not a re-derivation of the
@@ -653,38 +721,24 @@ def test_engagement_dwell_derives_watch_complete_via_navigate_away_flush(
     plain default Local feed, silently trained nothing for an entire session
     despite a real, correctly-measured 9-second full-visibility dwell).
 
-    **Deliberately narrower than the linux test above, and structured
-    differently, for a concrete test-infrastructure reason discovered while
-    writing this test**: the FlaUI bridge's `POST /element/scroll-into-view`
+    **The on-topic post starts mid-list, below a newer decoy, as in its
+    web/apple twin below — so the dwell moving it to the top is a re-rank
+    recency cannot fake (`learn-from-my-activity.md` outcome 14).** The
+    FlaUI bridge's plain `POST /element/scroll-into-view`
     (`Actions.ScrollIntoView`) stops as soon as UIA reports the element
-    `!IsOffscreen` — which on windows already flips true at a small, partial
-    visibility fraction (empirically as low as ~25% in this feed's post-card
-    layout, well under the shared `skipVisiblePm`/`longDwellVisiblePm` gates),
-    not "centered" or "substantially visible". A mid-list post can therefore
-    stay under the skip-visibility threshold for an entire dwell even after
-    `dwell_on_post`'s scroll — the exact case this test hit when first written
-    against linux's post-arrangement (3 posts, target at index 1: it settled
-    at a ~25%-visible resting position and never crossed the 50% skip gate in
-    9 real seconds, so no verdict was ever derived — confirmed via temporary
-    `ShellLog` tracing of the real geometry during a live run, not guessed).
-    Building a more precise scroll-to-N% primitive is FlaUI-bridge work,
-    outside this task's declared scope (`apps/fauna-windows/FaunaApp/...` +
-    this one test file) — tracked as a follow-on rather than gating this
-    task's landing (task-6 report's concerns section).
+    `!IsOffscreen`, which on windows flips at a small, partial visibility
+    (empirically as low as ~25% of a post-card, under both the skip and the
+    long-dwell gates), so `dwell_on_post`'s plain scroll can leave a mid-list
+    card credited nothing. The dwell therefore scrolls with the bridge's
+    MEASURED sibling, `scroll_to_visible_fraction` (`Actions.
+    ScrollIntoViewFraction`: a sweep until the card's own rect overlaps the
+    viewport by the asked fraction), to the long-dwell visibility, and
+    asserts the fraction it reached. It ends the exposure by navigating AWAY
+    from Feed rather than scrolling — `FeedPage.OnNavigatedFrom` →
+    `CueViewportObserver.Unwire()` → `FlushAll()`, the same "unmap ⇒ flush
+    everything" path linux's `viewport.rs` exercises on page teardown.
 
-    So this test avoids scroll precision entirely: the composed feed has only
-    two posts (one off-topic decoy + the on-topic post, created LAST so it is
-    the newest and renders as post-card[0], ~100%-visible with no scroll
-    needed), and it ends the exposure by navigating AWAY from Feed rather than
-    scrolling — which drives `FeedPage.OnNavigatedFrom` →
-    `CueViewportObserver.Unwire()` → `FlushAll()`, the exact same "unmap ⇒
-    flush everything" code path linux's `viewport.rs` exercises on page
-    teardown. The scroll-to-N%-visible primitive itself remains FlaUI-bridge
-    follow-on work, outside this task's declared scope
-    (`apps/fauna-windows/FaunaApp/...` + this one test file) — tracked
-    separately.
-
-    It DOES now cover the flush-on-CLOSE + restart leg (linux's step 6+):
+    It covers the flush-on-CLOSE + restart leg too (linux's step 6+):
     windows gained the `window_close()` / `wait_app_exit()` driver hooks
  — `Actions.WindowClose` posts a real WM_CLOSE
     to the app's main window, running the real
@@ -708,23 +762,19 @@ def test_engagement_dwell_derives_watch_complete_via_navigate_away_flush(
     # why capture-while-off must never accidentally pre-train the factor).
     assert not app.personalization.engagement_toggle_on(0)
 
-    # ── 2. Seed real posts: one off-topic unplayed VIDEO decoy (can't
-    # dwell-complete — its gate is playback, and windows has no inline
-    # player yet, so the shell reports no played fraction), then the
-    # on-topic TEXT post created LAST — the newest post, so it renders as
-    # post-card[0] in ANY feed built from these two posts (untrained ranking
-    # falls back to recency), ~100%-visible without any scroll (sidestepping
-    # the scroll-precision gap documented above; this test's proof is the
-    # CAPTURE mechanism, not re-ranking, so it does not need the on-topic post
-    # to start mid-list) ──────────────────────────────────────────────────
+    # ── 2. Seed real posts: the on-topic TEXT post FIRST, then one newer
+    # off-topic unplayed VIDEO decoy (it can NEVER dwell-complete — its gate
+    # is playback, and nothing plays it). Recency therefore puts the decoy
+    # above the on-topic post, so the dwell below moving it to the top is a
+    # re-rank recency cannot fake (outcome 14) ───────────────────────────
     app.driver.set_state({"nav": {"stack": [{"view": "feed"}]}})
-    _post_decoy(app, f"quarterly budget spreadsheet {_unique('rows')}")
-    time.sleep(1.2)  # strictly-older created_at (epoch-seconds resolution)
     app.feed.create_post(text=CAT_TEXT)
+    time.sleep(1.2)  # sleep-ok: strictly-newer created_at (epoch-seconds resolution)
+    _post_decoy(app, f"quarterly budget spreadsheet {_unique('rows')}")
 
-    # ── 3. Compose a feed over the trained factor — REQUIRED for Layer A to
-    # train it at all (see the docstring above); weight doesn't matter here
-    # since re-ranking isn't asserted, only that the factor is COMPOSED ────
+    # ── 3. Compose a feed dominated by the trained factor — REQUIRED for
+    # Layer A to train it at all (see the docstring above), and the weight is
+    # what lets the trained factor out-rank recency in step 7 ─────────────
     feed_name = _unique("cats-feed")
     app.feed.create_feed_with_factor(
         name=feed_name, factor_label=factor_key, weight="5.0",
@@ -752,11 +802,11 @@ def test_engagement_dwell_derives_watch_complete_via_navigate_away_flush(
     app.personalization.set_engagement_toggle(0, True)
     app.personalization.clear_engagement_data()
 
-    # ── 5. Re-enter the SAME composed feed — Page_Loaded builds a BRAND NEW
-    # FfiFeedManager + CueViewportObserver (FeedPage isn't cached), so this
-    # dwell starts with a completely fresh tracker; hydrate_cues() finds the
-    # just-deleted rollup absent (a fresh capture, not an error). Re-selecting
-    # the composed feed re-populates `engagement_factors` for THIS reload. ──
+    # ── 5. Re-enter the SAME composed feed — Page_Loaded wires a new
+    # CueViewportObserver (FeedPage isn't cached) over the session's manager
+    # and the auth's one capture tracker, which the navigate-away above
+    # drained, so this dwell starts with nothing tracked. Re-selecting the
+    # composed feed re-populates `engagement_factors` for THIS reload. ──
     app.driver.set_state({"nav": {"stack": [{"view": "feed"}]}})
     app.driver.wait_for("feed-view")
     app.feed.open_feed(feed_name)
@@ -768,18 +818,27 @@ def test_engagement_dwell_derives_watch_complete_via_navigate_away_flush(
          if CAT_TEXT in (app.feed.post_text(i) or "")), None
     )
     assert target_index is not None, "on-topic post missing after reopening"
-    assert target_index == 0, (
-        "the on-topic post is the newest — it must render as post-card[0], "
-        "already ~100% visible with no scroll needed"
+    assert target_index > 0, (
+        f"before the dwell the on-topic post must not lead (the decoy is "
+        f"newer); error={app.error_text()!r}"
     )
 
-    # ── 6. The honest dwell: hold real wall-clock time past the long-dwell
-    # gate on the already-fully-visible post-card[0] (no scroll call at all —
-    # `dwell_on_post` would invoke the imprecise ScrollIntoView for nothing,
-    # since the element already satisfies `!IsOffscreen`), then navigate AWAY
-    # from Feed to end the exposure — OnNavigatedFrom's Unwire()/FlushAll()
-    # emits the accumulated exposure deterministically, no scroll needed ────
-    time.sleep(CUE_DWELL_LONG_S + 1.0)
+    # ── 6. The honest dwell: bring the mid-list on-topic card to long-dwell
+    # visibility with the MEASURED scroll (the docstring's reason the plain
+    # one is not enough; the capture samples that same scroll position, so
+    # the exposure is honest), advance the frozen clock past the long-dwell gate, then
+    # navigate AWAY from Feed to end the exposure — OnNavigatedFrom's
+    # Unwire()/FlushAll() emits the accumulated exposure deterministically ──
+    visible = app.driver.scroll_to_visible_fraction(
+        "post-card", CUE_LONG_DWELL_VISIBLE, index=target_index
+    )
+    assert visible >= CUE_LONG_DWELL_VISIBLE, (
+        f"the measured scroll left post-card[{target_index}] only "
+        f"{visible:.0%} visible — under the long-dwell gate, so no dwell can "
+        f"be credited; error={app.error_text()!r}"
+    )
+    # The hold is advanced on the frozen cue clock, never slept (convention 14).
+    app.feed.accrue_dwell(target_index, CUE_DWELL_LONG_S + 1.0)
     app.personalization.navigate()
 
     reply = _wait_model_blob(port, test_user, factor_key)
@@ -788,28 +847,27 @@ def test_engagement_dwell_derives_watch_complete_via_navigate_away_flush(
         f"error={app.error_text()!r}"
     )
 
+    # Outcome 14: what the topic learned from the dwell moves the on-topic
+    # post to the top of the composed feed.
+    _open_feed(app, feed_name)
+    top = _wait_top_post_contains(app, CAT_TEXT)
+    assert CAT_TEXT in top, (
+        f"the composed feed did not re-rank after the dwell-derived "
+        f"watch-complete; top post = {top!r}, error={app.error_text()!r}"
+    )
+    app.personalization.navigate()
+
     # ── 7. Flush-on-close + restart: mirrors the linux test's step 6 above.
     # windows' AppWindow.Closing only reaches TrayIconService.QuitApplication()
     # when Close-to-tray is OFF (it defaults ON — AppSettingsStore.CloseToTray —
     # so a plain window_close() would just HIDE the window, never quitting and
     # never flushing; leaving it on is what made the FIRST cut of this leg fail
-    # with "app did not exit on window close"). Flip it off first so close
-    # really quits. The debounced cues:v1 rollup is then put by the REAL
+    # with "app did not exit on window close"), so the leave door switches it
+    # off before the close. The debounced cues:v1 rollup is then put by the REAL
     # close-request handler (QuitApplication()'s bounded flush — the quit path
     # blocks on it), and survives as a sealed nest-side row any device
     # could fetch ──────────────────────────────────────────────────────
-    app.driver.set_state(
-        {"nav": {"stack": [{"view": "settings"}, {"view": "settings", "id": "general"}]}}
-    )
-    app.driver.wait_for("close-to-tray-toggle", timeout=10)
-    if app.driver.get_attr("close-to-tray-toggle", "state") == "true":
-        _click_with_retry(app.driver, "close-to-tray-toggle")
-    assert app.driver.get_attr("close-to-tray-toggle", "state") != "true", (
-        "close-to-tray must be OFF for window_close() to reach the real quit "
-        f"path; error={app.error_text()!r}"
-    )
-
-    app.driver.window_close()
+    _quit_through_the_apps_own_leave_door(app)
     assert app.driver.wait_app_exit(APP_EXIT_S), (
         f"app did not exit on window close; still alive={app.driver.is_app_alive()}"
     )
@@ -818,7 +876,15 @@ def test_engagement_dwell_derives_watch_complete_via_navigate_away_flush(
         f"cues:v1 rollup was not flushed on close: {rollup!r}"
     )
 
+    before = ws_api.personalization_model_fetch(port, test_user, factor_key)
     app.driver.hard_reload()  # relaunch + session replay (same actor)
+    _open_feed(app, feed_name)
+    top = _wait_top_post_contains(app, CAT_TEXT, timeout=25)
+    assert CAT_TEXT in top, (
+        f"the dwell-trained order did not survive the restart; top post = "
+        f"{top!r}, error={app.error_text()!r}; "
+        f"{_restart_leg_diagnosis(app, port, test_user, factor_key, before)}"
+    )
     app.personalization.navigate()
 
     # Cleanup — the session-scoped test_user is shared across this module's
@@ -859,6 +925,7 @@ def _cue_rollup_row_count(db_path: str, actor_id: bytes, factor: str = CUES_ROLL
 # over the same `FeedManager::set_cue_rollup_for_test` seam tui/linux drive.
 @pytest.mark.macos
 @pytest.mark.ios
+@pytest.mark.android
 @pytest.mark.feature("learn-from-my-activity")
 def test_engagement_toggle_and_clear_activity_data(logged_in_app, nest_instance, test_user):
     """The capture-free slice of the personalization chain's engagement
@@ -1136,6 +1203,7 @@ def test_signal_sharing_optin_producer_and_transparency_pane(
 @pytest.mark.macos
 @pytest.mark.ios
 @pytest.mark.android
+@pytest.mark.windows
 @pytest.mark.feature("learn-from-my-activity")
 def test_signal_sharing_persisted_optin_honoured_by_producer_after_relaunch(
     logged_in_app, nest_instance, test_user, request
@@ -1144,11 +1212,11 @@ def test_signal_sharing_persisted_optin_honoured_by_producer_after_relaunch(
     opening Personalization (engagement-cues.md § Layer B): the shared producer
     (`FeedManager::record_observation`) contributes only when the manager's
     cached opt-in is true, and that cache is filled by `hydrate_signal_optin`,
-    which every capture shell calls at feed init. apple's shell once did not —
-    a relaunch (or a second device) left the cache empty, so the dwell below
+    which every capture shell calls at feed init. apple's and windows' shells
+    once did not — a relaunch (or a second device) left the cache empty, so the dwell below
     derived a watch-complete that was never contributed until the pane's own
     read happened to fill it. Red before `CueViewportObserver.hydrateIfNeeded`
-    gained the call.
+    (apple) and `FeedPage.Page_Loaded` (windows) gained the call.
 
     Drives by element id only. Opt in through the UI, relaunch, and — WITHOUT
     visiting Personalization, whose own status read would fill the cache and
@@ -1236,10 +1304,9 @@ def test_signal_sharing_toggle_and_pane_render(logged_in_app):
     shared `FfiFeedManager` instance the Feed page observes), and the
     transparency pane (`signal-share-published-list`) renders without error.
 
-    Deliberately does NOT dwell/produce a real signal: the windows capture
-    shell (the `media_played_pm` playback gate a video-capable client needs)
-    is a separate, not-yet-built track (engagement-cues.md § Implementation
-    status today: "Not built: capture shells on windows/apple"). Mirrors
+    Deliberately does NOT dwell/produce a real signal here: the producer side
+    is proven by the dwell journeys and the persisted-opt-in relaunch test
+    (engagement-cues.md § Implementation status today). Mirrors
     apple's own landing scope note verbatim — "this lift proves only the
     toggle round-trip + pane render",
     which is exactly this test's scope too. The full k=3 producer→pane proof
@@ -1324,6 +1391,7 @@ def test_signal_sharing_toggle_and_pane_render(logged_in_app):
 
 @pytest.mark.macos
 @pytest.mark.ios
+@pytest.mark.android
 @pytest.mark.web
 @pytest.mark.feature("learn-from-my-activity")
 def test_engagement_dwell_derives_watch_complete_via_navigate_away_flush_apple(
@@ -1504,11 +1572,13 @@ def test_engagement_dwell_derives_watch_complete_via_navigate_away_flush_apple(
         f"the composed feed did not re-rank after the dwell-derived "
         f"watch-complete; top post = {top!r}, error={app.error_text()!r}"
     )
+    before = ws_api.personalization_model_fetch(port, test_user, factor_key)
     app.driver.hard_reload()
     top = reopen_and_read_top(25)
     assert CAT_TEXT in top, (
         f"the dwell-trained order did not survive the restart; top post = "
-        f"{top!r}, error={app.error_text()!r}"
+        f"{top!r}, error={app.error_text()!r}; "
+        f"{_restart_leg_diagnosis(app, port, test_user, factor_key, before)}"
     )
     app.personalization.navigate()
 
@@ -1522,8 +1592,18 @@ def test_engagement_dwell_derives_watch_complete_via_navigate_away_flush_apple(
 
 # The 5 s VP9 clip both linux's GStreamer and Playwright's Chromium play
 # (`test_feed_video_playback.py`'s fixture map).
-TINY_VIDEO = Path(__file__).parent.parent.parent / "fixtures" / "tiny-video.webm"
-TINY_VIDEO_S = 5.0
+FIXTURE_DIR = Path(__file__).parent.parent.parent / "fixtures"
+
+
+def _tiny_video(app) -> tuple[Path, float]:
+    """The clip each app's native player decodes, and its length in seconds —
+    the per-app choice ``test_feed_video_playback.py`` makes: web's browser and
+    linux's GStreamer play the 5 s VP9 ``tiny-video.webm``; AVFoundation
+    (macos, ios) and windows' ``MediaPlayerElement`` play no VP9, so they get
+    the 1 s H.264 ``tiny-video.mp4``."""
+    if app.driver.is_web() or app.driver.is_linux():
+        return FIXTURE_DIR / "tiny-video.webm", 5.0
+    return FIXTURE_DIR / "tiny-video.mp4", 1.0
 CUE_COMPLETE_FRACTION_PM = 850  # fauna_core::scoring::cues::CUE_COMPLETE_FRACTION_PM
 
 
@@ -1544,6 +1624,34 @@ def _played_s(app, card_index: int) -> float | None:
         ))
     except (TypeError, ValueError):
         return None
+
+
+#: fauna_core::scoring::cues::CUE_SKIP_MS — an exposure ended by a scroll after
+#: less than this at skip-visibility derives `skip`, which trains the topic.
+CUE_SKIP_MS = 1_200
+
+
+def _await_on_screen_cards_past_skip(app) -> None:
+    """Hold until every exposure in progress has dwelt at skip-visibility for
+    at least ``CUE_SKIP_MS`` — so the scroll that follows ends none of them as
+    a ``skip``. A skip on a decoy trains the composed topic, and that training
+    re-ranks the loaded window in place (measured on web 2026-11-02: the
+    played post jumped from post-card[7] to post-card[0] during the scroll to
+    it, the decoys above it having been on screen under 1.2 s). Polled off
+    the capture's own probe — the state the derivation reads — never a sleep
+    (convention 14)."""
+    def settled():
+        exposures = app.feed.cue_probe().get("exposures") or []
+        return all(
+            e.get("dwell_ms_at_skip_visibility", 0) >= CUE_SKIP_MS for e in exposures
+        ) or None
+
+    wait_until(
+        settled,
+        CUE_SKIP_MS / 1000 + budgets.RPC_ROUNDTRIP_S,
+        diagnose=lambda: f"the cards on screen never dwelt past the skip window: "
+                         f"{app.feed.cue_probe()!r}",
+    )
 
 
 def _card_of(app, post_id: str, hint: int) -> int | None:
@@ -1592,6 +1700,9 @@ def _video_cards(app) -> str:
 
 @pytest.mark.linux
 @pytest.mark.web
+@pytest.mark.macos
+@pytest.mark.ios
+@pytest.mark.windows
 @pytest.mark.feature("learn-from-my-activity")
 def test_a_video_played_to_its_end_derives_watch_complete_through_the_media_arm(
     logged_in_app, nest_instance, test_user
@@ -1613,9 +1724,10 @@ def test_a_video_played_to_its_end_derives_watch_complete_through_the_media_arm(
     alone — the dwell arm is never consulted for it (``CueEngine::derive``) —
     so however long the card sat on screen while the clip loaded and played,
     no dwell could have completed it. That is why this test asserts no
-    wall-clock bound on the dwell (convention 14). On linux the capture's own
-    probe additionally shows the exposure carrying the played fraction before
-    the leave.
+    wall-clock bound on the dwell (convention 14). On linux, web, macos and ios the capture's own
+    probe additionally shows the exposure attended by the play while it plays
+    (``playing`` — a play is attention, ``engagement-cues.md`` § Cue vocabulary
+    & derivation) and carrying the played fraction before the leave.
 
     Same setup as the apple/web journey above: an on-topic post FIRST, then a
     newer off-topic VIDEO decoy that can never complete (the test never
@@ -1624,7 +1736,8 @@ def test_a_video_played_to_its_end_derives_watch_complete_through_the_media_arm(
     """
     app = logged_in_app
     port = nest_instance["port"]
-    assert TINY_VIDEO.exists(), f"fixture video missing: {TINY_VIDEO}"
+    tiny_video, tiny_video_s = _tiny_video(app)
+    assert tiny_video.exists(), f"fixture video missing: {tiny_video}"
 
     # ── 1. Trained topic, engagement learning still off ──────────────────
     app.personalization.navigate()
@@ -1636,7 +1749,7 @@ def test_a_video_played_to_its_end_derives_watch_complete_through_the_media_arm(
     marker = _unique("clip")
     video_text = f"{CAT_TEXT} {marker}"
     app.driver.set_state({"nav": {"stack": [{"view": "feed"}]}})
-    app.feed.create_post_with_video(text=video_text, video_path=str(TINY_VIDEO))
+    app.feed.create_post_with_video(text=video_text, video_path=str(tiny_video))
     time.sleep(1.2)  # sleep-ok: strictly-newer created_at (epoch-seconds resolution)
     _post_decoy(app, f"quarterly budget spreadsheet {_unique('rows')}")
 
@@ -1672,7 +1785,12 @@ def test_a_video_played_to_its_end_derives_watch_complete_through_the_media_arm(
     )
 
     # ── 6. Bring the card into view, tap its video, let it play out ──────
+    # The scroll waits out the skip window first, so the decoy it moves past
+    # derives no `skip` that would train the topic on its own
+    # (`_await_on_screen_cards_past_skip`).
+    _await_on_screen_cards_past_skip(app)
     app.feed.scroll_post_into_view(target)
+    _await_on_screen_cards_past_skip(app)
     tapped_post = app.feed._post_id_of_card(target)
     app.driver.click("video-thumbnail", scope=f"post-card[{target}]")
 
@@ -1680,14 +1798,45 @@ def test_a_video_played_to_its_end_derives_watch_complete_through_the_media_arm(
         index = _card_of(app, tapped_post, target)
         return None if index is None else _played_s(app, index)
 
+    def tapped_exposure() -> dict | None:
+        return next(
+            (e for e in app.feed.cue_probe().get("exposures") or []
+             if e["post_id"] == tapped_post),
+            None,
+        )
+
+    # linux, web, macos, ios and windows relay their player's engagement to the
+    # shared tracker; while the clip plays, the tapped post's exposure reads as
+    # attended (`playing`).
+    relays_playing = (
+        app.driver.is_linux() or app.driver.is_web()
+        or app.driver.is_macos() or app.driver.is_ios()
+        or app.driver.is_windows()
+    )
+    attended: list[dict] = []
+
+    def played_to_its_end() -> float | None:
+        if relays_playing and not attended:
+            exposure = tapped_exposure()
+            if exposure and exposure.get("playing"):
+                attended.append(exposure)
+        s = played_s()
+        if s is not None and s >= 0.95 * tiny_video_s:
+            return s
+        # Where the play leaves the card under the skip gate (windows), the
+        # end-of-play release ends the exposure, its emit trains the topic and
+        # the re-rank rebuilds the cards — often before a poll reads the 1 s
+        # clip's end off the card. The post's own derived verdict is the same
+        # fact, read latency-independently: watch-complete needs the media arm.
+        verdict = app.feed.cue_verdict_for_test(tapped_post)
+        return tiny_video_s if verdict.get("verdict") == "watch-complete" else None
+
     # The player reaching (nearly) its end is the causal anchor, polled for
     # (convention 14): 95 % is past the 85 % gate with a tick to spare. Read
     # on the tapped POST's card wherever it now stands (`_card_of`).
     played = wait_until(
-        lambda: (lambda s: s if s is not None and s >= 0.95 * TINY_VIDEO_S else None)(
-            played_s()
-        ),
-        TINY_VIDEO_S + 25.0,
+        played_to_its_end,
+        tiny_video_s + 25.0,
         diagnose=lambda: (
             f"the video never played to its end: position={played_s()!r}, "
             f"tapped post-card[{target}] = {tapped_post[:12]}; cards now: "
@@ -1695,6 +1844,11 @@ def test_a_video_played_to_its_end_derives_watch_complete_through_the_media_arm(
         ),
     )
     assert played
+    if relays_playing:
+        assert attended, (
+            f"the capture never showed {tapped_post[:12]}'s exposure attended by "
+            f"the play while it played: {app.feed.cue_probe()!r}"
+        )
 
     if app.feed.has_cue_clock():
         # linux: the capture itself shows the played fraction folded into the
@@ -1702,18 +1856,24 @@ def test_a_video_played_to_its_end_derives_watch_complete_through_the_media_arm(
         post_id = tapped_post
 
         def folded():
-            probe = app.feed.cue_probe()
-            exposure = next(
-                (e for e in probe.get("exposures") or [] if e["post_id"] == post_id), None
-            )
+            exposure = tapped_exposure()
             pm = (exposure or {}).get("media_played_pm")
-            return exposure if pm is not None and pm >= CUE_COMPLETE_FRACTION_PM else None
+            if pm is not None and pm >= CUE_COMPLETE_FRACTION_PM:
+                return exposure
+            # A card the play leaves under the skip gate (windows' card, grown
+            # with its player in the 600 x 600 DIP e2e window) ends its exposure
+            # at the end-of-play release, and the held peak is taken at that
+            # emit (engagement-cues.md, *A play is attention*): the post's own
+            # derived verdict is then the witness of the fold.
+            verdict = app.feed.cue_verdict_for_test(post_id)
+            return verdict if verdict.get("verdict") == "watch-complete" else None
 
         wait_until(
             folded,
             budgets.RPC_ROUNDTRIP_S,
             diagnose=lambda: f"the capture never folded the play into {post_id[:12]}'s "
-                             f"exposure: {app.feed.cue_probe()!r}",
+                             f"exposure: {app.feed.cue_probe()!r}; verdict "
+                             f"{app.feed.cue_verdict_for_test(post_id)!r}",
         )
 
     # ── 7. Move on: leaving the feed drains the exposure, and the derived
@@ -1725,6 +1885,11 @@ def test_a_video_played_to_its_end_derives_watch_complete_through_the_media_arm(
     assert reply.get("sealed_blob"), (
         f"the played-to-the-end video never weak-trained the topic: {reply!r}; "
         f"error={app.error_text()!r}"
+    )
+    # The played post's own verdict, so no other card's cue can stand in for it.
+    verdict = app.feed.cue_verdict_for_test(tapped_post)
+    assert verdict.get("verdict") == "watch-complete", (
+        f"the played-to-the-end video derived {verdict!r}, not watch-complete"
     )
 
     # What the topic learned moves an on-topic post above the newer decoy,
@@ -1748,12 +1913,231 @@ def test_a_video_played_to_its_end_derives_watch_complete_through_the_media_arm(
     assert app.personalization.wait_for_topic_count(0) == 0
 
 
+#: fauna_core::scoring::cues::CUE_SKIP_VISIBLE_PM as a fraction — the skip
+#: gate a card under which the visibility rule alone would end its exposure.
+CUE_SKIP_VISIBILITY = 0.5
+
+#: Where the bottom-edge journey leaves the played card: a quarter of its
+#: height above the feed's bottom edge, well under the 50 % gate.
+BOTTOM_EDGE_FRACTION = 0.25
+
+#: Newer video decoys composed above the played post — enough height above it
+#: for the feed to scroll it down to its bottom edge. Videos, like the media-arm
+#: journey's decoy, so none of them can ever complete (the test never plays
+#: them).
+BOTTOM_EDGE_DECOYS = 7
+
+@pytest.mark.linux
+@pytest.mark.web
+@pytest.mark.macos
+@pytest.mark.ios
+@pytest.mark.feature("learn-from-my-activity")
+def test_a_video_played_near_the_bottom_edge_still_counts_as_watched(
+    logged_in_app, nest_instance, test_user
+):
+    """*A play is attention* (``engagement-cues.md`` § Cue vocabulary &
+    derivation, ruled 2026-10-30): a video card that sits under the 50 % skip
+    gate while its player plays to the end still derives ``watch-complete`` on
+    the leave — the gate answers "was the reader looking?" for a card that
+    merely sits in the viewport, and a play the reader started answers it by
+    itself.
+
+    The reader taps a post's video and scrolls on until only a quarter of the
+    card shows above the feed's bottom edge, while the clip plays out. The
+    placement is the driver's measured bottom-edge scroll
+    (``scroll_to_bottom_fraction``, ``e2e-conventions.md`` § Driver primitives
+    → *Placing an element at a measured fraction*), and the fraction it
+    measured is asserted under the gate. Before the ruling the tracker ended
+    the exposure ``ScrolledPast`` at that instant and dropped every later
+    reading of the player, so the play taught nothing; now the engaged row is
+    attended and its held peak is taken at emit.
+
+    **The witness is valid only if the card went under the gate before the
+    play could complete** — otherwise the peak was folded while the card was
+    still above the gate, and the old rule would pass too. So the player's
+    position is read right after the placement and asserted short of the
+    85 % completion line: a state assertion on what happened, not a timing
+    assumption (convention 14).
+
+    The setup is the media-arm journey's, with more newer video decoys so the
+    feed has the height above the played post to scroll it to the bottom edge.
+    """
+    app = logged_in_app
+    port = nest_instance["port"]
+    tiny_video, tiny_video_s = _tiny_video(app)
+    assert tiny_video.exists(), f"fixture video missing: {tiny_video}"
+
+    # ── 1. Trained topic, engagement learning still off ──────────────────
+    app.personalization.navigate()
+    app.personalization.create_sole_topic(_unique("Cats"))
+    factor_key = app.personalization.topic_factor_key()
+    assert not app.personalization.engagement_toggle_on(0)
+
+    # ── 2. The on-topic VIDEO post first, then the newer video decoys ────
+    marker = _unique("edge")
+    app.driver.set_state({"nav": {"stack": [{"view": "feed"}]}})
+    app.feed.create_post_with_video(text=f"{CAT_TEXT} {marker}", video_path=str(tiny_video))
+    time.sleep(1.2)  # sleep-ok: strictly-newer created_at (epoch-seconds resolution)
+    for _ in range(BOTTOM_EDGE_DECOYS):
+        _post_decoy(app, f"quarterly budget spreadsheet {_unique('rows')}")
+
+    # ── 3. A feed the trained factor dominates ───────────────────────────
+    feed_name = _unique("edge-feed")
+    app.feed.create_feed_with_factor(name=feed_name, factor_label=factor_key, weight="5.0")
+    app.feed.open_feed(feed_name)
+    assert app.feed.wait_for_post_text(marker, timeout_s=15), (
+        f"the video post is missing from the composed feed; error={app.error_text()!r}"
+    )
+    fetch = ws_api.personalization_model_fetch(port, test_user, factor_key)
+    assert not fetch.get("sealed_blob"), "factor must start with no model row"
+
+    # ── 4. Opt in, then clear what the setup's incidental viewing derived ─
+    app.personalization.navigate()
+    assert app.personalization.wait_for_topic_count(1) == 1
+    app.personalization.set_engagement_toggle(0, True)
+    app.personalization.clear_engagement_data()
+
+    # ── 5. Re-enter the composed feed; the video post sits below the decoys
+    app.driver.set_state({"nav": {"stack": [{"view": "feed"}]}})
+    app.driver.wait_for("feed-view")
+    app.feed.open_feed(feed_name)
+    assert app.feed.wait_for_post_text(marker, timeout_s=15)
+    target = next(
+        (i for i in range(app.feed.post_count()) if marker in (app.feed.post_text(i) or "")),
+        None,
+    )
+    assert target is not None, "the video post is missing after reopening"
+    assert target >= BOTTOM_EDGE_DECOYS, (
+        f"the video post must sit below its {BOTTOM_EDGE_DECOYS} newer decoys, "
+        f"found at post-card[{target}]; error={app.error_text()!r}"
+    )
+
+    # ── 6. Tap its video, then scroll on until the card sits under the gate
+    # Every scroll below waits out the skip window first, so no decoy it
+    # moves past derives a `skip` (`_await_on_screen_cards_past_skip`).
+    _await_on_screen_cards_past_skip(app)
+    app.feed.scroll_post_into_view(target)
+    _await_on_screen_cards_past_skip(app)
+    tapped_post = app.feed._post_id_of_card(target)
+    app.driver.click("video-thumbnail", scope=f"post-card[{target}]")
+
+    def played_s() -> float | None:
+        index = _card_of(app, tapped_post, target)
+        return None if index is None else _played_s(app, index)
+
+    placed_at = _card_of(app, tapped_post, target)
+    assert placed_at is not None, f"the tapped post left the feed: {_video_cards(app)}"
+    fraction = app.feed.place_post_at_bottom_edge(placed_at, BOTTOM_EDGE_FRACTION)
+    position_at_placement = played_s()
+    assert fraction < CUE_SKIP_VISIBILITY, (
+        f"the bottom-edge scroll left {fraction:.2f} of post-card[{placed_at}] "
+        f"visible, not under the {CUE_SKIP_VISIBILITY:.0%} skip gate — the feed "
+        f"could not scroll it that far (too little height above it?); tapped "
+        f"post {tapped_post[:12]} was post-card[{target}]; cards now: "
+        f"{_video_cards(app)}; error={app.error_text()!r}"
+    )
+    assert position_at_placement is None or position_at_placement < 0.85 * tiny_video_s, (
+        f"the clip was already at {position_at_placement:.2f}s of {tiny_video_s}s when "
+        f"the card went under the gate — past the 85 % completion line, so the "
+        f"peak was folded above the gate and this run witnesses nothing"
+    )
+
+    def tapped_exposure() -> dict | None:
+        return next(
+            (e for e in app.feed.cue_probe().get("exposures") or []
+             if e["post_id"] == tapped_post),
+            None,
+        )
+
+    # While the clip plays under the gate the capture shows the exposure open
+    # and attended (`playing`) — the rule's part 2, read off the shared probe.
+    attended: list[dict] = []
+
+    def played_to_its_end() -> float | None:
+        if not attended:
+            exposure = tapped_exposure()
+            if exposure and exposure.get("playing"):
+                attended.append(exposure)
+        s = played_s()
+        return s if s is not None and s >= 0.95 * tiny_video_s else None
+
+    played = wait_until(
+        played_to_its_end,
+        tiny_video_s + 25.0,
+        diagnose=lambda: (
+            f"the video never played to its end under the gate: position={played_s()!r}, "
+            f"tapped post {tapped_post[:12]}; cards now: {_video_cards(app)}"
+        ),
+    )
+    assert played
+    assert attended, (
+        f"the capture never showed {tapped_post[:12]}'s exposure attended by the "
+        f"play while its card sat under the gate: {app.feed.cue_probe()!r}"
+    )
+
+    if app.driver.is_linux() or app.driver.is_web():
+        # linux and web: the exposure still open under the gate carries the
+        # played fraction — the held peak the media arm reads at emit. Apple
+        # folds the peak at the NEXT sample and the leave drains it, so by the
+        # time this poll reads, the exposure can already have ended and the
+        # learned topic re-ranked the feed (the post is no longer tracked): the
+        # state to read there is the verdict below, not this transient.
+        def folded():
+            exposure = tapped_exposure()
+            pm = (exposure or {}).get("media_played_pm")
+            return exposure if pm is not None and pm >= CUE_COMPLETE_FRACTION_PM else None
+
+        wait_until(
+            folded,
+            budgets.RPC_ROUNDTRIP_S,
+            diagnose=lambda: f"the capture never folded the play into {tapped_post[:12]}'s "
+                             f"exposure under the gate: {app.feed.cue_probe()!r}",
+        )
+
+    # ── 7. Move on: the leave drains the exposure and the verdict
+    # weak-trains the topic ──────────────────────────────────────────────
+    app.personalization.navigate()
+    reply = _wait_model_blob(port, test_user, factor_key)
+    assert reply.get("sealed_blob"), (
+        f"the video played to its end under the gate never weak-trained the topic: "
+        f"{reply!r}; error={app.error_text()!r}"
+    )
+    # The played post's own verdict, so no other card's cue can stand in for it.
+    verdict = app.feed.cue_verdict_for_test(tapped_post)
+    assert verdict.get("verdict") == "watch-complete", (
+        f"the video played to its end under the gate derived {verdict!r}, not "
+        f"watch-complete"
+    )
+
+    # What the topic learned moves an on-topic post above the newer decoys,
+    # read after a relaunch (as in the media-arm journey above).
+    app.driver.hard_reload()
+    _open_feed(app, feed_name)
+    top = _wait_top_post_contains(app, CAT_TEXT, timeout=25)
+    assert CAT_TEXT in top, (
+        f"the composed feed did not re-rank after the bottom-edge watch-complete; "
+        f"top post = {top!r}, error={app.error_text()!r}"
+    )
+    app.personalization.navigate()
+
+    # Cleanup — the session-scoped test_user is shared across this module.
+    assert app.personalization.wait_for_topic_count(1) == 1
+    app.personalization.clear_engagement_data()
+    app.personalization.delete_topic(0)
+    assert app.personalization.wait_for_topic_count(0) == 0
+
+
 # Bytes that are no sealed rollup: the AEAD open refuses them, exactly as it
 # refuses a corrupted row or one sealed under a key this device does not hold.
 UNOPENABLE_ROLLUP = b"not a sealed cue rollup -- the open must refuse it"
 
 
 @pytest.mark.tui
+@pytest.mark.linux
+@pytest.mark.web
+@pytest.mark.macos
+@pytest.mark.ios
+@pytest.mark.windows
 @pytest.mark.feature("learn-from-my-activity")
 def test_saved_activity_data_that_cannot_be_opened_is_reported_not_started_over(
     logged_in_app, nest_instance, test_user
@@ -1815,9 +2199,9 @@ def test_saved_activity_data_that_cannot_be_opened_is_reported_not_started_over(
 # both bounded from above, so a witness that let real time pass between scroll
 # steps would go red on a loaded box for no product reason (convention 14).
 # These journeys freeze the capture clocks before any post is on screen (the
-# shared tracker's, `fauna_feed::CueTracker` § The test clock, on tui, linux
-# and web alike) and advance them by exact amounts; the scroll is real (tui's
-# focus ring, linux's and web's pixel scroll position), the geometry what the
+# shared tracker's, `fauna_feed::CueTracker` § The test clock, on every app
+# that runs them) and advance them by exact amounts; the scroll is real (tui's
+# focus ring, the other apps' pixel scroll position), the geometry what the
 # app laid out, the derivation the shared engine. Frozen, a card accrues exactly what
 # the test advanced while it was in view, so every setup exposure ends with no
 # dwell and derives nothing.
@@ -1837,15 +2221,24 @@ CUE_DWELL_LONG_MS = 8_000
 
 
 def _set_up_on_topic_post_below_a_decoy(app) -> tuple[str, str, str, str]:
-    """Freeze the cue clocks, then build a composed feed whose list reads: an
+    """Freeze the cue clocks, then build a composed feed whose list reads: a
     video decoy, the on-topic text post, then six older video decoys — more
     than any app's viewport holds, so the on-topic post can be scrolled out of
-    view whatever else the session left in the feed.
+    view.
+
+    The feed holds these eight posts and nothing else: its ``BodyContains``
+    rule names a token only they carry. The session's test user keeps every
+    post earlier tests made, and a skip sinks the on-topic post to the very
+    bottom of the list, among the oldest of them. Those are text and image
+    posts, so outcome 7's long linger would complete them too, train the topic
+    on their words and erase the rank differential (the module doc's
+    selectivity note) — this journey went red only after such a test, and
+    passed alone.
 
     Returns ``(factor_key, cat_text, cat_post_id, below_text)`` —
     ``below_text`` is the decoy directly under the on-topic post. The on-topic
-    text carries a token of its own: the session's test user keeps the posts
-    earlier tests made, the same vocabulary included. The topic learns from activity
+    text carries a token of its own too: the session's test user keeps the same
+    vocabulary from earlier tests. The topic learns from activity
     from the start: with the clocks frozen nothing on screen accrues any
     dwell, so setup derives no verdict to train on. The decoys are unplayed
     video posts so the long linger of outcome 7 cannot complete them (the module doc's
@@ -1863,25 +2256,29 @@ def _set_up_on_topic_post_below_a_decoy(app) -> tuple[str, str, str, str]:
     app.driver.set_state({"nav": {"stack": [{"view": "feed"}]}})
     app.feed.open_feed("General")
     # Oldest first: an untrained composed feed lists newest first.
-    cat_text = f"{CAT_TEXT} {_unique('paw')}"
-    below_text = f"garden hose nozzle {_unique('spray')}"
-    for text in (f"harbour ferry schedule {_unique('dock')}",
-                 f"office printer toner {_unique('page')}",
-                 f"parking garage levels {_unique('ramp')}",
-                 f"commuter rail timetable {_unique('stop')}",
-                 f"quarterly budget spreadsheet {_unique('rows')}",
+    journey = _unique("journey")
+    cat_text = f"{CAT_TEXT} {_unique('paw')} {journey}"
+    below_text = f"garden hose nozzle {_unique('spray')} {journey}"
+    for text in (f"harbour ferry schedule {_unique('dock')} {journey}",
+                 f"office printer toner {_unique('page')} {journey}",
+                 f"parking garage levels {_unique('ramp')} {journey}",
+                 f"commuter rail timetable {_unique('stop')} {journey}",
+                 f"quarterly budget spreadsheet {_unique('rows')} {journey}",
                  below_text):
         _post_decoy(app, text)
         time.sleep(1.2)  # sleep-ok: strictly-older created_at (epoch-seconds resolution)
     app.feed.create_post(text=cat_text)
     time.sleep(1.2)  # sleep-ok: strictly-older created_at (epoch-seconds resolution)
-    _post_decoy(app, f"bicycle chain grease {_unique('gear')}")
+    _post_decoy(app, f"bicycle chain grease {_unique('gear')} {journey}")
 
     feed_name = _unique("cats-feed")
-    app.feed.create_feed_with_factor(name=feed_name, factor_label=factor_key, weight="5.0")
+    app.feed.create_feed_with_factor(
+        name=feed_name, factor_label=factor_key, weight="5.0",
+        rule=("BodyContains", journey),
+    )
     app.feed.open_feed(feed_name)
     order = wait_until(
-        lambda: (lambda o: o if len(o) >= 8 else None)(_rendered_order(app)),
+        lambda: (lambda o: o if len(o) == 8 else None)(_rendered_order(app)),
         budgets.RPC_ROUNDTRIP_S,
         diagnose=lambda: f"composed feed reads {_rendered_order(app)!r}; "
                          f"error={app.error_text()!r}",
@@ -1938,6 +2335,9 @@ def _pass_the_on_topic_post(app, cat_id: str, pace_ms: int) -> None:
 @pytest.mark.linux
 @pytest.mark.web
 @pytest.mark.android
+@pytest.mark.macos
+@pytest.mark.ios
+@pytest.mark.windows
 @pytest.mark.feature("learn-from-my-activity")
 def test_scrolling_past_a_post_teaches_less_like_this_and_lingering_later_takes_it_back(
     logged_in_app, nest_instance, test_user
@@ -1975,7 +2375,7 @@ def test_scrolling_past_a_post_teaches_less_like_this_and_lingering_later_takes_
         )
 
         # ── Outcome 7: a later linger takes the skip back ───────────────
-        app.driver.scroll_to("post-card", index=_position(order, cat_text))
+        app.feed.bring_post_into_dwell_view(_position(order, cat_text))
         probe = app.feed.cue_probe()
         assert cat_id in probe["tracked"], f"the on-topic post is not in view: {probe!r}"
         probe = app.feed.advance_cue_clock(CUE_DWELL_LONG_MS + 1_000)
@@ -2011,6 +2411,9 @@ def test_scrolling_past_a_post_teaches_less_like_this_and_lingering_later_takes_
 @pytest.mark.linux
 @pytest.mark.web
 @pytest.mark.android
+@pytest.mark.macos
+@pytest.mark.ios
+@pytest.mark.windows
 @pytest.mark.feature("learn-from-my-activity")
 def test_flicking_fast_past_a_post_teaches_nothing(
     logged_in_app, nest_instance, test_user
@@ -2021,8 +2424,8 @@ def test_flicking_fast_past_a_post_teaches_nothing(
     The same scroll sequence as the skip above with only the pace changed:
     the on-topic post leaves view 100 ms after the card above it did, after
     100 ms in view. Nothing is learned — the order stands, and once no put
-    can still be on its way (the app has exited; on web and android, the
-    scroll step has acked) the topic has no model."""
+    can still be on its way (the app has exited; on web, android, macos and
+    ios, the scroll step has acked) the topic has no model."""
     app = logged_in_app
     port = nest_instance["port"]
     factor_key, cat_text, cat_id, below_text = _set_up_on_topic_post_below_a_decoy(app)
@@ -2037,10 +2440,11 @@ def test_flicking_fast_past_a_post_teaches_nothing(
         assert app.driver.wait_app_exit(APP_EXIT_S), (
             f"app did not exit; still alive={app.driver.is_app_alive()}"
         )
-    # A browser tab or a phone app has no quit door a test can drive and wait
-    # out; there the barrier is the scroll step itself — it acked only once
-    # every exposure it ended was recorded, a train and its put included
-    # (web's `#lib/feed-cues-e2e`, android's TestAgent `feedCueCommand`).
+    # A browser tab, a phone app or a macOS app (which outlives its last
+    # window) has no quit door a test can drive and wait out; there the barrier
+    # is the scroll step itself — it acked only once every exposure it ended was
+    # recorded, a train and its put included (web's `#lib/feed-cues-e2e`,
+    # android's TestAgent `feedCueCommand`, apple's `FeedCueClockTestCommand`).
     learned = ws_api.personalization_model_fetch(port, test_user, factor_key)
     assert not learned.get("sealed_blob"), f"a flick-through taught the topic: {learned!r}"
 

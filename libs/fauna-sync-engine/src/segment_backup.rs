@@ -611,6 +611,26 @@ pub async fn sweep_stale_staging(staging: &std::path::Path) {
     }
 }
 
+/// Back-date `dir`, for a test of [`sweep_stale_staging`]. On windows a directory
+/// opens only with `FILE_FLAG_BACKUP_SEMANTICS`, and setting its time needs an
+/// access `File::open` does not ask for.
+#[cfg(test)]
+pub(crate) fn backdate_dir(dir: &std::path::Path, modified: std::time::SystemTime) {
+    let mut options = std::fs::OpenOptions::new();
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_WRITE_ATTRIBUTES: u32 = 0x0100;
+        const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+        options
+            .access_mode(FILE_WRITE_ATTRIBUTES)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS);
+    }
+    #[cfg(not(windows))]
+    options.read(true);
+    options.open(dir).unwrap().set_modified(modified).unwrap();
+}
+
 /// One live path of a covered ordinary folder's head, as the mirror pull reads
 /// it (`docs/goal/behavior/backup-destinations.md` § Ordinary-folder coverage).
 /// The `path_hash` is the mirror's path key — uniform across sealed- and
@@ -1183,8 +1203,8 @@ pub async fn resolve_destination(
 /// connection alongside the resolved identity — for the **add** flow, which
 /// reuses it to register the revocable nest-writer grant at the destination
 /// (`fauna.backup.writer_grant.register`, a USER-class kind that needs an
-/// authed session; `NestClient::connect` already minted one to prove
-/// reachability/authorization, so this avoids a second connect+handshake).
+/// authed session; the mint below already proved reachability/authorization,
+/// so this avoids a second connect+handshake).
 /// The grant registration itself lives in `fauna_client_config::
 /// enroll_backup_destination`, which takes this connection as its
 /// `destination: D` parameter — this fn only resolves + hands back the
@@ -1198,7 +1218,14 @@ pub async fn resolve_destination_connected(
 
     let keypair = ActorKeypair::from_secret(owner_secret);
     let client = fauna_client::NestClient::new(destination_url.to_string(), keypair);
-    client.connect().await.with_context(|| {
+    // The mint first, on its own: `connect()` alone is `Ok` over a destination
+    // that never answered, its supervisor retrying.
+    async {
+        client.authenticate().await?;
+        client.connect().await
+    }
+    .await
+    .with_context(|| {
         format!("connect to backup destination {destination_url} (handshake / authorization)")
     })?;
 
@@ -1639,10 +1666,7 @@ mod tests {
         }
         let old = std::time::SystemTime::now()
             - std::time::Duration::from_secs(STALE_STAGING_SECS + 3_600);
-        std::fs::File::open(&stale)
-            .unwrap()
-            .set_modified(old)
-            .unwrap();
+        backdate_dir(&stale, old);
 
         sweep_stale_staging(staging.path()).await;
 
@@ -2286,5 +2310,17 @@ mod tests {
             ..payload_match
         };
         assert!(!push_matches_actor(&payload_malformed, &actor, &["mail"]));
+    }
+
+    /// An unreachable destination is the connect's failure — not a session that
+    /// never came up, read one step later as an identity failure.
+    #[tokio::test]
+    async fn resolving_an_unreachable_destination_fails_at_the_connect() {
+        // Nothing listens on port 1 of the loopback.
+        let err = match resolve_destination_connected([0x24; 32], "http://127.0.0.1:1").await {
+            Ok(_) => panic!("an unreachable destination connected"),
+            Err(e) => e.to_string(),
+        };
+        assert!(err.starts_with("connect to backup destination"), "{err}");
     }
 }

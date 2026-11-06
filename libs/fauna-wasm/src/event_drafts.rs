@@ -93,6 +93,11 @@ mod face {
         /// A transport/seal *failure* rejects WITHOUT lifting the `DraftsSync`
         /// save gate, so a later `saveDrafts` stays a no-op for the session and
         /// can never clobber the user's unread draft; the next launch retries.
+        ///
+        /// A transport failure is retried for minutes first (`DraftsSync::load`),
+        /// so never await this on a path that holds a page back, and hand what
+        /// it resolves to to [`fill_event_draft`], never straight into the live
+        /// draft.
         #[wasm_bindgen(js_name = restoreDrafts)]
         pub fn restore_drafts(&self) -> js_sys::Promise {
             let sync = self.sync.clone();
@@ -159,6 +164,29 @@ mod face {
             })
         }
     }
+}
+
+/// The events rail's FILL rule across the boundary (`events.md` §
+/// Persistence, *A restore FILLS*): what the page's live draft becomes when the
+/// launch restore lands — `restored` when the user has not authored into
+/// `live`, else `live` untouched. Both are `{ summary, dtstart, dtend,
+/// description, location }` objects; `live` may be `null`/`undefined` for "no
+/// draft yet". The twin of `fauna-ffi`'s `fill_event_draft`.
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen::prelude::wasm_bindgen(js_name = fillEventDraft)]
+pub fn fill_event_draft(
+    live: wasm_bindgen::JsValue,
+    restored: wasm_bindgen::JsValue,
+) -> Result<wasm_bindgen::JsValue, wasm_bindgen::JsValue> {
+    use fauna_client_caldav::drafts::EventDrafts;
+    let mut live: EventDrafts = if live.is_null() || live.is_undefined() {
+        EventDrafts::default()
+    } else {
+        crate::rpc::from_js(live)?
+    };
+    let restored: EventDrafts = crate::rpc::from_js(restored)?;
+    live.fill(restored);
+    crate::rpc::to_js(&live)
 }
 
 #[cfg(target_arch = "wasm32")]

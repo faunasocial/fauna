@@ -28,7 +28,10 @@ name: Build, stage and verify the nest Docker image
 #                the upgrade smoke against the previous verified build. Holds
 #                no registry credential: the image leaves the job as a
 #                workflow artifact, so a build step (thousands of third-party
-#                build scripts) never runs beside a token that can push.
+#                build scripts) never runs beside a token that can push. Once
+#                per run, dry or not, it also uploads the served web tree as
+#                the 90-day run artifact `web-tree` (asset-manifest.json
+#                inside), for the e2e columns that never build web.
 #   2. stage   — pushes the per-arch tags, merges them into the immutable
 #                :sha-<sha>, stages the vetted third-party images on it, then
 #                moves the stage tag on all of them: :dev on the private
@@ -177,6 +180,7 @@ jobs:
       # cannot answer.
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
         with:
+          persist-credentials: false
           fetch-depth: 0
 
       # The upgrade smoke decides its window through a Python helper run under uv.
@@ -468,6 +472,47 @@ jobs:
           ./scripts/image-upgrade-smoke.sh "$IMAGE:$ARCH_TAG" \
             --expect-commit ${{ github.sha }} "${previous[@]}"
 
+      # The served web tree — the Dockerfile's `web-tree` stage, exactly what
+      # the image serves from /usr/share/fauna-web/ — leaves every green build
+      # as the run artifact `web-tree`, dry or not, either leg, for the e2e
+      # columns whose harness runs where web is never built (build-system.md
+      # § The Deno build sandbox → *The web tree is consumed off Linux, never
+      # built there*). Once per run: the amd64 job, or the arm64 one when the
+      # run built arm64 alone. The final build above left the stage in this
+      # job's builder, so with the same build args this is an export, not a
+      # rebuild, and it starts no Rust stage. The manifest ships inside the
+      # tree and names the commit (no --static: the runner holds no `just
+      # wasm` tree, as in web-tree-reproducibility.yml).
+      - name: Export the served web tree
+        if: matrix.arch == 'amd64' || (inputs.arches == 'arm64' && github.repository != 'faunasocial/fauna')
+        timeout-minutes: 30
+        run: |
+          builder=()
+          if [ "$RUNNER_LEG" = self-hosted ]; then builder=(--builder default); fi
+          rm -rf "$RUNNER_TEMP/web-tree"
+          docker buildx build "${builder[@]}" \
+            --platform "linux/${{ matrix.arch }}" \
+            --build-arg BUILD_JOBS="${{ steps.jobs.outputs.jobs }}" \
+            --build-arg FAUNA_BUILD_COMMIT=${{ github.sha }} \
+            --build-arg FAUNA_BUILD_ID="$BUILD_ID" \
+            --build-arg FAUNA_VERSION=${{ steps.version.outputs.version }} \
+            --target web-tree \
+            --output type=local,dest="$RUNNER_TEMP/web-tree" .
+          uv run --no-project python scripts/web-asset-manifest.py write \
+            "$RUNNER_TEMP/web-tree" --commit ${{ github.sha }}
+          test -f "$RUNNER_TEMP/web-tree/share-viewer.html" \
+            || { echo "::error::the exported web tree holds no share-viewer.html"; exit 1; }
+          du -sh "$RUNNER_TEMP/web-tree"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        name: Upload the served web tree
+        if: matrix.arch == 'amd64' || (inputs.arches == 'arm64' && github.repository != 'faunasocial/fauna')
+        with:
+          name: web-tree
+          path: ${{ runner.temp }}/web-tree
+          retention-days: 90
+          if-no-files-found: error
+
       # The hosted leg hands the image to the stage job as a workflow artifact;
       # on the self-hosted runner the stage job runs on the same docker daemon,
       # which still holds it under its per-arch tag.
@@ -523,6 +568,8 @@ jobs:
     steps:
       # The mirror step reads the vetted table (which repositories to copy).
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
+        with:
+          persist-credentials: false
 
       # The mirror step reads the vetted table through `uv run`.
       - name: Install uv
@@ -638,6 +685,8 @@ jobs:
       GITHUB_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
+        with:
+          persist-credentials: false
 
       # The scanner probe and the admission run under uv.
       - name: Install uv
@@ -717,6 +766,8 @@ jobs:
     steps:
       # The mirror copy and the verification read the vetted table (which mirrors).
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
+        with:
+          persist-credentials: false
 
       - name: Install uv
         run: |

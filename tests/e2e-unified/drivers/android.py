@@ -1,15 +1,18 @@
 """Android driver using on-device Kotlin bridge via ADB port-forward."""
 
+import io
 import json
 import os
 import re
 import shutil
 import subprocess
+import tarfile
 import time
 from pathlib import Path
 from urllib.parse import urlparse
 
-from .http_bridge import HttpBridgeDriver
+from .http_bridge import HttpBridgeDriver, LaunchWitnesses, launch_timeout_report
+from .local_launch import schedstat_wait_s, stat_cpu
 from .port_util import drain_pipes, popen_group_kwargs, reap_descendants_of
 
 
@@ -43,6 +46,137 @@ def nest_ports_from_config(config: dict) -> list[int]:
     for extra in config.get("nest_ports") or ():
         add(extra)
     return ports
+
+
+def _device_cpu_reading(text: str) -> tuple[str, float | None, float | None, str]:
+    """(pid, CPU seconds, wall seconds since the process started, why unread) from
+    the device's answer to `_launch_witnesses`' shell: `pid <n>`, `CLK_TCK`, the
+    app's `/proc/<pid>/stat` line and `/proc/uptime`."""
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    pid = next((ln.split()[1] for ln in lines if ln.startswith("pid ") and len(ln.split()) > 1), "")
+    if not pid:
+        return "", None, None, "the app has no process on the device (pidof found none)"
+    stat = next((ln for ln in lines if "(" in ln and ")" in ln), None)
+    hz = next((int(ln) for ln in lines if ln.isdigit()), None)
+    uptime = next((ln for ln in lines if re.fullmatch(r"[\d.]+ [\d.]+", ln)), None)
+    if stat is None or hz is None or uptime is None:
+        return pid, None, None, f"the device's /proc answer was incomplete: {text[-200:]!r}"
+    try:
+        cpu_s, since_boot = stat_cpu(stat, hz)
+    except (ValueError, IndexError) as exc:
+        return pid, None, None, f"the device's /proc/{pid}/stat could not be parsed ({exc})"
+    return pid, cpu_s, float(uptime.split()[0]) - since_boot, ""
+
+
+def _device_wait_reading(text: str, pid: str, wall_s: float | None) -> tuple[float | None, str, str]:
+    """(share of the window waited for a CPU, how it was read, why unread) from the
+    `schedstat` lines in the same answer: the device's `/proc/<pid>/task/*/schedstat`,
+    the kernel's own run-queue wait, read as linux's is."""
+    if not wall_s:
+        return None, "", "no wall time to take the wait's share of"
+    wait_s = schedstat_wait_s(ln.strip() for ln in text.splitlines())
+    if wait_s is None:
+        return None, "", f"the device answered no schedstat line for /proc/{pid}/task/* (CONFIG_SCHED_INFO off?)"
+    return (
+        wait_s / wall_s,
+        f"its longest-waiting thread's run-queue wait, {wait_s:.1f} s of {wall_s:.1f} s, "
+        f"from the device's /proc/{pid}/task/*/schedstat",
+        "",
+    )
+
+
+# --- Convention 6's close rider: the device's crash witnesses ----------------
+
+#: A `logcat -v epoch` line: `<epoch>.<frac>  <pid>  <tid> <level> <tag>: <message>`.
+_LOGCAT_EPOCH_LINE = re.compile(
+    r"^\s*(?P<at>\d+\.\d+)\s+(?P<pid>\d+)\s+(?P<tid>\d+)\s+(?P<level>[VDIWEFA])\s+"
+    r"(?P<tag>[^:]*?)\s*:\s?(?P<msg>.*)$"
+)
+
+#: The three lines a crash block opens with: the runtime's uncaught exception
+#: (`AndroidRuntime`), libc's report of a fatal signal (a native crash, a Rust
+#: `abort()`), and debuggerd's tombstone header.
+_CRASH_OPENERS = re.compile(r"FATAL EXCEPTION|Fatal signal \d+|^\*\*\* \*\*\* \*\*\*")
+
+#: How many lines of one block a report carries: a Java trace with its causes
+#: runs to a few dozen, a tombstone's header and backtrace to about a hundred.
+_CRASH_BLOCK_MAX_LINES = 160
+
+
+def _device_instant_reading(text: str) -> tuple[float | None, str]:
+    """(the device's epoch clock, the app's pid or ``""``) from the answer to
+    `date +%s.%N; echo "pid $(pidof <package>)"` — the one adb call every
+    launch and every close makes. An unread clock is ``None``; toybox `date`
+    printing `%N` literally still yields the whole seconds."""
+    at = None
+    pid = ""
+    for line in text.splitlines():
+        line = line.strip()
+        if line.startswith("pid"):
+            pid = line[3:].strip().split(" ")[0] if line[3:].strip() else ""
+        elif at is None:
+            m = re.match(r"^(\d+)(?:\.(\d+))?", line)
+            if m:
+                at = float(f"{m[1]}.{m[2]}") if m[2] else float(m[1])
+    return at, pid
+
+
+def _crash_block(
+    logcat: str, *, package: str, pid: str, since: float | None
+) -> tuple[str, list[str], float] | None:
+    """The first crash block in ``logcat`` (`logcat -d -b main,crash -v epoch`)
+    that belongs to this app and was written at or after ``since``, as
+    (its fatal line, the block whole, its device instant) — or ``None``.
+
+    A block belongs to the app when its opening line was written by the app's
+    process (``pid``, the pid read at its launch) or names the package — the
+    runtime's `Process: <package>, PID: <n>`, libc's `pid <n> (<package>)`,
+    the tombstone's `>>> <package> <<<`. The pid is what keeps another app's
+    crash, or this app's crash in an earlier launch, out; the package name is
+    the fallback for a launch whose pid was unread. The harness's own
+    `am force-stop` writes no block, so it never reads as one."""
+    parsed = [(_LOGCAT_EPOCH_LINE.match(ln), ln) for ln in logcat.splitlines()]
+    for i, (m, raw) in enumerate(parsed):
+        if m is None or not _CRASH_OPENERS.search(m["msg"]):
+            continue
+        at = float(m["at"])
+        if since is not None and at < since:
+            continue
+        block = [raw]
+        for nm, nraw in parsed[i + 1:]:
+            if len(block) >= _CRASH_BLOCK_MAX_LINES:
+                break
+            if nm is None or (nm["pid"], nm["tag"]) != (m["pid"], m["tag"]):
+                continue
+            if _CRASH_OPENERS.search(nm["msg"]) and nm["msg"] != m["msg"]:
+                break
+            block.append(nraw)
+        text = "\n".join(block)
+        owned = (pid and m["pid"] == pid) or any(
+            marker in text
+            for marker in (f"Process: {package},", f"({package})", f">>> {package} <<<")
+        )
+        if not owned:
+            continue
+        return _fatal_line(m["msg"], block), block, at
+    return None
+
+
+def _fatal_line(opener: str, block: list[str]) -> str:
+    """The one line a death report leads with: the exception the runtime
+    reported (`FATAL EXCEPTION: main — java.lang.IllegalStateException: …`),
+    libc's fatal-signal line, or a tombstone's `signal N (SIG…)` line."""
+    messages = [m["msg"] for m in map(_LOGCAT_EPOCH_LINE.match, block[1:]) if m]
+    if "FATAL EXCEPTION" in opener:
+        cause = next(
+            (msg.strip() for msg in messages if msg.strip() and not msg.startswith(("Process:", "PID:"))),
+            "",
+        )
+        return f"{opener.strip()} — {cause}" if cause else opener.strip()
+    if opener.startswith("***"):
+        signal_line = next((msg.strip() for msg in messages if re.match(r"\s*signal \d+", msg)), "")
+        return f"tombstone — {signal_line}" if signal_line else "tombstone (no signal line in its header)"
+    return opener.strip()
 
 
 class AndroidBridgeDriver(HttpBridgeDriver):
@@ -185,6 +319,35 @@ class AndroidBridgeDriver(HttpBridgeDriver):
             return None if runs is None else json.dumps(runs)
         return super().get_attr(element_id, attribute, index, scope=scope)
 
+    def in_viewport(self, element_id: str, *, index: int = 0,
+                    scope: str | None = None) -> bool:
+        """Whether the ``index``-th ``element_id`` sits in the visible band of the
+        open thread: its ``frame`` (accessibility bounds, already clipped to the
+        window) has a non-zero size, its vertical centre is on screen, and it is
+        above the pinned compose bar (``dm-text-field``) when that is shown.
+
+        Compose's LazyColumn composes only the rows at or near the viewport, so an
+        unrealized row has no frame at all (the bridge answers ``None`` -> not in
+        view); a realized row is further tested against the compose bar, which
+        pins to the bottom of the same column and would otherwise hide a bubble
+        scrolled underneath it. Read-only, never scrolls — linux's, tui's and
+        windows's rule in this app's geometry."""
+        frame = self.get_attr(element_id, "frame", index, scope=scope)
+        if not frame:
+            return False
+        _x, y, _w, h = (float(p) for p in frame.split(","))
+        if h <= 0:
+            return False
+        centre = y + h / 2
+        if centre < 0:
+            return False
+        bar = self.get_attr("dm-text-field", "frame")
+        if bar:
+            bar_y = float(bar.split(",")[1])
+            if centre >= bar_y:
+                return False
+        return True
+
     #: Commit-on-Enter inputs: a ``click`` on one is the commit, the type-then-click
     #: idiom the shared action layer uses for every app (``actions/custody.py``
     #: ``set_held_budget``). A UiAutomator tap only focuses a Compose text field,
@@ -293,7 +456,14 @@ class AndroidBridgeDriver(HttpBridgeDriver):
                 check=True, capture_output=True, timeout=60,
             )
 
+        # Before the bridge starts, while nothing of the app is running: a first
+        # launch finds no store an earlier, killed run left behind. A later
+        # launch of this driver is the same machine, and keeps what it wrote.
+        if config.get(self._PRODUCTION_STORE_KEY) and not getattr(self, "_launched_once", False):
+            self._wipe_production_store(check=True)
+
         self._apply_permission_grants()
+        self.set_app_locale(config.get("locale"))
 
         # ADB port-forward: local port -> device port. `adb forward` listens on
         # the machine running the adb SERVER. With a local server that is this
@@ -334,6 +504,7 @@ class AndroidBridgeDriver(HttpBridgeDriver):
         # Armed against point 9 (2026-08-14): `am instrument -w` streams for the
         # WHOLE run, so this adb client is long-lived by construction, and an
         # unreaped one keeps its device port-forward claimed against the next run.
+        posted_at = time.time()
         self._bridge_proc = subprocess.Popen(
             [*adb, "shell", "am", "instrument", "-w",
              "-e", "port", str(self._device_port),
@@ -351,7 +522,7 @@ class AndroidBridgeDriver(HttpBridgeDriver):
         self._bridge_log = drain_pipes(self._bridge_proc)
 
         self._url = f"http://127.0.0.1:{self._local_port}"
-        self._wait_for_health(timeout=30)
+        self._wait_for_health(posted_at, timeout=self._RELAUNCH_READY_BUDGET_S)
 
         # Kept for `preserve_state_across_relaunch()`, which pins into it, and
         # for the relaunch `recover()` runs from it.
@@ -359,6 +530,7 @@ class AndroidBridgeDriver(HttpBridgeDriver):
         self._note_store_owner(config)
         self._mark_log_baseline()
         self._post("/session", self._session_body(config))
+        self._mark_app_launch()
 
     #: The `_launch_config` key `preserve_state_across_relaunch()` pins. android
     #: has no per-launch store dir to pin (the base vocabulary,
@@ -366,6 +538,61 @@ class AndroidBridgeDriver(HttpBridgeDriver):
     #: relaunch, and the one thing that would replace the store is the
     #: launch's own `seed_credentials` overwrite — so the pin is "don't seed".
     _PRESERVE_STORE_KEY = "preserve_store"
+
+    #: The launch-config key of convention 12's Android arm: this launch rests its
+    #: identity in the app's production store, `EncryptedSharedPreferences` under a
+    #: Keystore master key. The app takes that store whenever the launch intent
+    #: names no credential file, and the bridge names one whenever the file exists
+    #: (`AppLauncher.launchApp`), so the mode is the file's absence: nothing seeds
+    #: it, on any launch of this machine, and `_wipe_production_store` removes it.
+    _PRODUCTION_STORE_KEY = "production_store"
+
+    #: Everything a production-store launch owns on the device, relative to the
+    #: app's data directory: the two encrypted stores (`SecretBackend.kt`'s
+    #: `SECURE_PREFS_FILE` and `INSTALL_PREFS_FILE`) and the two e2e files whose
+    #: presence would put the launch back on the file arm (`AppLauncher`'s
+    #: `credentialFile()` and `LaunchModule`'s sibling `install-secrets.json`).
+    _PRODUCTION_STORE_FILES = (
+        "shared_prefs/fauna_secure_prefs.xml",
+        "shared_prefs/fauna_install_prefs.xml",
+        "files/e2e_credentials.json",
+        "files/install-secrets.json",
+    )
+
+    def _wipe_production_store(self, *, check: bool) -> None:
+        """Stop the app and remove `_PRODUCTION_STORE_FILES` — the borrow and the
+        give-back of convention 12's Android arm. The app goes first: a live
+        process keeps its SharedPreferences in memory and writes them back. The
+        Keystore master key stays, inert until a new store is made under it.
+        ``check=False`` is teardown's: it must not raise over a device that went
+        away, and the next launch's wipe covers what this one could not reach."""
+        adb = self._adb_cmd()
+        package = "social.fauna.fauna"
+        subprocess.run(
+            [*adb, "shell", "am", "force-stop", package],
+            check=check, capture_output=True, timeout=15,
+        )
+        subprocess.run(
+            [*adb, "shell", "run-as", package, "rm", "-f", *self._PRODUCTION_STORE_FILES],
+            check=check, capture_output=True, timeout=15,
+        )
+
+    def set_app_locale(self, tag: str | None) -> None:
+        """Pin (or, with ``None``, clear) the app's per-app locale before it starts.
+
+        The Android platform mechanism for a locale chosen per launch: the
+        framework's per-app language setting (`cmd locale set-app-locales`,
+        Android 13+), which is what `Locale.getDefault()` — and so
+        `WeekFields.of(...)`, the source of the calendar's week start — reads
+        inside the app process. A BCP-47 tag such as ``en-GB``. The setting
+        persists per package, so a test that sets one clears it in its
+        `finally` (``set_app_locale(None)``)."""
+        adb = self._adb_cmd()
+        subprocess.run(
+            [*adb, "shell", "cmd", "locale", "set-app-locales", "social.fauna.fauna",
+             "--locales", tag or ""],
+            check=True, capture_output=True, timeout=15,
+        )
 
     def _session_body(self, config: dict) -> dict:
         """The `/session` POST body that launches the app for `config`."""
@@ -381,6 +608,17 @@ class AndroidBridgeDriver(HttpBridgeDriver):
             "fresh_install": not getattr(self, "_launched_once", False),
         }
         self._launched_once = True
+        if config.get(self._PRODUCTION_STORE_KEY):
+            # Even an empty seed creates the file whose absence is this mode.
+            # `AndroidCredStore` always sends one, so `{}` is dropped; a real seed
+            # is an identity the test did not sign in through the wizard, whose
+            # whole subject is where a sign-in rests it, so it is refused.
+            if config.get("seed_credentials"):
+                raise ValueError(
+                    "a production_store launch takes no seed_credentials: the identity "
+                    "must arrive through a real sign-in"
+                )
+            return body
         if config.get(self._PRESERVE_STORE_KEY):
             # Pinned: the relaunched process must read back what the previous
             # one wrote, so the seed — a full overwrite of the credential file
@@ -439,7 +677,15 @@ class AndroidBridgeDriver(HttpBridgeDriver):
         bridge writes over that file. A pinned relaunch
         (`preserve_state_across_relaunch`) withholds the seed altogether via
         `_session_body`, so the new process reads back the store the old one wrote.
+
+        The app it is about to close may already be dead of a crash — the `app`
+        fixture reaches here when a reset was never acknowledged — so the exit is
+        read first (convention 6's close rider), before the health wait: on
+        android the instrumentation bridge lives in the app's own process, so a
+        crash that killed the app killed the bridge with it, and the health wait
+        below is what then gives up.
         """
+        self._read_exit_before_close("the relaunch in recover()")
         if not self._await_health():
             return False
         config = getattr(self, "_launch_config", None)
@@ -454,7 +700,7 @@ class AndroidBridgeDriver(HttpBridgeDriver):
             self._bridge_dead = True
             return False
         body = self._session_body(config)
-        if not config.get(self._PRESERVE_STORE_KEY):
+        if not config.get(self._PRESERVE_STORE_KEY) and not config.get(self._PRODUCTION_STORE_KEY):
             # The empty seed below erases the store with every enrollment in it
             # still live nest-side (a relaunch signs nothing out): keep what it
             # held, so a later teardown can still retire it.
@@ -469,6 +715,7 @@ class AndroidBridgeDriver(HttpBridgeDriver):
         except Exception:
             self._bridge_dead = True
             return False
+        self._mark_app_launch()
         return True
 
     # --- A discarded driver retires its machine (convention 10) ---
@@ -492,9 +739,7 @@ class AndroidBridgeDriver(HttpBridgeDriver):
         driver; what makes a teardown a discard is that nothing this driver was
         asked to keep rests there. A later unseeded launch on the same device
         then finds the machine as its retirement left it — signed out."""
-        return not getattr(self, "_store_caller_owned", False) and not getattr(
-            self, "_preserve_pinned_keys", None
-        )
+        return not getattr(self, "_store_caller_owned", False) and not self._relaunch_pinned()
 
     def _current_slots(self) -> dict[str, dict] | None:
         """The on-device credential file's account-store slots, read over the
@@ -512,7 +757,42 @@ class AndroidBridgeDriver(HttpBridgeDriver):
         if slots:
             self.__dict__.setdefault("_principal_slot_vault", {}).update(slots)
 
+    def quit_app(self) -> None:
+        """The user quits the app and leaves the device as it is
+        (`HttpBridgeDriver.quit_app`'s contract) — the bridge force-stops the app
+        (`DELETE /session`, `AppLauncher.stopApp`) while the instrumentation
+        bridge, the adb forward and every recorded reverse stay up, and the
+        app's filesDir (its credential file and store) is untouched. So the
+        later `hard_reload()` → `recover()` has a bridge to ask and a nest to
+        reach. The inherited `_stop_app()` is the `teardown()` half here: it
+        terminates the bridge and drops the forward and reverses, after which
+        `recover()` finds no bridge and returns False."""
+        if self._bridge_dead or not self._url:
+            return
+        self._read_exit_before_close("quit_app()")
+        self._delete("/session")
+
+    def enter_background(self) -> None:
+        """Send the app to the background the way a user leaves a phone app —
+        the HOME key, so Android delivers the real `ON_STOP` to the process
+        lifecycle (`ConversationsManagerHost.onStop`, the leave door:
+        `reserved-folders.md` § The leave-flush promise, "switching away on your
+        phone").
+
+        The app keeps RUNNING afterwards — backgrounding is not an exit — so
+        assert the outcome by what the transition was meant to produce (the
+        nest-side drafts blob), never by process death. The key goes through
+        `adb shell input`, from outside the app, so nothing test-only sits
+        between the user's gesture and the lifecycle callback; the iOS twin
+        drives the delegate in-process only because `simctl` has no such verb
+        (`IosDriver.enter_background`)."""
+        subprocess.run(
+            [*self._adb_cmd(), "shell", "input", "keyevent", "KEYCODE_HOME"],
+            check=True, capture_output=True, timeout=15,
+        )
+
     def _stop_app(self) -> None:
+        self._read_exit_before_close("teardown")
         try:
             self._delete("/session")
         except Exception:
@@ -552,6 +832,104 @@ class AndroidBridgeDriver(HttpBridgeDriver):
         if self._widget_mirror:
             shutil.rmtree(self._widget_mirror, ignore_errors=True)
             self._widget_mirror = None
+        config = getattr(self, "_launch_config", None) or {}
+        if config.get(self._PRODUCTION_STORE_KEY) and not self._relaunch_pinned():
+            self._wipe_production_store(check=False)
+
+    # --- Convention 6's close rider: was the app already dead of a crash? ---
+
+    def _device_instant(self) -> tuple[float | None, str]:
+        """The device's epoch clock and the app's pid, in one adb call."""
+        return _device_instant_reading(
+            self._device_shell(f'date +%s.%N; echo "pid $(pidof {self.APPLICATION_ID})"')
+        )
+
+    def _mark_app_launch(self) -> None:
+        """Record, after each launch's `POST /session`, the device instant and
+        the app's pid the next close reads its crash witnesses against: the pid
+        is what narrows logcat to THIS app, and the instant to THIS launch. An
+        unread device leaves the mark empty, and the close then reads nothing.
+        Never raises: a launch that worked is not failed by its own witness."""
+        try:
+            at, pid = self._device_instant()
+        except (OSError, subprocess.SubprocessError) as exc:
+            print(f"[e2e] android: the launch's crash witness mark was not taken: "
+                  f"{type(exc).__name__}: {exc}", flush=True)
+            at, pid = None, ""
+        self._app_launch_mark = None if at is None else (at, pid, time.time())
+
+    def _read_exit_before_close(self, close: str) -> None:
+        """Convention 6's close rider, the android leg: read whether the app
+        had already died of a crash, BEFORE the close (`DELETE /session` is
+        `am force-stop`, which ends the app however it was).
+
+        The witnesses are the device's, over `adb`: the app's process — on
+        android the instrumentation bridge runs inside it, so its pid is the
+        one `_mark_app_launch` read and it changes only when the process dies
+        — and logcat's crash blocks since the launch (`_crash_block`). A gone
+        pid with a block is a crash, recorded with `helpers/app_deaths.py`; a
+        gone pid with none is printed as UNKNOWN, the absence stated, and fails
+        nothing (a crash is the one ending that fails). A live pid, no launch
+        to read against, a close already made (the mark is spent at the first
+        close of each launch, so the teardown after a `quit_app()` reads
+        nothing) and an unanswering device stay silent. Never raises."""
+        mark = getattr(self, "_app_launch_mark", None)
+        self._app_launch_mark = None
+        if mark is None:
+            return
+        launched_at, launch_pid, host_launched_at = mark
+        try:
+            now, pid = self._device_instant()
+            if pid and (pid == launch_pid or not launch_pid):
+                return
+            logcat = self._device_shell("logcat -d -b main,crash -v epoch")
+        except (OSError, subprocess.SubprocessError) as exc:
+            print(f"[e2e] android: the app's exit before {close} was unread: "
+                  f"adb did not answer ({type(exc).__name__}: {exc})", flush=True)
+            return
+        try:
+            found = _crash_block(
+                logcat, package=self.APPLICATION_ID, pid=launch_pid, since=launched_at
+            )
+            if found is None:
+                print(
+                    f"[e2e] android: the app's process (pid {launch_pid or 'unread'}) was "
+                    f"gone before {close} closed it: UNKNOWN — logcat holds no crash block "
+                    f"for it since its launch", flush=True,
+                )
+                return
+            report = self._app_death_report(close, found, launched_at, now)
+        except Exception as exc:  # noqa: BLE001 - a diagnosis must never break the close
+            report = (
+                f"the app died before {close} closed it (diagnostics unavailable: "
+                f"{type(exc).__name__}: {exc})"
+            )
+        from helpers import app_deaths
+
+        app_deaths.record(report, launch=f"{host_launched_at:.3f}")
+
+    def _app_death_report(
+        self, close: str, found: tuple[str, list[str], float], launched_at: float, now: float | None
+    ) -> str:
+        """The verdict first, then when it died on the device's clock, then the
+        logcat block whole and the instrumentation bridge's output tail (which
+        ends `Process crashed.` when the crash took the bridge with it)."""
+        fatal, block, died_at = found
+        when = f"it died +{max(0.0, died_at - launched_at):.0f} s after its launch"
+        if now is not None:
+            when += f", {max(0.0, now - died_at):.0f} s before this close"
+        bridge_tail = list(getattr(self, "_bridge_log", []) or [])[-20:]
+        parts = [
+            f"the app died before {close} closed it: {fatal}",
+            f"{when} (the device's clock). The close is `am force-stop`, so the app died "
+            "on its own before it: during the last command the harness sent it (a reset, "
+            "a teardown's sign-out) or after the test's last step.",
+            "  --- logcat, the crash block ---",
+            *block,
+        ]
+        if bridge_tail:
+            parts += ["  --- the instrumentation bridge's output, its tail ---", *bridge_tail]
+        return "\n".join(parts)
 
     def credential_map(self) -> dict[str, str]:
         """The on-device e2e credential file, read back over the bridge.
@@ -726,6 +1104,38 @@ class AndroidBridgeDriver(HttpBridgeDriver):
             if line.startswith(rel_dir)
         )
 
+    def pull_app_data(self, dest) -> Path:
+        """The app's whole private data directory, as host files under ``dest``,
+        for a search that reads every byte the app rests.
+
+        Read from outside the app, the way ``app_data_exists`` is: ``run-as`` (the
+        e2e build is debuggable) starts in the data directory, and ``exec-out`` is
+        byte-clean. Regular files only, so nothing in the archive can point
+        outside ``dest``. ``exec-out`` carries no exit status, so an answer that
+        is no archive raises, never reading as a device with nothing on it.
+        """
+        result = subprocess.run(
+            [*self._adb_cmd(), "exec-out", "run-as", "social.fauna.fauna",
+             "tar", "-cf", "-", "."],
+            capture_output=True, timeout=120,
+        )
+        root = Path(dest)
+        root.mkdir(parents=True, exist_ok=True)
+        try:
+            with tarfile.open(fileobj=io.BytesIO(result.stdout), mode="r:") as archive:
+                archive.extractall(
+                    root,
+                    filter=lambda member, path: (
+                        tarfile.data_filter(member, path) if member.isreg() else None
+                    ),
+                )
+        except tarfile.ReadError as exc:
+            raise RuntimeError(
+                f"run-as tar answered no archive ({exc}): "
+                f"{result.stdout[:200]!r} {result.stderr[:200]!r}"
+            ) from exc
+        return root
+
     def custodian_store_blob_paths(self) -> list[str]:
         """Every sealed blob file the in-app custodian store holds, as paths
         relative to the app data directory.
@@ -764,6 +1174,47 @@ class AndroidBridgeDriver(HttpBridgeDriver):
         front, as a user who already allowed access would have. Applied by
         ``launch()`` right after the install, since a grant needs the package."""
         self._grant_photos = True
+
+    def add_photo_to_library(self, host_path: str) -> None:
+        """Put a photo in the emulator's gallery — the android twin of the iOS
+        driver's `simctl addmedia` method of the same name. The file is pushed
+        under ``Pictures`` and indexed with the media scanner, then PROVED to be
+        in MediaStore by name: a scan that is accepted but never indexes the
+        file would otherwise read, from inside the app, exactly like a broken
+        ingest (the failure the iOS method's own proof exists to rule out)."""
+        name = Path(host_path).name
+        device_path = f"/sdcard/Pictures/{name}"
+        for argv in (
+            ["push", host_path, device_path],
+            ["shell", "am", "broadcast", "-a",
+             "android.intent.action.MEDIA_SCANNER_SCAN_FILE",
+             "-d", f"file://{device_path}"],
+        ):
+            result = subprocess.run(
+                [*self._adb_cmd(), *argv], capture_output=True, text=True, timeout=60,
+            )
+            if result.returncode != 0:
+                raise RuntimeError(
+                    f"adb {argv[0]} failed (rc={result.returncode}) for {host_path!r}: "
+                    f"{result.stderr.strip()}"
+                )
+        deadline = time.monotonic() + 30
+        while True:
+            query = subprocess.run(
+                [*self._adb_cmd(), "shell", "content", "query", "--uri",
+                 "content://media/external/images/media", "--projection",
+                 "_display_name", "--where", f"_display_name='{name}'"],
+                capture_output=True, text=True, timeout=30,
+            )
+            if name in query.stdout:
+                return
+            if time.monotonic() > deadline:
+                raise RuntimeError(
+                    f"the media scanner accepted {device_path} but MediaStore never "
+                    f"listed {name!r}; the gallery has no photo for the app to find. "
+                    f"last query: {query.stdout.strip()!r} {query.stderr.strip()!r}"
+                )
+            time.sleep(0.5)
 
     def grant_notifications(self) -> None:
         """Pre-grant ``POST_NOTIFICATIONS`` (API 33+) before ``launch()``
@@ -844,6 +1295,41 @@ class AndroidBridgeDriver(HttpBridgeDriver):
         )
         self._reverse_ports.append(port)
 
+    #: The installed app's application id (`applicationId` in `app/build.gradle.kts`;
+    #: the source namespace stays `com.fauna.app`).
+    APPLICATION_ID = "social.fauna.fauna"
+
+    def dumpsys_package(self) -> str:
+        """``dumpsys package`` for the INSTALLED app, read from the device —
+        the package manager's own reading of the manifest it installed (its
+        ``flags=[ … ]`` line carries ``ALLOW_BACKUP`` when backup is allowed)."""
+        return subprocess.run(
+            [*self._adb_cmd(), "shell", "dumpsys", "package", self.APPLICATION_ID],
+            check=True, capture_output=True, text=True, timeout=30,
+        ).stdout
+
+    def pull_installed_apk(self, dest_dir) -> Path:
+        """Copy the INSTALLED app's base APK off the device into ``dest_dir``
+        (``pm path`` names it) — the artifact the device runs, not the build
+        output the harness installed from."""
+        listing = subprocess.run(
+            [*self._adb_cmd(), "shell", "pm", "path", self.APPLICATION_ID],
+            check=True, capture_output=True, text=True, timeout=30,
+        ).stdout
+        paths = [
+            line.removeprefix("package:").strip()
+            for line in listing.splitlines() if line.startswith("package:")
+        ]
+        base = next((p for p in paths if p.endswith("/base.apk")), None)
+        if base is None:
+            raise RuntimeError(f"pm path {self.APPLICATION_ID} named no base.apk: {listing!r}")
+        dest = Path(dest_dir) / "base.apk"
+        subprocess.run(
+            [*self._adb_cmd(), "pull", base, str(dest)],
+            check=True, capture_output=True, timeout=120,
+        )
+        return dest
+
     def _adb_cmd(self) -> list[str]:
         # The one home of the prefix, shared with the availability probe: the
         # executable (PATHEXT-aware), this launch's adb server and its device.
@@ -851,18 +1337,15 @@ class AndroidBridgeDriver(HttpBridgeDriver):
 
         return android_device.adb_argv(self._device_serial, self._adb_server)
 
-    def _wait_for_health(self, timeout: float = 30.0):
+    def _wait_for_health(self, posted_at: float, timeout: float = 30.0):
+        """The launch gate: the instrumentation bridge's `/health` answering.
+        Both ends go through convention 6's launch-timeout builder — the bridge
+        exiting is its FAULTED verdict, not a second grammar."""
         import urllib.request
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             if self._bridge_proc and self._bridge_proc.poll() is not None:
-                # Read the DRAINED buffer, not the pipe: drain_pipes owns the
-                # streams from launch onward, so a direct .read() here would race
-                # it and report nothing.
-                tail = "\n".join(getattr(self, "_bridge_log", []) or [])
-                raise RuntimeError(
-                    f"Bridge instrumentation exited early.\nOUTPUT: {tail[-2000:]}"
-                )
+                raise RuntimeError(self._launch_timeout_report(posted_at, timeout))
             try:
                 resp = urllib.request.urlopen(f"{self._url}/health", timeout=2)
                 if resp.status == 200:
@@ -870,4 +1353,90 @@ class AndroidBridgeDriver(HttpBridgeDriver):
             except Exception:
                 pass
             time.sleep(0.5)
-        raise TimeoutError(f"Android bridge not ready after {timeout}s at {self._url}")
+        raise TimeoutError(self._launch_timeout_report(posted_at, timeout))
+
+    #: The launch gate's budget: the instrumentation bridge's `/health` answering
+    #: after `am instrument`. 30 s, the figure the gate already carried; a deadline
+    #: poll, so a green run never pays it (convention 14). Named as windows' twin
+    #: is, and never load-aware (convention 6's launch-timeout rider, its part (3)).
+    _RELAUNCH_READY_BUDGET_S = 30.0
+
+    #: How long each `adb` read of a failure report may take: it runs inside a
+    #: ``raise``, and an emulator too wedged to answer is itself a stated absence.
+    _WITNESS_ADB_TIMEOUT_S = 10.0
+
+    def _launch_timeout_report(self, posted_at: float, budget_s: float) -> str:
+        """`launch_timeout_report` over this launch's witnesses. Never raises."""
+        try:
+            witnesses = self._launch_witnesses(posted_at, budget_s)
+        except Exception as exc:  # noqa: BLE001 - must never mask the real failure
+            return (
+                f"launch timeout ({budget_s:.0f} s): UNKNOWN — "
+                f"the witnesses could not be gathered: {type(exc).__name__}: {exc}"
+            )
+        return launch_timeout_report(witnesses)
+
+    def _device_shell(self, script: str) -> str:
+        return subprocess.run(
+            [*self._adb_cmd(), "shell", script],
+            capture_output=True, text=True, timeout=self._WITNESS_ADB_TIMEOUT_S,
+        ).stdout
+
+    def _launch_witnesses(self, posted_at: float, budget_s: float, machine=None) -> LaunchWitnesses:
+        """(a) the instrumentation bridge's handle, and the app's CPU time read on
+        the device (`/proc/<pid>/stat` over `adb`); (b) logcat's tail for the app's
+        pid, and the bridge's drained output; (c) the timeline; (d) THIS machine's
+        agent ledger — the emulator runs on the emulator host, so the machine witness is the
+        harness side's, and the report says so."""
+        deadline_at = time.time()
+        rc = self._bridge_proc.poll() if self._bridge_proc else None
+        alive = rc is None
+        cpu_s = wall_s = wait_share = None
+        cpu_unread, wait_basis, wait_unread, pid = "", "", "", ""
+        try:
+            reading = self._device_shell(
+                f"pid=$(pidof {self.APPLICATION_ID}); echo \"pid $pid\"; getconf CLK_TCK; "
+                "[ -n \"$pid\" ] && cat /proc/$pid/stat; cat /proc/uptime; "
+                "[ -n \"$pid\" ] && cat /proc/$pid/task/*/schedstat"
+            )
+            pid, cpu_s, wall_s, cpu_unread = _device_cpu_reading(reading)
+            wait_share, wait_basis, wait_unread = _device_wait_reading(reading, pid, wall_s)
+        except (OSError, subprocess.SubprocessError) as exc:
+            cpu_unread = wait_unread = f"adb did not answer ({type(exc).__name__}: {exc})"
+        # logcat narrowed to the app's pid: unnarrowed, another app's crash would
+        # read as this launch's fault, so without a pid it is printed, not judged.
+        log_lines, notes = [], [
+            "(d) is this harness machine's: the emulator runs on the emulator host, so its "
+            "own load is not in that reading"
+        ]
+        try:
+            logcat = self._device_shell(f"logcat -d -t 80{f' --pid={pid}' if pid else ''}")
+            lines = [ln for ln in logcat.splitlines() if ln.strip()]
+            if pid:
+                log_lines = lines
+            else:
+                notes += ["  --- logcat, not narrowed to the app (it has no pid) ---", *lines]
+        except (OSError, subprocess.SubprocessError) as exc:
+            notes.append(f"(b) logcat unread: {type(exc).__name__}: {exc}")
+        if machine is None:
+            from helpers import launch_load
+
+            machine = launch_load.machine_window(posted_at, deadline_at, apps=("android",))
+        return LaunchWitnesses(
+            budget_s=budget_s,
+            posted_at=posted_at,
+            deadline_at=deadline_at,
+            process_started_at=None if wall_s is None else deadline_at - wall_s,
+            alive=alive,
+            exit_phrase="" if alive else f"the bridge instrumentation exited with code {rc}",
+            cpu_s=cpu_s,
+            cpu_wall_s=wall_s,
+            cpu_unread=cpu_unread,
+            cpu_wait_share=wait_share,
+            cpu_wait_basis=wait_basis,
+            cpu_wait_unread=wait_unread,
+            log_lines=log_lines,
+            stderr_lines=list(getattr(self, "_bridge_log", []) or []),
+            machine=machine,
+            notes=notes,
+        )

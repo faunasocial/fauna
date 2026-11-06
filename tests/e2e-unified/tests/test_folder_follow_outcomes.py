@@ -61,6 +61,7 @@ pytestmark = [
     pytest.mark.macos,
     pytest.mark.ios,
     pytest.mark.windows,
+    pytest.mark.android,
 ]
 
 # Generous ceilings, not expectations (convention 14).
@@ -456,19 +457,14 @@ def test_a_followed_row_says_whose_folder_it_is(follower_app, nest_instance, cro
     authority as handle domain, TLS) and the follower's nest relays every read —
     the same two-nest topology the outcome-10 witness uses.
     """
-    from common.auth import register_handled_actor
+    from helpers.admin_wire import admit_adult
 
     app = follower_app
     owner = _owner(nest_instance)
     by_handle = _folder_for(nest_instance, owner)
     by_id = _folder_for(nest_instance, owner)
     home = cross_nest_foreign
-    remote_owner = register_handled_actor(
-        home["port"],
-        handle="xnown" + secrets.token_hex(3),
-        domain=home["authority"],
-        base_url=home["url"],
-    )
+    remote_owner = admit_adult(home, "xnown" + secrets.token_hex(3), domain=home["authority"], token=True)
     on_other_nest = _folder_for(home, remote_owner, prefix="xn")
     remote_address = f"{remote_owner['handle']}@{home['authority']}"
 

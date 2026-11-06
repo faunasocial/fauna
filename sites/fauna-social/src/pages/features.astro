@@ -32,13 +32,16 @@ const APP_LABELS: Record<string, string> = {
 
 // What each state MEANS, as a cell tooltip — the legend in the copy says it once in
 // prose, and this repeats it where the reader's cursor already is.
+// public-text: site-features
 const STATE_TITLE: Record<string, string> = {
   full: 'Every test for this feature passed on this platform',
-  partial: 'Partly covered, or a mix of passes and failures',
+  partial: 'Partly covered, a mix of passes and failures, or a test needed something not yet built while another failed',
   failing: 'Tests exist for this platform and none passed',
+  unbuilt: 'At its last run here, a test of this feature needed something not yet built for this platform — nothing else failed',
   none: 'No run recorded yet — a statement about our records, not the software',
   absent: 'Deliberately absent on this platform',
 };
+// public-text-end: site-features
 
 const apps: string[] = matrix.apps;
 const label = (app: string) => APP_LABELS[app] ?? app;
@@ -86,7 +89,7 @@ const mark = (state: string) => (matrix.marks as Record<string, string>)[state] 
         </section>
       ))}
 
-      {matrix.releases.length > 0 && (
+      {matrix.versions.length > 0 && (
         <section class="matrix">
           <h2>Releases</h2>
           <div class="scroller">
@@ -95,7 +98,7 @@ const mark = (state: string) => (matrix.marks as Record<string, string>)[state] 
                 <tr><th scope="col">Version</th><th scope="col">Date</th><th scope="col">In production</th></tr>
               </thead>
               <tbody>
-                {matrix.releases.map((release: any) => (
+                {matrix.versions.map((release: any) => (
                   <tr>
                     <th scope="row">{release.version}</th>
                     <td>{release.date}</td>

@@ -69,16 +69,16 @@ pub(crate) const MAX_CAPTURE_ATTEMPTS: usize = 3;
 /// (`NestInfoReply::domain` doc) — a domainless box. The seed custody must never
 /// fail over a missing label (the seed is irreplaceable; the domain a hint), so
 /// every error path collapses to `None`.
+///
+/// The domain is fixed for a connection's life, so it is read through the
+/// transport's per-connection memo (`fauna_protocol::read_nest_info`;
+/// `transport-trust.md` § Transport trust → *The nest's self-description is
+/// read once per connection*): an admin's sign-in already read the reply for
+/// its landing, and the custody leg spends none of the discovery budget again.
 pub(crate) async fn resolve_box_domain<R: fauna_protocol::RpcRequester>(
     nest: &R,
 ) -> Option<String> {
-    let reply: fauna_protocol::discovery::NestInfoReply = nest
-        .request(
-            "fauna.nest.info",
-            fauna_protocol::discovery::NestInfoRequest::default(),
-        )
-        .await
-        .ok()?;
+    let reply = fauna_protocol::read_nest_info(nest).await.ok()?;
     match reply.domain.trim() {
         "" | "unknown" => None,
         d => Some(d.to_string()),
@@ -841,6 +841,42 @@ mod tests {
                 "fauna.nest.info",
             ],
             "admin check, fetch, domain — and no chain fetch with no other box held"
+        );
+    }
+
+    /// The custody label's domain comes off the connection's one
+    /// `fauna.nest.info` reply: an admin whose sign-in already read it (the
+    /// landing's node leg) captures without a read of its own
+    /// (`transport-trust.md` § Transport trust → *The nest's self-description
+    /// is read once per connection*).
+    #[test]
+    fn the_capture_labels_its_domain_off_the_connections_one_nest_info_read() {
+        let bound = kp(2);
+        let nest = admin_nest(&bound);
+        *nest.connection.lock().unwrap() = Some(1);
+        let store = FakeDeploymentSeedStore::empty();
+        let landing = block_on(fauna_protocol::read_nest_info(&nest)).expect("the landing's read");
+        assert_eq!(landing.domain, "box.example");
+
+        let report = block_on(run_deployment_seed_custody_leg(
+            &nest,
+            bound.actor_id(),
+            &store,
+        ));
+
+        assert_eq!(report.custody, DeploymentSeedCustody::Captured);
+        let got = held(&store, &bound).expect("the box's row landed");
+        assert_eq!(got.domain.as_deref(), Some("box.example"));
+        let reads = nest
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|k| **k == "fauna.nest.info")
+            .count();
+        assert_eq!(
+            reads, 1,
+            "the custody leg read fauna.nest.info itself beside the connection's one read"
         );
     }
 

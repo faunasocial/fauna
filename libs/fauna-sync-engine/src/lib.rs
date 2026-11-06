@@ -69,6 +69,7 @@ pub use fauna_account_plane::folder_key_rows;
 pub use fauna_account_plane::follows_rows;
 pub use fauna_account_plane::mail_import_source_rows;
 pub use fauna_account_plane::mail_rows;
+pub use fauna_account_plane::moderation_rows;
 pub use fauna_account_plane::nostr_confirmation_rows;
 pub use fauna_account_plane::peer_anchor_rows;
 #[cfg(feature = "account-runtime")]
@@ -149,6 +150,7 @@ pub use fauna_account_plane::publish_diff;
 pub mod group_roster_door;
 pub use fauna_account_plane::backup_rows;
 pub use fauna_account_plane::group_scope_view;
+pub use fauna_account_plane::group_set;
 pub use fauna_account_plane::group_share_rows;
 pub use fauna_account_plane::group_state_plane;
 pub use fauna_account_plane::succession_ledger_rows;
@@ -178,6 +180,15 @@ pub use page_walk::MAX_FRONTIER_WRITERS;
 /// The owner-fleet restore leg: the custodian dial pass's NEST arm.
 #[cfg(feature = "account-runtime")]
 pub mod custodian_nest_restore;
+/// The share plane's group leg: the pull of the group content plane from
+/// the scope's other members. Same gate as the driver that runs it.
+#[cfg(all(feature = "p2p-share", feature = "account-runtime"))]
+pub mod group_pump;
+/// The held group sets' rings as the app mirrors them for an app-dead
+/// capability host (`group-set.md` § decision 12). The file half is
+/// unconditional (the host reads it with no runtime); the runtime reader
+/// rides the share plane's gate.
+pub mod group_ring_mirror;
 #[cfg(feature = "account-runtime")]
 pub mod peer_leg;
 #[cfg(all(test, feature = "p2p-share"))]
@@ -292,6 +303,8 @@ mod deposit_adoption_test;
 mod download_file_bytes_test;
 #[cfg(test)]
 mod enumerate_test;
+#[cfg(test)]
+mod group_seat_test;
 #[cfg(test)]
 mod head_rejudge_test;
 #[cfg(test)]

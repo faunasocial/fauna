@@ -13,7 +13,7 @@
 # every nested Mach-O with the OUTER bundle's entitlements. The bundled
 # `Contents/MacOS/fauna-sync-agent` — the copy the .pkg's LaunchAgent prefers —
 # therefore shipped carrying the APP's `com.apple.security.application-groups`
-# claims, including the account keychain group only the app may hold, while the
+# claims, a claim only the app may hold, while the
 # `/usr/local/bin` copy signed with `fauna-sync-agent.entitlements` carried none.
 # Same binary, two entitlement sets, decided by which codesign line ran last.
 # Signing inside-out is Apple's own guidance and the only shape under which an

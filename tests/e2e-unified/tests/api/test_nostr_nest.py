@@ -1,16 +1,18 @@
 """tier_3 nest-side witnesses for the Nostr page (`docs/features/nostr.md`).
 
-The thirteen `[nest]` outcomes of the page — what a Nostr client, a Nostr relay
+The sixteen `[nest]` outcomes of the page — what a Nostr client, a Nostr relay
 or another nest observes of a nest, the half no app journey can see. Each test
 speaks only the wire, from outside, and drives no app:
 
 * the nest's **own relay** (`/nostr`), as an anonymous NIP-01 client — the
-  posts you share (5, 6) and the direct-message inbox (8)
+  posts you share (5, 6), searched by their words (27), the direct-message
+  inbox (8), and an account's Nostr app writing and deleting there (26)
   (`docs/goal/ui/nostr.md` § The relay event store);
 * its **NIP-05 document** (`/.well-known/nostr.json`) — your address (7);
 * **relays the nest dials** — a :class:`~helpers.nostr_relay.FakeRelay` as your
   publish relay, recording what the nest sends it (12, 14, 15, 16, 21), and as a
-  followed author's relay, serving that author's notes and deletion (10)
+  followed author's relay, serving that author's notes and deletion (10) and a
+  note by a key nobody follows that the nest never asked for (25)
   (§ Replying to and quoting a nostr note → *When the nest publishes*,
   § Implementation status today);
 * the **WS-RPC link door** with a key held outside the nest — a NIP-07 signer
@@ -20,10 +22,10 @@ speaks only the wire, from outside, and drives no app:
   user's NIP-46 signer (bunker)).
 
 **Two nests under test, split by whether the nest must dial out.** The outcomes
-observed at the nest's own doors (5, 6, 7, 8, 18's NIP-07 arm, 19) run on
+observed at the nest's own doors (5, 6, 7, 8, 18's NIP-07 arm, 19, 26, 27) run on
 ``nostr_home_nest``, a nest of the run's mode — so a docker run witnesses the
 image. The outcomes observed at a relay the nest DIALS (10, 12, 14, 15, 16, 18's
-remote-signer arm, 22, 21) run on ``nostr_dialing_nest``, a locally built nest
+remote-signer arm, 22, 21, 25) run on ``nostr_dialing_nest``, a locally built nest
 with ``FAUNA_TEST_NOSTR_ALLOW_LOOPBACK`` set: every relay this harness can host
 is on loopback, a production nest refuses a loopback relay both when the user
 stores it and when it dials (`nest/network-exposure.md` § Rulings F7), and the
@@ -40,8 +42,8 @@ going to be sent would have arrived first. Never a wall-clock wait.
 
 **The one cadence no test can poke.** A followed author's notes reach the feed
 through the sync worker's one-minute inbound tick (`nostr/sync_worker.rs`), with
-no wake for a new follow; the module's followed-author fixture pays it once and
-the deletion test once more, under ``NOSTR_INBOUND_TICK_S``.
+no wake for a new follow; the module's followed-author fixture pays it once,
+the deletion test once more and the unfollowed-author test twice, under ``NOSTR_INBOUND_TICK_S``.
 """
 
 from __future__ import annotations
@@ -395,6 +397,76 @@ def test_a_direct_message_is_accepted_by_your_own_nest(nostr_home_nest):
     )
 
 
+@pytest.mark.feature("nostr")
+def test_a_deletion_removes_only_its_own_authors_events_from_your_nests_relay(
+    nostr_home_nest,
+):
+    """Outcome 26 — two accounts' Nostr apps each write a note to the nest's
+    relay; a kind-5 deletion by the first naming both notes removes the first's
+    and leaves the second's served (`nostr.md` § The relay event store; slice C,
+    `store::apply_deletion` is author-scoped). The relay keeps only events by
+    local accounts, written over NIP-42 (§ The relay event store → *Read/write
+    policy*), so both authors are accounts of this nest."""
+    nest = nostr_home_nest
+    relay = nostr_relay.nest_relay_url(nest)
+    secrets_by_author = {}
+    for author in ("deleter", "bystander"):
+        user = _user(nest)
+        secret = os.urandom(32)
+        ws_api.bridge_link(
+            nest["port"], user, "nostr", "import", {"nsec": fauna_ffi.nostr_keys(secret)["nsec"]},
+        )
+        secrets_by_author[author] = secret
+
+    def _write(author, template):
+        secret = secrets_by_author[author]
+        event = fauna_ffi.nostr_sign_event(secret, {
+            "created_at": int(time.time()), "tags": [], "content": "", **template,
+        })
+        accepted, message = nostr_relay.publish(
+            relay, event,
+            auth=(f"wss://{NOSTR_DOMAIN}/nostr", lambda t: fauna_ffi.nostr_sign_event(secret, t)),
+        )
+        assert accepted, f"the {author}'s app writes to its own nest's relay: {message!r}"
+        return event
+
+    own = _write("deleter", {"kind": 1, "content": _text("the deleter's note")})
+    theirs = _write("bystander", {"kind": 1, "content": _text("the bystander's note")})
+
+    def _served():
+        return sorted(e["id"] for e in nostr_relay.query(relay, {"ids": [own["id"], theirs["id"]]}))
+
+    assert _served() == sorted([own["id"], theirs["id"]]), "both notes are on the relay"
+
+    _write("deleter", {"kind": 5, "tags": [["e", own["id"]], ["e", theirs["id"]]]})
+    assert _served() == [theirs["id"]], (
+        "a deletion removes its own author's note and nothing of another author's"
+    )
+
+
+@pytest.mark.feature("nostr")
+def test_other_nostr_apps_search_your_shared_posts_by_their_words(nostr_home_nest):
+    """Outcome 27 — a NIP-50 ``search`` REQ on the nest's relay finds a shared
+    post by a word in it, and a word in no post finds nothing (`nostr.md`
+    § The relay event store → *NIP-50 search*; slice D)."""
+    nest = nostr_home_nest
+    user = _user(nest)
+    pubkey = _link_generated(nest, user)
+    word = f"heron{secrets.token_hex(6)}"
+    text = f"a post that mentions {word} once"
+    _post(nest, user, text)
+    _settings(nest, user, expose_content=True)
+    relay = nostr_relay.nest_relay_url(nest)
+
+    found = nostr_relay.query(relay, {"kinds": [1], "search": word})
+    assert [(e["pubkey"], e["content"]) for e in found] == [(pubkey, text)], (
+        f"a search for a word in your shared post finds exactly that post: {found!r}"
+    )
+    assert nostr_relay.query(relay, {"kinds": [1], "search": f"heron{secrets.token_hex(6)}"}) == [], (
+        "a search for a word in no post finds nothing"
+    )
+
+
 # ── a followed author's relay ────────────────────────────────────────────────
 
 
@@ -421,6 +493,59 @@ def test_a_followed_authors_delete_removes_the_post_from_your_feed(followed):
         diagnose=lambda: f"the deleted note is still in the feed: {sorted(_ids())!r}",
     )
     assert kept in ids, "a deletion naming one note leaves the author's other note alone"
+
+
+@pytest.mark.feature("nostr")
+def test_a_post_by_someone_nobody_follows_never_reaches_a_feed(followed):
+    """Outcome 25 — a relay the nest sweeps serves a note by a key no account
+    here follows, although the nest's subscription never asked for it: the note
+    is refused at ingest; once the user follows that key, its next note arrives
+    (`nostr.md` § Implementation status today — the inbound sweep authorizes the
+    author at ingest).
+
+    The absence is anchored on a control note (convention 14): the followed
+    author's note is served AFTER the stranger's on the same connection, and the
+    sweep drains one relay's events in arrival order, so once the control note
+    is in the feed the stranger's was already decided."""
+    nest, user, feed_id = followed["nest"], followed["user"], followed["feed_id"]
+    relay = followed["author_relay"]
+    stranger_secret = os.urandom(32)
+    stranger = fauna_ffi.nostr_keys(stranger_secret)
+
+    def _note(secret, label):
+        return fauna_ffi.nostr_sign_event(secret, {
+            "kind": 1, "created_at": int(time.time()), "tags": [], "content": _text(label),
+        })
+
+    def _bodies():
+        return {p["body"] for p in ws_api.feed_posts(nest["port"], user, feed_id)}
+
+    def _arrives(note, what):
+        wait_until(
+            lambda: note["content"] in _bodies(),
+            NOSTR_INBOUND_TICK_S,
+            diagnose=lambda: (
+                f"{what} never reached the feed; the relay saw REQs {relay.requests!r}; "
+                f"feed: {sorted(b[:40] for b in _bodies())!r}"
+            ),
+        )
+
+    unasked = _note(stranger_secret, "from a key nobody here follows")
+    relay.seed(unasked, regardless_of_filters=True)
+    control = _note(followed["author_secret"], "from the followed author, after the stranger")
+    relay.seed(control)
+
+    _arrives(control, "the followed author's control note")
+    assert unasked["content"] not in _bodies(), (
+        "a note by a key no account follows is refused at ingest, even when a relay sends it"
+    )
+
+    ws_api.bridge_add_follow(
+        nest["port"], user, "nostr", stranger["npub"], extra={"relay_hints": [relay.url]},
+    )
+    following = _note(stranger_secret, "from the same key, now followed")
+    relay.seed(following)
+    _arrives(following, "the newly followed key's next note")
 
 
 @pytest.mark.feature("nostr")

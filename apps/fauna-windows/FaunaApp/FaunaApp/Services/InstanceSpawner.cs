@@ -138,10 +138,12 @@ internal static class InstanceSpawner
         }
     }
 
+#if DEBUG || FAUNA_E2E_AGENT
     /// <summary>
     /// Snapshot for the e2e state protocol's <c>spawned_instances</c> key —
     /// the cross-app shape (apple's <c>InstanceSpawner.stateRecords</c>, linux's
     /// <c>instance_remote::spawned_instances</c>), so one test reads every platform.
+    /// Compiled out of Release with the state protocol that reads it (convention 15).
     /// </summary>
     public static IReadOnlyList<Dictionary<string, object?>> StateRecords()
     {
@@ -156,4 +158,5 @@ internal static class InstanceSpawner
                 .ToArray();
         }
     }
+#endif
 }

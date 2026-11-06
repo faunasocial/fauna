@@ -645,6 +645,12 @@ impl ScreenLockCore {
         self.policy = None;
         self.guardian_handle = None;
         self.heartbeat.reset();
+        // The fake clock is the poked identity's too: a skew outliving it
+        // makes a long-lived app's test order load-bearing.
+        #[cfg(any(debug_assertions, feature = "e2e-agent"))]
+        {
+            self.test_clock_skew_secs = 0;
+        }
     }
 
     /// The raw lock decision — no i18n, just whether the ward is currently
@@ -1648,6 +1654,36 @@ mod screen_lock_core_tests {
         assert!(
             lock.lock_message(lookup).is_some(),
             "140 real minutes advanced must land past the window's end at now+130"
+        );
+    }
+
+    /// The test clock's skew belongs to the identity that was poked, never to
+    /// the process: a sign-out drops it with the rest of the ward state. A
+    /// linux or tui app lives across a module's tests, so a skew that
+    /// outlived the identity made test order load-bearing — a budget test's
+    /// 135 advanced minutes landed a later window test's "now" past the end
+    /// of a window built around the real clock.
+    #[test]
+    fn an_identity_change_drops_the_test_clock_skew() {
+        let mut lock = ScreenLockCore::default();
+        let now = lock.local_minutes_from_midnight();
+        lock.advance_test_clock(135 * 60);
+        lock.clear_for_identity_change();
+        let start = (now + 1320) % 1440; // now - 2h, mod a day
+        let end = (now + 120) % 1440; // now + 2h
+        lock.set_ward_screen_time(
+            Some(ScreenTimePolicy {
+                window_start: Some(start),
+                window_end: Some(end),
+                daily_minutes: None,
+            }),
+            Some("mum".into()),
+            None,
+        );
+        assert_eq!(
+            lock.lock_message(lookup),
+            None,
+            "the next identity reads the real clock, inside [now-2h, now+2h)"
         );
     }
 }

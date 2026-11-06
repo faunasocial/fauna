@@ -164,18 +164,7 @@ _POSITIONAL_PLACEHOLDERS = frozenset({"n", "i", "index", "N"})
 # is reported only once it is FIXED (the entry is then stale and must go), so the
 # list can only shrink. Each pair is captured as work in its app's queue; never add
 # one to make a new suffixed paint pass.
-INDEXED_SUFFIX_PENDING: dict[str, frozenset[str]] = {
-    "windows": frozenset({
-        "admin-nest-oauth-key-item",
-        "admin-nest-seed-rotate-roster-item",
-        "recover-box-item",
-    }),
-    "apple": frozenset({
-        "admin-nest-oauth-key-item",
-        "admin-nest-seed-rotate-roster-item",
-        "recover-box-item",
-    }),
-}
+INDEXED_SUFFIX_PENDING: dict[str, frozenset[str]] = {}
 
 _INTERP_OPEN = r"(?:\{|\$\{|\$[A-Za-z_]|\\\()"
 _SUFFIX_OPEN = re.compile(rf"-{_INTERP_OPEN}")

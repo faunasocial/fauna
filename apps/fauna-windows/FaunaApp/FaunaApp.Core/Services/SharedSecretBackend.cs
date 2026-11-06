@@ -18,7 +18,10 @@ namespace FaunaApp.Core.Services;
 ///     roamed</b> to the person's other PCs, which is what <c>apps/common.md</c>
 ///     § Credential storage → <i>What a device's own backup carries</i> asks of a
 ///     store. The terminal app and the sync agent write the same arm, so all
-///     three read each other's grammar by construction.</description></item>
+///     three read each other's grammar by construction — and every call holds
+///     the arm's one per-user lock, because Credential Manager itself loses
+///     updates when two writers overlap (<c>apps/windows.md</c> § Key
+///     storage).</description></item>
 ///   <item><description><b>The harness file</b> — a flat JSON map at
 ///     <c>{FAUNA_E2E_CREDENTIAL_DIR}/{namespace}.json</c>, selected by the crate's
 ///     own <c>cred_file_dir()</c>, which is compiled out of a release build
@@ -32,9 +35,6 @@ namespace FaunaApp.Core.Services;
 ///     (<c>credential file write failed: … being used by another process</c>,
 ///     measured 2026-10-10).</description></item>
 /// </list>
-///
-/// <para>Keyed by Resource alone (the UserName is ignored): every logical key
-/// resolves to a distinct Resource, and the namespace is this backend's own.</para>
 ///
 /// <para><b>Failures are swallowed by contract</b>, as on every platform store:
 /// the shared arm's write is best-effort and log-only, and a throw here would
@@ -51,7 +51,7 @@ internal sealed class SharedSecretBackend : ISecretBackend
         _namespace = ns;
     }
 
-    public string? Get(string resource, string user)
+    public string? Get(string resource)
     {
         try
         {
@@ -64,7 +64,7 @@ internal sealed class SharedSecretBackend : ISecretBackend
         }
     }
 
-    public void Set(string resource, string user, string value)
+    public void Set(string resource, string value)
     {
         try
         {
@@ -76,7 +76,7 @@ internal sealed class SharedSecretBackend : ISecretBackend
         }
     }
 
-    public void Delete(string resource, string user)
+    public void Delete(string resource)
     {
         try
         {

@@ -12,10 +12,11 @@ opt-in — never the OS permission).
 tui leads (the desktops' `ws-device` transport: the app subscribes, the sync
 agent posts while the app is closed — `common.md` § Transports) and windows
 follows on the same three journeys, each a shared body with one leg per app;
-the Apple targets (APNs) follow with the one journey their entitlement gate
-allows — the toggle that cannot register settling back off; web follows on
-the identity journey over a stand-in for the browser's push service, plus the
-open-tab presence witness (the bottom section says why). Every mutation is
+the Apple targets (APNs) follow with the journey their entitlement gate
+allows — the toggle that cannot register settling back off — and the identity
+journey over a stand-in for APNs' answer; web follows on the identity journey
+over a stand-in for the browser's push service, plus the open-tab presence
+witness (the bottom section says why). Every mutation is
 the app's own toggle, switch and sign-out (convention 8); the persisted truth
 is read back through the nest's test-hooks surface
 (`GET /api/v1/test/push/subscriptions`), the way the admin toggle tests read
@@ -39,6 +40,7 @@ import pytest
 from common import build_registry_seed, create_actor_and_register
 from conftest import _seeded_environment
 from drivers import create_driver
+from helpers.app_launch import app_launch_config
 from helpers.budgets import PUSH_DIAL_S, RPC_ROUNDTRIP_S, UI_SETTLE_S
 from helpers.waiting import wait_until
 
@@ -65,6 +67,12 @@ ACCOUNT_PAGE_NAV = {
 # (`common.md` § Transports) — under e2e the debug build's stand-in
 # distributor's (`E2ePushDistributor.kt`).
 _TRANSPORT = {"android": "web-push"}
+# The Apple targets host the control apart from the switcher (`GENERAL_PAGE_NAV`).
+_APPLE = ("macos", "ios")
+# What stands in for APNs' answer on an Apple launch (`PushManager.tokenStandIn`):
+# the variable, and a token of the hex shape the nest stores on an `apns` row.
+APNS_STAND_IN_ENV = "FAUNA_E2E_APNS_TOKEN_STAND_IN"
+APNS_STAND_IN_TOKEN = "ab" * 32
 
 
 def _rows(nest_url: str, actor: str) -> list[dict]:
@@ -86,8 +94,9 @@ def _presence(nest_url: str, actor: str) -> dict:
         return json.load(r)
 
 
-def _wait_rows(nest_url: str, actor: str, want: int) -> list[dict]:
-    """Poll until the actor holds exactly ``want`` rows; return them."""
+def _wait_rows(nest_url: str, actor: str, want: int, driver=None) -> list[dict]:
+    """Poll until the actor holds exactly ``want`` rows; return them. Given the
+    ``driver`` whose toggle wrote them, a timeout also reads its inline line."""
     seen: list[list[dict]] = []
 
     def settled():
@@ -98,7 +107,10 @@ def _wait_rows(nest_url: str, actor: str, want: int) -> list[dict]:
     wait_until(
         settled,
         RPC_ROUNDTRIP_S,
-        diagnose=lambda: f"rows for {actor[:12]}…: {seen[-1] if seen else None!r}",
+        diagnose=lambda: (
+            f"rows for {actor[:12]}…: {seen[-1] if seen else None!r}"
+            + (f"; {_diagnose(driver)}" if driver is not None else "")
+        ),
     )
     return seen[-1]
 
@@ -106,6 +118,19 @@ def _wait_rows(nest_url: str, actor: str, want: int) -> list[dict]:
 def _open_account_page(driver) -> None:
     driver.set_state(ACCOUNT_PAGE_NAV)
     driver.wait_for(SECTION, timeout=15)
+
+
+def _open_push_page(driver, app: str) -> None:
+    if app in _APPLE:
+        driver.set_state(GENERAL_PAGE_NAV)
+        driver.wait_for(SECTION, timeout=15)
+    else:
+        _open_account_page(driver)
+
+
+def _open_switcher_page(driver, app: str) -> None:
+    if app in _APPLE:
+        driver.set_state(ACCOUNT_PAGE_NAV)
 
 
 def _toggle_state(driver) -> str | None:
@@ -167,8 +192,8 @@ def _diagnose(driver) -> str:
     """Self-diagnosis (convention 6): the inline line, if any."""
     try:
         return f"push-notifications-error={driver.get_text('push-notifications-error')!r}"
-    except Exception:  # noqa: BLE001 - absent is the common case
-        return "no push-notifications-error"
+    except Exception as e:  # noqa: BLE001 - absent is the common case
+        return f"no push-notifications-error ({type(e).__name__}: {str(e)[:120]})"
 
 
 def _register_user(nest_instance) -> tuple[str, str]:
@@ -198,6 +223,20 @@ def _launch(app, app_path, nest_instance, request, tmp_path, seed, keyring_app):
         driver = create_driver(app)
         # The journeys drive the toggle, not the OS permission dialog.
         driver.grant_notifications()
+        driver.launch(config)
+        _wait_signed_in(driver)
+        return driver, config
+    if app in _APPLE:
+        config = {
+            "url": nest_instance["url"],
+            "seed_credentials": seed,
+            "environment": {
+                **_seeded_environment(request, nest_instance),
+                APNS_STAND_IN_ENV: APNS_STAND_IN_TOKEN,
+            },
+            **app_launch_config(app, request),
+        }
+        driver = create_driver(app)
         driver.launch(config)
         _wait_signed_in(driver)
         return driver, config
@@ -352,6 +391,26 @@ def test_android_push_follows_whoever_is_signed_in_and_switching_keeps_the_setti
     _follows_whoever_is_signed_in("android", android_app_path, nest_instance, request, tmp_path)
 
 
+@pytest.fixture(params=_APPLE)
+def apple_app(request):
+    """The Apple target this item drives; its id lands in the test name, which
+    is what conftest's ``--app`` filter reads."""
+    return request.param
+
+
+@pytest.mark.macos
+@pytest.mark.ios
+@pytest.mark.feature("notifications")
+@pytest.mark.feature("multiple-accounts")
+def test_apple_push_follows_whoever_is_signed_in_and_switching_keeps_the_setting(
+    apple_app, nest_instance, request, tmp_path
+):
+    """Only APNs' answer is stood in for (`APNS_STAND_IN_ENV`): the toggle, the
+    shared registration machine, the switch's row drop and re-arm, and the nest
+    row are the real ones."""
+    _follows_whoever_is_signed_in(apple_app, None, nest_instance, request, tmp_path)
+
+
 def _follows_whoever_is_signed_in(app, app_path, nest_instance, request, tmp_path):
     url = nest_instance["url"]
     first, first_secret = _register_user(nest_instance)
@@ -370,29 +429,31 @@ def _follows_whoever_is_signed_in(app, app_path, nest_instance, request, tmp_pat
     )
     try:
         # Opt in as the first identity.
-        _open_account_page(driver)
+        _open_push_page(driver, app)
         assert not _settled_toggle(driver), "a fresh install is never opted in"
         driver.click(TOGGLE)
-        _wait_rows(url, first, 1)
+        _wait_rows(url, first, 1, driver)
         _wait_toggle(driver, True)
 
         # Switch to the second (switcher row 1): the outgoing identity's row is
         # dropped, the incoming one is re-armed with NO Settings visit, and the
         # toggle — this device's setting — is still on (multiple-accounts 11).
+        _open_switcher_page(driver, app)
         _click_switcher_row(driver, 1)
         _wait_rows(url, second, 1)
         _wait_rows(url, first, 0)
         _wait_signed_in(driver, actor=second, timeout=45)
-        _open_account_page(driver)
+        _open_push_page(driver, app)
         assert _settled_toggle(driver), "switching identity turned this device's push off"
 
         # Off as the second, then switch back: off stays off for the first too.
         driver.click(TOGGLE)
         _wait_rows(url, second, 0)
         _wait_toggle(driver, False)
+        _open_switcher_page(driver, app)
         _click_switcher_row(driver, 0)
         _wait_signed_in(driver, actor=first, timeout=45)
-        _open_account_page(driver)
+        _open_push_page(driver, app)
         assert not _settled_toggle(driver), "switching identity turned this device's push on"
         assert _rows(url, first) == [], "a switch opted the incoming identity in"
     finally:
@@ -485,7 +546,8 @@ def _sign_out_drops_and_sign_in_rearms(app, app_path, nest_instance, request, tm
 # — the toggle settles back off and the inline line renders — so that, not a
 # landed row, is what this leg witnesses. When the gate opens this test goes
 # red on its first assertion after the click, which is the cue to give Apple the
-# three journeys above.
+# other two journeys above. The identity journey runs today, over a stand-in
+# for APNs' answer.
 
 
 # No `feature` marker: this is not a witness of `notifications.md` outcome 9

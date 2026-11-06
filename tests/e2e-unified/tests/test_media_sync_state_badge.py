@@ -50,6 +50,7 @@ pytestmark = [pytest.mark.tier2, pytest.mark.tier_3]
 @pytest.mark.windows
 @pytest.mark.web
 @pytest.mark.tui
+@pytest.mark.android
 @pytest.mark.feature("media")
 def test_media_item_shows_synced_badge(seeded_media_app):
     """A control-plane client's media item renders ``sync-state-badge`` ==

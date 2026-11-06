@@ -556,13 +556,21 @@ def _manifest_xml(name=GRADE_IDENTITY, publisher=GRADE_PUBLISHER, version="0.1.1
     )
 
 
+# The four native markers of the peer-to-peer sharing plane (`just
+# windows-store-safe-check`'s P2P_NATIVE_PATS): the Store's flavour keeps it, so a
+# well-formed upload's core carries them.
+_P2P_NATIVE = (b"uniffi_fauna_ffi_fn_func_offline_share_begin", b"FfiCeremonySeat",
+               b"share_plane_view", b"FfiSharePlaneView")
+
+
 def _msix(tmp_path, arch="x64", manifest=None, extra=None):
-    """A package-shaped zip carrying the four payload binaries built for `arch`."""
+    """A package-shaped zip carrying the four payload binaries built for `arch`, its
+    core in the Store's flavour."""
     pe = _pe(_MACHINE[arch])
     entries = {
         "AppxManifest.xml": manifest if manifest is not None else _manifest_xml(arch=arch),
         "App/FaunaApp.exe": pe,
-        "App/fauna_ffi.dll": pe,
+        "App/fauna_ffi.dll": pe + b"".join(m + b"\x00" for m in _P2P_NATIVE),
         "fauna-sync-agent.exe": pe,
         "fauna_shell.dll": pe,
     }
@@ -648,11 +656,15 @@ class TestStorePackageGrade:
 
 
 class TestStorePackageFlavourGrade:
-    """The Store package is the `store-safe` flavour (installers/windows.md § Store
-    distribution, the flavour paragraph, owner ruling 2026-10-14): its native core
-    carries no payments plane, and zaps and peer-to-peer sharing go with it. The
-    grade reads the packaged fauna_ffi.dll for the names `just
-    windows-store-safe-check` scans in its native column."""
+    """The Store package is a store flavour (installers/windows.md § Store
+    distribution, the flavour paragraph): `store-safe` (owner ruling 2026-10-14)
+    carries no payments plane, and zaps and peer-to-peer sharing go with it;
+    `store-no-payments` (from the first version whose recorded commit carries the
+    Windows leg) drops the money plane and KEEPS sharing. The grade reads the
+    packaged fauna_ffi.dll for the names `just windows-store-safe-check` scans in
+    its native column."""
+
+    _P2P = _P2P_NATIVE
 
     def _grade(self, builder, path, flavour):
         return builder.grade_package(path, "x64", GRADE_IDENTITY, GRADE_PUBLISHER,
@@ -663,10 +675,53 @@ class TestStorePackageFlavourGrade:
 
     def test_the_store_flavour_is_the_default(self, builder, tmp_path):
         """A grade that names no flavour grades the ruled one, so a hand re-run
-        cannot pass a full package by omission."""
-        path = _msix(tmp_path, extra={"App/fauna_ffi.dll": self._ffi(b"fauna.payments.invoice")})
-        problems = builder.grade_package(path, "x64", GRADE_IDENTITY, GRADE_PUBLISHER, "0.1.1.0")
-        assert any("fauna.payments." in p for p in problems), problems
+        cannot pass a full package by omission — nor a store-safe one, which has
+        lost the sharing plane the ruled flavour keeps."""
+        assert builder.STORE_FLAVOUR == "store-no-payments"
+        assert builder.STORE_FLAVOUR in builder.FLAVOURS
+        for name, ffi in (("full", self._ffi(b"fauna.payments.invoice", *self._P2P)),
+                          ("store-safe", self._ffi(b"fauna.feed.post"))):
+            (tmp_path / name).mkdir()
+            path = _msix(tmp_path / name, extra={"App/fauna_ffi.dll": ffi})
+            problems = builder.grade_package(path, "x64", GRADE_IDENTITY, GRADE_PUBLISHER, "0.1.1.0")
+            assert problems, f"a {name} core passes the default grade"
+            assert all("App/fauna_ffi.dll" in p for p in problems), problems
+
+    def test_a_store_no_payments_core_grades_clean(self, builder, tmp_path):
+        path = _msix(tmp_path, extra={"App/fauna_ffi.dll": self._ffi(b"fauna.feed.post", *self._P2P)})
+        assert self._grade(builder, path, "store-no-payments") == []
+
+    @pytest.mark.parametrize("carried", [
+        b"fauna.payments.invoice", b"fauna.tips.send", b"fauna.nostr.zap_signers.list",
+    ])
+    def test_a_store_no_payments_core_carrying_the_money_plane_is_refused(self, builder,
+                                                                         tmp_path, carried):
+        path = _msix(tmp_path, extra={"App/fauna_ffi.dll": self._ffi(carried, *self._P2P)})
+        problems = self._grade(builder, path, "store-no-payments")
+        marker = carried[: carried.rindex(b".") + 1].decode()   # the kind's namespace
+        assert any("App/fauna_ffi.dll" in p and f"'{marker}'" in p for p in problems), problems
+
+    @pytest.mark.parametrize("dropped", range(4))
+    def test_a_store_no_payments_core_without_sharing_is_refused(self, builder, tmp_path, dropped):
+        """The other direction: a core that fell back to store-safe — any one of the
+        four sharing markers gone — is not this flavour, though it carries no money."""
+        kept = tuple(m for i, m in enumerate(self._P2P) if i != dropped)
+        path = _msix(tmp_path, extra={"App/fauna_ffi.dll": self._ffi(b"fauna.feed.post", *kept)})
+        problems = self._grade(builder, path, "store-no-payments")
+        marker = self._P2P[dropped].decode()
+        if marker.startswith("uniffi_fauna_ffi_fn_func_offline_share_"):
+            marker = "uniffi_fauna_ffi_fn_func_offline_share_"
+        assert any("App/fauna_ffi.dll" in p and marker in p for p in problems), problems
+
+    def test_a_store_no_payments_package_without_its_core_is_refused(self, builder, tmp_path):
+        path = _msix(tmp_path)
+        with zipfile.ZipFile(path) as z:
+            kept = {n: z.read(n) for n in z.namelist() if n != "App/fauna_ffi.dll"}
+        with zipfile.ZipFile(path, "w") as z:
+            for name, body in kept.items():
+                z.writestr(name, body)
+        problems = self._grade(builder, path, "store-no-payments")
+        assert any("App/fauna_ffi.dll" in p and "missing" in p for p in problems), problems
 
     def test_an_excised_core_grades_clean(self, builder, tmp_path):
         path = _msix(tmp_path, extra={"App/fauna_ffi.dll": self._ffi(b"fauna.feed.post")})

@@ -64,6 +64,11 @@ pytestmark = [
     # apple joined 2026-09-21, once the real bug below was measured and fixed.
     pytest.mark.macos,
     pytest.mark.ios,
+    # android joined 2026-10-28: `FoldersScreen.kt` tags `folder-nest-residency-select`
+    # and arms `folder-residency-confirm` on the metadata-only pick, committing
+    # only on its answer (the same arm-then-confirm seam this file drives). The
+    # marker records the witness; the device run waits on the emulator venue.
+    pytest.mark.android,
     # ── The apple bug this file found, and what it actually was ──────────
     #
     # For three passes `test_the_flip_back_to_full_needs_no_confirm` failed on

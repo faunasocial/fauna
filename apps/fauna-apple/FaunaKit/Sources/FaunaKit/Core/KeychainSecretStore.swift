@@ -15,7 +15,7 @@ import Foundation
 /// condition here, it almost certainly belongs in `fauna-client-accounts` instead — that
 /// asymmetry is the whole point of the seam.
 ///
-/// `@unchecked Sendable` mirrors `NullLaunchObserver` and `ObserverBox` (FaunaKit's other
+/// `@unchecked Sendable` mirrors `LaunchTicks` and `ObserverBox` (FaunaKit's other
 /// UniFFI callback conformances): the protocol is `Sendable`, and the only stored property
 /// is a reference to the Keychain wrapper, whose operations are individually atomic
 /// `SecItem*` calls under a lock.

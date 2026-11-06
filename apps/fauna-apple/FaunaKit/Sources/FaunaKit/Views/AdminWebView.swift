@@ -66,7 +66,11 @@ public struct AdminWebView: View {
                     // closures re-read live `vm.options`/`vm.selectedIndex`.
                     .automationSelect(
                         Ids.adminWebApexActorSelect,
-                        value: { vm.options.first(where: { $0.id == vm.selectedIndex })?.label }
+                        value: { vm.options.first(where: { $0.id == vm.selectedIndex })?.label },
+                        // Every painted option text, so the picker-label
+                        // collision witness can assert the whole set is
+                        // injective (drivers/base.py `option_texts`).
+                        options: { vm.options.map(\.label) }
                     ) { label in
                         if let opt = vm.options.first(where: { $0.label == label }) {
                             Task { await vm.select(index: opt.id) }
@@ -76,10 +80,11 @@ public struct AdminWebView: View {
                     // kind — `actor: None` is the clear.
                     .faunaGate("fauna.web.set_apex_actor")
 
-                    Text(L.admin.webPage.apexInfo(url: vm.apexUrl))
+                    // `automationText` also registers the id for the in-process
+                    // driver (`/element/text`), which has no a11y tree.
+                    automationText(Ids.adminWebApexInfo, L.admin.webPage.apexInfo(url: vm.apexUrl))
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                        .accessibilityIdentifier(Ids.adminWebApexInfo)
                 }
 
                 if let error = vm.errorMessage {

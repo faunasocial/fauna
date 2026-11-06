@@ -328,6 +328,7 @@ async fn agent_process_hosts_the_shared_account_store_with_no_app_running() {
                 peer_transport: None,
                 // The machine's named row.
                 enrollment_target_device_id: hex::encode(DEVICE_ID),
+                enrollment_device_label: None,
             },
         )
         .await

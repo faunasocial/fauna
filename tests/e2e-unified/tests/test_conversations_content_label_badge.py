@@ -45,6 +45,7 @@ MESSAGE_PAINT_BUDGET_S = 15.0
 @pytest.mark.linux
 @pytest.mark.tui
 @pytest.mark.windows
+@pytest.mark.android
 @pytest.mark.feature("post-badges")
 def test_a_labeled_message_shows_its_content_label(logged_in_app):
     app = logged_in_app

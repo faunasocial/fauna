@@ -122,9 +122,11 @@ historical **`content_key_version`**. Properties, each by construction:
   user is looking at — showing the pre-restore content, forever. A client that both records a
   restore **and** owns a local copy therefore owns the local apply as a second, explicit step:
   re-point the local sync-state row at the historical `manifest_hash` / `size_bytes` /
-  `content_key_version`, then invalidate the cached bytes. Apps whose restore surface has no
-  local file (the Media library on all 7 apps — a nest-side view fetched by hash) have
-  nothing to apply and are unaffected.
+  `content_key_version`, then invalidate the cached bytes. A restore surface with no local file
+  of its own (the Media library and the review list on all 7 apps, nest-side views) has nothing
+  to apply itself, but its record carries this device's id, so on a device that also serves the
+  folder the copy is still owed: by the record's echo on a resident root and by the fold on an
+  on-demand one (ordering 1).
 
   On an on-demand (cfapi) client this is the invalidation path: re-point the row,
   `supersede_placeholder` (free the cached bytes and leave the placeholder describing the restored
@@ -149,14 +151,15 @@ historical **`content_key_version`**. Properties, each by construction:
      the file becomes a placeholder at the new head and the next open re-hydrates the restored bytes.
 
      **An always-resident root has no start-up fold** — its pull is the change log from this
-     device's anchor, and a restore this device recorded reads there as its own echo, which only
-     refreshes the merge base. So the crash window on a resident root is closed by an
+     device's anchor, and a restore this device recorded reads there as its own echo, which applies
+     nothing. So the crash window on a resident root is closed by an
      **owed-restore intent** instead (ratified 2026-10-10): a row in the folder's state DB holding
      the path, the restored head (manifest, size, content-key generation), the identity the restore
      records as, and when it was owed — written **before** the nest record, so a crash at any point
-     leaves either the intent or nothing; drained by the resident loop at start and on every rescan
-     tick, after its pull. The drain asks the nest for the path's current head (the versions
-     listing) and takes exactly one of four roads: the head is **not** the restored version and the
+     leaves either the intent or nothing; drained by the resident loop at start, on every rescan
+     tick and on a reconnect or a nudge, always after its pull. The drain asks the nest for the
+     path's current head (the versions listing) and takes exactly one of four roads: the head is
+     **not** the restored version and the
      intent is older than the record's grace → **dropped** (the record never landed, or another
      change has since moved past it — that change arrives by the pull like any other); younger →
      **kept** for the next tick (the record may still be in flight); the head **is** the restored
@@ -164,15 +167,51 @@ historical **`content_key_version`**. Properties, each by construction:
      moved last and stamped with the restore's signer; a row already standing there takes only the
      stamp), after which the intent is dropped — a copy holding an unsynced edit refuses the
      replace and drops the intent too, the edit uploading as a conflict with the restore; a fetch
-     that fails **keeps** the intent for the next tick. The intent dies in one place, the replace,
+     that fails **keeps** the intent for the next tick. A delete past the restore is not listed
+     (a tombstone is no version), so it reads as the restored head, and the replace refuses
+     because the pull that applied the delete left no synced copy to write over: the file stays
+     gone and the intent is dropped. The intent dies in one place, the replace,
      whichever road reached it — the restore's own hand-off or the drain — and a drop never touches
      a newer intent on the same path (a second restore before the first drained replaces the
-     first). **The on-demand root keeps its fold**: a full head listing at start heals every stale
+     first). While the intent is owed, the restore's own echo only accounts: the ledger may hold
+     the restored bytes at a lower seq, which reads as a declined own tail, and re-asserting that
+     tail would record the replaced copy back over the restore on every device, so
+     `apply_self_echo` takes no such arm for an owed `(path, manifest)` and the drain applies.
+
+     **The other two doors owe it from the echo.** Media's restore and the review list's *use the
+     other version* run in the app, with no hand on the root's state DB and no assurance the root
+     is running, yet they record under this device's id, so their record reaches a resident root
+     as its own echo and never as a remote change. What tells it from a row the engine wrote is the
+     anchor: every engine record of a new head carries the `derived_through` it derived from, and
+     these doors hold none to give. So an own row with no anchor, later than the row local came
+     from, naming a head the path's row does not stand at, owes the restore it records: the echo
+     writes the intent, signed as this account, and the drain applies it as above. (The one engine
+     record with no anchor, the thumbnail backfill, re-records the head its row already stands at,
+     so it owes nothing.) The fix sits at the echo and not at the doors because only the echo also
+     covers a restore recorded while the root is down.
+
+     **A door's record of a path with no file here applies as a remote change** (ruled
+     2026-10-31). Every echo arm works on the local file, so with none on the disk the row would
+     only be accounted and the anchor would move past it, and the file would reach every device
+     but the one that recorded it. So an own create or modify with no anchor that is its path's
+     batch-latest change, over a path with no file, is downloaded and written as a peer's row is,
+     a failed fetch holding the anchor. This covers a Media upload of a new path and a restore of
+     a file deleted on this device: **a restore past a delete brings the file back here, as it
+     does on every other device**, whether it names an older version or the head the delete left
+     on the tombstoned row. Seq order is what tells the two orders apart: the drain cannot, as
+     above, so it keeps refusing a path with no copy, and the pull, which reads the rows in
+     order, decides. A delete past the restore in one batch makes the delete the path's latest
+     change and nothing is written; in a later batch the delete arm removes the file. Two rows
+     stay echoes, because a missing file there is a delete on its way: a row with an anchor, and
+     the thumbnail backfill's re-record of the head a live row stands at.
+
+     **The on-demand root keeps its fold**: a full head listing at start heals every stale
      row, restores included, so the intent is written only for a location served always-resident —
      one heal per root kind, never both. An own-echo heuristic ("an own echo whose head differs
      from the row while the disk holds the row's recorded body") was considered and refused: an
      older own upload's echo arriving after a newer own record has the same shape and would write an
-     old version over a newer one.
+     old version over a newer one. The anchor rule above is not that heuristic: an engine's older
+     upload carries its anchor, and an intent writes only the nest's current head.
   2. **Within a *restore's* local apply: durable row before volatile cache.** Re-point the sync-state
      row, *then* drop the cached bytes. A failed free then leaves a correct row and a stale
      cache — never a truncated file: an open of a placeholder that describes another size than its
@@ -437,6 +476,14 @@ a charge with no delete verb could not have released them (`reserved-folders.md`
 
 ## Implementation status today (File Versions)
 
+- **Another door's restore on a resident root BUILT (2026-10-31):** the echo of a record with
+  no anchor writes the owed-restore intent (`SyncEngine::owe_another_doors_restore`, pinned in
+  `resident_restore_test.rs`) and the drain applies it.
+- **A door's record of a path with no file on a resident root BUILT (2026-10-31):** the row
+  applies as a remote change (`SyncEngine::doors_record_owes_the_file`), pinned red first by
+  `a_doors_upload_of_a_new_path_reaches_the_disk` and
+  `a_doors_restore_of_a_file_deleted_here_brings_it_back`, witnessed end to end by
+  `test_media_upload_reaches_the_folder_this_device_serves` on tui.
 - **The version's row BUILT (2026-10-12):** `files_handlers::row_to_info` stamps
   `FileVersionInfo.folder_id` on every `list`/`get` item (conformance
   `every_version_names_its_sets_row`); the Media machine carries it on
@@ -645,17 +692,35 @@ a charge with no delete verb could not have released them (`reserved-folders.md`
   signer. Pinned by `resident_restore_test` (the restored version on the disk, the row `Synced`
   and signed, nothing uploaded; an unsynced edit kept and uploaded) and
   `pipe_server::tests::a_restore_on_an_always_resident_root_takes_the_kept_copy_road`.
-  ⚠ **Two gaps remain.** (1) Explorer cannot reach the road yet: `path_map::resolve_to_folder_rel`
-  serves on-demand roots only, so a resident file has no badge, no "Fauna" menu, no version
-  list and no restore. (2) A resident root has no start-up fold. A
-  restore its loop never applied — the root not running, the loop stopping before it answers,
-  or a crash between the record and the hand-off — leaves the copy at the replaced version
-  until the user restores again or another device's change arrives. **The heal is ratified, not
-  built (2026-10-10):** the owed-restore intent of § Restore, ordering 1 — a state-DB row the
-  restore verb writes before the nest record for an always-resident location, the resident loop
-  draining it at start and on every tick against the nest's head, the intent dying in
-  `SyncEngine::replace_kept_copy`. Nothing of it exists in code yet: no table, no write, no
-  drain.
+  **Explorer reaches the road (2026-10-27)**:
+  `path_map::resolve_to_folder_rel` resolves every bound location, carrying its mode, so a
+  resident file badges from its row and shows the "Fauna" menu, its version list comes from
+  the nest, and `RestoreFileVersion` records the restore and hands it to the kept-copy road
+  above. Each link is pinned on its own — the verbs reaching the nest
+  (`pipe_server::tests::the_version_verbs_reach_the_nest_for_a_resident_root`), the hand-off
+  to the root's loop (`a_restore_on_an_always_resident_root_takes_the_kept_copy_road`) and the
+  loop's write (`resident_restore_test`) — and since 2026-11-02 one test drives them together:
+  `resident_restore_tier3.rs` (`--features tier3-nest`, Windows) runs the verb through the
+  capability's own WS client to a real nest and the root's own loop, and reads the restored
+  version off the disk, the intent written ahead of the record and settled by the write, the
+  row `Synced` at the restored head and signed as the restoring identity, and nothing more
+  recorded. Its first run found the verb's record going out unsigned, which every nest
+  refuses (`apps/windows.md` § Shell Extension, the `RestoreFileVersion` status row). The
+  live-Explorer render on a resident root has not been run: the shell extension is not
+  installed on the box that would run it.
+  **A restore the loop never applied heals (2026-10-31):** a resident root has no start-up fold,
+  so the root not running, the loop stopping before it answers, or a crash between the record
+  and the hand-off is closed by the owed-restore intent of § Restore, ordering 1 — the
+  `owed_restores` table in `sync.db`, written ahead of the record through the `owe` seam of
+  `versions::restore_file_version` (`pipe_server::owe_restore`, an always-resident location
+  only), `SyncEngine::drain_owed_restores` run by the resident loop at start and on every tick
+  after its pull, the intent dying in `SyncEngine::replace_kept_copy`. Each crash window is
+  pinned in `resident_restore_test`, against a closure standing in for the nest's head, and so
+  is the loop's drain at start; the drain on the tick is pinned by reading only, and the head is
+  read from a listing by a unit test (`listed_head`), while no test drives the production listing
+  call against a nest. The echo guard of ordering 1 is pinned by
+  `an_owed_restore_is_applied_and_its_own_echo_does_not_undo_it`, over a root whose ledger holds
+  the restored bytes.
   ⚠ **Until 2026-07-17 this same comparison also misfired on the device's own successful uploads**
   (not just genuine remote modifies): the upload path left `manifest_hash` at the pre-upload merge
   base even after a change record succeeded, so the very next fold read the device's own echoed

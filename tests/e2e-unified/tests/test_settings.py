@@ -2,7 +2,8 @@ import uuid
 import pytest
 
 from common.launch_harness import reached_authenticated_app
-from helpers.app_surface import app_name, declared_absence, skip_unbuilt
+from helpers.app_surface import declared_absence, require_surface
+from helpers.relaunch import pin_store_across_relaunch
 from helpers.budgets import RPC_ROUNDTRIP_S
 from helpers.rpc_hold import (
     arm_rpc_hold,
@@ -87,29 +88,8 @@ def test_inbox_mode_pre_selects_the_accounts_real_mode_after_a_relaunch(logged_i
     #      (`e2e-relaunch-wipes-client-store`);
     #   2. the injected identity must survive INTO that store, else the app
     #      returns signed out and never reaches the page under test.
-    if not driver.preserve_state_across_relaunch():
-        skip_unbuilt(
-            driver,
-            surface="a client store that can be pinned across a relaunch",
-            detail=(
-                "the driver hands the relaunched process a fresh store, so the "
-                "app returns signed out and cannot re-read the stored mode"
-            ),
-            tracked="drivers/http_bridge.py::preserve_state_across_relaunch",
-        )
-    if not driver.relaunch_preserves_injected_identity():
-        skip_unbuilt(
-            driver,
-            surface="a login that survives a relaunch",
-            detail=(
-                "logged_in_app injects the session with set_state, and on this "
-                "app the injection does not reach a store the relaunch keeps, so "
-                "the app returns signed out and the stored inbox mode can never "
-                "be re-read. The product behaviour here is UNVERIFIED, not "
-                "known-good"
-            ),
-            tracked="drivers/http_bridge.py::relaunch_preserves_injected_identity",
-        )
+    pin_store_across_relaunch(driver)
+    require_surface(driver, "relaunch-injected-identity")
     assert driver.recover(), "the app did not come back up after the relaunch"
     reached_authenticated_app(driver, timeout=90)
 
@@ -196,27 +176,8 @@ def test_inbox_mode_is_unknown_while_its_fetch_is_still_pending(logged_in_app, n
     # A relaunch, and for the same two reasons the test above needs one: only a
     # process boundary clears the mode this test just cached, and a client that
     # kept the mode in RAM would enter the held window already knowing it.
-    if not driver.preserve_state_across_relaunch():
-        skip_unbuilt(
-            driver,
-            surface="a client store that can be pinned across a relaunch",
-            detail=(
-                "the driver hands the relaunched process a fresh store, so the "
-                "app returns signed out and never issues the read this test holds"
-            ),
-            tracked="drivers/http_bridge.py::preserve_state_across_relaunch",
-        )
-    if not driver.relaunch_preserves_injected_identity():
-        skip_unbuilt(
-            driver,
-            surface="a login that survives a relaunch",
-            detail=(
-                "logged_in_app injects the session with set_state, and on this "
-                "app the injection does not reach a store the relaunch keeps, so "
-                "the app returns signed out and never reaches the page under test"
-            ),
-            tracked="drivers/http_bridge.py::relaunch_preserves_injected_identity",
-        )
+    pin_store_across_relaunch(driver)
+    require_surface(driver, "relaunch-injected-identity")
     # Armed BEFORE the relaunch, and this is the load-bearing ordering. The only
     # genuinely-unknown window is a COLD one — an app that already holds the mode
     # is not guessing, it is remembering, and re-entering the page does not
@@ -326,20 +287,8 @@ def test_privacy_nav_names_no_mode_while_the_mode_read_is_held(logged_in_app, ne
     # boundary clears the mode this test just cached. tui pins its store across
     # a relaunch and keeps the injected login, so these guards are the six-app
     # test's own, kept so a driver change reads as a skip rather than a red.
-    if not driver.preserve_state_across_relaunch():
-        skip_unbuilt(
-            driver,
-            surface="a client store that can be pinned across a relaunch",
-            detail="the relaunched process would get a fresh store and return signed out",
-            tracked="drivers/tui.py::preserve_state_across_relaunch",
-        )
-    if not driver.relaunch_preserves_injected_identity():
-        skip_unbuilt(
-            driver,
-            surface="a login that survives a relaunch",
-            detail="the relaunched app would return signed out and never reach the page",
-            tracked="drivers/http_bridge.py::relaunch_preserves_injected_identity",
-        )
+    pin_store_across_relaunch(driver)
+    require_surface(driver, "relaunch-injected-identity")
     # Armed BEFORE the relaunch, as the six-app test does and for its reason:
     # only a cold app is genuinely unknowing, so every read of this kind must be
     # parked from before the process exists.
@@ -760,22 +709,6 @@ def test_email_filter_forward_keeps_its_copy_mode_through_an_edit(
     settings.delete_filter(_wait_filter_listed(settings, name))
 
 
-#: The apps whose filter form collects every v1 condition and action, the
-#: rule's order and its `continue` flag (tui leads; the six follow from their
-#: per-app lifts).
-_FULL_FILTER_FORM_APPS = {"tui", "linux", "web", "android"}
-
-
-def _require_full_filter_form(driver, surface: str) -> None:
-    if app_name(driver) not in _FULL_FILTER_FORM_APPS:
-        skip_unbuilt(
-            driver,
-            surface=surface,
-            detail="this app's filter form collects only the Allow/Discard/Reject/Forward inputs",
-            tracked="docs/goal/behavior/email-filters.md § Email filter rules (Implementation status today)",
-        )
-
-
 @pytest.mark.feature("mail-filter-rules")
 def test_email_filter_files_labels_and_replies_from_the_form(
     logged_in_app, nest_instance, test_user
@@ -785,7 +718,6 @@ def test_email_filter_files_labels_and_replies_from_the_form(
     typed, listed with its badge, and reopened with every input it was saved
     with (`mail-filter-rules` outcome 4; the forward half is
     `test_email_filter_forward_keeps_its_copy_mode_through_an_edit`)."""
-    _require_full_filter_form(logged_in_app.driver, "filter-file-into-mailbox")
     settings = logged_in_app.settings
     settings.navigate()
     cases = [
@@ -850,7 +782,6 @@ def test_email_filter_matches_a_header_value_or_the_spam_score(
     typed condition and reopened with the same inputs (`mail-filter-rules`
     outcome 5; the sender, subject, body and header-present conditions are
     the form's single-value kinds `test_email_filter_edit` drives)."""
-    _require_full_filter_form(logged_in_app.driver, "filter-rule-spam-score")
     settings = logged_in_app.settings
     settings.navigate()
     cases = [
@@ -896,7 +827,6 @@ def test_email_filter_order_and_continue_are_set_from_the_form(
     are set from the form, stored on the rule, reopened as saved, and cleared
     again by an edit (`mail-filter-rules` outcome 6; the nest applying them is
     outcome 14)."""
-    _require_full_filter_form(logged_in_app.driver, "filter-continue-toggle")
     settings = logged_in_app.settings
     settings.navigate()
     name = _unique("Ordered")
@@ -979,37 +909,28 @@ def test_handle_change_validation(logged_in_app):
     `ab` is too short (< 3 chars), so it can never be a valid handle and the
     assertion never mutates the logged-in actor's real handle.
 
-    Cross-app rollout: linux is the reference (validates client-side + shows
-    the error in `error-message`). Where a client doesn't yet expose the
-    change-handle form *or* doesn't yet route the change-handle error into the
-    `error-message` element, the test skips with an *adoption-pending* reason
-    (tracked in `NEXT-<client>` + settings.md § Implementation status today) —
-    e.g. web gates the form behind `{#if identity.handle}`. As each app
-    adopts, it runs and asserts automatically. linux must never skip here.
+    The validation error is synchronous (no RPC), but the repaint that carries
+    it is not instant on a loaded box, so the error line is waited for as state
+    (convention 14), never slept for and never skipped on: an app that does not
+    paint the line fails here, it does not drop out of `--strict-app`.
     """
-    import time
-
     d = logged_in_app.driver
     logged_in_app.settings._navigate_subpage("account")
-    try:
-        d.wait_for("new-handle", timeout=5)
-    except Exception:
-        pytest.skip(
-            "change-handle form (new-handle) not reachable for this client — "
-            "adoption pending (e.g. web gates it on identity.handle); see NEXT-<client>"
-        )
+    d.wait_for("new-handle", timeout=5)
     d.clear_and_type("new-handle", "ab")
     d.click("change-handle")
-    time.sleep(2)
     # Read the `error-message` element directly. The cross-app `error_text()`
     # helper consults the state protocol first, which can shadow a *page-level*
     # error (not the global banner) on clients that report a `messages` object.
-    if not d.is_visible("error-message"):
-        pytest.skip(
-            "client does not yet route the change-handle validation error into "
-            "the error-message element — adoption pending; see NEXT-<client>"
-        )
-    err = d.get_text("error-message")
+    # Scrolled: the page sits scrolled down to the button just pressed.
+    err = wait_until(
+        lambda: d.is_visible_scrolled("error-message") and d.get_text("error-message"),
+        RPC_ROUNDTRIP_S,
+        diagnose=lambda: (
+            "no validation error painted for the too-short handle; "
+            f"state errors {(d.get_state() or {}).get('messages')!r}"
+        ),
+    )
     assert err, f"error-message visible but empty (got {err!r})"
 
 
@@ -1041,15 +962,7 @@ def test_handle_someone_else_holds_is_refused_and_not_applied(
 
     d = logged_in_app.driver
     logged_in_app.settings._navigate_subpage("account")
-    try:
-        d.wait_for("new-handle", timeout=5)
-    except Exception:
-        skip_unbuilt(
-            d,
-            surface="new-handle",
-            detail="the change-handle form is not reachable on this app",
-            tracked="",
-        )
+    d.wait_for("new-handle", timeout=5)
     pending_before = d.count("pending-action-item")
 
     d.clear_and_type("new-handle", wanted)
@@ -1399,13 +1312,7 @@ def test_general_sub_page_heading_is_visible(logged_in_app):
     this only asserts a real, non-empty, id-bearing heading paints, not a specific
     string. See `test_sub_page_heading_is_visible` for the uniform-title siblings.
     """
-    if logged_in_app.driver.is_android():
-        skip_unbuilt(
-            logged_in_app.driver,
-            surface="the general Settings sub-page",
-            detail="not built yet on android (settings.md § Sub-page heading conformance table)",
-            tracked="settings.md § Sub-page heading conformance",
-        )
+    require_surface(logged_in_app.driver, "settings-general")
     logged_in_app.settings._navigate_subpage("general")
     logged_in_app.driver.wait_for("page-heading", timeout=10.0)
     heading = logged_in_app.driver.get_text("page-heading")

@@ -578,7 +578,8 @@ fn confirm_button(
 /// The DMARC-reports group (`dmarc-reporting.md` § Forensic-report receive →
 /// *Default off*, § Retention): the forensic opt-in with its PII text beside it
 /// (painted always, the toggle point's whole explanation), the `fo=` picker over
-/// the shared catalog, the two retentions and the group's Save. A forensic
+/// the shared catalog, the two retentions, the outbound aggregate-report switch
+/// (§ Generation is on by default) and the group's Save. A forensic
 /// retention past the default adds the UI's warning under its field — untagged
 /// chrome, decided by the shared `dmarc_forensic_retention_warns` over the
 /// draft as typed (an unparsed draft warns on nothing).
@@ -632,6 +633,12 @@ fn dmarc_elements(state: &AdminState) -> Vec<Element> {
             t::mail_page::DMARC_FORENSIC_RETENTION_WARNING,
         ));
     }
+    els.push(toggle(
+        ids::ADMIN_MAIL_DMARC_OUTBOUND_AGGREGATE_TOGGLE,
+        t::mail_page::DMARC_OUTBOUND_AGGREGATE_LABEL,
+        d.outbound_aggregate,
+        MailToggle::DmarcOutboundAggregate,
+    ));
     els.push(save(
         ids::ADMIN_MAIL_DMARC_SAVE_BUTTON,
         t::mail_page::DMARC_SAVE,
@@ -894,6 +901,7 @@ impl MailDrafts {
             fo_mode: dm.fo_mode.clone(),
             aggregate_retention: dm.aggregate_retention_days.to_string(),
             forensic_retention: dm.forensic_retention_days.to_string(),
+            outbound_aggregate: dm.outbound_aggregate_enabled,
         };
         let ms = &snap.microsoft_registration;
         self.microsoft = MicrosoftDraft {
@@ -1008,6 +1016,9 @@ impl MailDrafts {
             AliasSubaddressing => self.alias.subaddressing = !self.alias.subaddressing,
             AliasWildcardPrefix => self.alias.wildcard_prefix = !self.alias.wildcard_prefix,
             DmarcRufPublish => self.dmarc.ruf_publish = !self.dmarc.ruf_publish,
+            DmarcOutboundAggregate => {
+                self.dmarc.outbound_aggregate = !self.dmarc.outbound_aggregate
+            }
         }
     }
 
@@ -1117,7 +1128,7 @@ impl MailDrafts {
         }
     }
 
-    /// Gather the DMARC group's drafts into a full `DmarcPolicyView`: the four
+    /// Gather the DMARC group's drafts into a full `DmarcPolicyView`: the five
     /// edited fields over the persisted `base`, every record tag without a
     /// control (`p`, `sp`, `pct`, `adkim`, `aspf`, `rua`, the `ruf` destination,
     /// `ri`) carried through unchanged. A retention past its ceiling is sent as
@@ -1129,6 +1140,7 @@ impl MailDrafts {
             fo_mode: d.fo_mode.clone(),
             aggregate_retention_days: pu32(&d.aggregate_retention, base.aggregate_retention_days),
             forensic_retention_days: pu32(&d.forensic_retention, base.forensic_retention_days),
+            outbound_aggregate_enabled: d.outbound_aggregate,
             ..base.clone()
         }
     }
@@ -1265,6 +1277,7 @@ mod tests {
                 ri_seconds: 86_400,
                 aggregate_retention_days: 90,
                 forensic_retention_days: 30,
+                outbound_aggregate_enabled: true,
             },
             microsoft_registration: MicrosoftRegistrationView {
                 client_id: "0b5c1a2e-3f4d-4e5a-8b6c-7d8e9f0a1b2c".into(),
@@ -1511,6 +1524,7 @@ mod tests {
                 "admin-mail-dmarc-fo-mode-select",
                 "admin-mail-dmarc-aggregate-retention-input",
                 "admin-mail-dmarc-forensic-retention-input",
+                "admin-mail-dmarc-outbound-aggregate-toggle",
                 "admin-mail-dmarc-save-button",
                 // Secrets
                 "admin-mail-list-unsubscribe-secret-rotate-button",
@@ -1826,11 +1840,11 @@ mod tests {
         );
     }
 
-    /// The DMARC Save carries the four edited fields and round-trips every
+    /// The DMARC Save carries the five edited fields and round-trips every
     /// record tag the page has no control for — a Save must never reset a
     /// deployment's `p=` or destinations to whatever the drafts lack.
     #[test]
-    fn gather_dmarc_carries_the_four_edits_and_round_trips_the_rest() {
+    fn gather_dmarc_carries_the_five_edits_and_round_trips_the_rest() {
         let mut snap = sample_snapshot();
         snap.dmarc.policy_mode = "quarantine".into();
         snap.dmarc.pct = 50;
@@ -1839,8 +1853,10 @@ mod tests {
         drafts.seed(&snap);
         assert_eq!(drafts.dmarc.forensic_retention, "30");
         assert_eq!(drafts.dmarc.fo_mode, "1");
+        assert!(drafts.dmarc.outbound_aggregate);
 
         drafts.toggle(MailToggle::DmarcRufPublish);
+        drafts.toggle(MailToggle::DmarcOutboundAggregate);
         drafts.dmarc.fo_mode = "d".into();
         drafts.set_text(MailField::DmarcForensicRetention, "60".into());
         drafts.set_text(MailField::DmarcAggregateRetention, "oops".into());
@@ -1853,6 +1869,7 @@ mod tests {
                 forensic_retention_days: 60,
                 // Unparsed → the persisted value.
                 aggregate_retention_days: 90,
+                outbound_aggregate_enabled: false,
                 ..snap.dmarc.clone()
             }
         );

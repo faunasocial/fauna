@@ -55,8 +55,10 @@ import time
 
 import pytest
 
+from common.nest import start_nest_in_place, stop_nest
 from helpers.app_surface import declared_absence
 from helpers.folder_content import mountable_location, on_demand_mount_stands
+from helpers.waiting import wait_until
 
 pytestmark = [
     pytest.mark.tier2,
@@ -149,7 +151,9 @@ def _bind_fresh_folder(app, request, tmp_path) -> tuple[str, str, object]:
     b = app.backups
     b.navigate_folders()
     b.create_folder_via_wizard(name)
-    idx = b.find_and_expand_folder(name)
+    # The retrying expand: a fresh set's row re-mounts as its roster loads, which
+    # discards an expand that arrived first (`BackupActions.bind_location`'s reason).
+    idx = b.find_and_expand_folder_until(name, "folder-location-path-input")
     scope = f"folder-row[{idx}]"
 
     # Somewhere an on-demand root can be served over (linux: under /tmp).
@@ -265,3 +269,69 @@ def test_folder_location_mode_toggle_flip_survives_re_entry(logged_in_app, reque
     )
     _assert_served(app, src, before)
     assert not app.has_error(), f"the mode round-trip raised an error: {app.error_text()!r}"
+
+
+def test_folder_location_row_paints_and_flips_with_the_nest_down(
+    logged_in_app, nest_instance, request, tmp_path
+):
+    """A bound row is this device's own state, so it needs no nest.
+
+    The rows come from the binding model and the agent, never the nest: the
+    switch is device-local config the agent persists (`LocationConfig.mode`, this
+    module's docstring), and it is the user's "always keep" at the location's
+    grain (on-demand-files.md § The free-up-space gesture where the OS offers
+    none, *Keep on this device is the switch*: "turning the row's on-demand
+    switch off downloads everything and keeps it"). Nothing in that choice needs
+    the nest, so with the nest stopped a page entered afresh must still paint
+    the row and take the flip.
+
+    What this test does NOT assert is that the flip is SERVED while the nest is
+    down. Building an engine reads the nest's folder list to settle the set's
+    content-key binding and refuses, fail closed, when it cannot
+    (`fauna_sync_engine::engine_lifecycle::resolve_local_binding`;
+    mls-group-key-material.md § M2), and the agent retries that build on a
+    backoff (`engine_driver::build_until_served`). No goal-doc sentence promises
+    an on-demand root mounted with the nest away, so on a linux host the
+    kernel-mount check (`_assert_served`) is left to the nest-up test above; here
+    the nest-down half pins the row and the agent's re-read mode only.
+
+    The re-entry is the load-bearing half: a page that reads the nest ahead of the
+    binding model leaves a row it opened empty for as long as the nest does not
+    answer, while a row already on screen hides that. On windows this runs on the
+    in-memory channel, so it needs no agent: what it pins is the page's load order.
+    The switch's real work is `test_folder_location_free_space.py`'s outcome 8.
+    """
+    app = logged_in_app
+    loc = app.sync_locations
+    _require_placeholder_host(app)
+
+    name, scope, _src = _bind_fresh_folder(app, request, tmp_path)
+    before = loc.mode_toggle_state(scope=scope)
+
+    stop_nest(nest_instance, graceful=True)
+    try:
+        scope = _re_enter_folder(app, name)
+        # Polled: the row paints when the binding load lands, a moment after the
+        # form it sits above. A ceiling, not an expectation.
+        wait_until(
+            lambda: loc.mode_toggle_visible(scope=scope),
+            30,
+            interval=0.3,
+            diagnose=lambda: (
+                "with the nest down a re-entered page must still paint the bound row; "
+                f"{app.driver.diagnose('folder-location-mode-toggle')} "
+                f"{app.driver.diagnose('folder-location-path-input')} "
+                f"{app.driver.diagnose('folder-location-path')} error={app.error_text()!r}"
+            ),
+        )
+        flipped = _other(before)
+        after = loc.toggle_mode(scope=scope)
+        assert after == flipped, (
+            f"with the nest down the switch must still move the row from {before!r} to "
+            f"{flipped!r}; got {after!r} error={app.error_text()!r}"
+        )
+        # No `_assert_served` here: the mount needs an engine, and an engine is
+        # not built without the nest's folder list (the docstring's second
+        # paragraph). The mode read above is the agent's own re-read answer.
+    finally:
+        start_nest_in_place(nest_instance)

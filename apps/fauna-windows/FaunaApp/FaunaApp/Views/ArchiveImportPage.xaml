@@ -1,0 +1,296 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Page
+    x:Class="FaunaApp.Views.ArchiveImportPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:local="using:FaunaApp.Views"
+    xmlns:loc="using:FaunaApp.Markup"
+    xmlns:controls="using:FaunaApp.Controls"
+    xmlns:vm="using:FaunaApp.Core.ViewModels"
+    Loaded="Page_Loaded"
+    Unloaded="Page_Unloaded"
+    xmlns:ids="using:FaunaApp.UiIds">
+
+    <!-- Settings → Import from other services (docs/goal/behavior/archive-import.md
+         § The wizard and its machine; ui.yaml `archive-import`, ids user-approved
+         2026-09-08 and 2026-10-16). A six-step wizard (Source → Archive → Scope →
+         Confirm → Progress → Done) that is a dumb renderer of the shared
+         fauna_archive_import_machine::ArchiveImportMachine (UniFFI, built by
+         build_archive_import_machine) — the FSM, the parser, the folder writes and the
+         authoring are shared Rust (priority #2). Lifts the tui lead page
+         (apps/fauna-tui/src/settings/archive_import.rs); the MailImportPanel shape.
+
+         Every step's ids live in one tree, shown by step. A Collapsed element is absent
+         from the UIA tree, so the gating is also what keeps the reused
+         wizard-back-button / wizard-next-button and the two archive-import-error-log
+         copies unique at any moment — and the non-Source groups are Collapsed HERE, in
+         markup, so no build-to-first-hydrate window shows two of an id. -->
+    <Grid>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+        </Grid.RowDefinitions>
+
+        <!-- error-message sits ABOVE the scrolling wizard, not inside it: a refusal
+             answers the button the user just pressed, which on the long Scope step is
+             far down the page — inside the ScrollViewer the bar would open scrolled out
+             of view (and read as not visible, IsOffscreen, to the e2e walk). -->
+        <controls:CopyableInfoBar
+            x:Name="ErrorBar"
+            Grid.Row="0"
+            Margin="16,16,16,0"
+            MaxWidth="640"
+            HorizontalAlignment="Left"
+            Severity="Error"
+            IsOpen="False"
+            IsClosable="True" />
+
+    <ScrollViewer Grid.Row="1" Padding="16">
+        <StackPanel Spacing="12" MaxWidth="640" HorizontalAlignment="Left">
+
+            <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.PageHeading}"
+                       Style="{StaticResource TitleTextBlockStyle}"
+                       Text="{loc:Localize Key=archive_import/title}" />
+            <TextBlock Opacity="0.7" TextWrapping="Wrap"
+                       Text="{loc:Localize Key=archive_import/description}" />
+            <!-- The glue refused (a bearer-only session holds no identity key to sign
+                 the imported posts with): the page states it and offers no wizard that
+                 could not commit (the tui UNAVAILABLE shape). -->
+            <TextBlock x:Name="UnavailableText" Visibility="Collapsed" TextWrapping="Wrap"
+                       Text="{loc:Localize Key=archive_import/unavailable}" />
+
+            <ProgressRing x:Name="LoadingRing" IsActive="False" Visibility="Collapsed"
+                          HorizontalAlignment="Left" />
+
+            <!-- ════ Step 1 — Source ════ -->
+            <StackPanel x:Name="SourceGroup" Spacing="8">
+                <TextBlock Style="{StaticResource BodyStrongTextBlockStyle}"
+                           Text="{loc:Localize Key=archive_import/source_title}" />
+                <!-- driver.select matches a ComboBoxItem by its exact UIA Name: the items
+                     are the shared platform labels (a brand, never translated). -->
+                <ComboBox x:Name="SourcePicker"
+                          AutomationProperties.AutomationId="{x:Bind ids:Ids.ArchiveImportSourcePicker}"
+                          AutomationProperties.Name="Source"
+                          SelectionChanged="SourcePicker_SelectionChanged" />
+                <TextBlock x:Name="SourceHelp"
+                           AutomationProperties.AutomationId="{x:Bind ids:Ids.ArchiveImportSourceHelp}"
+                           TextWrapping="Wrap" />
+                <!-- Names the platform's export page and opens it through the app's one
+                     OS opener (UrlOpener — recorded, not launched, under the harness). -->
+                <HyperlinkButton x:Name="SourceExportLink"
+                                 AutomationProperties.AutomationId="{x:Bind ids:Ids.ArchiveImportSourceExportLink}"
+                                 Click="SourceExportLink_Click" />
+                <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.WizardNextButton}"
+                        Content="{loc:Localize Key=archive_import/next}" Click="Next_Click" />
+            </StackPanel>
+
+            <!-- ════ Step 2 — Archive ════ -->
+            <StackPanel x:Name="ArchiveGroup" Spacing="8" Visibility="Collapsed">
+                <TextBlock Style="{StaticResource BodyStrongTextBlockStyle}"
+                           Text="{loc:Localize Key=archive_import/archive_title}" />
+                <!-- Path entry on desktop (ui.yaml: "path entry (tui/desktop)"); the open
+                     button opens what the field holds, or launches the file picker when it
+                     is empty and fills the field from the pick. -->
+                <TextBox x:Name="ArchivePathInput"
+                         AutomationProperties.AutomationId="{x:Bind ids:Ids.ArchiveImportArchivePath}"
+                         PlaceholderText="{loc:Localize Key=archive_import/archive_path_placeholder}" />
+                <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.ArchiveImportArchiveOpenButton}"
+                        Content="{loc:Localize Key=archive_import/archive_open_button}"
+                        Click="OpenArchive_Click" />
+                <TextBlock x:Name="ArchiveSummary"
+                           AutomationProperties.AutomationId="{x:Bind ids:Ids.ArchiveImportArchiveSummary}"
+                           Visibility="Collapsed" TextWrapping="Wrap" />
+                <StackPanel Orientation="Horizontal" Spacing="8">
+                    <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.WizardBackButton}"
+                            Content="{loc:Localize Key=archive_import/back}" Click="Back_Click" />
+                    <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.WizardNextButton}"
+                            Content="{loc:Localize Key=archive_import/next}" Click="Next_Click" />
+                </StackPanel>
+            </StackPanel>
+
+            <!-- ════ Step 3 — Scope ════ -->
+            <StackPanel x:Name="ScopeGroup" Spacing="8" Visibility="Collapsed">
+                <TextBlock Style="{StaticResource BodyStrongTextBlockStyle}"
+                           Text="{loc:Localize Key=archive_import/scope_title}" />
+                <!-- archive-import-scope-categories — the container. Border-wrapped with a
+                     non-empty Name and a non-virtualizing panel so FlaUI realizes it and
+                     every row (the mail-import mailbox-list reasoning). -->
+                <Border AutomationProperties.AutomationId="{x:Bind ids:Ids.ArchiveImportScopeCategories}"
+                        AutomationProperties.Name="{loc:Localize Key=archive_import/scope_categories_label}"
+                        BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                        BorderThickness="1" CornerRadius="6" Padding="12">
+                    <ItemsControl x:Name="CategoriesList">
+                        <ItemsControl.ItemsPanel>
+                            <ItemsPanelTemplate>
+                                <StackPanel Orientation="Vertical" Spacing="4" />
+                            </ItemsPanelTemplate>
+                        </ItemsControl.ItemsPanel>
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate x:DataType="vm:ArchiveImportCategoryItem">
+                                <!-- The indexed archive-import-scope-category-item: a CheckBox for
+                                     an importable category, text for a model-only one (kept in
+                                     the archive). One of the two is Collapsed, so each row
+                                     contributes exactly one element with the id. HelpText is the
+                                     `state` attribute the walk reads; the CheckBox carries no
+                                     static Name, so its Content stays the row's get_text. -->
+                                <Grid>
+                                    <CheckBox AutomationProperties.AutomationId="{x:Bind ids:Ids.ArchiveImportScopeCategoryItem}"
+                                              AutomationProperties.HelpText="{x:Bind State}"
+                                              Visibility="{x:Bind local:ArchiveImportPage.VisibleIf(Importable)}"
+                                              Content="{x:Bind Text}"
+                                              IsChecked="{x:Bind Selected}"
+                                              Tag="{x:Bind Token}"
+                                              Click="Category_Click" />
+                                    <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.ArchiveImportScopeCategoryItem}"
+                                               AutomationProperties.HelpText="{x:Bind State}"
+                                               Visibility="{x:Bind local:ArchiveImportPage.VisibleUnless(Importable)}"
+                                               Text="{x:Bind Text}" Opacity="0.7" TextWrapping="Wrap" />
+                                </Grid>
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                </Border>
+                <ComboBox x:Name="AudienceModePicker"
+                          AutomationProperties.AutomationId="{x:Bind ids:Ids.ArchiveImportScopeAudienceMode}"
+                          AutomationProperties.Name="{loc:Localize Key=archive_import/scope_audience_mode_label}"
+                          Header="{loc:Localize Key=archive_import/scope_audience_mode_label}"
+                          SelectionChanged="AudienceModePicker_SelectionChanged" />
+                <TextBlock x:Name="AudienceSummary"
+                           AutomationProperties.AutomationId="{x:Bind ids:Ids.ArchiveImportScopeAudienceSummary}"
+                           TextWrapping="Wrap" />
+                <TextBlock x:Name="HiddenTiersNote" Visibility="Collapsed" Opacity="0.7" TextWrapping="Wrap"
+                           Text="{loc:Localize Key=archive_import/scope_hidden_tiers_unavailable}" />
+                <TextBox x:Name="DateFromInput"
+                         AutomationProperties.AutomationId="{x:Bind ids:Ids.ArchiveImportScopeDateFrom}"
+                         PlaceholderText="{loc:Localize Key=archive_import/scope_date_from_placeholder}" />
+                <TextBox x:Name="DateToInput"
+                         AutomationProperties.AutomationId="{x:Bind ids:Ids.ArchiveImportScopeDateTo}"
+                         PlaceholderText="{loc:Localize Key=archive_import/scope_date_to_placeholder}" />
+                <StackPanel Orientation="Horizontal" Spacing="8">
+                    <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.WizardBackButton}"
+                            Content="{loc:Localize Key=archive_import/back}" Click="Back_Click" />
+                    <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.WizardNextButton}"
+                            Content="{loc:Localize Key=archive_import/next}" Click="ScopeNext_Click" />
+                </StackPanel>
+            </StackPanel>
+
+            <!-- ════ Step 4 — Confirm ════ -->
+            <StackPanel x:Name="ConfirmGroup" Spacing="8" Visibility="Collapsed">
+                <TextBlock Style="{StaticResource BodyStrongTextBlockStyle}"
+                           Text="{loc:Localize Key=archive_import/confirm_title}" />
+                <TextBlock x:Name="ConfirmSummary"
+                           AutomationProperties.AutomationId="{x:Bind ids:Ids.ArchiveImportConfirmSummary}"
+                           TextWrapping="Wrap" />
+                <StackPanel Orientation="Horizontal" Spacing="8">
+                    <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.WizardBackButton}"
+                            Content="{loc:Localize Key=archive_import/back}" Click="Back_Click" />
+                    <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.ArchiveImportStartButton}"
+                            Style="{StaticResource AccentButtonStyle}"
+                            Content="{loc:Localize Key=archive_import/start_button}"
+                            Click="Start_Click" />
+                </StackPanel>
+            </StackPanel>
+
+            <!-- ════ Step 5 — Progress ════ -->
+            <StackPanel x:Name="ProgressGroup" Spacing="8" Visibility="Collapsed">
+                <TextBlock Style="{StaticResource BodyStrongTextBlockStyle}"
+                           Text="{loc:Localize Key=archive_import/progress_title}" />
+                <TextBlock x:Name="ProgressSummary"
+                           AutomationProperties.AutomationId="{x:Bind ids:Ids.ArchiveImportProgressSummary}"
+                           TextWrapping="Wrap" />
+                <!-- HelpText carries the `fraction` attribute (0.0–1.0, four places). -->
+                <ProgressBar x:Name="ImportProgressBar"
+                             AutomationProperties.AutomationId="{x:Bind ids:Ids.ArchiveImportProgressBar}"
+                             AutomationProperties.HelpText="0.0000"
+                             Minimum="0" Maximum="1" />
+                <StackPanel Orientation="Horizontal" Spacing="8">
+                    <Button x:Name="PauseButton"
+                            AutomationProperties.AutomationId="{x:Bind ids:Ids.ArchiveImportPauseButton}"
+                            Content="{loc:Localize Key=archive_import/pause_button}"
+                            Click="Pause_Click" />
+                    <Button x:Name="ResumeButton"
+                            AutomationProperties.AutomationId="{x:Bind ids:Ids.ArchiveImportResumeButton}"
+                            Content="{loc:Localize Key=archive_import/resume_button}"
+                            Click="Resume_Click" />
+                    <Button x:Name="CancelButton"
+                            AutomationProperties.AutomationId="{x:Bind ids:Ids.ArchiveImportCancelButton}"
+                            Content="{loc:Localize Key=archive_import/cancel_button}"
+                            Click="Cancel_Click" />
+                </StackPanel>
+                <TextBlock Opacity="0.7" FontSize="12"
+                           Text="{loc:Localize Key=archive_import/error_log_title}" />
+                <TextBlock x:Name="ProgressErrorLog"
+                           AutomationProperties.AutomationId="{x:Bind ids:Ids.ArchiveImportErrorLog}"
+                           Opacity="0.7" FontSize="12" TextWrapping="Wrap" />
+                <!-- archive-import-category-progress-list — one row per selected
+                     importable category with its settled counts. -->
+                <Border AutomationProperties.AutomationId="{x:Bind ids:Ids.ArchiveImportCategoryProgressList}"
+                        AutomationProperties.Name="{loc:Localize Key=archive_import/progress_title}"
+                        BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                        BorderThickness="1" CornerRadius="6" Padding="12">
+                    <ItemsControl x:Name="CategoryProgressList">
+                        <ItemsControl.ItemsPanel>
+                            <ItemsPanelTemplate>
+                                <StackPanel Orientation="Vertical" Spacing="4" />
+                            </ItemsPanelTemplate>
+                        </ItemsControl.ItemsPanel>
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate x:DataType="vm:ArchiveImportProgressItem">
+                                <Border AutomationProperties.AutomationId="{x:Bind ids:Ids.ArchiveImportCategoryProgressListItem}"
+                                        AutomationProperties.Name="{x:Bind Name}"
+                                        Padding="4">
+                                    <StackPanel Orientation="Horizontal" Spacing="8">
+                                        <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.ArchiveImportCategoryProgressListItemName}"
+                                                   Text="{x:Bind Name}" />
+                                        <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.ArchiveImportCategoryProgressListItemProgress}"
+                                                   Text="{x:Bind Progress}" Opacity="0.7" />
+                                    </StackPanel>
+                                </Border>
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                </Border>
+                <!-- A concluded run (cancelled or completed) may be left: Back starts a
+                     fresh wizard. A running, paused or errored one is resumable. -->
+                <Button x:Name="ProgressBackButton" Visibility="Collapsed"
+                        AutomationProperties.AutomationId="{x:Bind ids:Ids.WizardBackButton}"
+                        Content="{loc:Localize Key=archive_import/back}" Click="Back_Click" />
+            </StackPanel>
+
+            <!-- ════ Step 6 — Done ════ -->
+            <StackPanel x:Name="DoneGroup" Spacing="8" Visibility="Collapsed">
+                <TextBlock Style="{StaticResource BodyStrongTextBlockStyle}"
+                           Text="{loc:Localize Key=archive_import/done_title}" />
+                <TextBlock x:Name="DoneSummary"
+                           AutomationProperties.AutomationId="{x:Bind ids:Ids.ArchiveImportDoneSummary}"
+                           TextWrapping="Wrap" />
+                <StackPanel Orientation="Horizontal" Spacing="8">
+                    <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.ArchiveImportViewImportedButton}"
+                            Style="{StaticResource AccentButtonStyle}"
+                            Content="{loc:Localize Key=archive_import/view_imported_button}"
+                            Click="ViewImported_Click" />
+                    <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.ArchiveImportReviewSkippedButton}"
+                            Content="{loc:Localize Key=archive_import/review_skipped_button}"
+                            Click="ReviewSkipped_Click" />
+                </StackPanel>
+                <!-- The skip log, revealed on the Done screen by Review skipped. -->
+                <TextBlock x:Name="DoneErrorLog" Visibility="Collapsed"
+                           AutomationProperties.AutomationId="{x:Bind ids:Ids.ArchiveImportErrorLog}"
+                           Opacity="0.7" FontSize="12" TextWrapping="Wrap" />
+                <!-- Offered, never applied silently: enabled only while the snapshot carries
+                     an archive profile that is not yet applied (RenderState). -->
+                <Button x:Name="ProfilePrefillButton"
+                        AutomationProperties.AutomationId="{x:Bind ids:Ids.ArchiveImportProfilePrefillButton}"
+                        IsEnabled="False"
+                        Content="{loc:Localize Key=archive_import/profile_prefill_button}"
+                        Click="ProfilePrefill_Click" />
+                <HyperlinkButton x:Name="FolderLink"
+                                 AutomationProperties.AutomationId="{x:Bind ids:Ids.ArchiveImportFolderLink}"
+                                 Click="FolderLink_Click" />
+                <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.WizardBackButton}"
+                        Content="{loc:Localize Key=archive_import/back}" Click="Back_Click" />
+            </StackPanel>
+        </StackPanel>
+    </ScrollViewer>
+    </Grid>
+</Page>

@@ -630,6 +630,10 @@ pub struct SetupStatus {
     pub dns_configured: bool,
     pub tls_active: bool,
     pub email_enabled: bool,
+    /// The deployment's DAV toggles, an unset one following mail (see
+    /// [`SetupStatusReply::caldav_enabled`]).
+    pub caldav_enabled: bool,
+    pub carddav_enabled: bool,
     pub admin_exists: bool,
     pub claimed: bool,
     /// The resolved **NAT axis** (`AppState.node_mode`: the client-set
@@ -771,6 +775,16 @@ pub async fn setup_status_core(state: &AppState, caller_is_admin: bool) -> Setup
     // (gates 4-5). Disabled mail has no bridge to brick → `true`. This stays on
     // WS-RPC: the static unauth `/api/v1/health` must NOT gain a DB query
     // (production-HTTP carve-out + security review § L2).
+    // The deployment's DAV toggles, projected exactly as `fetch_config` serves
+    // them to the bridge (an unset row follows mail) — every client reads them
+    // to offer the calendar-only credential (`mail-credentials.md` § Trigger
+    // taxonomy). A failed read reports both off, as `email_enabled` degrades.
+    let (caldav_enabled, carddav_enabled) =
+        match crate::mail_enable::effective_service_toggles(&state.db).await {
+            Ok(t) => (t.caldav, t.carddav),
+            Err(_) => (false, false),
+        };
+
     let mail_subsystem_ok = !email_enabled || state.db.list_active_mail_domains().await.is_ok();
 
     // Deployment-wide "auto-enable mail for new users" policy. Unset ⇒ ON (the
@@ -910,6 +924,8 @@ pub async fn setup_status_core(state: &AppState, caller_is_admin: bool) -> Setup
         dns_configured: false,
         tls_active: state.tls_enabled,
         email_enabled,
+        caldav_enabled,
+        carddav_enabled,
         admin_exists,
         claimed,
         node_mode,

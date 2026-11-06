@@ -11,7 +11,13 @@
     xmlns:ids="using:FaunaApp.UiIds">
 
     <Page.Resources>
-        <local:BoolToVisibilityConverter x:Key="BoolToVisibility" />
+        <ResourceDictionary>
+            <ResourceDictionary.MergedDictionaries>
+                <!-- The Posts tab's rows: the feed's own post-card template. -->
+                <controls:PostCardTemplates />
+            </ResourceDictionary.MergedDictionaries>
+            <local:BoolToVisibilityConverter x:Key="BoolToVisibility" />
+        </ResourceDictionary>
     </Page.Resources>
 
     <!--
@@ -29,7 +35,10 @@
       handle fallback). The OTHER-profile offers/follow surface is Slice B (not here).
       No ConfigureAwait(false) in the handlers (off-thread bound-state mutation
       throws a silent COMException — reference_windows_vm_configureawait_comexception).
+      The root Grid layers the Posts tab cards' two overlays (the image lightbox and the
+      tip list window, the feed page's own) over the scrolling page.
     -->
+    <Grid>
     <ScrollViewer Padding="16" AutomationProperties.AutomationId="{x:Bind ids:Ids.ProfileView}">
         <StackPanel Spacing="12" MaxWidth="760" HorizontalAlignment="Left">
 
@@ -40,6 +49,15 @@
                  64-char actor_id until a display_name is published, which a StackPanel
                  would let overflow the viewport, clipping the follow button offscreen
                  (reference_windows_is_visible_offscreen). -->
+            <!-- The stored banner (profile-banner): rendered only when the profile names
+                 one (Collapsed = absent from UIA otherwise); ImageHashBind paints it and
+                 answers get_attr(state) = painted / placeholder on its HelpText, empty while
+                 loading or after a failed fetch (never error-message). The code-behind
+                 (PaintPictures) sets Hash/Home/Loader once the post-blob plane is built. -->
+            <Image x:Name="BannerImage"
+                   AutomationProperties.AutomationId="{x:Bind ids:Ids.ProfileBanner}"
+                   Height="120" Stretch="UniformToFill" HorizontalAlignment="Stretch"
+                   Visibility="Collapsed" />
             <Grid ColumnSpacing="12" VerticalAlignment="Center">
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="Auto" />
@@ -47,7 +65,13 @@
                     <ColumnDefinition Width="Auto" />
                     <ColumnDefinition Width="Auto" />
                 </Grid.ColumnDefinitions>
-                <FontIcon Grid.Column="0" Glyph="&#xE77B;" FontSize="40" Opacity="0.6" VerticalAlignment="Center" />
+                <FontIcon x:Name="AvatarGlyph" Grid.Column="0" Glyph="&#xE77B;" FontSize="40" Opacity="0.6" VerticalAlignment="Center" />
+                <!-- The stored avatar (profile-avatar): same contract as the banner; the
+                     glyph above stands in until a picture is named. -->
+                <Image x:Name="AvatarImage" Grid.Column="0"
+                       AutomationProperties.AutomationId="{x:Bind ids:Ids.ProfileAvatar}"
+                       Width="48" Height="48" Stretch="UniformToFill"
+                       VerticalAlignment="Center" Visibility="Collapsed" />
                 <!-- Two names (profile.md § The private section → The header shows
                      both names): profile-handle is the shared resolver's primary line
                      (the viewer's nickname, else the display name, else the short id);
@@ -202,6 +226,14 @@
                 <TextBox x:Name="EditBioBox"
                          AutomationProperties.AutomationId="{x:Bind ids:Ids.ProfileEditBio}"
                          Header="{loc:Localize Key=profile/edit_bio}" />
+                <!-- profile-edit-audience-toggle: the signed Profile.audience (Everyone
+                     opens the profile to other nests). Start value = the shared own-form
+                     decode over the whole edit base; an untouched toggle saves None. -->
+                <ToggleSwitch x:Name="EditAudienceToggle"
+                              AutomationProperties.AutomationId="{x:Bind ids:Ids.ProfileEditAudienceToggle}"
+                              Header="{loc:Localize Key=profile/edit_audience_toggle}"
+                              OnContent="" OffContent=""
+                              Toggled="EditAudienceToggle_Toggled" />
 
                 <!-- Repeatable links: non-virtualizing ItemsControl so FlaUI
                      count-all sees every row; each row carries .Name. -->
@@ -310,10 +342,46 @@
                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
                        Visibility="Collapsed" />
 
-            <!-- ════ Posts tab (landmark, content TBD) ════ -->
-            <StackPanel x:Name="PostsPanel">
-                <TextBlock x:Name="NoPostsText" Opacity="0.6"
+            <!-- ════ Posts tab — the viewed actor's posts, as the feed paints them ════
+                 profile.md § Layout & flow → The Posts tab. `profile-posts-section` is the
+                 tab's content host, present iff the Posts tab is active (TiersTab_Click
+                 collapses it); Name as well as AutomationId, or UIA prunes the panel. The
+                 rows are an AUTHOR WINDOW of the session's feed manager (a fresh one on
+                 every open of the tab — OpenPostsWindowAsync), painted by the feed's own
+                 post-card template and acting through the feed's own card behaviour
+                 (Feed/PostCardHost) on the window. -->
+            <StackPanel x:Name="PostsPanel" Spacing="8"
+                        AutomationProperties.AutomationId="{x:Bind ids:Ids.ProfilePostsSection}"
+                        AutomationProperties.Name="profile-posts-section">
+                <!-- profile-posts-empty: shown iff the window is Loaded and holds no post
+                     (the shared FeedSnapshot::empty_state, the feed-empty-state rule);
+                     nothing while the first read is in flight. AutomationId only, no
+                     static Name, so get_text reads the copy. -->
+                <TextBlock x:Name="NoPostsText" Opacity="0.6" Visibility="Collapsed"
+                           AutomationProperties.AutomationId="{x:Bind ids:Ids.ProfilePostsEmpty}"
                            Text="{loc:Localize Key=profile/no_posts}" />
+                <!-- The feed's post list shape: a non-virtualizing panel so
+                     count("post-card") sees every row, no IsItemClickEnabled (the card
+                     root is its own Button), and the feed's own load-more footer — the
+                     same gesture, no element id (profile.md § The Posts tab → Order and
+                     paging). The page's ScrollViewer scrolls; the list's own does not. -->
+                <ListView x:Name="ProfilePostsList" SelectionMode="None"
+                          ItemTemplate="{StaticResource PostCardTemplate}"
+                          ScrollViewer.VerticalScrollMode="Disabled"
+                          ScrollViewer.VerticalScrollBarVisibility="Disabled">
+                    <ListView.ItemsPanel>
+                        <ItemsPanelTemplate>
+                            <StackPanel />
+                        </ItemsPanelTemplate>
+                    </ListView.ItemsPanel>
+                    <ListView.Footer>
+                        <Button x:Name="LoadMorePostsButton"
+                                HorizontalAlignment="Center" Margin="0,8"
+                                Visibility="Collapsed"
+                                Click="LoadMorePosts_Click"
+                                Content="{loc:Localize Key=common/load_more}" />
+                    </ListView.Footer>
+                </ListView>
             </StackPanel>
 
             <!-- ════ Tiers tab — SELF author management (§1/§2/§3) OR, on another
@@ -353,7 +421,7 @@
                         <!-- The tier's money fields (dynamic-features.md section
                              Platform-family surface excision, The price-and-route class):
                              the price shown to subscribers, the asking price and the
-                             checkout URL live in Views/Payments/SubscriptionTierMoneyFields
+                             checkout URL live in Views/Payments/TierMoneyFields
                              and are hosted through this ContentControl exactly like
                              PaymentsSectionsHost below, so a store-safe build renders none of
                              them, never a bare TextBox here. Their ids are spelled only in
@@ -593,4 +661,12 @@
             </StackPanel>
         </StackPanel>
     </ScrollViewer>
+
+    <!-- The Posts tab cards' overlays — the feed page's own: the post image lightbox
+         (image-lightbox) and the tip attribution window, which the cards' PostCardHost
+         fills under `#if PAYMENTS` (Views/Payments/PostTipListDialog.xaml). -->
+    <controls:ImageLightboxOverlay x:Name="Lightbox" />
+    <ContentControl x:Name="TipListDialogHost"
+                    HorizontalAlignment="Center" VerticalAlignment="Center" />
+    </Grid>
 </Page>

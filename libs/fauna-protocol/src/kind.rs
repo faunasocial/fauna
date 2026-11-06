@@ -1217,6 +1217,10 @@ impl KindRegistry {
             bc::KIND_ROOMS_LIST,
             bc::KIND_ROOMS_OPEN,
             bc::KIND_INBOX_FETCH,
+            // The removes are naturally idempotent: a tombstoned row counts
+            // nothing a second time.
+            bc::KIND_MESSAGES_REMOVE,
+            bc::KIND_ROOMS_REMOVE,
         ] {
             self.add(kind, light);
         }
@@ -1770,6 +1774,12 @@ impl KindRegistry {
         // first reply (same minted token), and the signature replay guard makes
         // a re-executed request fail closed.
         self.add("fauna.auth.device_handshake", auth);
+        // In-band device bind (`crate::auth::DEVICE_BIND_KIND`, `devices.md`
+        // § Listing Devices → *The binding*; additive 2026-10-31). Post-auth,
+        // and the handshake's replay posture: the idempotency cache replays the
+        // first reply, and the signature replay guard fails a re-executed
+        // request closed.
+        self.add("fauna.auth.device_bind", auth);
         // Custody-session bearer mint (`crate::auth::CUSTODY_HANDSHAKE_KIND`,
         // W8.6 (account-data-plane.md § Workstreams) — `account-data-plane.md` § Replica posture; additive
         // 2026-08-16). Same replay posture as its device-handshake sibling:
@@ -2198,7 +2208,7 @@ impl KindRegistry {
     }
 
     /// `fauna.sync.{register,changes.{list,record},status,files,backup_status,
-    /// devices.{list,delete}}` — Track B13 of
+    /// devices.{list,delete,rename}}` — Track B13 of
     /// the WS-RPC-everywhere migration (tracked internally), a behavior-preserving transport
     /// migration of the bearer-authed device-sync routes (`sync_routes`). Ride
     /// the **bearer** connection and ARE actor-scoped; gate `User | Admin` (the
@@ -2211,7 +2221,8 @@ impl KindRegistry {
     /// Replay semantics: all 9 are `forbid_replay = false` @5 s — reads
     /// (`changes.list` / `status` / `files` / `backup_status` / `devices.list`)
     /// and fast local DB mutations. `register` is an `INSERT OR REPLACE` upsert;
-    /// `devices.delete` re-runs harmlessly; `changes.record` is a non-idempotent
+    /// `devices.delete` re-runs harmlessly; `devices.rename` re-writes the same
+    /// sealed label; `changes.record` is a non-idempotent
     /// `INSERT` (new `seq` per call, like `folders.create`) — the
     /// per-connection idempotency cache replays the first reply on a recovered
     /// connection, so a replay returns the original `seq` rather than a duplicate
@@ -2237,6 +2248,7 @@ impl KindRegistry {
             "fauna.sync.backup_status",
             "fauna.sync.devices.list",
             "fauna.sync.devices.delete",
+            crate::sync::KIND_SYNC_DEVICES_RENAME,
             "fauna.sync.devices.p2p_participation.set",
             // Relay serving's announce (`file-sync.md` § Relay serving): it
             // replaces the calling connection's announced set whole, so a
@@ -3246,6 +3258,10 @@ impl KindRegistry {
             RpcKindMeta::new(false, Duration::from_secs(5)),
         );
         self.add(
+            "fauna.bridges.get_actor_mail_enabled",
+            RpcKindMeta::new(false, Duration::from_secs(5)),
+        );
+        self.add(
             "fauna.bridges.get_mail_serving_enabled",
             RpcKindMeta::new(false, Duration::from_secs(5)),
         );
@@ -3543,6 +3559,10 @@ impl KindRegistry {
         );
         self.add(
             "fauna.bridges.set_mail_enabled",
+            RpcKindMeta::new(false, Duration::from_secs(5)),
+        );
+        self.add(
+            "fauna.bridges.set_actor_mail_enabled",
             RpcKindMeta::new(false, Duration::from_secs(5)),
         );
         self.add(
@@ -3968,6 +3988,13 @@ impl KindRegistry {
         self.add(
             "fauna.dns.probe_txt_visible",
             RpcKindMeta::new(false, Duration::from_secs(30)),
+        );
+        // The web e2e fake DNS provider's mirror into the harness's name
+        // server, served by a `test-hooks` nest alone (`E2eMirrorTxtRequest`).
+        // One RFC 2136 UPDATE per zone over loopback TCP.
+        self.add(
+            "fauna.dns.e2e_mirror_txt",
+            RpcKindMeta::new(false, Duration::from_secs(10)),
         );
     }
 
@@ -4973,6 +5000,7 @@ mod tests {
             "fauna.sync.backup_status",
             "fauna.sync.devices.list",
             "fauna.sync.devices.delete",
+            crate::sync::KIND_SYNC_DEVICES_RENAME,
             "fauna.sync.devices.p2p_participation.set",
             crate::sync::KIND_SYNC_SERVE_ANNOUNCE,
             crate::account_state::KIND_STATE_PUT,

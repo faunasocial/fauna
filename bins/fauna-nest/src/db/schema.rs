@@ -66,6 +66,26 @@ pub const SCHEMA_CONTENT: &str = "
     CREATE INDEX IF NOT EXISTS idx_content_expires ON content(expires_at) WHERE expires_at IS NOT NULL;
 ";
 
+/// **Custody of a follow-delivered row** (`federated-follow.md` § Decision 3,
+/// *What a reader-named home is trusted for*): one row per verified origin that
+/// delivered the post (`content.follow_delivered = 1`) through the follow gate,
+/// its URL the one this nest resolved for that origin. A delivered row lists to
+/// a reader only through a custody row matching the home of that reader's
+/// `approved` follow (`db::feeds::FeedLocality::ForReader`), is deleted on a
+/// tombstone from any custodian, and is purged once no custody is left
+/// (`follow_delivery::purge_unfollowed`). Additive (schema 161).
+pub const SCHEMA_FOLLOW_DELIVERY_HOMES: &str = "
+    CREATE TABLE IF NOT EXISTS follow_delivery_homes (
+        post_id         BLOB NOT NULL,
+        origin_nest_id  BLOB NOT NULL,
+        origin_nest_url TEXT NOT NULL,
+        delivered_at    INTEGER NOT NULL,
+        PRIMARY KEY (post_id, origin_nest_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_follow_delivery_homes_origin
+        ON follow_delivery_homes (origin_nest_id);
+";
+
 /// Typed relationship edges between content, actors, and external entities.
 pub const SCHEMA_CONTENT_LINKS: &str = "
     CREATE TABLE IF NOT EXISTS content_links (
@@ -478,6 +498,7 @@ pub fn apply_unified_schema(conn: &rusqlite::Connection) -> anyhow::Result<()> {
     conn.execute_batch(SCHEMA_CONTENT_LINKS)?;
     conn.execute_batch(SCHEMA_CONTENT_LINKS_UNIQUE)?;
     conn.execute_batch(SCHEMA_CONTENT_META)?;
+    conn.execute_batch(SCHEMA_FOLLOW_DELIVERY_HOMES)?;
     conn.execute_batch(SCHEMA_CONTENT_FTS)?;
     conn.execute_batch(SCHEMA_BRIDGE_SEARCH_POLICY)?;
     conn.execute_batch(SCHEMA_BRIDGE_INDEX_MAP)?;

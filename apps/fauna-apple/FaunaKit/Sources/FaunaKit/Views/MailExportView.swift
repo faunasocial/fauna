@@ -74,6 +74,8 @@ public struct MailExportView: View {
             guard let client else { return }
             await vm.configure(api: client.api) { client.sessionMaterial?.handle ?? "" }
         }
+        .onMailExportChanged { await vm.dispatch(.refresh) }
+        .onDisappear { vm.reset() }
     }
 
     // MARK: - Step 1 — Format
@@ -187,11 +189,13 @@ public struct MailExportView: View {
 
     private var confirmSection: some View {
         groupedSection(title: L.mailExport.confirmTitle) {
-            automationText(Ids.mailExportConfirmSummary, confirmSummary)
-            // The archive's size and wall-clock time have no source to estimate from.
-            Text(L.mailExport.confirmEstimateUnavailable)
-                .font(.caption)
-                .foregroundStyle(.secondary)
+            let confirm = confirmText
+            automationText(Ids.mailExportConfirmSummary, confirm.summary)
+            if confirm.showsEstimateUnavailable {
+                Text(L.mailExport.confirmEstimateUnavailable)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
             HStack {
                 backButton
                 Button(L.mailExport.startButton) { Task { await vm.dispatch(.start) } }
@@ -199,6 +203,8 @@ public struct MailExportView: View {
                     .automationActivate(Ids.mailExportStartButton) {
                         Task { await vm.dispatch(.start) }
                     }
+                    // The durable commit — opens the export session row.
+                    .faunaGate("fauna.bridges.start_export_session")
             }
         }
     }
@@ -228,20 +234,36 @@ public struct MailExportView: View {
         groupedSection(title: L.mailExport.progressTitle) {
             automationText(Ids.mailExportProgressSummary, progressSummary)
             automationProgressBar(Ids.mailExportProgressBar, fraction: progressFraction)
-            HStack {
-                Button(L.mailExport.pauseButton) { Task { await vm.dispatch(.pause) } }
-                    .accessibilityIdentifier(Ids.mailExportPauseButton)
-                    .automationActivate(Ids.mailExportPauseButton) {
-                        Task { await vm.dispatch(.pause) }
+            if MailExportVM.isFailedExport(vm.snapshot?.sessionState) {
+                Button(L.mailExport.dismissFailedButton) { Task { await vm.dispatch(.discard) } }
+                    .accessibilityIdentifier(Ids.mailExportDiscardButton)
+                    .automationActivate(
+                        Ids.mailExportDiscardButton, text: { L.mailExport.dismissFailedButton }
+                    ) {
+                        Task { await vm.dispatch(.discard) }
                     }
-                Button(L.mailExport.resumeButton) { Task { await vm.dispatch(.resume) } }
-                    .accessibilityIdentifier(Ids.mailExportResumeButton)
-                    .automationActivate(Ids.mailExportResumeButton) {
-                        Task { await vm.dispatch(.resume) }
-                    }
-                Button(cancelLabel, role: .destructive) { tapCancel() }
-                    .accessibilityIdentifier(Ids.mailExportCancelButton)
-                    .automationActivate(Ids.mailExportCancelButton, text: { cancelLabel }) { tapCancel() }
+                    .faunaGate("fauna.bridges.discard_export_blob")
+            } else {
+                HStack {
+                    Button(L.mailExport.pauseButton) { Task { await vm.dispatch(.pause) } }
+                        .accessibilityIdentifier(Ids.mailExportPauseButton)
+                        .automationActivate(Ids.mailExportPauseButton) {
+                            Task { await vm.dispatch(.pause) }
+                        }
+                        .faunaGate("fauna.bridges.pause_export_session")
+                    Button(L.mailExport.resumeButton) { Task { await vm.dispatch(.resume) } }
+                        .accessibilityIdentifier(Ids.mailExportResumeButton)
+                        .automationActivate(Ids.mailExportResumeButton) {
+                            Task { await vm.dispatch(.resume) }
+                        }
+                        .faunaGate("fauna.bridges.resume_export_session")
+                    Button(cancelLabel, role: .destructive) { tapCancel() }
+                        .accessibilityIdentifier(Ids.mailExportCancelButton)
+                        .automationActivate(Ids.mailExportCancelButton, text: { cancelLabel }) { tapCancel() }
+                        // Arm and confirm are the same control (two-click inline),
+                        // so this is the control that issues Cancel.
+                        .faunaGate("fauna.bridges.cancel_export_session")
+                }
             }
             automationText(Ids.mailExportErrorLog, (vm.snapshot?.errorLog ?? []).joined(separator: "\n"))
                 .font(.caption.monospaced())
@@ -318,6 +340,7 @@ public struct MailExportView: View {
                 .automationActivate(Ids.mailExportDiscardButton) {
                     Task { await vm.dispatch(.discard) }
                 }
+                .faunaGate("fauna.bridges.discard_export_blob")
         }
     }
 
@@ -352,15 +375,20 @@ public struct MailExportView: View {
 
     // MARK: - Derived text
 
-    private var confirmSummary: String {
-        guard let snap = vm.snapshot else { return "" }
+    private var confirmText: MailExportConfirmText {
+        guard let snap = vm.snapshot else {
+            return MailExportConfirmText(summary: "", showsEstimateUnavailable: false)
+        }
         // Through the same echo the rows render from, so the Confirm step never
         // disagrees with the checkboxes the user just left behind.
-        let selected = snap.mailboxes.filter { isSelected($0) }
-        let messages = selected.reduce(UInt64(0)) { $0 + UInt64($1.messageCount) }
-        return L.mailExport.confirmSummaryCountFmt(
+        let echoed = snap.mailboxes.map { mb -> MailboxOption in
+            var copy = mb
+            copy.selected = isSelected(mb)
+            return copy
+        }
+        return MailExportConfirmText.make(
             format: renderLocalizedText(exportFormatLabel(format: snap.format)),
-            mailboxes: String(selected.count), messages: String(messages))
+            mailboxes: echoed)
     }
 
     /// The shared elapsed time / time left of this session (`mail-export.md`

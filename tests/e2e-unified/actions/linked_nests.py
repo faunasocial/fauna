@@ -64,7 +64,7 @@ class LinkedNestsActions:
         })
         time.sleep(1)
         if not self.driver.is_visible("nests-add-button"):
-            for link in ("nests-link", "linked-nests-link"):
+            for link in ("nests-link", "settings-nav-row[nests]"):
                 try:
                     if self.driver.is_visible(link):
                         self.driver.click(link)

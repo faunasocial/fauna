@@ -201,10 +201,12 @@ class MainActivity : FragmentActivity() {
         val DNS_E2E_ENV_KEYS = listOf(
             "FAUNA_DNS_PROVIDER_FAKE",
             "FAUNA_DNS_RECHECK_SECS",
+            "FAUNA_E2E_DRAFTS_AUTOSAVE_DEBOUNCE_MS",
             "FAUNA_E2E_ACME_DIRECTORY_URL",
             "FAUNA_E2E_ACME_CA_PEM",
             "FAUNA_E2E_ACME_NAMESERVER",
             "FAUNA_E2E_IMAP_EXTRA_CA_PEM",
+            "FAUNA_E2E_NEST_EXTRA_CA_PEM",
             "FAUNA_E2E_IMAP_HOST_MAP",
             "FAUNA_E2E_MICROSOFT_AUTHORITY",
         )

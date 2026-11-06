@@ -27,6 +27,15 @@ from helpers import android_device  # noqa: E402
 
 pytestmark = pytest.mark.tier_1
 
+_REAL_SDK_ADB = android_device._sdk_adb
+
+
+@pytest.fixture(autouse=True)
+def _no_sdk_adb(monkeypatch):
+    """The argv tests stub `which`; the SDK fallback must not find this box's
+    real `~/android-sdk` behind their back."""
+    monkeypatch.setattr(android_device, "_sdk_adb", lambda: None)
+
 
 # ── resolution precedence: flag, then env, then "whatever is attached" ──────
 
@@ -384,3 +393,24 @@ def test_the_run_launch_facts_carry_the_adb_server(tmp_path):
     assert android_device.run_launch_facts(tmp_path)["adb_server"] is None
     android_device.set_adb_server(_SERVER)
     assert android_device.run_launch_facts(tmp_path)["adb_server"] == _SERVER
+
+
+def test_adb_is_found_off_path_under_the_sdk(tmp_path, monkeypatch):
+    """A process without the login shell's PATH (the fleet broker's service,
+    which probes the android venue) still finds adb: `$ANDROID_HOME`'s
+    platform-tools first, then the primary dev VM's `~/android-sdk`."""
+    monkeypatch.setattr(android_device.shutil, "which", lambda _name: None)
+    monkeypatch.setattr(android_device, "_sdk_adb", _REAL_SDK_ADB)
+    sdk = tmp_path / "sdk"
+    (sdk / "platform-tools").mkdir(parents=True)
+    adb = sdk / "platform-tools" / "adb"
+    adb.write_text("")
+    adb.chmod(0o755)
+    monkeypatch.setenv("ANDROID_HOME", str(sdk))
+    assert android_device.adb_argv(None)[0] == str(adb)
+    monkeypatch.delenv("ANDROID_HOME")
+    monkeypatch.setenv("HOME", str(tmp_path))
+    (tmp_path / "android-sdk").symlink_to(sdk)
+    assert android_device.adb_argv(None)[0] == str(tmp_path / "android-sdk" / "platform-tools" / "adb")
+    (tmp_path / "android-sdk").unlink()
+    assert android_device.adb_argv(None)[0] == "adb"  # still fails loudly at the call

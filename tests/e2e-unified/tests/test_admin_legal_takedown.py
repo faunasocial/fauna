@@ -46,7 +46,6 @@ import uuid
 
 import pytest
 
-from helpers.app_surface import app_name, skip_unbuilt
 from i18n.strings import S
 
 pytestmark = [
@@ -59,8 +58,6 @@ pytestmark = [
     pytest.mark.macos,
     pytest.mark.ios,
 ]
-
-_BUILT_APPS = ("tui", "linux", "android", "web", "windows", "macos", "ios")
 
 # The console's own wording (i18n `admin.nest_page.takedown_*`, en.yaml) — the
 # shared verdict every app renders (`fauna_client_moderation::takedown`).
@@ -92,14 +89,6 @@ def test_the_admin_takes_down_and_restores_a_post_through_the_app(admin_app):
     """fill → guard → arm → named confirm → verdict → feed exclusion → queue
     row → restore → the post serves again."""
     app = admin_app
-    if app_name(app.driver) not in _BUILT_APPS:
-        skip_unbuilt(
-            app.driver,
-            surface="admin-nest-takedown-section",
-            detail="the legal-takedown console (moderation.md § Legal takedown, "
-            "invocation surface) is built on tui first",
-            tracked="",
-        )
 
     token = uuid.uuid4().hex[:10]
     target_text = f"takedown target {token}"

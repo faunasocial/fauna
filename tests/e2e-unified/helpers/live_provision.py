@@ -158,7 +158,7 @@ E2E_LABEL_VALUE = "1"
 #: place here, and neither could come from the shared dispatcher:
 #:   1. `start_provisioning` spawns work that outlives the call, so runtime
 #:      ownership is per-app and the shared dispatcher deliberately excludes it
-#:      (`apps/fauna-tui/src/automation.rs`, `apps/fauna-linux/src/main.rs`).
+#:      (`apps/fauna-tui/src/automation.rs`, `apps/fauna-linux/src/lib.rs`).
 #:   2. The async names (`verify_dns`, `wizard_submit_claim_code`,
 #:      `submit_nat_mode_choice`, …) run only via
 #:      `OnboardingMachine::call_machine_method_async`; the SYNC dispatcher
@@ -192,36 +192,24 @@ E2E_LABEL_VALUE = "1"
 #: The dead hypotheses themselves are in
 #:  and are not worth
 #: re-reading here.
-LIVE_DRIVE_APPS = ("linux", "tui", "web", "macos", "ios", "windows")
+#: The set itself is the surface registry's `live-drive-onboarding-bridge`
+#: entry (`tests/e2e-unified/surfaces.toml`); this note is why each app is in it.
 
 
-def skip_unless_live_drive_app(driver, *, surface: str) -> None:
-    """Route an app that cannot drive a live run through convention 7's
-    `skip_unbuilt` — temporary parity debt, red under `--strict-app`.
-
-    One home for the app set so the four live tests cannot drift apart, and so
-    the day an app's bridge lands, one edit opens all of them.
+def skip_unless_live_drive_app(driver) -> None:
+    """Route an app that cannot drive a live run through convention 7's surface
+    registry (`live-drive-onboarding-bridge`) — temporary parity debt, red under
+    `--strict-app`. The app set is the registry entry's `built`, so the day an
+    app's bridge lands, one edit there opens every live test.
     """
-    from helpers.app_surface import app_name, skip_unbuilt
+    from helpers.app_surface import require_surface
 
-    app = app_name(driver)
-    if app in LIVE_DRIVE_APPS:
-        return
-    skip_unbuilt(
-        driver,
-        surface=surface,
-        detail=(
-            "this app's e2e bridge does not forward onboarding machine methods "
-            "to the shared dispatcher yet; built for "
-            + ", ".join(LIVE_DRIVE_APPS)
-        ),
-        tracked="",
-    )
+    require_surface(driver, "live-drive-onboarding-bridge")
 
 
 # ── Reaching a box that has not been claimed yet ───────────────────────────
 #: The apps that can reach a **freshly-provisioned, pre-claim** box. Strictly
-#: narrower than :data:`LIVE_DRIVE_APPS`, and the reason is TLS, not the bridge.
+#: narrower than `live-drive-onboarding-bridge`, and the reason is TLS, not the bridge.
 #:
 #: A new nest boots **domainless** and learns its name *from the claim*
 #: (`docs/goal/behavior/onboarding.md` § handle entry; `nest/domains-and-tls-
@@ -238,7 +226,7 @@ def skip_unless_live_drive_app(driver, *, surface: str) -> None:
 #: third. The ratified fix is the nest's IP bridge cert plus the wizard claiming
 #: the box as Online's last substep.
 #:
-#: Deliberately NOT folded into `LIVE_DRIVE_APPS`: that tuple answers "can this
+#: Deliberately NOT folded into `live-drive-onboarding-bridge`: that entry answers "can this
 #: app drive the machine bridge", which web can and does. A test targeting an
 #: ALREADY-CLAIMED box with a real cert (the live DNS-01 renewal against
 #: the live nest) needs only that one, so collapsing the two would over-gate web on
@@ -259,30 +247,18 @@ def skip_unless_live_drive_app(driver, *, surface: str) -> None:
 #: `aarch64-pc-windows-msvc`, another non-wasm target — and unlike ios the
 #: property is MEASURED: its live `Online` poll reached a pre-claim box over the
 #: floor cert and succeeded (`attempt 14 finished (Succeeded)`, 2026-09-04),
-#: which is exactly what this tuple asserts.
-FRESH_BOX_REACH_APPS = ("linux", "tui", "macos", "ios", "windows")
+#: which is exactly what this entry asserts.
+#: The set itself is the surface registry's `fresh-box-floor-cert-reach`
+#: entry (`tests/e2e-unified/surfaces.toml`); this note is why each app is in it.
 
 
-def skip_unless_fresh_box_reach_app(driver, *, surface: str) -> None:
-    """Skip when the app cannot reach a pre-claim box over its floor cert."""
-    from helpers.app_surface import app_name, skip_unbuilt
+def skip_unless_fresh_box_reach_app(driver) -> None:
+    """Skip when the app cannot reach a pre-claim box over its floor cert (the
+    registry's `fresh-box-floor-cert-reach`), after the live-drive gate."""
+    from helpers.app_surface import require_surface
 
-    skip_unless_live_drive_app(driver, surface=surface)
-    if app_name(driver) in FRESH_BOX_REACH_APPS:
-        return
-    skip_unbuilt(
-        driver,
-        surface=surface,
-        detail=(
-            "a pre-claim box serves only its self-signed floor cert (it learns "
-            "its name from the claim, so no ACME cert can exist yet) and this "
-            "app's TLS stack cannot accept it — on web the browser owns TLS in "
-            "wasm and the strict client is deliberate. Not a DNS race: no "
-            "propagation delay makes this succeed. Unblocks with the nest's IP "
-            "bridge cert + the wizard claiming the box as Online's last substep"
-        ),
-        tracked="",
-    )
+    skip_unless_live_drive_app(driver)
+    require_surface(driver, "fresh-box-floor-cert-reach")
 
 
 # ── Driving the shared provisioning path via the onboarding bridge ──────────

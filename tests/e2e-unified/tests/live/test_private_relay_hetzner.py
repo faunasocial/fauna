@@ -626,7 +626,7 @@ def _submit_via_live_box(auth_username: str, password: str, mail_from: str,
 # ── The test ─────────────────────────────────────────────────────────────────
 @pytest.mark.feature("home-nest-behind-a-relay")
 def test_private_relay_behind_hetzner_public_node(app, box, ghcr_latest_image, request):
-    skip_unless_fresh_box_reach_app(app.driver, surface="the private-relay live e2e drive")
+    skip_unless_fresh_box_reach_app(app.driver)
     token, dns_token = hetzner_token(), hetzner_token(purpose="dns")
     secret_hex = box.identity_secret_hex
     handle = box.handle  # admin@e2e-<runid>.<zone> — ONE identity claims both boxes

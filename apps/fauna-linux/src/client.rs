@@ -1,12 +1,9 @@
 use fauna_client::{AuthClient, MultipartBlob, NestClient, NestClientError};
 use fauna_client_caldav::{
     AnonAttendeeDiscovery, AttendeeInfo, CalDavClient, DavRecipientKeys, DecodedEventsPage,
-    bridge_routing::{
-        DeleteEventRequest, ListCalendarsRequest, ProvisionCalendarRequest, QueryEventsRequest,
-    },
+    bridge_routing::{DeleteEventRequest, ProvisionCalendarRequest, QueryEventsRequest},
     delta_sync::{BackstopVerdict, CalendarSyncTokens, backstop_probe},
-    dispatch_imip_request, imip_reply_for_rsvp, imip_request_for_invite, personal_calendar_id,
-    uid_hash,
+    dispatch_imip_request, imip_reply_for_rsvp, imip_request_for_invite, uid_hash,
 };
 use fauna_client_carddav::{
     CardDavClient, DecodedCardsPage, addressbook_row,
@@ -133,6 +130,12 @@ pub struct FaunaClient {
     /// the `DataMessage::AuthSuccess` arm post-login and spawns the
     /// connection-state + push pumps (WS-RPC adoption, tracked internally).
     nest_rpc: Arc<NestClient>,
+    /// Whether this session's `fauna.account.am_i_admin` gate has already
+    /// passed — so the reconnect re-read ([`Self::check_admin_status`], fired
+    /// on `StaleSurfaces::admin_gate`) reports only a CHANGE, and the
+    /// once-per-session admin effects of `AdminStatusLoaded` never re-fire on
+    /// every reconnect. Per client, so per session: a switch builds a new one.
+    admin_gate_passed: Arc<std::sync::atomic::AtomicBool>,
     /// Path of the file the user staged in the feed composer (via the attach
     /// button, paste, or the `compose.file` test hook), pending the next
     /// `create_post`. The blob is uploaded at *post* time, not attach time —
@@ -164,10 +167,10 @@ pub struct FaunaClient {
     /// The persistent `admin-bridges-pending` machine — see [`FaunaClient::bridge_machine`].
     bridge_machine: RefCell<Option<Arc<fauna_client_mail_settings::BridgeApprovalMachine>>>,
     /// What ends the auto-renew tick's wait early — empty in a production build;
-    /// the e2e agent's `auto_renew_wake` fires it ([`crate::loop_wake::LoopWake`]).
+    /// the e2e agent's `auto_renew_wake` fires it ([`fauna_core::loop_wake::LoopWake`]).
     /// Minted where `start_ws_rpc` spawns the tick and dropped by `shutdown()`, so
     /// a wake with no tick running is refused rather than acked into nothing.
-    auto_renew_wake: RefCell<Option<crate::loop_wake::LoopWake>>,
+    auto_renew_wake: RefCell<Option<fauna_core::loop_wake::LoopWake>>,
     /// Lazily-resolved, then cached for the client's lifetime: the account's
     /// retired owner keys (`AccountRegistry::predecessor_backup_keys`), read
     /// by both `label_custody()` (this plane) and `sync_agent::install()`
@@ -293,6 +296,7 @@ impl FaunaClient {
         let runtime_handle = runtime.handle().clone();
         Self {
             node_url,
+            admin_gate_passed: Arc::default(),
             secret_hex: SecretString::from(secret_hex),
             runtime: RefCell::new(Some(runtime)),
             runtime_handle,
@@ -602,29 +606,20 @@ impl FaunaClient {
     /// verdict: it stops the WS supervisor, and the connection-state pump
     /// escalates that stop through [`session_ending_escalation`]. Stops when the
     /// bearer source starts minting for another actor, so a later account's
-    /// identity never lands in this session's cache.
+    /// identity never lands in this session's cache — the check is the shared
+    /// follower's (`AuthClient::follow_self_identity`), pinned in `fauna-client`.
     pub fn follow_self_identity(&self) {
-        let Some(mut identity) = self.nest_auth.subscribe_self_identity() else {
+        let Some(mut follower) = self.nest_auth.follow_self_identity() else {
             tracing::warn!("the session client cannot say who it is signed in as");
             return;
         };
-        let bearer = self.nest_auth.bearer();
-        let actor_id = actor_id_from_secret_hex(&self.secret_hex).unwrap_or_default();
         let tx = self.tx.clone();
         self.spawn_bg(async move {
-            loop {
-                if let Some(minted_for) = bearer.bearer_actor_id()
-                    && fauna_core::hex32::encode(&minted_for) != actor_id
-                {
-                    return;
-                }
-                let current = identity.borrow_and_update().clone();
-                if let Some(minted) = current {
-                    apply_self_identity(minted.handle, minted.domain, minted.tier, &tx).await;
-                }
-                if identity.changed().await.is_err() {
-                    return;
-                }
+            // The shared follower judges every value against the session's
+            // actor (`fauna_client::SelfIdentityFollower`) and ends on
+            // another's.
+            while let Some(minted) = follower.next().await {
+                apply_self_identity(minted.handle, minted.domain, minted.tier, &tx).await;
             }
         });
     }
@@ -898,8 +893,9 @@ impl FaunaClient {
         let tx = self.tx.clone();
         let handle = handle.to_string();
         self.spawn_bg(async move {
-            // Bare-handle local resolve (the find-user no-`@` / `Invalid`
-            // branch): there is no typed `@domain`, so the home nest reports its
+            // Bare-handle local resolve (the find-user no-`@` branch — the shared
+            // classification's domain-less `Handle`): there is no typed
+            // `@domain`, so the home nest reports its
             // canonical/identity domain, which `HandleResolved` then displays as
             // `handle@<primary>`. A typed `bob@domain2` never reaches here — it
             // classifies as `Handle{user,domain}` and routes through
@@ -1168,13 +1164,16 @@ impl FaunaClient {
                 return;
             };
             let client = CalDavClient::new(Arc::clone(&nest));
-            let mut entries = match client
-                .list_calendars(ListCalendarsRequest {
-                    actor_id: actor_id.to_vec(),
-                })
-                .await
-            {
-                Ok(reply) => reply.calendars,
+            // The shared load: lazy-provisions Personal so a fresh actor
+            // always has a calendar, and hands back the provision error to
+            // log — a silent failure reads as "no calendars".
+            let entries = match client.list_calendars_with_personal(&actor_id, &msek).await {
+                Ok(reply) => {
+                    if let Some(e) = &reply.personal_provision_error {
+                        tracing::error!("fetch_calendars: lazy Personal: {e}");
+                    }
+                    reply.calendars
+                }
                 Err(e) => {
                     tx.send(UiMessage::Action(ActionResult::Failed {
                         context: "fauna.bridges.list_calendars".into(),
@@ -1183,50 +1182,13 @@ impl FaunaClient {
                     return;
                 }
             };
-            // Lazy-provision Personal so a fresh actor always has a calendar.
-            // Surface the provision/re-list errors instead of swallowing them
-            // (`let _`): a silent failure here is indistinguishable from "no
-            // calendars" and is exactly how the calendar-load gap stays opaque.
-            if entries.is_empty() {
-                match caldav_backend::seal_calendar_metadata_fields("Personal", "#3273dc", &msek) {
-                    Ok(metadata) => {
-                        if let Err(e) = client
-                            .provision_calendar(ProvisionCalendarRequest {
-                                actor_id: actor_id.to_vec(),
-                                calendar_id: personal_calendar_id().to_vec(),
-                                encrypted_metadata: metadata,
-                                ..Default::default()
-                            })
-                            .await
-                        {
-                            tracing::error!(
-                                "fetch_calendars: provision_calendar failed: {e}"
-                            );
-                        }
-                        match client
-                            .list_calendars(ListCalendarsRequest {
-                                actor_id: actor_id.to_vec(),
-                            })
-                            .await
-                        {
-                            Ok(reply) => entries = reply.calendars,
-                            Err(e) => tracing::error!(
-                                "fetch_calendars: re-list after provision failed: {e}"
-                            ),
-                        }
-                    }
-                    Err(e) => tracing::error!(
-                        "fetch_calendars: seal Personal metadata failed: {e}"
-                    ),
-                }
-            }
             // Surface (don't silently `.ok()`-drop) an entry that fails to
             // decode: a calendar whose sealed metadata the client can't open —
             // e.g. a non-canonical-CBOR producer (the MDA lazy-Personal bug) or
             // an msek mismatch — would otherwise just vanish from the list.
             // Derived once for the whole list — every row's metadata reuses it
             // instead of paying its own X-Wing keygen .
-            let dav_keys = DavRecipientKeys::from_mseks(&msek, &prior_mseks);
+            let dav_keys = DavRecipientKeys::from_mseks(fauna_client_caldav::DavKind::Calendar, &msek, &prior_mseks);
             let calendars: Vec<_> = entries
                 .iter()
                 .filter_map(
@@ -1442,7 +1404,11 @@ impl FaunaClient {
                     ListAddressbooksRequest {
                         actor_id: actor_id.to_vec(),
                     },
-                    &DavRecipientKeys::from_mseks(&msek, &prior_mseks),
+                    &DavRecipientKeys::from_mseks(
+                        fauna_client_caldav::DavKind::Card,
+                        &msek,
+                        &prior_mseks,
+                    ),
                 )
                 .await
             {
@@ -1498,7 +1464,11 @@ impl FaunaClient {
                         after_card_id: None,
                         limit: 0,
                     },
-                    &DavRecipientKeys::from_mseks(&msek, &prior_mseks),
+                    &DavRecipientKeys::from_mseks(
+                        fauna_client_caldav::DavKind::Card,
+                        &msek,
+                        &prior_mseks,
+                    ),
                 )
                 .await
             {
@@ -2084,7 +2054,11 @@ impl FaunaClient {
                 .export_calendar_ics(
                     &actor_id,
                     &cal_id,
-                    &DavRecipientKeys::from_mseks(&msek, &prior_mseks),
+                    &DavRecipientKeys::from_mseks(
+                        fauna_client_caldav::DavKind::Calendar,
+                        &msek,
+                        &prior_mseks,
+                    ),
                 )
                 .await
             {
@@ -2417,6 +2391,12 @@ impl FaunaClient {
                 // like, never un-like, because the nest's like arm is
                 // idempotent per (actor, post).
                 ("like", _) => Some(m.like(post_id.clone()).await),
+                // `react` (`post-reaction-pill`) is the manager's TOGGLE off
+                // the tapped group's `viewer_react_id` (feed.md § Reaction
+                // posts count and paint): `body` carries the emoji. A bridged
+                // target is refused with `REACT_REFUSED_NOT_NATIVE`, which
+                // reads on `error-message` like any other stated refusal.
+                ("react", Some(emoji)) => Some(m.react(post_id.clone(), emoji).await),
                 _ => None,
             };
             let outcome = match routed {
@@ -4216,16 +4196,34 @@ impl FaunaClient {
     // -----------------------------------------------------------------------
 
     /// Check whether the authenticated user is a nest admin via
-    /// `fauna.account.am_i_admin` (WS-RPC). Mirrors the HTTP twin's
-    /// fail-soft behavior: any error hides admin UI (`is_admin = false`) rather
-    /// than surfacing a failure.
+    /// `fauna.account.am_i_admin` (WS-RPC) — post-auth, and again on every
+    /// reconnect (`StaleSurfaces::admin_gate`). Fail-closed without surfacing a
+    /// failure: an error sends **no message**, so the admin UI keeps its last
+    /// state — hidden at login, and never hidden from a confirmed admin by a
+    /// reconnect read that lost the socket again. A reply that only confirms
+    /// an admin this session already knew sends nothing either, so the
+    /// handler's once-per-session admin effects run once.
     pub fn check_admin_status(&self) {
         let nest_rpc = Arc::clone(&self.nest_rpc);
+        let passed = Arc::clone(&self.admin_gate_passed);
         let tx = self.tx.clone();
         self.spawn_bg(async move {
             let account = fauna_client_account::AccountClient::new(nest_rpc);
-            let is_admin = account.am_i_admin().await.map(|r| r.admin).unwrap_or(false);
-            tx.send(UiMessage::Data(DataMessage::AdminStatusLoaded { is_admin }));
+            match account.am_i_admin().await {
+                Ok(r) => {
+                    let was = passed.swap(r.admin, std::sync::atomic::Ordering::SeqCst);
+                    if !(r.admin && was) {
+                        tx.send(UiMessage::Data(DataMessage::AdminStatusLoaded {
+                            is_admin: r.admin,
+                        }));
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "am_i_admin gate read reached no nest; the gate keeps its last answer: {e}"
+                    );
+                }
+            }
         });
     }
 
@@ -4367,6 +4365,40 @@ impl FaunaClient {
         )))
     }
 
+    /// Run one `admin-dns` local-domain action on the persistent machine and
+    /// ship the result. `Refresh` first so the list is populated even if the
+    /// action errors (the error surfaces in the shipped snapshot). An action
+    /// that moves the record matrix (`LocalDomainAction::moves_record_matrix`)
+    /// re-reads and re-verifies it with the shared `recheck_matrix` before
+    /// anything ships, so an added domain renders with its records and their
+    /// status (`mail-multidomain.md` § Wizard steps, step 8); the DNS snapshot
+    /// ships first so the local-domains render that follows paints both.
+    fn dispatch_admin_local_domain(
+        &self,
+        action: fauna_client_mail_settings::local_domains::LocalDomainAction,
+    ) {
+        use fauna_client_mail_settings::local_domains::LocalDomainAction;
+        let machine = self.admin_local_domain_machine();
+        let dns = action
+            .moves_record_matrix()
+            .then(|| self.dns_machine())
+            .flatten();
+        let tx = self.tx.clone();
+        self.spawn_bg(async move {
+            let _ = machine.dispatch(LocalDomainAction::Refresh).await;
+            let ok = machine.dispatch(action).await.is_ok();
+            if let Some(dns) = dns.filter(|_| ok) {
+                dns.recheck_matrix().await;
+                tx.send(UiMessage::Data(DataMessage::AdminDnsRecordsLoaded {
+                    snapshot: dns.snapshot(),
+                }));
+            }
+            tx.send(UiMessage::Data(DataMessage::AdminLocalDomainsLoaded {
+                snapshot: machine.snapshot(),
+            }));
+        });
+    }
+
     /// Fetch the deployment's local mail domains over WS-RPC via the shared
     /// `LocalDomainMachine` (`fauna.bridges.list_local_domains`), for the admin
     /// Settings page's email-domains section. Display-only: dispatches
@@ -4399,19 +4431,9 @@ impl FaunaClient {
     /// (`mail-bridge-lifecycle.md` § DKIM provisioning) — the client mints no key.
     pub fn add_local_domain(&self, domain: String) {
         use fauna_client_mail_settings::local_domains::{DEFAULT_CERT_MODE, LocalDomainAction};
-        let machine = self.admin_local_domain_machine();
-        let tx = self.tx.clone();
-        self.spawn_bg(async move {
-            let _ = machine.dispatch(LocalDomainAction::Refresh).await;
-            let _ = machine
-                .dispatch(LocalDomainAction::AddDomain {
-                    domain: domain.clone(),
-                    mta_sts_cert_mode: DEFAULT_CERT_MODE.to_string(),
-                })
-                .await;
-            tx.send(UiMessage::Data(DataMessage::AdminLocalDomainsLoaded {
-                snapshot: machine.snapshot(),
-            }));
+        self.dispatch_admin_local_domain(LocalDomainAction::AddDomain {
+            domain,
+            mta_sts_cert_mode: DEFAULT_CERT_MODE.to_string(),
         });
     }
 
@@ -4446,34 +4468,14 @@ impl FaunaClient {
     /// snapshot. Same `Refresh`-then-act shape.
     pub fn confirm_remove_local_domain(&self) {
         use fauna_client_mail_settings::local_domains::LocalDomainAction;
-        let machine = self.admin_local_domain_machine();
-        let tx = self.tx.clone();
-        self.spawn_bg(async move {
-            let _ = machine.dispatch(LocalDomainAction::Refresh).await;
-            let _ = machine
-                .dispatch(LocalDomainAction::ConfirmRemoveDomain)
-                .await;
-            tx.send(UiMessage::Data(DataMessage::AdminLocalDomainsLoaded {
-                snapshot: machine.snapshot(),
-            }));
-        });
+        self.dispatch_admin_local_domain(LocalDomainAction::ConfirmRemoveDomain);
     }
 
     /// Restore a soft-deleted local mail domain (admin) from `admin-dns` (within
     /// the 30-day window). Same `Refresh`-then-act shape.
     pub fn restore_local_domain(&self, domain: String) {
         use fauna_client_mail_settings::local_domains::LocalDomainAction;
-        let machine = self.admin_local_domain_machine();
-        let tx = self.tx.clone();
-        self.spawn_bg(async move {
-            let _ = machine.dispatch(LocalDomainAction::Refresh).await;
-            let _ = machine
-                .dispatch(LocalDomainAction::RestoreDomain { domain })
-                .await;
-            tx.send(UiMessage::Data(DataMessage::AdminLocalDomainsLoaded {
-                snapshot: machine.snapshot(),
-            }));
-        });
+        self.dispatch_admin_local_domain(LocalDomainAction::RestoreDomain { domain });
     }
 
     /// Designate (`Some`) or clear (`None`) a domain's catch-all actor (admin)
@@ -4484,17 +4486,7 @@ impl FaunaClient {
     /// track (mail-multidomain.md § Implementation status today).
     pub fn set_catch_all_actor(&self, domain: String, actor_id: Option<Vec<u8>>) {
         use fauna_client_mail_settings::local_domains::LocalDomainAction;
-        let machine = self.admin_local_domain_machine();
-        let tx = self.tx.clone();
-        self.spawn_bg(async move {
-            let _ = machine.dispatch(LocalDomainAction::Refresh).await;
-            let _ = machine
-                .dispatch(LocalDomainAction::SetCatchAllActor { domain, actor_id })
-                .await;
-            tx.send(UiMessage::Data(DataMessage::AdminLocalDomainsLoaded {
-                snapshot: machine.snapshot(),
-            }));
-        });
+        self.dispatch_admin_local_domain(LocalDomainAction::SetCatchAllActor { domain, actor_id });
     }
 
     /// Set one domain's published DMARC policy from the `admin-dns` per-domain row
@@ -4508,22 +4500,12 @@ impl FaunaClient {
         policy: fauna_client_mail_settings::local_domains::DomainDmarcPolicy,
     ) {
         use fauna_client_mail_settings::local_domains::LocalDomainAction;
-        let machine = self.admin_local_domain_machine();
-        let tx = self.tx.clone();
-        self.spawn_bg(async move {
-            let _ = machine.dispatch(LocalDomainAction::Refresh).await;
-            let _ = machine
-                .dispatch(LocalDomainAction::UpdateConfig {
-                    domain,
-                    mta_sts_max_age_seconds: None,
-                    mta_sts_cert_mode: None,
-                    spf_record: None,
-                    dmarc_policy: Some(policy),
-                })
-                .await;
-            tx.send(UiMessage::Data(DataMessage::AdminLocalDomainsLoaded {
-                snapshot: machine.snapshot(),
-            }));
+        self.dispatch_admin_local_domain(LocalDomainAction::UpdateConfig {
+            domain,
+            mta_sts_max_age_seconds: None,
+            mta_sts_cert_mode: None,
+            spf_record: None,
+            dmarc_policy: Some(policy),
         });
     }
 
@@ -4541,20 +4523,10 @@ impl FaunaClient {
         actor_id: Option<Vec<u8>>,
     ) {
         use fauna_client_mail_settings::local_domains::LocalDomainAction;
-        let machine = self.admin_local_domain_machine();
-        let tx = self.tx.clone();
-        self.spawn_bg(async move {
-            let _ = machine.dispatch(LocalDomainAction::Refresh).await;
-            let _ = machine
-                .dispatch(LocalDomainAction::SetRoleAddress {
-                    domain,
-                    role,
-                    actor_id,
-                })
-                .await;
-            tx.send(UiMessage::Data(DataMessage::AdminLocalDomainsLoaded {
-                snapshot: machine.snapshot(),
-            }));
+        self.dispatch_admin_local_domain(LocalDomainAction::SetRoleAddress {
+            domain,
+            role,
+            actor_id,
         });
     }
 
@@ -4569,19 +4541,9 @@ impl FaunaClient {
     /// (mail-primary-domain-rename.md § UX surface). No HTTP.
     pub fn start_primary_rename(&self, new_primary_domain_id: Vec<u8>, grace_days: Option<i64>) {
         use fauna_client_mail_settings::local_domains::LocalDomainAction;
-        let machine = self.admin_local_domain_machine();
-        let tx = self.tx.clone();
-        self.spawn_bg(async move {
-            let _ = machine.dispatch(LocalDomainAction::Refresh).await;
-            let _ = machine
-                .dispatch(LocalDomainAction::StartPrimaryRename {
-                    new_primary_domain_id,
-                    grace_days,
-                })
-                .await;
-            tx.send(UiMessage::Data(DataMessage::AdminLocalDomainsLoaded {
-                snapshot: machine.snapshot(),
-            }));
+        self.dispatch_admin_local_domain(LocalDomainAction::StartPrimaryRename {
+            new_primary_domain_id,
+            grace_days,
         });
     }
 
@@ -4593,16 +4555,9 @@ impl FaunaClient {
     /// surfaces in the shipped snapshot. No HTTP.
     pub fn complete_primary_rename(&self, rename_id: Vec<u8>, force: bool) {
         use fauna_client_mail_settings::local_domains::LocalDomainAction;
-        let machine = self.admin_local_domain_machine();
-        let tx = self.tx.clone();
-        self.spawn_bg(async move {
-            let _ = machine.dispatch(LocalDomainAction::Refresh).await;
-            let _ = machine
-                .dispatch(LocalDomainAction::CompletePrimaryRename { rename_id, force })
-                .await;
-            tx.send(UiMessage::Data(DataMessage::AdminLocalDomainsLoaded {
-                snapshot: machine.snapshot(),
-            }));
+        self.dispatch_admin_local_domain(LocalDomainAction::CompletePrimaryRename {
+            rename_id,
+            force,
         });
     }
 
@@ -4613,19 +4568,9 @@ impl FaunaClient {
     /// No HTTP.
     pub fn extend_primary_rename_grace(&self, rename_id: Vec<u8>, additional_days: i64) {
         use fauna_client_mail_settings::local_domains::LocalDomainAction;
-        let machine = self.admin_local_domain_machine();
-        let tx = self.tx.clone();
-        self.spawn_bg(async move {
-            let _ = machine.dispatch(LocalDomainAction::Refresh).await;
-            let _ = machine
-                .dispatch(LocalDomainAction::ExtendPrimaryRenameGrace {
-                    rename_id,
-                    additional_days,
-                })
-                .await;
-            tx.send(UiMessage::Data(DataMessage::AdminLocalDomainsLoaded {
-                snapshot: machine.snapshot(),
-            }));
+        self.dispatch_admin_local_domain(LocalDomainAction::ExtendPrimaryRenameGrace {
+            rename_id,
+            additional_days,
         });
     }
 
@@ -4636,16 +4581,9 @@ impl FaunaClient {
     /// surfaces in the shipped snapshot. No HTTP.
     pub fn abort_primary_rename(&self, rename_id: Vec<u8>, reason: Option<String>) {
         use fauna_client_mail_settings::local_domains::LocalDomainAction;
-        let machine = self.admin_local_domain_machine();
-        let tx = self.tx.clone();
-        self.spawn_bg(async move {
-            let _ = machine.dispatch(LocalDomainAction::Refresh).await;
-            let _ = machine
-                .dispatch(LocalDomainAction::AbortPrimaryRename { rename_id, reason })
-                .await;
-            tx.send(UiMessage::Data(DataMessage::AdminLocalDomainsLoaded {
-                snapshot: machine.snapshot(),
-            }));
+        self.dispatch_admin_local_domain(LocalDomainAction::AbortPrimaryRename {
+            rename_id,
+            reason,
         });
     }
 
@@ -7399,7 +7337,9 @@ impl FaunaClient {
         let tx_reconn = self.tx.clone();
 
         // (a) Drive the reconnect supervisor. `connect()` only initiates the
-        // handshake, so its `Err` is only ever the authentication step. What
+        // handshake, so its `Err` is only ever the authentication step's
+        // terminal refusal (a first mint that found no nest is the
+        // supervisor's to retry, and starts it all the same). What
         // the supervisor meets later — including a terminal stop such as a
         // version skew — arrives on requests (`NestClient::supervisor_stop`),
         // and the pumps below observe the watch transition to Disconnected.
@@ -7514,7 +7454,7 @@ impl FaunaClient {
             // waiting out its clock; a production build's `LoopWake` is empty and
             // sleeps the clock. Fresh per spawn, so a departed loop's handle is
             // fired by nothing.
-            let wake = crate::loop_wake::LoopWake::default();
+            let wake = fauna_core::loop_wake::LoopWake::default();
             *self.auto_renew_wake.borrow_mut() = Some(wake.clone());
             self.spawn_bg(async move {
                 let machine = crate::mail_glue::build_dns_management_machine_with_credentials(
@@ -7565,7 +7505,7 @@ impl FaunaClient {
     }
 
     /// Mint this actor's shared MSEK + `default` credential via the CalDAV-enable
-    /// recipe (`MailSettingsMachine::enable_caldav_mailbox_with_generated_password`,
+    /// recipe (`MailSettingsMachine::enable_dav_mailbox_with_generated_password`,
     /// the read-only mailbox material — no submission token, no deployment toggle),
     /// writing the outcome into `shared.caldav_mailbox_reply` for the test agent to
     /// surface. **Test-agent only.** It mints a CalDAV mailbox for the *currently
@@ -7599,11 +7539,11 @@ impl FaunaClient {
             let outcome = match password {
                 Some(pw) => {
                     machine
-                        .enable_caldav_mailbox_with_password("Default".to_string(), pw)
+                        .enable_dav_mailbox_with_password("Default".to_string(), pw)
                         .await
                 }
                 None => machine
-                    .enable_caldav_mailbox_with_generated_password("Default".to_string())
+                    .enable_dav_mailbox_with_generated_password("Default".to_string())
                     .await
                     .map(|_password| ()),
             };
@@ -9036,19 +8976,19 @@ mod family_status_loaded_tests {
         }
     }
 
-    /// A supervised reply's floor survives the mapping intact.
+    /// A supervised reply's content rules survive the mapping intact.
     #[test]
-    fn a_supervised_read_carries_the_floor() {
+    fn a_supervised_read_carries_the_content_rules() {
         let reply = FamilyStatusReply {
             supervised_by: Some(FamilyGuardianInfo {
                 handle: "guardian".into(),
                 ..Default::default()
             }),
             policy: Some(ReachPolicy {
-                content_policy: Some(fauna_core::obligation::ContentPolicy {
-                    nsfw: fauna_core::obligation::ContentFloor::Block,
-                    ..Default::default()
-                }),
+                content_policy: Some(fauna_core::obligation::ContentPolicy::category_rules(&[(
+                    "nsfw",
+                    fauna_core::content_policy::ContentVerdict::Block,
+                )])),
                 ..Default::default()
             }),
             ..Default::default()
@@ -9061,9 +9001,10 @@ mod family_status_loaded_tests {
                 ..
             } => {
                 assert_eq!(supervised_by.as_deref(), Some("guardian"));
-                assert_eq!(
-                    snapshot.content_policy.map(|p| p.nsfw),
-                    Some(fauna_core::obligation::ContentFloor::Block)
+                assert!(
+                    snapshot
+                        .content_policy
+                        .is_some_and(|p| p.document.is_some())
                 );
             }
             other => panic!("wrong message: {other:?}"),
@@ -9086,10 +9027,10 @@ mod family_status_loaded_tests {
         let reply = FamilyStatusReply {
             supervised_by: None,
             policy: Some(ReachPolicy {
-                content_policy: Some(fauna_core::obligation::ContentPolicy {
-                    nsfw: fauna_core::obligation::ContentFloor::Block,
-                    ..Default::default()
-                }),
+                content_policy: Some(fauna_core::obligation::ContentPolicy::category_rules(&[(
+                    "nsfw",
+                    fauna_core::content_policy::ContentVerdict::Block,
+                )])),
                 content_notify: Some(true),
                 screen_time: Some(fauna_core::screen_time::ScreenTimePolicy {
                     window_start: Some(1260),
@@ -9478,15 +9419,40 @@ async fn read_folder_actors(
     name: &str,
 ) -> Result<Vec<fauna_client_folders::folders::FolderActorMember>, String> {
     let folders = fauna_client_folders::FoldersClient::new(Arc::clone(nest_rpc));
-    match folders.actor_members_list(name.to_string()).await {
-        Ok(reply) => Ok(reply.members),
-        Err(NestClientError::Rpc(ref e)) if e.code == "fauna.folders.not_shared" => Ok(Vec::new()),
-        Err(e) => Err(e.to_string()),
-    }
+    folders
+        .row_actor_members(name.to_string())
+        .await
+        .map_err(|e| e.to_string())
 }
 
-/// Resolve the bare handle → its actor, then run `FoldersAuthor::share_set`
-/// (same-nest), and re-read the roster. Returns the fresh member list + the
+/// Resolve a typed share recipient to the member's actor id and, for a person on
+/// another nest, that nest's URL. Classified and resolved exactly as the contacts
+/// find does (`contacts.md` § Layout & flow, region 3): a 64-hex actor id offline
+/// (a home-nest member), a handle through the shared `find_user_across_nests`.
+async fn resolve_share_recipient(
+    nest_rpc: &Arc<NestClient>,
+    recipient: &str,
+) -> Result<(ActorId, Option<String>), String> {
+    use fauna_anon_client::AnonymousNestClient;
+    use fauna_client_core::find_user::RecipientError;
+    let (actor_hex, nest_url) = fauna_client_core::find_user::resolve_recipient_across_nests(
+        nest_rpc.as_ref(),
+        recipient,
+        |d| fauna_provisioning::probe::peer_nest_url(Some(d.to_string())),
+        |url| async move { AnonymousNestClient::connect(&url).await },
+    )
+    .await
+    .map_err(|e| match e {
+        RecipientError::Invalid => fauna_i18n::strings::contacts::HANDLE_OR_ACTOR_ID.to_string(),
+        RecipientError::Lookup(msg) => msg,
+    })?;
+    let member = ActorId::from_hex(&actor_hex).map_err(|e| e.to_string())?;
+    Ok((member, nest_url))
+}
+
+/// Resolve the typed recipient (`resolve_share_recipient`), run
+/// `FoldersAuthor::share_set` (cross-nest when the member is on another nest),
+/// and re-read the roster. Returns the fresh member list + the
 /// shared set's derived `ChannelId` (hex) for the row's remove buttons.
 /// `access` is the invited member's grant (`Some("writer")` for read-write;
 /// `None` = reader — the `folder-share-role-select` value).
@@ -9504,14 +9470,9 @@ async fn do_share_folder(
     String,
 > {
     let (author, convs) = build_folders_author(nest_rpc, secret_hex)?;
-    let resolved = convs
-        .actor_by_handle(handle.to_string())
-        .await
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| format!("no actor for handle '{handle}'"))?;
-    let member = ActorId::from_hex(&resolved.actor_id).map_err(|e| e.to_string())?;
+    let (member, member_nest_url) = resolve_share_recipient(nest_rpc, handle).await?;
     let outcome = author
-        .share_set(&convs, name, member, None, access)
+        .share_set(&convs, name, member, member_nest_url, access)
         .await
         .map_err(|e| e.to_string())?;
     let channel_id = fauna_mls::types::ChannelId(outcome.channel_id).to_string();
@@ -9832,13 +9793,7 @@ async fn list_pending_actions(
     account
         .pending_actions_list()
         .await
-        .map(|reply| {
-            reply
-                .actions
-                .into_iter()
-                .filter(|a| a.status == "pending")
-                .collect()
-        })
+        .map(|reply| reply.into_pending())
         .map_err(|e| format!("list pending actions: {e}"))
 }
 
@@ -9995,7 +9950,11 @@ async fn query_events_in(
                 after_event_id: None,
                 limit: 0,
             },
-            &DavRecipientKeys::from_mseks(msek, prior_mseks),
+            &DavRecipientKeys::from_mseks(
+                fauna_client_caldav::DavKind::Calendar,
+                msek,
+                prior_mseks,
+            ),
         )
         .await
         .map_err(|e| e.to_string())?;
@@ -10032,7 +9991,11 @@ async fn query_events_in_seeded(
                 after_event_id: None,
                 limit: 0,
             },
-            &DavRecipientKeys::from_mseks(msek, prior_mseks),
+            &DavRecipientKeys::from_mseks(
+                fauna_client_caldav::DavKind::Calendar,
+                msek,
+                prior_mseks,
+            ),
         )
         .await
         .map_err(|e| e.to_string())?;
@@ -10865,50 +10828,9 @@ async fn ask_feed_source(
         .unwrap_or_default())
 }
 
-/// How a knock send ended — the one classification the contacts page and the
-/// profile page both render from, so the guardian gate is told apart from every
-/// other failure in exactly one place (tui's `contacts::KnockSend`).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum KnockSend {
-    Sent,
-    /// The nest's typed guardian-approval refusal
-    /// (`RpcError::is_guardian_approval_required`) — the one failure that
-    /// reveals `contact-request-guardian-button`.
-    RefusedByGuardian,
-    Failed(String),
-}
-
-/// `build_knock_payload` → `fauna.inbox.send`, classified. The guardian gate is
-/// separated from every other failure on the SHARED typed predicate rather than
-/// a per-app string match — which handler refused is the nest's business.
-async fn knock_classified(
-    nest: Arc<NestClient>,
-    node_url: &str,
-    secret: [u8; 32],
-    recipient: String,
-    recipient_nest_url: Option<String>,
-) -> KnockSend {
-    let kp = ActorKeypair::from_secret(secret);
-    let recipient_bytes = match fauna_core::hex32::decode(&recipient) {
-        Ok(b) => b,
-        Err(e) => return KnockSend::Failed(format!("recipient id: {e}")),
-    };
-    let payload =
-        match fauna_client_core::email::build_knock_payload(&kp, &recipient_bytes, node_url) {
-            Ok(p) => p,
-            Err(e) => return KnockSend::Failed(format!("knock payload: {e}")),
-        };
-    match fauna_client_inbox::InboxClient::new(nest)
-        .send(recipient, recipient_nest_url, payload)
-        .await
-    {
-        Ok(_) => KnockSend::Sent,
-        Err(fauna_client::NestClientError::Rpc(err)) if err.is_guardian_approval_required() => {
-            KnockSend::RefusedByGuardian
-        }
-        Err(e) => KnockSend::Failed(format!("inbox send: {e}")),
-    }
-}
+// The knock send and its classification are shared Rust (`fauna_client_contacts::knock`).
+pub use fauna_client_contacts::knock::KnockSend;
+use fauna_client_contacts::knock::send_knock as knock_classified;
 
 // ---------------------------------------------------------------------------
 // Contact / Knock / Notification WS-RPC reply → UI row mappers
@@ -11052,22 +10974,17 @@ async fn seal_and_upload_attachment(
 #[allow(clippy::too_many_arguments)]
 /// The `snapshot-restore-result` line for a finished walk: how many files were
 /// written and where, and — when any failed to fetch, open or verify — which,
-/// by their redacted paths, with everything else said to be written. The tui
-/// twin is `restore_result_line` in `apps/fauna-tui/src/backups.rs`.
+/// by their redacted paths, with everything else said to be written. The wording
+/// is the shared `fauna_backups_machine::snapshot_restore_result_text`.
 fn restore_result_line(summary: &fauna_sync_engine::engine::RestoreSummary, path: &str) -> String {
-    use crate::i18n::strings::backups as bs;
-    let files = summary.files_restored.to_string();
-    if summary.unverified.is_empty() {
-        let size = crate::i18n::byte_size(summary.bytes_written);
-        bs::snapshot_restore_done(&files, &size, path)
-    } else {
-        bs::snapshot_restore_partial(
-            &files,
-            path,
-            &summary.unverified.len().to_string(),
-            &summary.unverified.join(", "),
-        )
-    }
+    let size = crate::i18n::byte_size(summary.bytes_written);
+    fauna_backups_machine::snapshot_restore_result_text(
+        summary.files_restored,
+        &size,
+        path,
+        &summary.unverified,
+    )
+    .resolve(fauna_i18n::strings::lookup)
 }
 
 #[allow(clippy::too_many_arguments)]

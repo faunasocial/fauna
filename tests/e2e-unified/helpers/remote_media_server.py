@@ -11,8 +11,11 @@ and mapped-host-only on the nest side (``ssrf::test_resolve_client``); an
 unmapped host still meets the full guard, and production builds no
 ``test-hooks``.
 
-Each file is served whole (``200``, never a ``206``): a player asking a Range
-of a tiny clip plays the full body as well.
+A single-range ``Range: bytes=a-b`` / ``bytes=a-`` / ``bytes=-n`` is answered
+``206`` with its ``Content-Range``, as a real media host answers it (the proxy
+relays the ``206``); anything else gets the whole body. AVFoundation refuses an
+HTTP source that never answers a range (``AVErrorServerIncorrectlyConfigured``),
+so a whole-body-only remote would fail every apple leg on the helper alone.
 """
 
 from __future__ import annotations
@@ -49,11 +52,26 @@ class RemoteMediaServer:
                     self.send_error(404)
                     return
                 body, content_type = entry
-                self.send_response(200)
+                span = _byte_range(self.headers.get("Range"), len(body))
+                if span == "unsatisfiable":
+                    self.send_response(416)
+                    self.send_header("Content-Range", f"bytes */{len(body)}")
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    return
+                if span is None:
+                    self.send_response(200)
+                    part = body
+                else:
+                    start, end = span
+                    part = body[start:end + 1]
+                    self.send_response(206)
+                    self.send_header("Content-Range", f"bytes {start}-{end}/{len(body)}")
+                self.send_header("Accept-Ranges", "bytes")
                 self.send_header("Content-Type", content_type)
-                self.send_header("Content-Length", str(len(body)))
+                self.send_header("Content-Length", str(len(part)))
                 self.end_headers()
-                self.wfile.write(body)
+                self.wfile.write(part)
 
             def log_message(self, *_args):
                 pass
@@ -81,3 +99,23 @@ class RemoteMediaServer:
     def close(self) -> None:
         self._httpd.shutdown()
         self._httpd.server_close()
+
+
+def _byte_range(header: str | None, size: int):
+    """``(start, end)`` inclusive for a single satisfiable ``bytes=`` range,
+    ``"unsatisfiable"`` for one past the end, ``None`` for no (or an
+    unparseable, or a multi-) range — which gets the whole body."""
+    if not header or not header.startswith("bytes=") or "," in header:
+        return None
+    first, _, last = header[len("bytes="):].strip().partition("-")
+    try:
+        if not first:
+            start, end = max(size - int(last), 0), size - 1
+        else:
+            start = int(first)
+            end = min(int(last), size - 1) if last else size - 1
+    except ValueError:
+        return None
+    if start >= size or start > end:
+        return "unsatisfiable"
+    return start, end

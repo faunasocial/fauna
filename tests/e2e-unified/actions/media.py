@@ -546,7 +546,7 @@ class MediaActions:
         earlier upload in the same session typed there; web's
         ``<input type=file>`` has no "choose nothing" gesture beyond not choosing,
         and a page nobody has picked on is exactly that state."""
-        if not self.driver.is_web():
+        if not (self.driver.is_web() or self.driver.is_android()):
             self.driver.wait_for("file-upload", timeout=15.0)
             self.driver.clear_and_type("file-upload", "")
         self.driver.click("upload-button")
@@ -659,10 +659,11 @@ class MediaActions:
             )
         if (
             self.driver.is_linux() or self.driver.is_macos() or self.driver.is_ios()
-            or self.driver.is_windows()
+            or self.driver.is_windows() or self.driver.is_android()
         ):
             # The live `gtk::Image`'s paintable (apple: the card's decoded image;
-            # windows: the Image's own Source, as HelpText) — see :meth:`thumbnail_kind`.
+            # windows: the Image's own Source, as HelpText; android: the node's
+            # stateDescription) — see :meth:`thumbnail_kind`.
             return sum(
                 state == "painted"
                 for state in self.driver.get_attrs("media-thumbnail", "state")

@@ -281,6 +281,12 @@ pub fn is_permitted(class: CallerClass, kind: &str) -> bool {
         // nothing, but it belongs to the admin cert surface and stays Admin-only
         // like the rest of the namespace. No bridge has a reason to ask.
         "fauna.dns.probe_txt_visible" => matches!(class, Admin | ThirdParty),
+        // The web e2e fake DNS provider's mirror into the harness's name server
+        // (`e2e-gated-seeds.md` § The ACME directory seed → *The web order*):
+        // registered by a `test-hooks` build alone, so a shipped nest answers
+        // `unknown_kind` before this arm is read. Admin — the admin-dns page is
+        // its one caller; no principal or bridge reaches it.
+        "fauna.dns.e2e_mirror_txt" => matches!(class, Admin),
         // The onboarding hand-off that persists the deployment's own public
         // address (apex + mail-host A/AAAA/PTR source). Admin-only — host config.
         "fauna.dns.set_host_address" => matches!(class, Admin),
@@ -351,6 +357,13 @@ pub fn is_permitted(class: CallerClass, kind: &str) -> bool {
         // view (admin may see but not set another user's preference).
         "fauna.bridges.set_mail_serving_enabled" => matches!(class, User),
         "fauna.bridges.get_mail_serving_enabled" => matches!(class, User | Admin),
+        // Per-actor mail-off flag (mail-credentials.md § Trigger taxonomy, the
+        // Disable-mail row): the user's own "Disable mail", enforced nest-side
+        // by the IMAP serving gate. Both halves **User-class + caller-scoped**
+        // (keyed on the authenticated actor) — no admin audit read: unlike
+        // serve-here, it is no deployment-placement fact an admin reasons about.
+        "fauna.bridges.set_actor_mail_enabled" => matches!(class, User),
+        "fauna.bridges.get_actor_mail_enabled" => matches!(class, User),
         // Running-phase re-keying: revoke an already-approved bridge so the
         // admin can rotate its key (`mail-bridge-lifecycle.md` § Service-user
         // re-keying). Admin-only — a bridge cannot revoke itself or a peer.
@@ -785,7 +798,7 @@ pub fn is_permitted(class: CallerClass, kind: &str) -> bool {
             matches!(class, BridgeMta | BridgeMda | ThirdParty | User)
         }
         // Phase G — the bridged-conversation family. The bridge's six are
-        // `ThirdParty` only; the user's four are `User` and caller-scoped.
+        // `ThirdParty` only; the user's six are `User` and caller-scoped.
         "fauna.bridges.conversation.deposit" => matches!(class, ThirdParty),
         "fauna.bridges.conversation.outbox.fetch" => matches!(class, ThirdParty),
         "fauna.bridges.conversation.outbox.ack" => matches!(class, ThirdParty),
@@ -796,6 +809,8 @@ pub fn is_permitted(class: CallerClass, kind: &str) -> bool {
         "fauna.bridges.conversation.rooms.open" => matches!(class, User),
         "fauna.bridges.conversation.inbox.fetch" => matches!(class, User),
         "fauna.bridges.conversation.send" => matches!(class, User),
+        "fauna.bridges.conversation.messages.remove" => matches!(class, User),
+        "fauna.bridges.conversation.rooms.remove" => matches!(class, User),
         "fauna.bridges.fetch_recipient_index_key" => matches!(class, BridgeMta | BridgeMda),
         // The PDS bridge fetches config on the same lifecycle cadence (boot +
         // reconnect + `config_changed`); S1 has no atproto-specific knobs yet, so
@@ -1956,6 +1971,11 @@ pub fn is_permitted(class: CallerClass, kind: &str) -> bool {
         // it can only suppress or receive the actor's own push (ruled
         // 2026-09-26, `apps/common.md` § Registration).
         "fauna.push.presence" => matches!(class, User | Admin),
+        // Narrows the caller's own connection to a device of its own actor and
+        // confers nothing (`devices.md` § Listing Devices → *The binding*), so
+        // the class that holds a device is the class that may send it. Bridges
+        // and the custody classes hold none → denied.
+        "fauna.auth.device_bind" => matches!(class, User | Admin),
 
         // Session management (`fauna.sessions.*`, Track B2) — per-actor active
         // tokens: list, revoke one, revoke-all-except-current, authed emergency
@@ -2092,6 +2112,9 @@ pub fn is_permitted(class: CallerClass, kind: &str) -> bool {
         "fauna.sync.backup_status" => matches!(class, User | Admin),
         "fauna.sync.devices.list" => matches!(class, User | Admin),
         "fauna.sync.devices.delete" => matches!(class, User | Admin),
+        // `devices.md` § Device names, rule (1): the owner names their own
+        // rows — actor-scoped like the delete beside it.
+        "fauna.sync.devices.rename" => matches!(class, User | Admin),
         // W2.3, the account-data plane's class-2 write leg. **User-class, and
         // the scope is derived from the connection actor** — the request carries
         // no actor id at all (`account-sync-plane.md` § Feeds and cursors →

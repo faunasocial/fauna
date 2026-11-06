@@ -177,7 +177,7 @@
       // Periodic re-read so a device registered out-of-band shows up — and
       // the enrollment's standing refusal comes down once a pass clears it.
       timer = setInterval(() => {
-        machine?.refresh();
+        machine?.resync();
         void loadAccountFacts();
       }, 15000);
     } catch (e: unknown) {
@@ -191,7 +191,7 @@
   // runs the periodic re-read's own body at once, and re-folds the custody
   // facet — a fold only (a null fold keeps the rows), never a ceremony drive.
   const unsubStoreChange = onStoreChange(() => {
-    machine?.refresh();
+    machine?.resync();
     void loadAccountFacts();
     void loadCustody().catch(() => {});
   });
@@ -204,6 +204,29 @@
 
   async function removeDevice(index: number): Promise<void> {
     await machine?.removeDevice(index);
+    applySnapshot();
+  }
+
+  // The rename editor (`devices.md` § Device names, rule (1)): ONE editor,
+  // keyed by the card's `device_id` — never a painted index — so a refresh
+  // that reshapes the roster cannot retarget it. The input opens prefilled
+  // with the machine's opened name; confirm hands the machine the text (it
+  // sends nothing for a blank or unchanged name and paints every refusal on
+  // `error-message`); cancel closes without writing.
+  let renamingId = $state<string | null>(null);
+  let renameText = $state('');
+  const openRenameId = $derived(
+    renamingId !== null && (snap?.devices ?? []).some((d) => d.device_id === renamingId) ? renamingId : null,
+  );
+
+  function openRename(deviceId: string): void {
+    renamingId = deviceId;
+    renameText = machine?.deviceName(deviceId) ?? '';
+  }
+
+  async function confirmRename(deviceId: string): Promise<void> {
+    renamingId = null;
+    await machine?.renameDevice(deviceId, renameText);
     applySnapshot();
   }
 
@@ -350,7 +373,24 @@
                 {resolveLocalized(paint.label)}
               </label>
             {/if}
+            {#if openRenameId === device.device_id}
+              <div class="device-rename">
+                <input
+                  type="text"
+                  aria-label={t.devices.rename_label}
+                  data-testid={IDS.DEVICE_RENAME_INPUT}
+                  bind:value={renameText}
+                  onkeydown={(e) => {
+                    if (e.key === 'Enter') void confirmRename(device.device_id);
+                    else if (e.key === 'Escape') renamingId = null;
+                  }}
+                />
+                <button class="btn btn-small" data-testid={IDS.DEVICE_RENAME_CONFIRM_BUTTON} onclick={() => confirmRename(device.device_id)}>{t.devices.rename_confirm}</button>
+                <button class="btn btn-small" data-testid={IDS.DEVICE_RENAME_CANCEL_BUTTON} onclick={() => (renamingId = null)}>{t.common.cancel}</button>
+              </div>
+            {/if}
             <div class="device-actions">
+              <button class="btn btn-small" data-testid={IDS.DEVICE_RENAME_BUTTON} onclick={() => openRename(device.device_id)}>{t.devices.rename}</button>
               <button class="btn btn-small btn-danger" data-testid={IDS.DEVICE_REMOVE_BUTTON} onclick={() => removeDevice(i)}>{t.common.remove}</button>
             </div>
           </div>
@@ -533,6 +573,8 @@
     margin-bottom: 1rem;
   }
   .device-actions { margin-top: 0.5rem; display: flex; gap: 0.5rem; }
+  .device-rename { margin-top: 0.5rem; display: flex; gap: 0.5rem; align-items: center; }
+  .device-rename input { flex: 1; min-width: 0; }
   .p2p-participation { margin-top: 0.5rem; display: flex; align-items: center; gap: 0.4rem; font-size: 0.85rem; }
   .p2p-participation[aria-disabled='true'] { opacity: 0.6; }
   .btn {

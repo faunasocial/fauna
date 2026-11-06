@@ -8,14 +8,16 @@ guide: docs/guides/app-tour.md § Conversations
 
 ## What a user gets
 
-Message anyone by handle, on your nest or another. Conversations are end-to-end
-encrypted: your nest relays sealed messages it cannot read. Every bubble shows who
-wrote it and when, your history is there after a restart and on your other devices,
-and a message that could not be sent tells you so.
+Message anyone by handle, on your nest or another. Conversations between people
+on Fauna are end-to-end encrypted by default: your nest relays encrypted
+messages it cannot read, unless a group chooses to be a community room, which
+its home nest can read. Every bubble shows who wrote it and when, your history
+is there after a restart and on your other devices, and a message that could not
+be sent tells you so.
 
 ## Coverage contract
 
-Stamped 2026-08-31 at 4a2dfda4dc.
+Stamped 2026-11-01 at a6047fbd8b.
 
 1. [app] You start a conversation by picking a person, and picking two starts a group — `docs/goal/ui/conversations.md` § Layout & flow
    - `tests/e2e-unified/tests/test_messaging.py::test_new_conversation_compose_opens`
@@ -65,54 +67,69 @@ Stamped 2026-08-31 at 4a2dfda4dc.
    - `tests/e2e-unified/tests/test_bridged_conversation.py::test_a_bridged_room_renders_and_a_reply_reaches_only_the_bridge`
 14. [app] When you disconnect the app that carried such a conversation, the conversation stays readable and says the app is no longer connected, and a reply still waiting to go out is marked not delivered, its text kept — `docs/goal/ui/conversations.md` § Element IDs
    - `tests/e2e-unified/tests/test_bridged_conversation.py::test_a_revoked_bridges_room_says_so_and_its_undelivered_reply_too`
+15. [app] A message that arrived while the app was closed raises no notification when you next start it; the unread mark carries it instead — `docs/goal/behavior/message-banners.md` § Where logic lives
+   - `tests/e2e-unified/tests/test_conversations_read_state_across_restart.py::test_a_message_that_arrived_while_the_app_was_closed_raises_no_banner`
+16. [app] A message you sent from another of your devices raises no notification — `docs/goal/behavior/message-banners.md` § Where logic lives
+   - `tests/e2e-unified/tests/test_conversations_across_own_devices.py::test_a_message_sent_from_another_of_your_devices_raises_no_banner`
+17. [app] A conversation you read on one of your devices shows as read on your others — `docs/goal/behavior/conversation-read-state.md` § Goal
+   - `tests/e2e-unified/tests/test_conversations_across_own_devices.py::test_a_conversation_read_on_one_device_shows_read_on_the_other`
+18. [app] When new messages stop arriving because the app's receiving loop failed, the Conversations page says so on its error line until a working receive loop replaces it; only the notice that your account is open elsewhere outranks it — `docs/goal/ui/conversations.md` § Errors & edge cases
+   - `tests/e2e-unified/tests/test_conversations_receive_stopped.py::test_a_stopped_receive_loop_says_so_until_a_newer_loop_replaces_it`
+19. [app] When you pick someone on your own nest who has not opened Fauna yet, the picker says they are not reachable yet instead of offering plain email, and once they have signed in you can write to them — `docs/goal/ui/conversations.md` § Errors & edge cases
+   - `tests/e2e-unified/tests/test_recipient_picker.py::test_home_nest_account_without_key_packages_reads_not_reachable`
 
 ## Status
 
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ⚠ partial | 0.1.2-dev+c438a386 standalone |
-| linux | ⚠ partial | 0.1.2-dev+c438a386 standalone |
-| windows | ⚠ partial | 0.1.2-dev+c438a386 standalone |
-| macos | ⚠ partial | 0.1.2-dev+8b423269 standalone |
-| ios | ⚠ partial | 0.1.2-dev+c438a386 standalone |
+| web | ⚠ partial | 0.1.5-dev+390d61b5 standalone |
+| linux | ✅ full | 0.1.5-dev+390d61b5 standalone |
+| windows | ⚠ partial | 0.1.5-dev+390d61b5 standalone |
+| macos | ⚠ partial | 0.1.5-dev+3f9f2b95 standalone |
+| ios | ⚠ partial | 0.1.5-dev+390d61b5 standalone |
 | android |  no run recorded | |
-| tui | ✅ full | 0.1.2-dev+c438a386 standalone |
+| tui | ✅ full | 0.1.5-dev+390d61b5 standalone |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
-| 1 | app | `tests/e2e-unified/tests/test_messaging.py::test_new_conversation_compose_opens` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 1 | app | `tests/e2e-unified/tests/test_recipient_picker.py::test_resolves_fauna_handle` | web (linux): failed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 1 | app | `tests/e2e-unified/tests/test_recipient_picker.py::test_multi_recipient_creates_group` | web (linux): failed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 1 | app | `tests/e2e-unified/tests/test_recipient_picker.py::test_typed_prefix_suggests_known_contact` | web (linux): passed, linux (linux): passed, tui (linux): passed |
-| 1 | app | `tests/e2e-unified/tests/test_recipient_picker.py::test_empty_input_has_no_suggestions` | web (linux): passed, linux (linux): passed, tui (linux): passed |
+| 1 | app | `tests/e2e-unified/tests/test_messaging.py::test_new_conversation_compose_opens` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 1 | app | `tests/e2e-unified/tests/test_recipient_picker.py::test_resolves_fauna_handle` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 1 | app | `tests/e2e-unified/tests/test_recipient_picker.py::test_multi_recipient_creates_group` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 1 | app | `tests/e2e-unified/tests/test_recipient_picker.py::test_typed_prefix_suggests_known_contact` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 1 | app | `tests/e2e-unified/tests/test_recipient_picker.py::test_empty_input_has_no_suggestions` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 1 | app | `tests/e2e-unified/tests/test_conversations_new_thread_keeps_threads_reachable.py::test_new_conversation_keeps_existing_threads_reachable` | windows (windows): passed |
-| 2 | app | `tests/e2e-unified/tests/test_fauna_mls_real_roundtrip.py::test_fauna_mls_real_roundtrip` | web (linux): failed, web (windows): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (windows): passed |
-| 2 | app | `tests/e2e-unified/tests/test_fauna_mls_two_client_inbox_drain.py::test_fauna_mls_two_client_inbox_drain` | linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (windows): passed |
-| 2 | app | `tests/e2e-unified/tests/test_fauna_mls_web_receive.py::test_fauna_mls_web_receive` | web (linux): passed, web (windows): passed |
-| 2 | app | `tests/e2e-unified/tests/test_fauna_mls_web_receives_from_linux_sender.py::test_fauna_mls_web_receives_from_linux_sender` | web (linux): passed, web (windows): error, linux (linux): passed |
-| 3 | app | `tests/e2e-unified/tests/test_fauna_mls_cross_nest_roundtrip.py::test_fauna_mls_cross_nest_roundtrip` | web (linux): failed, web (windows): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (windows): passed |
-| 3 | app | `tests/e2e-unified/tests/test_fauna_mls_cross_nest_receive.py::test_fauna_mls_cross_nest_receive` | web (linux): passed, linux (linux): passed, windows (windows): failed, macos (macos): failed, ios (macos): failed, tui (linux): passed |
-| 4 | app | `tests/e2e-unified/tests/test_conv_rail_push_wakes_native.py::test_conv_rail_push_wakes_native` | linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 2 | app | `tests/e2e-unified/tests/test_fauna_mls_real_roundtrip.py::test_fauna_mls_real_roundtrip` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 2 | app | `tests/e2e-unified/tests/test_fauna_mls_two_client_inbox_drain.py::test_fauna_mls_two_client_inbox_drain` | linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 2 | app | `tests/e2e-unified/tests/test_fauna_mls_web_receive.py::test_fauna_mls_web_receive` | web (linux): passed |
+| 2 | app | `tests/e2e-unified/tests/test_fauna_mls_web_receives_from_linux_sender.py::test_fauna_mls_web_receives_from_linux_sender` | web (linux): passed, linux (linux): passed |
+| 3 | app | `tests/e2e-unified/tests/test_fauna_mls_cross_nest_roundtrip.py::test_fauna_mls_cross_nest_roundtrip` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 3 | app | `tests/e2e-unified/tests/test_fauna_mls_cross_nest_receive.py::test_fauna_mls_cross_nest_receive` — requires `cross-nest-mls-receive-seam` (test harness) (not built: windows, android) | web (linux): passed, linux (linux): passed, windows (windows): failed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 4 | app | `tests/e2e-unified/tests/test_conv_rail_push_wakes_native.py::test_conv_rail_push_wakes_native` | linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 4 | app | `tests/e2e-unified/tests/test_conv_rail_push_wakes_web.py::test_conv_rail_push_wakes_web` | web (linux): passed, linux (linux): passed |
 | 5 | app | `tests/e2e-unified/tests/test_conversations_history_survives_app_restart.py::test_conversations_history_survives_app_restart` | windows (windows): passed |
 | 5 | app | `tests/e2e-unified/tests/test_conversations_own_message_survives_an_immediate_restart.py::test_conversations_own_message_survives_an_immediate_restart` | windows (windows): passed |
-| 5 | app | `tests/e2e-unified/tests/test_conversations_history_survives_restart_cross_app.py::test_conversations_history_survives_restart_cross_app` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 6 | app | `tests/e2e-unified/tests/test_fauna_mls_cross_device_sync.py::test_fauna_mls_cross_device_sync` | web (linux): skipped, web (windows): skipped, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): failed, tui (linux): passed, tui (windows): passed |
-| 6 | app | `tests/e2e-unified/tests/test_fauna_mls_web_cross_device_sync.py::test_fauna_mls_web_cross_device_sync` | web (linux): passed, web (windows): passed |
-| 6 | app | `tests/e2e-unified/tests/test_fauna_mls_web_cross_device_sync.py::test_fauna_mls_web_concurrent_tabs` | web (linux): passed, web (windows): passed |
-| 7 | app | `tests/e2e-unified/tests/test_conversations_dm_sender.py::test_bubble_shows_sender_label` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 7 | app | `tests/e2e-unified/tests/test_conversations_bubble_timestamp.py::test_bubble_shows_shared_timestamp` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 8 | app | `tests/e2e-unified/tests/test_conversations_compose_error.py::test_failed_send_surfaces_on_error_message` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 8 | app | `tests/e2e-unified/tests/test_conversations_compose_error.py::test_failed_membership_op_surfaces_on_error_message` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
+| 5 | app | `tests/e2e-unified/tests/test_conversations_history_survives_restart_cross_app.py::test_conversations_history_survives_restart_cross_app` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 6 | app | `tests/e2e-unified/tests/test_fauna_mls_cross_device_sync.py::test_fauna_mls_cross_device_sync` — requires `mls-cross-device-sync-proof` (test harness) (not built: web, android) | web (linux): skipped, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 6 | app | `tests/e2e-unified/tests/test_fauna_mls_web_cross_device_sync.py::test_fauna_mls_web_cross_device_sync` | web (linux): passed |
+| 6 | app | `tests/e2e-unified/tests/test_fauna_mls_web_cross_device_sync.py::test_fauna_mls_web_concurrent_tabs` | web (linux): passed |
+| 7 | app | `tests/e2e-unified/tests/test_conversations_dm_sender.py::test_bubble_shows_sender_label` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 7 | app | `tests/e2e-unified/tests/test_conversations_bubble_timestamp.py::test_bubble_shows_shared_timestamp` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 8 | app | `tests/e2e-unified/tests/test_conversations_compose_error.py::test_failed_send_surfaces_on_error_message` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 8 | app | `tests/e2e-unified/tests/test_conversations_compose_error.py::test_failed_membership_op_surfaces_on_error_message` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed, tui (macos): passed |
 | 9 | nest | `tests/e2e-unified/tests/api/test_mls_channels.py::test_dm_roundtrip` | nest (linux): passed, nest (macos): passed |
 | 9 | nest | `tests/e2e-unified/tests/api/test_mls_channels.py::test_key_package_lifecycle` | nest (linux): passed, nest (macos): passed |
 | 9 | nest | `tests/e2e-unified/tests/api/test_cross_nest_api.py::test_cross_nest_welcome_delivery` | nest (linux): passed, nest (macos): passed |
 | 9 | nest | `tests/e2e-unified/tests/api/test_mls_replica_sync.py::test_replica_round_trip_across_devices` | nest (linux): passed, nest (macos): passed |
-| 10 | app | `tests/e2e-unified/tests/test_fauna_mls_cross_nest_roundtrip.py::test_known_peer_unreachable_never_downgrades_to_email` | web (linux): passed, web (windows): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (windows): passed |
-| 10 | app | `tests/e2e-unified/tests/test_fauna_mls_cross_nest_roundtrip.py::test_first_contact_with_unreachable_authority_is_email` | web (linux): passed, web (windows): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (windows): passed |
-| 11 | app | `tests/e2e-unified/tests/test_conversations_message_banner.py::test_new_message_raises_a_banner_except_in_the_open_thread` | web (linux): passed, linux (linux): failed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
-| 12 | app | `tests/e2e-unified/tests/test_conversations_read_state_across_restart.py::test_a_native_message_sent_while_the_app_was_closed_is_unread_at_launch` | web (linux): failed, linux (linux): passed, tui (linux): passed |
-| 13 | app | `tests/e2e-unified/tests/test_bridged_conversation.py::test_a_bridged_room_renders_and_a_reply_reaches_only_the_bridge` | web (linux): passed, linux (linux): passed, ios (macos): passed, tui (linux): passed |
-| 14 | app | `tests/e2e-unified/tests/test_bridged_conversation.py::test_a_revoked_bridges_room_says_so_and_its_undelivered_reply_too` | web (linux): skipped, linux (linux): passed, tui (linux): passed |
+| 10 | app | `tests/e2e-unified/tests/test_fauna_mls_cross_nest_roundtrip.py::test_known_peer_unreachable_never_downgrades_to_email` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 10 | app | `tests/e2e-unified/tests/test_fauna_mls_cross_nest_roundtrip.py::test_first_contact_with_unreachable_authority_is_email` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 11 | app | `tests/e2e-unified/tests/test_conversations_message_banner.py::test_new_message_raises_a_banner_except_in_the_open_thread` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 12 | app | `tests/e2e-unified/tests/test_conversations_read_state_across_restart.py::test_a_native_message_sent_while_the_app_was_closed_is_unread_at_launch` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 13 | app | `tests/e2e-unified/tests/test_bridged_conversation.py::test_a_bridged_room_renders_and_a_reply_reaches_only_the_bridge` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 14 | app | `tests/e2e-unified/tests/test_bridged_conversation.py::test_a_revoked_bridges_room_says_so_and_its_undelivered_reply_too` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 15 | app | `tests/e2e-unified/tests/test_conversations_read_state_across_restart.py::test_a_message_that_arrived_while_the_app_was_closed_raises_no_banner` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 16 | app | `tests/e2e-unified/tests/test_conversations_across_own_devices.py::test_a_message_sent_from_another_of_your_devices_raises_no_banner` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 17 | app | `tests/e2e-unified/tests/test_conversations_across_own_devices.py::test_a_conversation_read_on_one_device_shows_read_on_the_other` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 18 | app | `tests/e2e-unified/tests/test_conversations_receive_stopped.py::test_a_stopped_receive_loop_says_so_until_a_newer_loop_replaces_it` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 19 | app | `tests/e2e-unified/tests/test_recipient_picker.py::test_home_nest_account_without_key_packages_reads_not_reachable` | web (linux): passed, linux (linux): passed, tui (linux): passed, tui (macos): passed |
 <!-- features-render:end -->

@@ -43,7 +43,11 @@ Nothing touches the photo library between the quiesce and the click, so the
 foreground observer has nothing to react to and the button is the only thing that
 can have started it.
 
-**Why this module is iOS-only** — macOS runs the same engine against the
+**Android (not yet run — no emulator venue on Linux)** drives the same two journeys
+against its own `photo-backup-controls` and the `photo_backup` subset funnel; the
+pass size is read off the readout since that funnel has no `assets_seen`.
+
+**Why macOS is not in this module's marks** — macOS runs the same engine against the
 machine-global host Photos library, out of reach of an ordinary launch under
 convention 10; the macOS column runs both functions from
 `tests/real_session/test_photo_backup_macos.py` (convention 12's macOS arm).
@@ -73,6 +77,7 @@ from helpers.waiting import describe_photo_backup_funnel, wait_until
 pytestmark = [
     pytest.mark.tier_3,
     pytest.mark.ios,
+    pytest.mark.android,
 ]
 
 #: The kind the sealed per-file ingest drives once per file — `host.ingestFile` →
@@ -168,7 +173,19 @@ def test_a_running_pass_shows_how_far_it_has_got(logged_in_app, tmp_path,
         )
 
         live = funnel(driver)
-        total = live["assets_seen"]
+        if driver.is_android():
+            # Android's funnel is a subset with no `assets_seen` (TestAgent.kt,
+            # convention 11): the pass size is read off the readout itself, which
+            # is "Syncing {processed} of {total}..." — and `pending` must agree
+            # with it.
+            position = re.search(r"(\d+)\D+(\d+)", shown)
+            assert position, (
+                f"photo-backup-sync-progress reads {shown!r}, which names no "
+                "position (N of M)"
+            )
+            total = int(position.group(2))
+        else:
+            total = live["assets_seen"]
         assert total >= len(tags), (
             "the running pass did not see every photo in the library "
             f"(assets_seen={total}, library holds {len(tags)}), so the total it "
@@ -249,6 +266,11 @@ def test_sync_now_starts_a_pass_that_nothing_else_would_have_started(
     # And it was a real pass over the real library, not an early return: every
     # photo was seen, and correctly recognised as already backed up by the
     # enable's pass.
+    if driver.is_android():
+        # No `assets_seen` leg on android; the started/completed attribution above
+        # is the button's proof, and already-backed-up photos are skipped by its
+        # pending query, so there is no library count to compare.
+        return
     after = funnel(driver)
     assert after["assets_seen"] >= len(tags), (
         "the pass the button started did not read the photo library "

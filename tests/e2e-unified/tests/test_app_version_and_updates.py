@@ -26,10 +26,8 @@ Three outcomes, all walked on the Settings landing:
    and makes no request to the feed; a sign-in against a nest that says nothing
    paints none and makes no request either. Both directions sign in a dedicated
    actor (`dedicated_actor_app`), so the look is that sign-in's own and never a
-   leftover of an earlier test's. macOS and windows still look at the feed
-   through `fauna-ffi`'s interim face, so the nest direction is unbuilt debt
-   there (`skip_unbuilt`), and their "nothing newer" direction anchors on the
-   feed as before.
+   leftover of an earlier test's. Every app that looks reads the nest (windows
+   since 2026-11-04, the last to leave `fauna-ffi`'s retired release-host face).
    The catalog page does not list this outcome yet (its web, iOS and Android
    absences wait on the user's approval), so its witness carries no feature
    mark until it does.
@@ -48,7 +46,7 @@ import urllib.request
 
 import pytest
 
-from helpers.app_surface import app_name, declared_absence, skip_unbuilt
+from helpers.app_surface import declared_absence
 from helpers.release_feed_stub import (
     LATEST_PATH,
     NEWER_TAG,
@@ -76,11 +74,6 @@ def _assert_names_the_newer_release(notice: str) -> None:
     )
 
 
-#: The apps whose sign-in look still reads the release host through `fauna-ffi`'s
-#: interim face, until each moves to the nest-reading one (`installers/README.md`
-#: § Implementation status today).
-_LOOK_STILL_READS_THE_FEED = ("macos", "windows")
-
 #: The test-hooks seam that seeds the newest release the nest reports on
 #: `fauna.nest.info` (`bins/fauna-nest/src/release_test_hook.rs`).
 _NEWEST_RELEASE_HOOK = "/api/v1/test/release/newest"
@@ -100,10 +93,6 @@ def _seed_the_nests_newest_release(nest_url: str, version: str | None) -> None:
 def _nest_info_reads_since_the_seed(nest_url: str) -> int:
     with urllib.request.urlopen(f"{nest_url}{_NEWEST_RELEASE_HOOK}", timeout=10) as resp:
         return int(json.loads(resp.read())["reads"])
-
-
-def _look_still_reads_the_feed(app) -> bool:
-    return app_name(app.driver) in _LOOK_STILL_READS_THE_FEED
 
 
 def _sign_in_with_the_nest_reporting(request, stub, newest: str | None):
@@ -140,25 +129,15 @@ def signed_in_with_a_newer_release_out(request, app, release_feed_stub):
     )
 
 
-def _await_the_sign_in_look(app, nest_url: str, stub, before: int) -> None:
-    """Wait until the sign-in's reads have reached their source, then drain the
-    app's UI work (convention 14's causal anchor). The nest-reading look: the
-    nest has answered `fauna.nest.info` with the seed at least once since it was
-    set. The interim release-host look (macOS, windows): the stub has served the
-    sign-in's request — it records one only once its answer is written."""
-    if _look_still_reads_the_feed(app):
-        wait_until(
-            lambda: stub.requests.count(LATEST_PATH) > before,
-            30,
-            diagnose=lambda: f"the app never looked at the feed after signing in; "
-            f"the stub saw {stub.requests}",
-        )
-    else:
-        wait_until(
-            lambda: _nest_info_reads_since_the_seed(nest_url) > 0,
-            30,
-            diagnose=lambda: "the nest answered no fauna.nest.info read after the sign-in",
-        )
+def _await_the_sign_in_look(app, nest_url: str) -> None:
+    """Wait until the sign-in's look has reached the nest — it has answered
+    `fauna.nest.info` with the seed at least once since it was set — then drain
+    the app's UI work (convention 14's causal anchor)."""
+    wait_until(
+        lambda: _nest_info_reads_since_the_seed(nest_url) > 0,
+        30,
+        diagnose=lambda: "the nest answered no fauna.nest.info read after the sign-in",
+    )
     app.driver.barrier()
 
 
@@ -195,18 +174,17 @@ def test_asking_for_a_newer_version_says_so_and_where_to_get_it(
     # The sign-in looked and found nothing newer, so nothing painted — the
     # "nothing to tell" direction of outcome 3, and the clean slate the asked
     # check starts from.
-    _await_the_sign_in_look(app, nest_url, release_feed_stub, before)
+    _await_the_sign_in_look(app, nest_url)
     assert app.driver.is_absent("update-available-notice"), (
         "a sign-in with nothing newer out painted the notice — the look must only "
         "tell you when a NEWER version is out"
     )
-    if not _look_still_reads_the_feed(app):
-        # A nest that says nothing means no notice and no fall-back: the unasked
-        # look never contacts the release host.
-        assert release_feed_stub.requests.count(LATEST_PATH) == before, (
-            "the sign-in contacted the release host although only the asked check "
-            f"may; the stub saw {release_feed_stub.requests}"
-        )
+    # A nest that says nothing means no notice and no fall-back: the unasked
+    # look never contacts the release host.
+    assert release_feed_stub.requests.count(LATEST_PATH) == before, (
+        "the sign-in contacted the release host although only the asked check "
+        f"may; the stub saw {release_feed_stub.requests}"
+    )
 
     with release_feed_stub.advertising(NEWER_TAG):
         app.settings.check_for_updates()
@@ -224,24 +202,114 @@ def test_signing_in_looks_once_and_only_tells_you(
 ):
     app, nest_url, before = signed_in_with_a_newer_release_out
     _skip_unless_the_update_ids_are_painted(app)
-    if _look_still_reads_the_feed(app):
-        skip_unbuilt(
-            app.driver,
-            surface="the nest-reading sign-in look",
-            detail="the sign-in look still reads the release host through "
-            "fauna-ffi's interim look_at_sign_in; move it to "
-            "FfiNestClient.look_for_newer_release_at_sign_in",
-            tracked="docs/goal/architecture/installers/README.md § Implementation status today",
-        )
     app.settings.navigate_to_about()
 
     # Nobody presses the check: the sign-in's own look paints the notice — from
     # the newest release the nest reports, while the release feed advertises only
     # the running version.
     _assert_names_the_newer_release(app.settings.update_notice(timeout=30))
-    _await_the_sign_in_look(app, nest_url, release_feed_stub, before)
+    _await_the_sign_in_look(app, nest_url)
     looks = release_feed_stub.requests.count(LATEST_PATH) - before
     assert looks == 0, (
         f"one sign-in made {looks} release-host requests — the unasked look reads "
         "the nest the app signed in to and contacts no third party"
+    )
+
+
+def _running_binary(driver):
+    """The executable this launch ran, where the driver can say (tui's
+    ``app_path()``, linux's ``app_path()``); None where it cannot (a bundle,
+    a browser). Unwraps the accessor however the driver exposes it."""
+    import os
+
+    path = getattr(driver, "app_path", None)
+    for _ in range(3):
+        if not callable(path):
+            break
+        path = path()
+    return path if isinstance(path, (str, os.PathLike)) else None
+
+
+def _file_digest(path) -> str | None:
+    import hashlib
+    import os
+
+    if not path or not os.path.isfile(path):
+        return None
+    with open(path, "rb") as f:
+        return hashlib.sha256(f.read()).hexdigest()
+
+
+def _downloaded_files(driver) -> list[str]:
+    import os
+
+    root = getattr(driver, "download_dir", None)
+    if callable(root):
+        root = root()
+    if not isinstance(root, (str, os.PathLike)) or not os.path.isdir(root):
+        return []
+    return sorted(
+        os.path.relpath(os.path.join(d, f), root)
+        for d, _dirs, files in os.walk(root) for f in files
+    )
+
+
+@pytest.mark.feature("app-version-and-updates")
+def test_a_newer_version_is_only_announced_never_fetched_or_installed(
+    signed_in_with_a_newer_release_out, release_feed_stub
+):
+    """Outcome 4 — the app never downloads or installs a newer version by
+    itself; it only tells you one is out (`installers/README.md` § Knowing a
+    newer version is out: no download, no self-replacement).
+
+    With a newer release out — reported by the nest at sign-in AND advertised
+    by the feed to an asked check — the notice paints from both, and then:
+    the release host was asked for nothing but the release record (the stub
+    404s and records every other path, an asset fetch included); nothing
+    landed in the app's download directory; the running binary on disk is
+    byte-identical; the same process is still running; and Settings still
+    shows the version that is running.
+    """
+    app, nest_url, _before = signed_in_with_a_newer_release_out
+    _skip_unless_the_update_ids_are_painted(app)
+    driver = app.driver
+    binary = _running_binary(driver)
+    digest_before = _file_digest(binary)
+    if getattr(driver, "is_tui", lambda: False)():
+        assert digest_before is not None, (
+            f"the tui driver names no running binary to watch ({binary!r}) — the "
+            "self-replacement check below would silently not run"
+        )
+    downloads_before = _downloaded_files(driver)
+    app.settings.navigate_to_about()
+
+    # The unasked sign-in look's notice, then the asked check against a feed
+    # advertising the newer tag.
+    _await_the_sign_in_look(app, nest_url)
+    with release_feed_stub.advertising(NEWER_TAG):
+        app.settings.check_for_updates()
+        _assert_names_the_newer_release(app.settings.update_notice())
+        driver.barrier()
+
+    stray = [p for p in release_feed_stub.requests if p != LATEST_PATH]
+    assert not stray, (
+        f"the app fetched {stray} from the release host — it may read the release "
+        "record and nothing else (no asset, no installer)"
+    )
+    assert _downloaded_files(driver) == downloads_before, (
+        "a newer version's notice wrote files into the download directory: "
+        f"{_downloaded_files(driver)}"
+    )
+    if digest_before is not None:
+        assert _file_digest(binary) == digest_before, (
+            f"the running app's binary {binary} changed on disk after a newer "
+            "version was announced — the app must never replace itself"
+        )
+    if hasattr(driver, "is_app_alive"):
+        assert driver.is_app_alive(), (
+            "the app stopped after announcing a newer version — it must keep running "
+            "the version it is"
+        )
+    assert app.settings.app_version() == _workspace_version(), (
+        "Settings must keep showing the running version after a newer one is announced"
     )

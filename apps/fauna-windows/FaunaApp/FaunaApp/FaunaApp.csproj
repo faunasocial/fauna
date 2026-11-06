@@ -60,12 +60,26 @@
   <PropertyGroup Condition="'$(FaunaE2eAgent)'=='true'">
     <DefineConstants>$(DefineConstants);FAUNA_E2E_AGENT</DefineConstants>
   </PropertyGroup>
+  <!-- ── The store flavors (dynamic-features.md § The App-Store escape hatch →
+       *The store flavors*): ONE property per registry member, the flavor
+       choosing which are set — `/p:FaunaExcisePayments=true` alone is
+       `store-no-payments` (payments and its `zaps` subset gone, sharing kept),
+       and `/p:FaunaStoreSafe=true` is `store-safe`, nothing but both set at once.
+       It stays the store-safe spelling so every existing caller keeps working.
+       This group comes FIRST: properties evaluate in document order, so the
+       groups below read the members only after it has set them. A global
+       `/p:` reaches a referenced project too, and Core and Tests state the
+       same mapping. ── -->
+  <PropertyGroup Condition="'$(FaunaStoreSafe)'=='true'">
+    <FaunaExcisePayments>true</FaunaExcisePayments>
+    <FaunaExciseP2pShare>true</FaunaExciseP2pShare>
+  </PropertyGroup>
   <!-- ── The `payments` compile condition (dynamic-features.md § Platform-family
        surface excision — "C#: a define"). POSITIVE and default-ON, which is the
        rule for every family whose toolchain can REMOVE a condition; apple's
        negative `FAUNA_EXCISE_PAYMENTS` is the documented exception, forced by
        SwiftPM's inability to un-define. MSBuild has no such limit, so the flavor
-       root states the default and `/p:FaunaStoreSafe=true` takes it away.
+       root states the default and `/p:FaunaExcisePayments=true` takes it away.
 
        Setting it is HALF an excised build. The other half is the Rust face:
        `just windows-ffi-store-safe` stages a fauna_ffi.dll built with no default
@@ -83,7 +97,7 @@
        (dynamic-features.md § What "completely compiled away" means, criterion 1).
        Same two-halves shape android's BuildConfig constant + source-set split
        takes, for the same reason. ── -->
-  <PropertyGroup Condition="'$(FaunaStoreSafe)'!='true'">
+  <PropertyGroup Condition="'$(FaunaExcisePayments)'!='true'">
     <DefineConstants>$(DefineConstants);PAYMENTS</DefineConstants>
   </PropertyGroup>
   <!-- ── The XAML half of the payments excision. XAML has NO preprocessor, so the
@@ -100,7 +114,7 @@
        against, and the one no compile gate can see. `<Compile Remove>` for the
        code-behind must accompany `<Page Remove>`: an orphaned .xaml.cs referencing
        a removed page's generated partial does not compile. ── -->
-  <ItemGroup Condition="'$(FaunaStoreSafe)'=='true'">
+  <ItemGroup Condition="'$(FaunaExcisePayments)'=='true'">
     <Page Remove="Views\Payments\**\*.xaml" />
     <Compile Remove="Views\Payments\**\*.cs" />
   </ItemGroup>
@@ -112,11 +126,12 @@
        the Folders page); its markup lives in Views\P2pShare\ and nowhere else,
        hosted by a ContentControl FoldersPage's `#if P2P_SHARE` code-behind fills,
        and its glue (App's seat state, the ceremony doors, the consent card and
-       landed-scope rows, the TestAgent arms) sits in `#if P2P_SHARE`. ── -->
-  <PropertyGroup Condition="'$(FaunaStoreSafe)'!='true'">
+       landed-scope rows, the TestAgent arms) sits in `#if P2P_SHARE`. Its own
+       property, `/p:FaunaExciseP2pShare=true`, so `store-no-payments` keeps it. ── -->
+  <PropertyGroup Condition="'$(FaunaExciseP2pShare)'!='true'">
     <DefineConstants>$(DefineConstants);P2P_SHARE</DefineConstants>
   </PropertyGroup>
-  <ItemGroup Condition="'$(FaunaStoreSafe)'=='true'">
+  <ItemGroup Condition="'$(FaunaExciseP2pShare)'=='true'">
     <Page Remove="Views\P2pShare\**\*.xaml" />
     <Compile Remove="Views\P2pShare\**\*.cs" />
   </ItemGroup>

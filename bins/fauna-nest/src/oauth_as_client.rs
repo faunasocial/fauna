@@ -303,9 +303,9 @@ fn test_hook_client(
 /// is the amplification an unauthenticated endpoint must not offer.
 /// The resolved client's kind manifest, verified by the one shared-Rust door
 /// against the host its document was served from — `None` for a document
-/// without a `fauna` member. Run at resolution (a refusal there refuses the
-/// client) and again by the consent's mint, which records what it verified;
-/// the second run cannot fail on a client the first one accepted.
+/// without a `fauna` member. Run at resolution: a refusal there refuses the
+/// client. The consent's mint records the manifest the CARD showed, through
+/// [`verify_document_manifest`], never this document re-resolved.
 ///
 /// Past the shared parse it applies the two refusals `third-party.md` § The
 /// manifest gives the `service_auth` member: a declared `lxm` the custodian
@@ -322,6 +322,29 @@ fn test_hook_client(
 pub fn verified_manifest(
     client: &ResolvedClient,
 ) -> Result<Option<fauna_protocol::kind_manifest::VerifiedManifest>, OAuthDeny> {
+    verify_document_manifest(
+        &client.client_id,
+        &client.declared_scopes,
+        client.fauna_manifest.as_deref(),
+    )
+}
+
+/// [`verified_manifest`]'s checks over a manifest held apart from a resolved
+/// document: the consent row's record of what its card showed. A redemption
+/// records THAT manifest, verified here against the consented scopes, never a
+/// document re-resolved since (`third-party.md` § The manifest: the set is
+/// saved as consented, and a publisher's later document is a new consent).
+/// The card's document passed these checks at resolution against its own
+/// declared scopes, a superset of the consented ones, so a consented manifest
+/// cannot fail them.
+///
+/// # Errors
+/// `invalid_client` naming the manifest's refusal.
+pub fn verify_document_manifest(
+    client_id: &str,
+    scopes: &[String],
+    fauna_manifest: Option<&str>,
+) -> Result<Option<fauna_protocol::kind_manifest::VerifiedManifest>, OAuthDeny> {
     use fauna_bridge_atproto::authz::service_auth_lxm_admitted;
     use fauna_bridge_atproto::fauna_scope::{
         SCOPE_IDENTITY_OP_ACTIVITYPUB_HTTP_SIG, SCOPE_IDENTITY_OP_ATPROTO_SERVICE_AUTH,
@@ -333,15 +356,13 @@ pub fn verified_manifest(
             format!("client metadata `fauna` manifest refused: {why}"),
         )
     };
-    let asks_service_auth = client
-        .declared_scopes
+    let asks_service_auth = scopes
         .iter()
         .any(|s| s == SCOPE_IDENTITY_OP_ATPROTO_SERVICE_AUTH);
-    let asks_http_sig = client
-        .declared_scopes
+    let asks_http_sig = scopes
         .iter()
         .any(|s| s == SCOPE_IDENTITY_OP_ACTIVITYPUB_HTTP_SIG);
-    let Some(jws) = client.fauna_manifest.as_deref() else {
+    let Some(jws) = fauna_manifest else {
         if asks_service_auth {
             return Err(refuse(format!(
                 "the document's scope names {SCOPE_IDENTITY_OP_ATPROTO_SERVICE_AUTH} but it \
@@ -356,7 +377,7 @@ pub fn verified_manifest(
         }
         return Ok(None);
     };
-    let host = client_id_host(&client.client_id)
+    let host = client_id_host(client_id)
         .ok_or_else(|| refuse("the document is not served over https".to_string()))?;
     let verified = verify_manifest(jws, &host).map_err(|e| refuse(e.to_string()))?;
     if let Some((entry, lxm)) = verified.service_auth.iter().find_map(|e| {

@@ -12,7 +12,7 @@ namespace FaunaApp.Core.Services;
 /// (priority #2/#3, one concept everywhere):
 ///
 /// <list type="number">
-/// <item>the guardian's per-category floor (<c>fauna.family.status</c>'s
+/// <item>the guardian's rule document (<c>fauna.family.status</c>'s
 /// <c>policy.content_policy</c>; <c>null</c> unless supervised), and</item>
 /// <item>the viewer's OWN spam/phishing per-mille thresholds
 /// (<c>fauna.spam.get_preferences</c>) — the every-user un-darking of
@@ -152,8 +152,8 @@ public static class ContentPolicyCache
     internal static ContentPolicyInputs Current => _inputs;
 
     /// <summary>
-    /// Set the guardian's per-category floor half — <c>null</c> when the viewer
-    /// is unsupervised, which is a REAL value ("no floor"), not a skip. Merges:
+    /// Set the guardian's rules half — <c>null</c> when the viewer
+    /// is unsupervised, which is a REAL value ("no guardian rules"), not a skip. Merges:
     /// leaves the own-thresholds half exactly as it was.
     /// </summary>
     internal static void SetGuardianPolicy(FfiContentPolicy? policy)

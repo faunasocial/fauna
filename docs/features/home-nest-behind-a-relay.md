@@ -9,8 +9,9 @@ guide: docs/guides/nest-relay-setup.md § Before you start
 ## What a user gets
 
 Keep your data at home and still receive mail at a domain: a small public nest
-relays sealed mail to the home nest and never keeps a readable copy. The two link
-from the app in one step, and it works across real machines on the real internet.
+takes your mail in, stores it encrypted until the home nest collects it, and, as
+long as you have not given it permission to read your mail, keeps no readable
+copy of the mail you receive. The two link from the app in one step.
 
 ## Coverage contract
 

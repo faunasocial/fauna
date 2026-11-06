@@ -24,9 +24,14 @@ public struct CopyButton: View {
     /// keeps set until `text` changes rather than timing out.
     @State private var showConfirmation = false
 
-    public init(_ accessibilityId: String, text: String) {
+    /// A visible caption in place of the copy icon (`admin-dns`'s per-record
+    /// "Copy" button); `nil` keeps the icon.
+    let title: String?
+
+    public init(_ accessibilityId: String, text: String, title: String? = nil) {
         self.accessibilityId = accessibilityId
         self.text = text
+        self.title = title
     }
 
     public var body: some View {
@@ -35,6 +40,9 @@ public struct CopyButton: View {
         } label: {
             if showConfirmation {
                 Text(L.common.copied)
+                    .font(.caption)
+            } else if let title {
+                Text(title)
                     .font(.caption)
             } else {
                 Image(systemName: "doc.on.doc")

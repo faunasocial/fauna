@@ -18,7 +18,8 @@
 //!  * a host outside the declared peer set is refused;
 //!  * the sovereign activity shapes — `Move`, `Delete` of the actor,
 //!    `Update` of the actor — are refused (the custodian's half of the deny
-//!    list);
+//!    list), and so is any body a JSON-LD processor could read otherwise
+//!    (an `@type: Move`);
 //!  * after the owner deletes the grant, the very next call is refused —
 //!    per-request re-resolution, no cached authority;
 //!  * revoking the principal deletes its record.
@@ -287,6 +288,26 @@ async fn a_principal_signs_for_a_declared_peer_under_its_live_grant_only() {
             "Update",
             serde_json::json!({ "id": ACTOR_URL, "type": "Person" }),
         ),
+        // `Move` named by the JSON-LD keyword an expanding
+        // receiver reads — refused as non-canonical, never signed.
+        serde_json::to_vec(&serde_json::json!({
+            "@context": "https://www.w3.org/ns/activitystreams",
+            "@type": "Move",
+            "actor": ACTOR_URL,
+            "object": ACTOR_URL,
+            "target": "https://elsewhere.example/users/alice",
+        }))
+        .unwrap(),
+        // A Delete of the actor under a compact-IRI property
+        // name, which an expanding receiver reads as `object` — refused as
+        // non-canonical, never signed.
+        serde_json::to_vec(&serde_json::json!({
+            "@context": "https://www.w3.org/ns/activitystreams",
+            "type": "Delete",
+            "actor": ACTOR_URL,
+            "as:object": ACTOR_URL,
+        }))
+        .unwrap(),
     ] {
         let err = sign(&state, &binding, "post", &inbox, Some(&sovereign))
             .await

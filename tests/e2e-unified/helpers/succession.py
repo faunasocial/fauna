@@ -72,18 +72,15 @@ _PROFILE_SET_KIND = "fauna.profile.set"
 _PROFILE_GET_KIND = "fauna.profile.get"
 
 def recovery_fixture_binary() -> Path:
-    """Path to the test-only ``recovery_fixture`` helper, building it if needed.
-
-    Delegates to ``common.nest.build_recovery_fixture`` — the same
-    stamp-keyed, build-slotted, win-aware composition the nest and sync-agent
-    builders use. The helper links the shared protocol/client crates, so a
-    binary is stale when ANY workspace source is newer, not just its own file: a
-    binary older than the wire shape signs a body the nest's strict decode
-    refuses.
+    """Path to the test-only ``recovery_fixture`` helper, prebuilt at collection
+    time — never built here (``helpers/helper_bins.py``, whose entry this
+    module's import reaches). The helper links the shared protocol/client
+    crates, so the registry's stamp is the whole workspace's: a binary older
+    than the wire shape signs a body the nest's strict decode refuses.
     """
-    from common.nest import build_recovery_fixture
+    from helpers.helper_bins import helper_bin
 
-    return Path(build_recovery_fixture())
+    return helper_bin("recovery_fixture")
 
 
 def registration_chain(nest_url: str, actor_id_hex: str) -> list[bytes]:

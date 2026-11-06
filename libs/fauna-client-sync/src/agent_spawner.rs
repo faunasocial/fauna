@@ -16,6 +16,16 @@
 //!   [`SystemdUserUnitSpawner`] — production writes+ensures the user unit, e2e
 //!   direct-spawns the agent as a reaped child inheriting the launch's isolated
 //!   XDG world.
+//!   (Every unix but macOS: launchd never reads a systemd unit.)
+//! * **macos** — [`LaunchdAgentSpawner`], the Rust lift of the macOS app's
+//!   Swift `LaunchdSyncAgentSpawner`, so ONE writer serves both apps that
+//!   self-install the per-user `social.fauna.sync-agent` LaunchAgent — the
+//!   desktop app (over UniFFI) and fauna-tui on a mac installed from the
+//!   archive alone (`sync-agent.md` § Packaging + lifecycle, *A tui-only mac*).
+//!   It writes/heals `~/Library/LaunchAgents/social.fauna.sync-agent.plist`,
+//!   then `launchctl bootstrap` + `kickstart`; e2e direct-spawns a child as on
+//!   linux. There is no linger concept: the `gui/<uid>` domain IS the login
+//!   session.
 //! * **windows** — [`WindowsDetachedSpawner`], the Rust lift of the C# app's
 //!   `SpawnSyncAgentDetached`: probe the installed/dev layouts and start the
 //!   agent as a console-less child, forwarding the harness's pipe/data-dir
@@ -46,7 +56,7 @@ pub const AGENT_BIN_NAME: &str = "fauna-sync-agent.exe";
 
 /// `fauna-sync-agent.service` — the systemd **user**-unit name
 /// (`sync-agent.md` § Packaging + lifecycle (linux)).
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 pub const UNIT_NAME: &str = "fauna-sync-agent.service";
 
 /// What the user unit runs, plus the file whose removal must silence it.
@@ -66,7 +76,7 @@ pub const UNIT_NAME: &str = "fauna-sync-agent.service";
 /// [`AGENT_BIN_ENV`] itself rejects. Hostile input yields no unit at all plus a
 /// loud log, and the convergence loop retries with whatever the environment
 /// says next tick.
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 pub struct UnitExec {
     /// The `ExecStart=` value — a plain binary path (quoted, since AppImage
     /// paths are user-chosen and may contain spaces) or a `flatpak run` line.
@@ -83,7 +93,7 @@ pub struct UnitExec {
 /// check runs over the exact strings [`unit_contents`] interpolates, so a
 /// non-UTF-8 path is judged as its lossy `display()` form — which is what would
 /// actually be written.
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 fn rejects_control_chars(field: &str, value: &str) -> bool {
     if let Some(bad) = value.chars().find(|c| c.is_control()) {
         tracing::warn!(
@@ -95,7 +105,7 @@ fn rejects_control_chars(field: &str, value: &str) -> bool {
     false
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 impl UnitExec {
     /// Build from a raw `ExecStart=` value + its condition target — the escape
     /// hatch the linux app's AppImage / Flatpak variants use. `None` when
@@ -151,7 +161,7 @@ impl UnitExec {
 ///   condition-skip instead (journal: "Skipped due to 'exec-condition'"),
 ///   leaving the unit cleanly `inactive`. Verified against the live systemd
 ///   user manager in `tests/e2e-unified/tests/real_session/`.
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 pub fn unit_contents(exec: &UnitExec) -> String {
     format!(
         "[Unit]\n\
@@ -176,7 +186,7 @@ pub fn unit_contents(exec: &UnitExec) -> String {
 }
 
 /// `$XDG_CONFIG_HOME|~/.config` + `systemd/user/fauna-sync-agent.service`.
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 pub fn unit_path() -> PathBuf {
     let config_root = match std::env::var_os("XDG_CONFIG_HOME") {
         Some(xdg) if !xdg.is_empty() => PathBuf::from(xdg),
@@ -285,7 +295,7 @@ pub fn path_lookup(path_var: Option<&OsStr>) -> Option<PathBuf> {
 /// How the spawner drives the user manager's reload/enable/start verbs. The
 /// native `systemctl --user` impl ([`SystemctlUser`]) lives here; the linux
 /// app's Flatpak session-bus arm is a local impl.
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 pub trait UnitControl {
     /// After a unit write/heal: pick up the new file, enable it persistently,
     /// and start it. `false` on failure (lets a fallible caller — the Flatpak
@@ -299,10 +309,10 @@ pub trait UnitControl {
 
 /// `systemctl --user` driving (native / AppImage channels) — best-effort, no
 /// fallback residency exists on these channels, so failures only warn.
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 pub struct SystemctlUser;
 
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 impl UnitControl for SystemctlUser {
     fn reload_enable_start(&self) -> bool {
         systemctl_user(&["daemon-reload"]);
@@ -316,7 +326,7 @@ impl UnitControl for SystemctlUser {
     }
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 fn systemctl_user(args: &[&str]) {
     match Command::new("systemctl").arg("--user").args(args).status() {
         Ok(status) if status.success() => {}
@@ -363,7 +373,7 @@ pub fn parse_linger_output(raw: &str) -> LingerState {
 /// How a client reads and flips lingering. A trait for the same reason
 /// [`UnitControl`] is one: the real impl shells out to `loginctl`, and a test
 /// needs to drive the surface without touching the machine's real logind state.
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 pub trait LingerControl {
     fn state(&self) -> LingerState;
     /// Enable/disable lingering for the calling user. `false` if the call
@@ -375,10 +385,10 @@ pub trait LingerControl {
 
 /// `loginctl` driving for the calling user (`--user` is implicit: `loginctl
 /// enable-linger` with no argument means "me").
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 pub struct LoginctlUser;
 
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 impl LingerControl for LoginctlUser {
     fn state(&self) -> LingerState {
         match Command::new("loginctl")
@@ -425,7 +435,7 @@ impl LingerControl for LoginctlUser {
 /// throughout — the convergence loop retries next tick; the `false` return is
 /// what lets a Flatpak caller fall back to a child spawn instead of silently
 /// having no agent at all.
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 pub fn ensure_unit_running(
     exec: &UnitExec,
     unit_path: &std::path::Path,
@@ -493,13 +503,13 @@ impl ChildSpawner {
 /// the same two arms). Production writes+ensures the user unit; e2e
 /// (`e2e = true`) direct-spawns the agent as a reaped child inheriting the
 /// launch's isolated XDG world.
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 pub struct SystemdUserUnitSpawner {
     e2e: bool,
     child: ChildSpawner,
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 impl SystemdUserUnitSpawner {
     pub fn new(e2e: bool) -> Self {
         Self {
@@ -685,7 +695,49 @@ impl AgentSpawner for WindowsDetachedSpawner {
 #[cfg(windows)]
 pub const AGENT_DATA_DIR_ENV: &str = "FAUNA_E2E_SYNC_AGENT_DATA_DIR";
 
-#[cfg(unix)]
+/// The pin-store dir an agent launched with `--data-dir <root>` reads:
+/// `<root>/trust`. ONE derivation for both ends — the agent's own path table
+/// (`fauna-sync-agent`'s `SyncPaths::at`) and the read replica its app keeps
+/// there ([`agent_pin_replica_dir_for`]) — so the two cannot drift apart
+/// (`transport-trust.md` § Pin custody across processes, *an isolated agent
+/// reads its app's replica*).
+pub fn agent_trust_dir(data_dir: &std::path::Path) -> PathBuf {
+    data_dir.join("trust")
+}
+
+/// Where an interactive app keeps a **read replica** of its pin file for the
+/// agent it spawns on `data_dir` — the harness's agent data-dir pin
+/// (`AGENT_DATA_DIR_ENV`, on windows): `Some(<data_dir>/trust)` when set and
+/// non-empty, else `None`. The agent then reads its app's pins without either
+/// process touching the box's install-scoped trust home (convention 10) and
+/// without a second minter (the replica is the app's file, copied — the
+/// mechanism macOS uses for its File Provider extension). Pure over its input,
+/// compiled everywhere so it is tested on every box; the env read is
+/// [`spawned_agent_pin_replica_dir`].
+pub fn agent_pin_replica_dir_for(data_dir: Option<&OsStr>) -> Option<PathBuf> {
+    data_dir
+        .filter(|d| !d.is_empty())
+        .map(|d| agent_trust_dir(std::path::Path::new(d)))
+}
+
+/// [`agent_pin_replica_dir_for`] over this process's environment — `Some`
+/// exactly when the windows spawner forwards `--data-dir` to the agent: the
+/// same `cfg` gate, so a production build (convention 15) and every
+/// non-windows target answer `None` and keep the plain writer store. The
+/// writers that consult it are the windows app (through `fauna-ffi`'s
+/// `install_nest_identity_pin_store`) and fauna-tui.
+pub fn spawned_agent_pin_replica_dir() -> Option<PathBuf> {
+    #[cfg(all(windows, any(test, debug_assertions, feature = "test-helpers")))]
+    {
+        agent_pin_replica_dir_for(std::env::var_os(AGENT_DATA_DIR_ENV).as_deref())
+    }
+    #[cfg(not(all(windows, any(test, debug_assertions, feature = "test-helpers"))))]
+    {
+        None
+    }
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
 impl AgentSpawner for SystemdUserUnitSpawner {
     fn spawn_agent(&self) {
         if self.e2e {
@@ -707,9 +759,389 @@ impl AgentSpawner for SystemdUserUnitSpawner {
     }
 }
 
+// ── macos: the per-user LaunchAgent arm ─────────────────────────────────────
+//
+// The Rust lift of the macOS app's Swift `LaunchdSyncAgentSpawner`. The plist
+// is one per user, and three parties write it — the `.pkg`'s sync component,
+// the desktop app and fauna-tui — so the two that live here share ONE target
+// resolution ([`macos_agent_candidates`]) and ONE rendering
+// ([`launchd_plist_contents`], byte-identical to the `.pkg`'s), and whichever
+// wrote last leaves the same file behind.
+
+/// `social.fauna.sync-agent` — the launchd label (and plist file stem) of the
+/// per-user agent job. The Swift side keeps `AppleIdentifiers.syncAgentLaunchAgent`
+/// as the bundle-side spelling of the same name; the `.pkg` postinstall is the
+/// third (all three pinned equal by `test_apple_identifier_pins.py`).
+#[cfg(target_os = "macos")]
+pub const LAUNCH_AGENT_LABEL: &str = "social.fauna.sync-agent";
+
+/// The desktop app's bundled agent — the first unpinned candidate whenever the
+/// writer is not itself inside an app bundle. A bundle-attributed agent prompts
+/// for TCC as "Fauna" on the app's own subject, while a bare `/usr/local/bin`
+/// exec prompts as a path (`installers/macos.md` § Identifier domain), so the
+/// bundled copy wins whichever app wrote the plist last.
+#[cfg(target_os = "macos")]
+pub const APP_BUNDLE_AGENT: &str = "/Applications/Fauna.app/Contents/MacOS/fauna-sync-agent";
+
+/// The `.pkg`'s services-only agent copy.
+#[cfg(target_os = "macos")]
+pub const PKG_AGENT: &str = "/usr/local/bin/fauna-sync-agent";
+
+/// `$HOME/Library/LaunchAgents/<label>.plist`.
+#[cfg(target_os = "macos")]
+pub fn launchd_plist_path(label: &str) -> PathBuf {
+    let home = std::env::var_os("HOME").unwrap_or_else(|| "/tmp".into());
+    PathBuf::from(home)
+        .join("Library")
+        .join("LaunchAgents")
+        .join(format!("{label}.plist"))
+}
+
+/// The candidate agent paths, in resolution order, for a writer whose own
+/// executable lives in `exe_dir` (`sync-agent.md` § Packaging + lifecycle,
+/// *A tui-only mac* — one order whichever app writes).
+///
+/// A `pinned` value is the **only** candidate — verbatim and unconditional (see
+/// [`AGENT_BIN_ENV`]). Otherwise, in order:
+///
+/// 1. the desktop app's bundled copy — the writer's own sibling when the writer
+///    is inside an `.app` bundle (`…/X.app/Contents/MacOS/`), else
+///    `app_bundle_agent` ([`APP_BUNDLE_AGENT`]);
+/// 2. the writer's own sibling (`$PREFIX/bin/fauna-sync-agent` for the
+///    archive's tui; a debug app's build dir);
+/// 3. `pkg_agent` ([`PKG_AGENT`]);
+/// 4. each `PATH` entry.
+///
+/// Duplicates are dropped (a bundled writer's 1 and 2 are one path). Pure over
+/// its inputs so the order is unit-pinnable with a temp layout.
+#[cfg(target_os = "macos")]
+pub fn macos_agent_candidates(
+    pinned: Option<PathBuf>,
+    exe_dir: Option<&std::path::Path>,
+    app_bundle_agent: &std::path::Path,
+    pkg_agent: &std::path::Path,
+    path_var: Option<&OsStr>,
+) -> Vec<PathBuf> {
+    if let Some(pinned) = pinned {
+        return vec![pinned];
+    }
+    let sibling = exe_dir.map(|dir| dir.join(AGENT_BIN_NAME));
+    let writer_is_bundled = exe_dir.is_some_and(|dir| {
+        dir.ends_with("Contents/MacOS")
+            && dir
+                .parent()
+                .and_then(|contents| contents.parent())
+                .and_then(|bundle| bundle.extension())
+                .is_some_and(|ext| ext == "app")
+    });
+    let mut ordered: Vec<PathBuf> = Vec::new();
+    match (&sibling, writer_is_bundled) {
+        (Some(own), true) => ordered.push(own.clone()),
+        _ => ordered.push(app_bundle_agent.to_path_buf()),
+    }
+    ordered.extend(sibling);
+    ordered.push(pkg_agent.to_path_buf());
+    if let Some(path_var) = path_var {
+        ordered.extend(
+            std::env::split_paths(path_var)
+                .filter(|dir| !dir.as_os_str().is_empty())
+                .map(|dir| dir.join(AGENT_BIN_NAME)),
+        );
+    }
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    for candidate in ordered {
+        if !candidates.contains(&candidate) {
+            candidates.push(candidate);
+        }
+    }
+    candidates
+}
+
+/// The first candidate that is an executable file — or the pin, verbatim, when
+/// one is set (a pin that misses must fail loudly at launch, never fall through
+/// to the box's installed agent).
+#[cfg(target_os = "macos")]
+pub fn resolve_macos_agent(candidates: &[PathBuf], pinned: bool) -> Option<PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
+    if pinned {
+        return candidates.first().cloned();
+    }
+    candidates
+        .iter()
+        .find(|c| {
+            std::fs::metadata(c).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+        })
+        .cloned()
+}
+
+/// Escape the three characters XML text cannot carry verbatim.
+#[cfg(target_os = "macos")]
+fn xml_text(raw: &str) -> String {
+    raw.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
+/// The LaunchAgent plist — `Label`, `ProgramArguments: [binary]`,
+/// `RunAtLoad`, `KeepAlive`, and deliberately NO `StandardOutPath` /
+/// `StandardErrorPath`: the agent writes its own size-capped log, and launchd
+/// never rotates a redirect (one reached 6.6 GB).
+///
+/// Byte-identical to what the `.pkg`'s sync postinstall writes (its heredoc
+/// through `echo`, trailing newline included), so a box whose plist the `.pkg`
+/// wrote is already current and is never rewritten — and re-bootstrapped — on
+/// the first convergence tick.
+///
+/// Hand-written XML: the three markup characters are escaped, and a path the
+/// file cannot carry honestly — a control character (invalid XML 1.0 text) or
+/// a non-UTF-8 name (a lossy form would name a different file) — yields `None`:
+/// refuse, don't sanitize, as [`UnitExec`]'s twin rule on the systemd arm.
+#[cfg(target_os = "macos")]
+pub fn launchd_plist_contents(label: &str, binary: &std::path::Path) -> Option<String> {
+    let Some(binary) = binary.to_str() else {
+        tracing::warn!(
+            "refusing to write a LaunchAgent: agent path {} is not UTF-8 (writing NO plist)",
+            binary.display()
+        );
+        return None;
+    };
+    for (field, value) in [("label", label), ("agent path", binary)] {
+        if let Some(bad) = value.chars().find(|c| c.is_control()) {
+            tracing::warn!(
+                "refusing to write a LaunchAgent: {field} contains control character {bad:?} \
+                 (writing NO plist)"
+            );
+            return None;
+        }
+    }
+    Some(format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+         <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\"\n  \
+         \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n\
+         <plist version=\"1.0\">\n\
+         <dict>\n    \
+         <key>Label</key>\n    \
+         <string>{label}</string>\n    \
+         <key>ProgramArguments</key>\n    \
+         <array>\n        \
+         <string>{binary}</string>\n    \
+         </array>\n    \
+         <key>RunAtLoad</key>\n    \
+         <true/>\n    \
+         <key>KeepAlive</key>\n    \
+         <true/>\n\
+         </dict>\n\
+         </plist>\n",
+        label = xml_text(label),
+        binary = xml_text(binary),
+    ))
+}
+
+/// How the spawner drives `launchctl` in the user's `gui/<uid>` domain. A
+/// trait for the same reason [`UnitControl`] is one on the systemd arm: the
+/// unit tests drive [`ensure_launch_agent`] without touching the machine's
+/// real launchd.
+#[cfg(target_os = "macos")]
+pub trait LaunchctlControl {
+    /// `launchctl bootstrap gui/<uid> <plist>`. Fails on an already-loaded job
+    /// — the steady state — so callers ignore the answer.
+    fn bootstrap(&self, plist: &std::path::Path) -> bool;
+    /// `launchctl bootout gui/<uid>/<label>` — unload, so a healed plist is
+    /// what the next bootstrap reads (launchd keeps the loaded definition, not
+    /// the file).
+    fn bootout(&self, label: &str) -> bool;
+    /// `launchctl kickstart gui/<uid>/<label>` — start a loaded-but-stopped job
+    /// (a no-op on a running one).
+    fn kickstart(&self, label: &str) -> bool;
+}
+
+#[cfg(target_os = "macos")]
+unsafe extern "C" {
+    /// libSystem's `getuid(2)` — always succeeds, no preconditions.
+    safe fn getuid() -> u32;
+}
+
+/// The real `/bin/launchctl` (absolute path: never a `PATH`-resolved stand-in),
+/// stdout/stderr to null.
+#[cfg(target_os = "macos")]
+pub struct Launchctl;
+
+#[cfg(target_os = "macos")]
+impl Launchctl {
+    fn domain() -> String {
+        format!("gui/{}", getuid())
+    }
+
+    fn run(args: &[&OsStr]) -> bool {
+        match Command::new("/bin/launchctl")
+            .args(args)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+        {
+            Ok(status) => status.success(),
+            Err(e) => {
+                tracing::warn!("launchctl {:?} failed to run: {e}", args.first());
+                false
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl LaunchctlControl for Launchctl {
+    fn bootstrap(&self, plist: &std::path::Path) -> bool {
+        let domain = Self::domain();
+        Self::run(&["bootstrap".as_ref(), domain.as_ref(), plist.as_os_str()])
+    }
+
+    fn bootout(&self, label: &str) -> bool {
+        let target = format!("{}/{label}", Self::domain());
+        Self::run(&["bootout".as_ref(), target.as_ref()])
+    }
+
+    fn kickstart(&self, label: &str) -> bool {
+        let target = format!("{}/{label}", Self::domain());
+        Self::run(&["kickstart".as_ref(), target.as_ref()])
+    }
+}
+
+/// Write or heal the plist, then make sure the job is loaded and started.
+///
+/// * missing → write, `bootstrap`;
+/// * present but not byte-equal to [`launchd_plist_contents`] (a different
+///   target, an older `.pkg`'s stdout/stderr redirect) → `bootout` the loaded
+///   job first (launchd runs the definition it loaded, not the file, so a
+///   heal without it would take effect only at the next login), rewrite,
+///   `bootstrap`;
+/// * current → `bootstrap` anyway (fails harmlessly when loaded — the steady
+///   state — and loads a job someone booted out).
+///
+/// Then `kickstart`, which starts a loaded-but-stopped job. Best-effort: the
+/// convergence loop retries next tick. `false` when the plist could not be
+/// rendered or written, or the kickstart failed.
+#[cfg(target_os = "macos")]
+pub fn ensure_launch_agent(
+    label: &str,
+    binary: &std::path::Path,
+    plist_path: &std::path::Path,
+    ctl: &dyn LaunchctlControl,
+) -> bool {
+    let Some(desired) = launchd_plist_contents(label, binary) else {
+        return false;
+    };
+    let existing = std::fs::read_to_string(plist_path).ok();
+    if existing.as_deref() != Some(desired.as_str()) {
+        if existing.is_some() || plist_path.exists() {
+            let _ = ctl.bootout(label);
+        }
+        if let Some(parent) = plist_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if let Err(e) = std::fs::write(plist_path, &desired) {
+            tracing::warn!("could not write {}: {e}", plist_path.display());
+            return false;
+        }
+    }
+    let _ = ctl.bootstrap(plist_path);
+    let started = ctl.kickstart(label);
+    if !started {
+        tracing::warn!("launchctl kickstart of {label} failed (next convergence tick retries)");
+    }
+    started
+}
+
+/// The macOS [`AgentSpawner`] — fauna-tui's directly, the desktop app's
+/// through `fauna-ffi`'s `FfiLaunchdAgentSpawner`. Production resolves the
+/// agent ([`macos_agent_candidates`]) and ensures the LaunchAgent; e2e
+/// (`e2e = true`) direct-spawns the agent as a reaped child inheriting the
+/// launch's isolated `HOME`, so no test ever touches the machine-global job
+/// (the [`SystemdUserUnitSpawner::new`] shape on linux).
+#[cfg(target_os = "macos")]
+pub struct LaunchdAgentSpawner {
+    e2e: bool,
+    child: ChildSpawner,
+}
+
+#[cfg(target_os = "macos")]
+impl LaunchdAgentSpawner {
+    pub fn new(e2e: bool) -> Self {
+        Self {
+            e2e,
+            child: ChildSpawner::new(),
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl AgentSpawner for LaunchdAgentSpawner {
+    fn spawn_agent(&self) {
+        if self.e2e {
+            self.child.spawn();
+            return;
+        }
+        let pinned = pinned_from_env();
+        let is_pinned = pinned.is_some();
+        let exe = std::env::current_exe().ok();
+        let candidates = macos_agent_candidates(
+            pinned,
+            exe.as_deref().and_then(|e| e.parent()),
+            std::path::Path::new(APP_BUNDLE_AGENT),
+            std::path::Path::new(PKG_AGENT),
+            std::env::var_os("PATH").as_deref(),
+        );
+        match resolve_macos_agent(&candidates, is_pinned) {
+            Some(binary) => {
+                ensure_launch_agent(
+                    LAUNCH_AGENT_LABEL,
+                    &binary,
+                    &launchd_plist_path(LAUNCH_AGENT_LABEL),
+                    &Launchctl,
+                );
+            }
+            None => tracing::warn!(
+                "no {AGENT_BIN_NAME} found in Fauna.app, beside this app, under \
+                 /usr/local/bin or on PATH — cannot install the LaunchAgent \
+                 (next convergence tick retries)"
+            ),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // -- the agent's pin replica (agent_pin_replica_dir_for) --
+
+    #[test]
+    fn the_pin_replica_is_the_trust_dir_inside_the_agents_data_dir() {
+        let root = std::path::Path::new("agent-root");
+        assert_eq!(
+            agent_pin_replica_dir_for(Some(root.as_os_str())),
+            Some(root.join("trust"))
+        );
+        assert_eq!(
+            agent_pin_replica_dir_for(Some(root.as_os_str())),
+            Some(agent_trust_dir(root)),
+            "the app's replica and the agent's read dir are one derivation"
+        );
+    }
+
+    #[test]
+    fn no_agent_data_dir_means_no_replica() {
+        assert_eq!(agent_pin_replica_dir_for(None), None);
+        assert_eq!(agent_pin_replica_dir_for(Some(OsStr::new(""))), None);
+    }
+
+    /// Off windows the spawner forwards no `--data-dir` (the unix agent
+    /// inherits the launch's isolated home), so no writer keeps a replica.
+    #[cfg(not(windows))]
+    #[test]
+    fn no_replica_off_windows() {
+        assert_eq!(spawned_agent_pin_replica_dir(), None);
+    }
 
     // -- harness pin (AGENT_BIN_ENV) --
 
@@ -881,9 +1313,367 @@ mod tests {
         );
     }
 
+    // -- macos: the LaunchAgent arm (the Swift LaunchdSyncAgentSpawner lift) --
+
+    #[cfg(target_os = "macos")]
+    const BUNDLED: &str = "/Applications/Fauna.app/Contents/MacOS/fauna-sync-agent";
+
+    /// The exact bytes, pinned whole: the `.pkg`'s sync postinstall writes this
+    /// same text, so a drift here makes every `.pkg` box re-bootstrap its agent
+    /// on the first tick — and a drift there is caught by
+    /// `test_apple_identifier_pins.py`'s byte comparison against this shape.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_plist_is_the_pkg_shape_byte_for_byte() {
+        let plist =
+            launchd_plist_contents(LAUNCH_AGENT_LABEL, std::path::Path::new(BUNDLED)).unwrap();
+        assert_eq!(
+            plist,
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+             <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\"\n\
+             \x20 \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n\
+             <plist version=\"1.0\">\n\
+             <dict>\n\
+             \x20   <key>Label</key>\n\
+             \x20   <string>social.fauna.sync-agent</string>\n\
+             \x20   <key>ProgramArguments</key>\n\
+             \x20   <array>\n\
+             \x20       <string>/Applications/Fauna.app/Contents/MacOS/fauna-sync-agent</string>\n\
+             \x20   </array>\n\
+             \x20   <key>RunAtLoad</key>\n\
+             \x20   <true/>\n\
+             \x20   <key>KeepAlive</key>\n\
+             \x20   <true/>\n\
+             </dict>\n\
+             </plist>\n"
+        );
+    }
+
+    /// launchd never rotates a stdout/stderr redirect (one reached 6.6 GB), and
+    /// the agent writes its own size-capped log — so neither key is ever written.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_plist_carries_no_launchd_log_redirect() {
+        let plist =
+            launchd_plist_contents(LAUNCH_AGENT_LABEL, std::path::Path::new(BUNDLED)).unwrap();
+        assert!(!plist.contains("StandardOutPath"));
+        assert!(!plist.contains("StandardErrorPath"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_space_and_ampersand_path_is_escaped_not_split() {
+        let plist = launchd_plist_contents(
+            LAUNCH_AGENT_LABEL,
+            std::path::Path::new("/Users/dev/My Tools & <Bins>/fauna-sync-agent"),
+        )
+        .unwrap();
+        assert!(plist.contains(
+            "<string>/Users/dev/My Tools &amp; &lt;Bins&gt;/fauna-sync-agent</string>\n"
+        ));
+    }
+
+    /// A control character is invalid XML 1.0 text and a non-UTF-8 name has no
+    /// honest rendering: refuse, never sanitize into a plist naming a different
+    /// file (the systemd arm's `UnitExec` rule).
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_path_the_plist_cannot_carry_yields_no_plist() {
+        use std::os::unix::ffi::OsStrExt;
+        assert!(
+            launchd_plist_contents(LAUNCH_AGENT_LABEL, std::path::Path::new("/tmp/x\u{1}y"))
+                .is_none()
+        );
+        let non_utf8 = std::path::Path::new(OsStr::from_bytes(b"/tmp/\xff/fauna-sync-agent"));
+        assert!(launchd_plist_contents(LAUNCH_AGENT_LABEL, non_utf8).is_none());
+    }
+
+    /// The archive's tui (`$PREFIX/bin`): the desktop app's bundled copy first —
+    /// so a box with both apps keeps the bundle-attributed agent whichever wrote
+    /// last — then tui's own sibling, then the `.pkg` copy, then PATH.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn an_unbundled_writer_prefers_the_app_bundle_then_its_own_sibling() {
+        let path_var = std::env::join_paths(["/opt/bin", "/Users/u/.local/bin"]).unwrap();
+        assert_eq!(
+            macos_agent_candidates(
+                None,
+                Some(std::path::Path::new("/Users/u/.local/bin")),
+                std::path::Path::new(APP_BUNDLE_AGENT),
+                std::path::Path::new(PKG_AGENT),
+                Some(path_var.as_os_str()),
+            ),
+            vec![
+                PathBuf::from(BUNDLED),
+                PathBuf::from("/Users/u/.local/bin/fauna-sync-agent"),
+                PathBuf::from("/usr/local/bin/fauna-sync-agent"),
+                PathBuf::from("/opt/bin/fauna-sync-agent"),
+            ],
+            "the PATH entry equal to the sibling is not repeated"
+        );
+    }
+
+    /// The desktop app writing from inside its own bundle (wherever the user put
+    /// it): its own bundled copy IS the first candidate, not `/Applications`.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_bundled_writer_names_its_own_bundle_first() {
+        let candidates = macos_agent_candidates(
+            None,
+            Some(std::path::Path::new(
+                "/Users/u/Apps/Fauna.app/Contents/MacOS",
+            )),
+            std::path::Path::new(APP_BUNDLE_AGENT),
+            std::path::Path::new(PKG_AGENT),
+            None,
+        );
+        assert_eq!(
+            candidates,
+            vec![
+                PathBuf::from("/Users/u/Apps/Fauna.app/Contents/MacOS/fauna-sync-agent"),
+                PathBuf::from("/usr/local/bin/fauna-sync-agent"),
+            ]
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_pinned_agent_is_the_only_macos_candidate() {
+        let pinned = PathBuf::from("/nonexistent/target/debug/fauna-sync-agent");
+        let candidates = macos_agent_candidates(
+            Some(pinned.clone()),
+            Some(std::path::Path::new("/Users/u/.local/bin")),
+            std::path::Path::new(APP_BUNDLE_AGENT),
+            std::path::Path::new(PKG_AGENT),
+            None,
+        );
+        assert_eq!(candidates, vec![pinned.clone()]);
+        // Verbatim even though it does not exist: a pin never falls through.
+        assert_eq!(resolve_macos_agent(&candidates, true), Some(pinned));
+    }
+
+    /// The order over a real temp layout: each candidate wins only once every
+    /// earlier one is absent or not executable.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn resolution_walks_the_order_over_a_real_layout() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let mk = |rel: &str| {
+            let p = root.path().join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(&p, b"#!/bin/sh\n").unwrap();
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+            p
+        };
+        let bundled = root
+            .path()
+            .join("Applications/Fauna.app/Contents/MacOS/fauna-sync-agent");
+        let prefix = root.path().join("prefix/bin");
+        let sibling = prefix.join(AGENT_BIN_NAME);
+        let pkg = root.path().join("usr/local/bin/fauna-sync-agent");
+        let on_path = root.path().join("path/fauna-sync-agent");
+        let path_var = std::env::join_paths([root.path().join("path")]).unwrap();
+        let resolve = || {
+            resolve_macos_agent(
+                &macos_agent_candidates(
+                    None,
+                    Some(&prefix),
+                    &bundled,
+                    &pkg,
+                    Some(path_var.as_os_str()),
+                ),
+                false,
+            )
+        };
+
+        assert_eq!(resolve(), None, "nothing installed → nothing to launch");
+        mk("path/fauna-sync-agent");
+        assert_eq!(resolve(), Some(on_path.clone()));
+        mk("usr/local/bin/fauna-sync-agent");
+        assert_eq!(resolve(), Some(pkg.clone()));
+        mk("prefix/bin/fauna-sync-agent");
+        assert_eq!(resolve(), Some(sibling.clone()));
+        // A non-executable bundled copy is skipped, an executable one wins.
+        std::fs::create_dir_all(bundled.parent().unwrap()).unwrap();
+        std::fs::write(&bundled, b"").unwrap();
+        assert_eq!(resolve(), Some(prefix.join(AGENT_BIN_NAME)));
+        mk("Applications/Fauna.app/Contents/MacOS/fauna-sync-agent");
+        assert_eq!(resolve(), Some(bundled.clone()));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[derive(Default)]
+    struct RecordingLaunchctl {
+        calls: Mutex<Vec<String>>,
+    }
+
+    #[cfg(target_os = "macos")]
+    impl RecordingLaunchctl {
+        fn take(&self) -> Vec<String> {
+            std::mem::take(&mut *self.calls.lock().unwrap())
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    impl LaunchctlControl for RecordingLaunchctl {
+        fn bootstrap(&self, _plist: &std::path::Path) -> bool {
+            self.calls.lock().unwrap().push("bootstrap".into());
+            false
+        }
+        fn bootout(&self, label: &str) -> bool {
+            self.calls.lock().unwrap().push(format!("bootout {label}"));
+            true
+        }
+        fn kickstart(&self, label: &str) -> bool {
+            self.calls
+                .lock()
+                .unwrap()
+                .push(format!("kickstart {label}"));
+            true
+        }
+    }
+
+    /// Missing → written + loaded; current → left alone, re-kicked; a different
+    /// target or an old redirect → booted out FIRST (launchd runs the loaded
+    /// definition, not the file), rewritten, re-loaded.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn ensure_writes_then_keeps_then_heals_the_plist() {
+        let dir = tempfile::tempdir().unwrap();
+        let plist = dir.path().join("LaunchAgents").join("probe.plist");
+        let ctl = RecordingLaunchctl::default();
+        let first = std::path::Path::new("/Users/u/.local/bin/fauna-sync-agent");
+
+        assert!(ensure_launch_agent("probe", first, &plist, &ctl));
+        assert_eq!(ctl.take(), ["bootstrap", "kickstart probe"]);
+        let written = std::fs::read_to_string(&plist).unwrap();
+        assert_eq!(
+            Some(written.clone()),
+            launchd_plist_contents("probe", first)
+        );
+
+        assert!(ensure_launch_agent("probe", first, &plist, &ctl));
+        assert_eq!(
+            ctl.take(),
+            ["bootstrap", "kickstart probe"],
+            "current: no bootout"
+        );
+        assert_eq!(std::fs::read_to_string(&plist).unwrap(), written);
+
+        let moved = std::path::Path::new(BUNDLED);
+        assert!(ensure_launch_agent("probe", moved, &plist, &ctl));
+        assert_eq!(
+            ctl.take(),
+            ["bootout probe", "bootstrap", "kickstart probe"]
+        );
+        assert_eq!(
+            Some(std::fs::read_to_string(&plist).unwrap()),
+            launchd_plist_contents("probe", moved)
+        );
+
+        // An older `.pkg`'s redirect-carrying plist, same target: healed too.
+        let with_redirect = launchd_plist_contents("probe", moved).unwrap().replace(
+            "</dict>",
+            "    <key>StandardOutPath</key>\n    <string>/tmp/a.log</string>\n</dict>",
+        );
+        std::fs::write(&plist, with_redirect).unwrap();
+        assert!(ensure_launch_agent("probe", moved, &plist, &ctl));
+        assert_eq!(
+            ctl.take(),
+            ["bootout probe", "bootstrap", "kickstart probe"]
+        );
+        assert!(
+            !std::fs::read_to_string(&plist)
+                .unwrap()
+                .contains("StandardOutPath")
+        );
+    }
+
+    /// A path the plist cannot carry writes nothing and drives nothing.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn ensure_refuses_without_touching_launchd() {
+        let dir = tempfile::tempdir().unwrap();
+        let plist = dir.path().join("probe.plist");
+        let ctl = RecordingLaunchctl::default();
+        assert!(!ensure_launch_agent(
+            "probe",
+            std::path::Path::new("/tmp/x\ny"),
+            &plist,
+            &ctl
+        ));
+        assert!(ctl.take().is_empty());
+        assert!(!plist.exists());
+    }
+
+    /// The REAL launchd, with a throwaway label and a stub agent — never the
+    /// real `social.fauna.sync-agent` job. Ignored by default: it mutates the
+    /// logged-in user's `gui/<uid>` domain, so it runs only behind the
+    /// real-session category's gates
+    /// (`tests/e2e-unified/tests/real_session/test_sync_agent_launch_agent.py`,
+    /// which passes the stub dir in `FAUNA_REAL_LAUNCHD_PROBE_DIR`).
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "real launchd: run through the real_session pytest"]
+    fn real_launchd_loads_heals_and_boots_out_the_probe_job() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = PathBuf::from(
+            std::env::var_os("FAUNA_REAL_LAUNCHD_PROBE_DIR")
+                .expect("run through test_sync_agent_launch_agent.py"),
+        );
+        let label = format!("social.fauna.sync-agent-probe-{}", std::process::id());
+        let plist = dir.join(format!("{label}.plist"));
+        let stub = |name: &str| {
+            let p = dir.join(name).join(AGENT_BIN_NAME);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(&p, b"#!/bin/sh\nexec /bin/sleep 300\n").unwrap();
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+            p
+        };
+        let print = || {
+            let out = Command::new("/bin/launchctl")
+                .args(["print", &format!("gui/{}/{label}", getuid())])
+                .output()
+                .unwrap();
+            (
+                out.status.success(),
+                String::from_utf8_lossy(&out.stdout).into_owned(),
+            )
+        };
+        let first = stub("one");
+        let second = stub("two");
+
+        let result = std::panic::catch_unwind(|| {
+            assert!(ensure_launch_agent(&label, &first, &plist, &Launchctl));
+            let (loaded, text) = print();
+            assert!(loaded, "the probe job must be loaded after ensure");
+            assert!(text.contains(&first.display().to_string()), "{text}");
+
+            // Steady state: a second ensure is harmless (bootstrap fails, kick ok).
+            assert!(ensure_launch_agent(&label, &first, &plist, &Launchctl));
+            assert!(print().0);
+
+            // Heal: the loaded definition follows the rewritten file.
+            assert!(ensure_launch_agent(&label, &second, &plist, &Launchctl));
+            let (loaded, text) = print();
+            assert!(loaded);
+            assert!(text.contains(&second.display().to_string()), "{text}");
+            assert!(!text.contains(&first.display().to_string()), "{text}");
+
+            assert!(Launchctl.bootout(&label));
+            assert!(!print().0, "booted out → gone from gui/<uid>");
+        });
+        let _ = Launchctl.bootout(&label);
+        let _ = std::fs::remove_file(&plist);
+        if let Err(panic) = result {
+            std::panic::resume_unwind(panic);
+        }
+    }
+
     // -- unit shape (the uninstall-inertness decision, the two-line guard) --
 
-    #[cfg(unix)]
+    #[cfg(all(unix, not(target_os = "macos")))]
     #[test]
     fn native_unit_execs_quoted_binary_with_matching_condition() {
         let exec =
@@ -896,7 +1686,7 @@ mod tests {
         assert!(unit.contains("ExecCondition=/usr/bin/test -x \"/usr/bin/fauna-sync-agent\"\n"));
     }
 
-    #[cfg(unix)]
+    #[cfg(all(unix, not(target_os = "macos")))]
     #[test]
     fn a_space_containing_binary_path_stays_one_quoted_arg() {
         let exec = UnitExec::for_binary(PathBuf::from("/opt/My Apps/fauna-sync-agent"))
@@ -908,7 +1698,7 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
+    #[cfg(all(unix, not(target_os = "macos")))]
     #[test]
     fn unit_keeps_the_ratified_lifecycle_shape() {
         // sync-agent.md § Packaging + lifecycle (linux): Restart=always,
@@ -920,7 +1710,7 @@ mod tests {
         assert!(unit.contains("WantedBy=default.target\n"));
     }
 
-    #[cfg(unix)]
+    #[cfg(all(unix, not(target_os = "macos")))]
     #[test]
     fn a_raw_exec_start_passes_through_new() {
         // The escape hatch the linux AppImage/Flatpak variants build on.
@@ -952,7 +1742,7 @@ mod tests {
 
     /// Every line the honest template writes, so a test can assert that a
     /// hostile input added none of its own.
-    #[cfg(unix)]
+    #[cfg(all(unix, not(target_os = "macos")))]
     const HONEST_DIRECTIVES: &[&str] = &[
         "[Unit]",
         "Description=",
@@ -970,7 +1760,7 @@ mod tests {
         "WantedBy=",
     ];
 
-    #[cfg(unix)]
+    #[cfg(all(unix, not(target_os = "macos")))]
     #[test]
     fn a_newline_bearing_binary_path_yields_no_unit_at_all() {
         // The exact probe shape from the report: a pinned path whose
@@ -982,7 +1772,7 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
+    #[cfg(all(unix, not(target_os = "macos")))]
     #[test]
     fn a_newline_bearing_raw_exec_start_yields_no_unit_at_all() {
         // The AppImage-shaped caller (`UnitExec::new`), same attack.
@@ -1003,7 +1793,7 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
+    #[cfg(all(unix, not(target_os = "macos")))]
     #[test]
     fn no_constructible_unit_carries_a_directive_the_caller_did_not_write() {
         // The general property, stated over the whole template rather than over

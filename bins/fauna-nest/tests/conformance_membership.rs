@@ -506,6 +506,8 @@ async fn apply_membership_payment(
         valid_until_secs: valid_until.map(|s| s as u64),
         external_ref: "mem_pay_1".into(),
         return_ref: None,
+        purchase_refs: Vec::new(),
+        product_reference: None,
     };
     match payment_core::apply_payment(state, &e)
         .await

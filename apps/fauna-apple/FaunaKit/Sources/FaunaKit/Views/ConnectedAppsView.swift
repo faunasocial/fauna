@@ -46,8 +46,13 @@ public struct ConnectedAppsView: View {
     /// does not remount it, and rows are nest state read on every open).
     private let reloadToken: Int
 
-    public init(reloadToken: Int = 0) {
+    /// Opens the Bridges page — the plugin roster rows' settings link lands on
+    /// the plugin's settings card there. The host owns the navigation.
+    private let onOpenBridges: (() -> Void)?
+
+    public init(reloadToken: Int = 0, onOpenBridges: (() -> Void)? = nil) {
         self.reloadToken = reloadToken
+        self.onOpenBridges = onOpenBridges
     }
 
     public var body: some View {
@@ -204,35 +209,31 @@ public struct ConnectedAppsView: View {
     /// `expires_at`, and the row carries no timestamp to check against, which is
     /// what keeps that ruling structural rather than remembered.
     private func requestCard(_ request: ConsentCardRow, index: Int) -> some View {
-        let who = request.clientName.map {
-            L.atprotoSettings.consentClient(name: $0, clientId: request.clientId)
-        } ?? L.atprotoSettings.consentClientUnnamed(clientId: request.clientId)
-        let asks = request.scopeDescriptions.map { "  • \($0)" }.joined(separator: "\n")
-        let setLines = consentSetLines(request.sets)
-        let endsLine = request.ends.map(renderLocalizedText)
-        let cardText = consentCardText(request)
+        // Every line of the card's text is the shared composition's
+        // (`connectedAppsRequestCardLines`, `connected-apps.md` § Where logic
+        // lives); this view only styles each line by its role.
+        let lines = consentCardLines(request)
+        let cardText = lines.map(\.text).joined(separator: "\n")
         let codeText = L.atprotoSettings.consentCode(code: request.code)
         return VStack(alignment: .leading, spacing: 6) {
-            Text(L.atprotoSettings.consentHeading).font(.headline)
-            Text(who)
-            Text(L.atprotoSettings.consentScopesHeading)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            Text(asks).font(.caption)
-
-            // Permission-set provenance, AFTER the effective list rather than
-            // instead of it: every member is already in `asks` above. Empty
-            // (nothing paints) for the common set-less request.
-            ForEach(Array(setLines.enumerated()), id: \.offset) { _, line in
-                Text(line).font(.caption2).foregroundStyle(.secondary)
+            ForEach(Array(lines.enumerated()), id: \.offset) { _, line in
+                switch line.role {
+                case .heading:
+                    Text(line.text).font(.headline)
+                case .who:
+                    Text(line.text)
+                case .scopesHeading:
+                    Text(line.text).font(.caption).foregroundStyle(.secondary)
+                case .scope, .reach, .ends:
+                    Text(line.text).font(.caption)
+                case .set:
+                    // Permission-set provenance, AFTER the effective list rather
+                    // than instead of it: every member is already a scope line.
+                    Text(line.text).font(.caption2).foregroundStyle(.secondary)
+                }
             }
 
-            // What approving ends: the key-replacement line, LAST in the card
-            // (the shared machine sets `ends` only when the attested key
-            // differs from the roster's for this client).
-            if let endsLine {
-                Text(endsLine).font(.caption)
-            }
+            installSection(request)
 
             Text(codeText)
                 .accessibilityIdentifier(Ids.connectedAppsRequestCode)
@@ -294,80 +295,100 @@ public struct ConnectedAppsView: View {
         .automationScope(Ids.connectedAppsRequestCard, index: index)
     }
 
-    // MARK: - Roster
-
-    /// The class badge's words — the one per-app half of the grouping key, which
-    /// the machine derives. An unknown class paints no badge rather than a guess.
-    private func classLabel(_ cls: String) -> String? {
-        switch cls {
-        case "remote": L.connectedApps.classRemote
-        case "device": L.connectedApps.classDevice
-        case "wasm": L.connectedApps.classWasm
-        case "container": L.connectedApps.classContainer
-        case "app_password": L.connectedApps.classAppPassword
-        case "signer": L.connectedApps.classSigner
-        case "oauth": L.connectedApps.classOauth
-        default: nil
+    /// The install section of an admin's hosted-plugin install card
+    /// (`third-party.md` § The runner contract → *The install-approval leg*): one
+    /// leaf per fact, each the shared composition's text
+    /// (`connectedAppsRequestInstallText`) resolved through the string table,
+    /// between the card's scope lines and its binding code. The admin framing
+    /// line is untagged, directly under the heading; the bind card has none.
+    /// Absent (nothing paints) on every other card. Reference painter: tui
+    /// `install_section_elements`.
+    @ViewBuilder
+    private func installSection(_ request: ConsentCardRow) -> some View {
+        if let section = connectedAppsRequestInstallText(consent: request) {
+            let separator = connectedAppsLineSeparator()
+            let many = { (lines: [ComposedText]) in
+                lines.map(resolveComposedText).joined(separator: separator)
+            }
+            let heading = resolveComposedText(section.heading)
+            let form = resolveComposedText(section.form)
+            let publisher = resolveComposedText(section.publisher)
+            let digest = resolveComposedText(section.digest)
+            let kinds = many(section.kinds)
+            let hosts = many(section.hosts)
+            let settings = many(section.settings)
+            let rawForm = request.install?.executionForm ?? ""
+            automationText(Ids.connectedAppsRequestInstall, heading)
+                .font(.subheadline.bold())
+            if let framing = section.framing {
+                Text(resolveComposedText(framing)).font(.caption)
+            }
+            Text(form)
+                .font(.caption)
+                .accessibilityIdentifier(Ids.connectedAppsRequestInstallForm)
+                .automationValue(
+                    Ids.connectedAppsRequestInstallForm,
+                    text: { form },
+                    attributes: { ["form": rawForm] }
+                )
+            automationText(Ids.connectedAppsRequestInstallPublisher, publisher).font(.caption)
+            automationText(Ids.connectedAppsRequestInstallDigest, digest).font(.caption)
+            automationText(Ids.connectedAppsRequestInstallKinds, kinds).font(.caption)
+            automationText(Ids.connectedAppsRequestInstallHosts, hosts).font(.caption)
+            automationText(Ids.connectedAppsRequestInstallSettings, settings).font(.caption)
         }
     }
+
+    // MARK: - Roster
 
     /// One `connected-apps-item` roster row. The joined description is the item's
     /// own text (ui.yaml mints no per-field leaves for the columns every row has);
     /// a mail app password's own leaves and the Revoke controls are its children.
     ///
-    /// A burned row (the identity-succession burn) has no leaf of its own: its
-    /// `Access revoked` words sit directly under the name and the item carries a
+    /// A burned row (the identity-succession burn — a mail credential or a
+    /// bunker signer connection) has no leaf of its own: its revoked words
+    /// sit directly under the name and the item carries a
     /// `revoked="true"` attr the tests read.
     private func rosterRow(_ row: ConnectedAppRow, index: Int) -> some View {
         let name = renderLocalizedText(row.name)
-        let badge = classLabel(row.class)
-        let head = badge.map { "\(name) · \($0)" } ?? name
-        let burned = row.mail?.revoked == true
-        let burnedLine = L.settings.mail.credentialRevoked
-        let publisherLine: String? = {
-            guard let clientId = row.clientId, let publisher = row.publisher else { return nil }
-            return L.connectedApps.publisher(domain: publisher) + " — " + clientId
-        }()
-        let scopes = row.scopeDescriptions.map { "  • \(renderLocalizedText($0))" }
-        var facts: [String] = []
-        // A paused row says why it cannot act and how to undo it; "not
-        // connected" is only for a row nothing but itself holds back.
-        if row.paused {
-            facts.append(L.connectedApps.paused)
-        } else if !row.connected {
-            facts.append(L.connectedApps.notConnected)
-        }
-        facts.append(L.connectedApps.created(time: formatUnixLocalMs(ms: row.createdAtMillis)))
-        facts.append(
-            row.lastUsedAtMillis.map { L.connectedApps.lastUsed(time: formatUnixLocalMs(ms: $0)) }
-                ?? L.connectedApps.neverUsed)
-        facts.append(
-            row.lastsUntilMillis.map { L.connectedApps.lastsUntil(time: formatUnixLocalMs(ms: $0)) }
-                ?? L.connectedApps.openEnded)
-        let factsLine = facts.joined(separator: " · ")
-        var itemLines = [head]
-        if burned { itemLines.append(burnedLine) }
-        if let publisherLine { itemLines.append(publisherLine) }
-        itemLines.append(contentsOf: scopes)
-        itemLines.append(factsLine)
-        let itemText = itemLines.joined(separator: "\n")
+        let burned = row.mail?.revoked == true || row.signerBurned
+        // The whole row's text is composed once in shared Rust
+        // (`compose::roster_row_text`): the head with its class badge, the
+        // burned state, the publisher, the scopes, the permission sets, the
+        // oracle summary, then the facts. This shell resolves each through the
+        // string table and paints; it words nothing.
+        let composed = connectedAppsRosterRowText(row: row)
+        let lines = composed.lines.map(resolveComposedText)
+        let factsLine = composed.facts.map(resolveComposedText)
+            .joined(separator: connectedAppsFactsSeparator())
+        let head = lines.first ?? name
+        // The burned line sits directly under the head, when there is one.
+        let burnedLine: String? = burned ? lines.dropFirst().first : nil
+        let body = Array(lines.dropFirst(burned ? 2 : 1))
+        let itemText = (lines + [factsLine]).joined(separator: "\n")
         let armed = vm.revokeArmed == row.key
 
         return VStack(alignment: .leading, spacing: 6) {
             Text(head).font(.headline)
-            if burned {
+            if let burnedLine {
                 Text(burnedLine).font(.caption).foregroundStyle(.red)
             }
-            if let publisherLine {
-                Text(publisherLine).font(.caption)
-            }
-            ForEach(Array(scopes.enumerated()), id: \.offset) { _, line in
+            ForEach(Array(body.enumerated()), id: \.offset) { _, line in
                 Text(line).font(.caption)
             }
             Text(factsLine).font(.caption).foregroundStyle(.secondary)
 
             if let mail = row.mail {
                 mailLeaves(key: row.key, mail: mail)
+            }
+
+            // A hosted plugin's row links to its settings card on the Bridges
+            // page; the shared composition says which rows (never a class test here).
+            if composed.opensSettingsCard, let onOpenBridges {
+                Button(L.connectedApps.settingsLink, action: onOpenBridges)
+                    .controlSize(.small)
+                    .accessibilityIdentifier(Ids.connectedAppsItemSettingsLink)
+                    .automationActivate(Ids.connectedAppsItemSettingsLink, perform: onOpenBridges)
             }
 
             if armed {
@@ -404,6 +425,8 @@ public struct ConnectedAppsView: View {
                 // `not_connected` — beside the words.
                 var attrs = ["status": row.paused ? "paused" : (row.connected ? "connected" : "not_connected")]
                 if burned { attrs["revoked"] = "true" }
+                // Present exactly on a row the oracle served.
+                if let oracle = row.oracle { attrs["oracle_ops"] = String(oracle.opsInWindow) }
                 return attrs
             }
         )
@@ -517,38 +540,36 @@ public struct ConnectedAppsView: View {
     }
 }
 
-/// The consent card's permission-set section as flat lines
-/// (`atproto-pds-full.md` § F4 detail → *Permission sets*, the card bullet). One
-/// heading per set — the publisher's title beside the NSID, or the NSID alone
-/// when no title was declared (never an invented label) — then the publisher's
-/// `details` when present, then one bulleted line per member. Empty for the
-/// overwhelmingly common set-less request, so the card paints no heading and no
-/// stray blank line. `title`/`details`/`memberDescriptions` arrive already
-/// control-stripped and worded by the shared machine's one composition pass —
-/// never re-word or re-fence here.
-/// The request card's text in tui's shape: heading, who, scopes heading, scope
-/// lines, permission-set lines, then the key-replacement `ends` line last (when
-/// the snapshot row carries one).
-func consentCardText(_ request: ConsentCardRow) -> String {
-    let who = request.clientName.map {
-        L.atprotoSettings.consentClient(name: $0, clientId: request.clientId)
-    } ?? L.atprotoSettings.consentClientUnnamed(clientId: request.clientId)
-    let asks = request.scopeDescriptions.map { "  • \($0)" }.joined(separator: "\n")
-    let lines = consentSetLines(request.sets) + (request.ends.map { [renderLocalizedText($0)] } ?? [])
-    return "\(L.atprotoSettings.consentHeading)\n\(who)\n"
-        + "\(L.atprotoSettings.consentScopesHeading)\n\(asks)"
-        + lines.map { "\n\($0)" }.joined()
+/// One line of a consent request card, with the role the view styles it by.
+struct ConsentCardLine: Equatable {
+    enum Role: Equatable { case heading, who, scopesHeading, scope, set, reach, ends }
+    let role: Role
+    let text: String
 }
 
-func consentSetLines(_ sets: [ConsentSetRow]) -> [String] {
-    var lines: [String] = []
-    for set in sets {
-        lines.append(set.title.map {
-            L.atprotoSettings.consentSetHeading(title: $0, nsid: set.nsid)
-        } ?? L.atprotoSettings.consentSetHeadingUnnamed(nsid: set.nsid))
-        if let details = set.details { lines.append(details) }
-        for member in set.memberDescriptions { lines.append("• \(member)") }
+/// The request card's lines, top to bottom, exactly as the shared composition
+/// orders and words them (`connectedAppsRequestCardLines`: heading, who, scopes
+/// heading, one bullet per scope, the permission sets, the cli's reach line, the
+/// key-replacement `ends` line last). The roles are read off positions the
+/// composition fixes — the first three lines, one per `scopeDescriptions` entry,
+/// the reach line by its key, `ends` last when the row carries one — never off
+/// re-composed text.
+func consentCardLines(_ request: ConsentCardRow) -> [ConsentCardLine] {
+    let composed = connectedAppsRequestCardLines(consent: request)
+    let scopeEnd = 3 + request.scopeDescriptions.count
+    let endsIndex = request.ends == nil ? nil : composed.count - 1
+    return composed.enumerated().map { index, line in
+        let role: ConsentCardLine.Role
+        switch index {
+        case 0: role = .heading
+        case 1: role = .who
+        case 2: role = .scopesHeading
+        case _ where index < scopeEnd: role = .scope
+        case _ where index == endsIndex: role = .ends
+        case _ where line.text.key == "connected_apps.consent_assistant_reach": role = .reach
+        default: role = .set
+        }
+        return ConsentCardLine(role: role, text: resolveComposedText(line))
     }
-    return lines
 }
 #endif // !FAUNA_KIDS

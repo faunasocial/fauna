@@ -26,11 +26,15 @@ import os
 
 
 def credential_store_path(driver) -> str | None:
-    """``{credential_dir}/{keyring_app}.json`` for this driver's app, or None
-    when the driver exposes no file-backed store (web, the mobile apps)."""
+    """``{credential_dir}/{keyring_app}.json`` for this driver's app — apple's
+    fixed ``{cred_dir}/keychain.json``, which it seeds and flushes in the same
+    flat logical-key shape — or None when the driver exposes no file-backed
+    store (web, android)."""
     cred_dir = getattr(driver, "_resolved_credential_dir", None) or getattr(
         driver, "_cred_dir", None
     )
+    if cred_dir and (driver.is_macos() or driver.is_ios()):
+        return os.path.join(cred_dir, "keychain.json")
     keyring_app = getattr(driver, "_resolved_keyring_app", None) or getattr(
         driver, "_keyring_app", None
     )
@@ -138,3 +142,13 @@ def _describe_map(name: str, stored: dict, actors: list[str]) -> list[str]:
         lines.append(f"  {actor}: {slots}")
     lines.append(f"  other keys: {sorted(k for k in stored if k not in claimed)}")
     return lines
+
+
+def flock_waiters(inode: int) -> int:
+    """Processes the kernel reports as BLOCKED on a ``flock`` over ``inode`` —
+    the ``->`` rows of ``/proc/locks``. The native twin of web's
+    ``navigator.locks.query()`` pending list: the lock manager's own record that
+    a mutator asked for the registry lock, which no wall-clock wait can stand in
+    for."""
+    with open("/proc/locks") as f:
+        return sum(1 for line in f if "->" in line.split(":", 1)[1][:6] and f":{inode} " in line)

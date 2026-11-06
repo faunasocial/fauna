@@ -12,6 +12,15 @@ whose subscribe mints the same kind of grant to the same holder.
 from __future__ import annotations
 
 import sqlite3
+from typing import NamedTuple
+
+
+class MdaHolder(NamedTuple):
+    """An enrolled `mda` holder's X25519 seal target and the secret behind it
+    — the secret is what the holder's drain unseals a deposited grant with."""
+
+    pubkey: bytes
+    secret: bytes
 
 
 def login_as_admin(app, nest, *, device_id: str) -> None:
@@ -33,28 +42,38 @@ def login_as_admin(app, nest, *, device_id: str) -> None:
         },
         "nav": {"stack": [{"view": "feed"}]},
     })
-    # No settle-sleep: every next step is a page navigation whose own
-    # element wait is the barrier (convention 14).
+    # The connection barrier every login seam owes (`_login_app_as`): a
+    # deadline poll on the app's own transport word, so the first online-only
+    # step (mail enable, a catalog read) never races the WS handshake and finds
+    # "no active session" on a loaded box (convention 14).
+    from helpers.connection import wait_until_online
+
+    wait_until_online(app.driver)
 
 
-def seed_mda_holder(nest, *, bridge_id: str = "trust-mda") -> bytes:
+def seed_mda_holder(nest, *, bridge_id: str = "trust-mda") -> MdaHolder:
     """Enroll an approved `mda`-role content-processor holder with an X25519
     seal target on `nest`, without running a bridge — the same admin
     pre-approve + x25519 attest `_spawn_mda_bridge` performs before its
-    process starts. Returns the holder's X25519 public key.
+    process starts. Returns the holder's X25519 keypair.
 
     The mint only needs a holder to SEAL to; the nest stores the deposit and
-    the test reads it back, so no holder process has to fetch anything."""
+    the test reads it back, so no holder process has to fetch anything — a
+    test that proves what the deposit OPENS unseals it with the secret."""
     from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
-    from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+    from cryptography.hazmat.primitives.serialization import (
+        Encoding,
+        NoEncryption,
+        PrivateFormat,
+        PublicFormat,
+    )
     from nacl.signing import SigningKey
 
     from helpers.bridge_enrollment import enroll_and_approve_bridge
 
     ed_pub = bytes(SigningKey.generate().verify_key)
-    x_pub = X25519PrivateKey.generate().public_key().public_bytes(
-        Encoding.Raw, PublicFormat.Raw
-    )
+    x_secret = X25519PrivateKey.generate()
+    x_pub = x_secret.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
     enroll_and_approve_bridge(nest["url"], nest["admin"]["signing_key"], ed_pub, "mda", bridge_id)
     conn = sqlite3.connect(nest["db_path"], timeout=10.0)
     try:
@@ -65,4 +84,7 @@ def seed_mda_holder(nest, *, bridge_id: str = "trust-mda") -> bytes:
         conn.commit()
     finally:
         conn.close()
-    return x_pub
+    return MdaHolder(
+        pubkey=x_pub,
+        secret=x_secret.private_bytes(Encoding.Raw, PrivateFormat.Raw, NoEncryption()),
+    )

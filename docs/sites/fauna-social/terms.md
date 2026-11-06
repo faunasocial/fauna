@@ -36,9 +36,12 @@ which features are on, and who handles reports.
 
 The software gives an admin no way to read content you did not share with
 their nest or publish to everyone, beyond the mail and the messages the nest
-passes to and from email and other networks. A community room's members
-choose to let its home nest read it, to label and index it for them, and the
-app says so.
+passes to and from email and other networks; beyond the address of a link
+standing on a line of its own in a post or a message, which the nest of each
+person who reads it fetches for its preview; and beyond the text of a message or
+a post only some people can open that someone attaches to a report. A community
+room's members choose to let its home nest read it, to label and index it for
+them, and the app says so.
 
 An admin has four levers:
 
@@ -57,16 +60,18 @@ An admin has four levers:
   removal is never silent.
 - **Blocking a reported item.** The admin can block a post or message that
   someone reported, on their nest only, naming the report's reason; the
-  report is the block's citation. The item is withheld from everyone except
-  its author, who keeps their own copy and their own view of a blocked post.
-  A block does not recall copies that already reached other places.
+  report is the block's citation. The item is withheld from everyone except its
+  author, who keeps their own view of it. Its photos and files are withheld from
+  the author too, and an author on another nest keeps a blocked message only on
+  the devices that already had it. A block does not recall copies that already
+  reached other places.
 
 For both a removal and a block, a notice naming the reason stands in the
-content's place, the author of a post can appeal, the act is recorded
-permanently, nothing is deleted, and it can be lifted. No admin removes or
-blocks a single post or message by hand for any other reason, and no lever is
-silent. Mail is the one exception: incoming mail is checked for spam and
-malware on the nest before it is filed, under thresholds the admin sets.
+content's place, the author can appeal, the act is recorded permanently, nothing
+is deleted, and it can be lifted. No admin removes or blocks a single post or
+message by hand for any other reason, and no lever is silent. Mail is the one
+exception: incoming mail is checked for spam and malware on the nest before it
+is filed, under thresholds the admin sets.
 
 Inside a group, its owner and admins can delete a member's message for
 everyone in it, and the deletion shows in its place.
@@ -110,9 +115,10 @@ while it is open, and your notifications show the outcome: acted on, or
 dismissed. Reporting something also hides it for you, and you can block the
 author at the same time.
 
-A report removes nothing by itself. A private message stays unreadable to the
-admin unless you choose to attach its text to your report, and the app tells
-you so before you do. The person you report is never told who reported them.
+A report removes nothing by itself. A private message, or a post only some
+people can open, stays unreadable to the admin unless you choose to attach its
+text to your report, and the app tells you so before you do. The person you
+report is never told who reported them.
 
 ## What we can and cannot do
 
@@ -120,14 +126,15 @@ you so before you do. The person you report is never told who reported them.
 or restore content on a nest we do not run, and a report about it never
 reaches us. On fauna.build we are the admin, and a request from an app store
 or an authority is carried out through the lever that matches it (removal for
-everyone, or a block that leaves the author their own copy), with the request
-kept as the recorded reference.
+everyone, or a block that withholds the content from everyone but its author),
+with the request kept as the recorded reference.
 
 ## Changes
 
-When this page changes, the date below changes with it.
+When this page changes, the change is visible in the public source repository,
+{repo}, alongside the software's source code.
 
-Last changed: 19 October 2026.
+Last changed: 25 October 2026.
 
 ## Questions
 

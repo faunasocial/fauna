@@ -9,6 +9,10 @@ struct Release {
     tag_name: String,
     html_url: String,
     published_at: Option<String>,
+    /// Absent from the harness's release-feed stub, and never read by the
+    /// version check: an empty list makes [`resolve_release_info`] answer "no
+    /// artifact matching", exactly as a list without this platform's does.
+    #[serde(default)]
     assets: Vec<Asset>,
 }
 
@@ -37,12 +41,16 @@ pub struct LatestRelease {
     pub release_url: String,
 }
 
-/// The newest published release of `repo` — its version only, so a release
+/// The newest published release of [`fauna_core::version::RELEASE_REPO`], as
+/// the release API at `origin` names it — its version only, so a release
 /// counts as known whatever its asset names (resolving this platform's
 /// artifact is [`check_latest`]'s, for the apply step). `None` when the
 /// repository has published none.
-pub async fn latest_release(client: &reqwest::Client, repo: &str) -> Result<Option<LatestRelease>> {
-    fetch_latest(client, repo)
+pub async fn latest_release(
+    client: &reqwest::Client,
+    origin: &str,
+) -> Result<Option<LatestRelease>> {
+    fetch_latest(client, origin)
         .await?
         .map(release_version)
         .transpose()
@@ -54,26 +62,27 @@ pub async fn latest_release(client: &reqwest::Client, repo: &str) -> Result<Opti
 /// Returns `None` if the current version is up to date or newer.
 pub async fn check_latest(
     client: &reqwest::Client,
-    repo: &str,
+    origin: &str,
     current: &Version,
     artifact_prefix: &str,
     target: &str,
 ) -> Result<Option<ReleaseInfo>> {
-    match fetch_latest(client, repo).await? {
+    match fetch_latest(client, origin).await? {
         Some(release) => resolve_release_info(release, current, artifact_prefix, target),
         None => Ok(None),
     }
 }
 
-/// The release host's "newest release" answer for `repo`, or `None` when the
-/// repository has published none. Anonymous, always: the request carries a
+/// The release API at `origin`'s "newest release" answer, read at
+/// [`fauna_core::version::latest_release_api_url`] — the one URL every checker
+/// requests — or `None` when the repository has published none. Anonymous, always: the request carries a
 /// fixed `User-Agent` and no credential — the `github_token` that once rode
 /// here as a `Bearer` header was a `nest.toml` knob no user or admin would
 /// choose, so it was REMOVED 2026-10-19 under `principles.md` § One
 /// configuration surface (a constant's stand-in); the anonymous rate limit is
 /// ample for one check a day, and the loop's back-off covers the rest.
-async fn fetch_latest(client: &reqwest::Client, repo: &str) -> Result<Option<Release>> {
-    let url = format!("https://api.github.com/repos/{repo}/releases/latest");
+async fn fetch_latest(client: &reqwest::Client, origin: &str) -> Result<Option<Release>> {
+    let url = fauna_core::version::latest_release_api_url(origin);
 
     let req = client
         .get(&url)
@@ -83,7 +92,7 @@ async fn fetch_latest(client: &reqwest::Client, repo: &str) -> Result<Option<Rel
     let resp = req.send().await.context("GitHub API request failed")?;
 
     if resp.status() == reqwest::StatusCode::NOT_FOUND {
-        tracing::debug!("no releases found for {repo}");
+        tracing::debug!("no releases found at {url}");
         return Ok(None);
     }
 
@@ -327,5 +336,57 @@ mod tests {
         let r = release("v1.2.3", vec![asset(&artifact_name)]);
         let err = resolve_release_info(r, &current, PREFIX, TARGET).unwrap_err();
         assert!(err.to_string().contains("no signature file"));
+    }
+
+    /// The check reads the origin it is handed, at the one path every checker
+    /// requests, and folds the two-field answer the harness's stub serves (no
+    /// `assets`) — `installers/README.md` § Knowing a newer version is out →
+    /// *Where a test nest's check reads*.
+    #[tokio::test]
+    async fn latest_release_reads_the_handed_origin_without_an_asset_list() {
+        use wiremock::matchers::{header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let latest_path = format!(
+            "/repos/{}/releases/latest",
+            fauna_core::version::RELEASE_REPO
+        );
+        Mock::given(method("GET"))
+            .and(path(latest_path.as_str()))
+            .and(header("User-Agent", "fauna-update"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "tag_name": "v99.0.0",
+                "html_url": "https://example.com/releases/tag/v99.0.0",
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let latest = latest_release(&reqwest::Client::new(), &server.uri())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(latest.version, Version::parse("99.0.0").unwrap());
+
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 1);
+        // wiremock re-spells the host it reports, so the path is what is
+        // compared: the origin's own `latest_release_api_url` path.
+        let wanted = fauna_core::version::latest_release_api_url(&server.uri());
+        assert!(wanted.ends_with(requests[0].url.path()));
+        assert_eq!(requests[0].url.path(), latest_path);
+    }
+
+    #[test]
+    fn a_release_without_an_asset_list_resolves_no_artifact() {
+        let r: Release = serde_json::from_value(serde_json::json!({
+            "tag_name": "v1.2.3",
+            "html_url": "https://example.com/releases/tag/v1.2.3",
+        }))
+        .unwrap();
+        let current = Version::parse("1.0.0").unwrap();
+        let err = resolve_release_info(r, &current, PREFIX, TARGET).unwrap_err();
+        assert!(err.to_string().contains("no artifact matching"));
     }
 }

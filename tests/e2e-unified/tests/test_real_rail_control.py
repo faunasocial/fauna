@@ -71,17 +71,33 @@ def _witness(app, log, **kw):
     )
 
 
-# ── No reader at all is a DECLARED skip, never an assert ──
-def test_a_driver_with_no_log_reader_declares_rather_than_asserting():
-    """A driver answering neither log attribute cannot show an absent marker is
-    evidence — convention 7's `skip_unbuilt`, not a red. (Every shipped family
-    now has a reader; the branch guards the next driver that does not.)"""
-    with pytest.raises(pytest.skip.Exception) as exc:
-        _witness("android", None)
-    assert "app-log reader" in str(exc.value)
+# ── No reader: the registry decides, the driver never declares for itself ──
+def test_an_app_the_registry_declares_readerless_is_a_declared_skip():
+    """An app outside the registry's `app-log-reader` cannot show an absent
+    marker is evidence — convention 7's unbuilt declaration, not a red. (Every
+    shipped family has a reader today, so the real entry lists all seven; the
+    substitute registry stands in for the next driver that does not.)"""
+    real = app_surface.surface_registry()["app-log-reader"]
+    app_surface.set_surface_registry({"app-log-reader": real.__class__(
+        key="app-log-reader", kind="harness",
+        built=frozenset(real.built) - {"android"}, detail=real.detail,
+        tracked=real.tracked)})
+    try:
+        with pytest.raises(pytest.skip.Exception) as exc:
+            _witness("android", None)
+    finally:
+        app_surface.set_surface_registry(None)
+    assert "has not built app-log-reader" in str(exc.value)
     assert "e2e-self-diagnosing-failures.md" in str(exc.value), (
         "the skip must name where the work is tracked"
     )
+
+
+def test_a_readerless_driver_on_an_app_declared_to_have_one_is_a_red():
+    """The registry says the app's driver reads its log; a driver that answers
+    neither attribute there is a regression, never a quiet skip."""
+    with pytest.raises(AssertionError, match="answers neither app_log_text nor app_stderr_text"):
+        _witness("android", None)
 
 
 def test_the_android_driver_has_an_app_log_reader():
@@ -123,6 +139,21 @@ def test_an_open_apple_gate_with_a_started_session_passes():
         "INFO mls-sync: cross-device plane wired (2 channel(s) restored from replica)\n"
     )
     _witness("macos", log)  # no raise
+
+
+@pytest.mark.parametrize("app", ["macos", "ios"])
+def test_an_apple_app_that_signed_itself_in_passes_on_its_production_verdict(app):
+    """A pinned-store relaunch signs in through the production launch, which
+    reaches no gate and builds the real session unconditionally — it stamps
+    its own verdict, and stage 2 still has to see the session start."""
+    verdict = (
+        "[e2e] real-conversations rail: production launch — the app signed itself in "
+        "and builds the real ConversationsSession unconditionally (no gate on this path)\n"
+    )
+    _witness(app, verdict + "INFO mls-sync: cross-device plane wired (1 channel(s) restored from replica)\n")
+    with pytest.raises(AssertionError) as exc:
+        _witness(app, verdict, budget_s=0.4)
+    assert "mls-sync:" in str(exc.value)
 
 
 def test_an_open_apple_gate_whose_session_never_started_FAILS_at_stage_2():

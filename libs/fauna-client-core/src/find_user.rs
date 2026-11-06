@@ -87,7 +87,8 @@ pub struct CrossNestFound {
 /// calls (UniFFI `find_user`, wasm `findUser`, linux and tui directly), so none of them
 /// re-derives the decision or the URL (priority #2).
 ///
-/// - No typed domain → one hop on `home` ([`find_user_by_handle`]), `nest_url`
+/// - No typed domain (`None`, or an empty string — a bare localpart's empty
+///   `domain` slot) → one hop on `home` ([`find_user_by_handle`]), `nest_url`
 ///   `None`.
 /// - Typed domain → probe `home` with the domain as the multi-domain qualifier
 ///   and let [`fauna_core::resolve::is_foreign_handle_domain`] judge the echoed
@@ -119,6 +120,11 @@ where
     Fut: std::future::Future<Output = Result<P, E>>,
     E: std::fmt::Display,
 {
+    // An empty typed domain is no typed domain: the flat
+    // `fauna_core::resolve::RecipientInput::into_parts` projection carries a bare
+    // localpart as `"handle"` with an empty `domain` slot, and every app forwards
+    // that slot as it is (`contacts.md` § Layout & flow, region 3).
+    let typed_domain = typed_domain.filter(|d| !d.is_empty());
     let Some(domain) = typed_domain else {
         let found = find_user_by_handle(home, handle, None)
             .await
@@ -180,6 +186,62 @@ where
         },
         nest_url: Some(url),
     })
+}
+
+/// Why [`resolve_recipient_across_nests`] gave no actor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RecipientError {
+    /// The input is neither a 64-hex actor id nor a handle; the caller shows its
+    /// localized "handle, handle@domain, or actor ID" hint (this crate carries no
+    /// i18n strings).
+    Invalid,
+    /// The handle lookup failed; the failing hop's message.
+    Lookup(String),
+}
+
+/// Resolve a typed recipient — a 64-hex actor id or a `localpart[@domain]`
+/// handle — to the actor's hex id and, for a person on another nest, that
+/// nest's URL (`None` for a home-nest actor). The one classify-then-find path
+/// the share surfaces use (`ui/folders.md` § Sharing a folder, *Cross-nest
+/// members*), exactly as the contacts find does: an actor id is taken offline
+/// (an id names no domain to route on), a handle goes through
+/// [`find_user_across_nests`]. `peer_url` / `connect_peer` are that function's
+/// closures (callers pass `fauna_provisioning::probe::peer_nest_url` and
+/// `AnonymousNestClient::connect`).
+pub async fn resolve_recipient_across_nests<H, P, C, Fut, E>(
+    home: &H,
+    recipient: &str,
+    peer_url: impl FnOnce(&str) -> Option<String>,
+    connect_peer: C,
+) -> Result<(String, Option<String>), RecipientError>
+where
+    H: RpcRequester,
+    H::Error: std::fmt::Display,
+    P: RpcRequester,
+    P::Error: std::fmt::Display,
+    C: FnOnce(String) -> Fut,
+    Fut: std::future::Future<Output = Result<P, E>>,
+    E: std::fmt::Display,
+{
+    use fauna_core::resolve::{RecipientInput, classify_recipient};
+    match classify_recipient(recipient) {
+        RecipientInput::ActorId(id) => Ok((id, None)),
+        RecipientInput::Handle { user, domain } => {
+            let hit = find_user_across_nests::<H, P, C, Fut, E>(
+                home,
+                &user,
+                domain.as_deref(),
+                peer_url,
+                connect_peer,
+            )
+            .await
+            .map_err(|e| {
+                RecipientError::Lookup(format!("no actor for handle '{recipient}': {e}"))
+            })?;
+            Ok((hit.found.actor_id, hit.nest_url.filter(|u| !u.is_empty())))
+        }
+        RecipientInput::Invalid => Err(RecipientError::Invalid),
+    }
 }
 
 #[cfg(test)]
@@ -362,7 +424,10 @@ mod tests {
         let home = Serving {
             domain: Some("home.test"),
         };
-        for typed in [Some("HOME.test"), None] {
+        // `Some("")` is a bare localpart as the flat `classify_recipient`
+        // projection carries it (an empty `domain` slot), forwarded unchanged by
+        // the UniFFI/wasm faces: it is no typed domain, never a peer to dial.
+        for typed in [Some("HOME.test"), None, Some("")] {
             let r = block_on(find_user_across_nests(
                 &home,
                 "bob",
@@ -386,5 +451,34 @@ mod tests {
             |_| async { Err::<Serving, String>("refused".into()) },
         ));
         assert!(r.unwrap_err().contains("refused"));
+    }
+
+    #[test]
+    fn a_recipient_is_an_actor_id_offline_a_handle_or_invalid() {
+        let home = Serving { domain: None };
+        let id = "AB".repeat(32);
+        let (actor, url) = block_on(resolve_recipient_across_nests(
+            &home,
+            &id,
+            |_| panic!("an actor id dials no peer"),
+            |_| async { Err::<Serving, String>("must not connect".into()) },
+        ))
+        .unwrap();
+        assert_eq!(actor, "ab".repeat(32));
+        assert_eq!(url, None);
+        let invalid = block_on(resolve_recipient_across_nests(
+            &home,
+            "not a recipient!",
+            |_| None,
+            |_| async { Err::<Serving, String>("x".into()) },
+        ));
+        assert_eq!(invalid.unwrap_err(), RecipientError::Invalid);
+        let down = block_on(resolve_recipient_across_nests(
+            &home,
+            "bob@peer.test",
+            |d| Some(format!("https://{d}")),
+            |_| async { Err::<Serving, String>("refused".into()) },
+        ));
+        assert!(matches!(down.unwrap_err(), RecipientError::Lookup(m) if m.contains("refused")));
     }
 }

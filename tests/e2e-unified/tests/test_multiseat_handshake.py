@@ -34,6 +34,8 @@ from pathlib import Path
 
 import pytest
 
+from actions.backups import BackupsActions
+
 import tests.test_filesync_multiseat_live as ms
 
 pytestmark = [pytest.mark.tier_1]
@@ -229,6 +231,9 @@ def test_adopt_or_create_set_honours_the_assembly_budget_not_the_symmetric_windo
         def folder_title(self, _i):
             return ms.SET_NAME
 
+        folder_titles = BackupsActions.folder_titles
+        folder_index = BackupsActions.folder_index
+
     ms._adopt_or_create_set(_FakeApp(), _FakeBackups(), "macos")
     assert calls["n"] >= 3
 
@@ -311,6 +316,9 @@ class _DiagBackups:
 
     def folder_title(self, i):
         return self._titles[i]
+
+    folder_titles = BackupsActions.folder_titles
+    folder_index = BackupsActions.folder_index
 
 
 class _DiagApp:
@@ -439,7 +447,7 @@ def test_an_unreadable_row_never_raises_out_of_the_diagnosis(monkeypatch):
 
     msg = ms._diagnose_missing_set_row(_DiagApp(), _Broken(["x", "y"]), "macos", None)
 
-    assert "rows rendered here: 2 ->" in msg
+    assert "rows rendered here: 1 ->" in msg
     assert "unreadable" in msg
 
 

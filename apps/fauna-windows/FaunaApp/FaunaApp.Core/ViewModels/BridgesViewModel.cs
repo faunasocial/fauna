@@ -12,10 +12,8 @@ namespace FaunaApp.Core.ViewModels;
 public partial class BridgesViewModel : ViewModelBase
 {
     [ObservableProperty] private bool _isLoading;
-    [ObservableProperty] private string? _selectedBridgeId;
 
     public ObservableCollection<BridgeInfo> Bridges { get; } = new();
-    public ObservableCollection<BridgeFollow> Follows { get; } = new();
     public ObservableCollection<BridgeFeedSubscription> Subscriptions { get; } = new();
 
     /// <summary>When set, <see cref="LoadAsync"/> scopes <see cref="Bridges"/> to just
@@ -60,7 +58,7 @@ public partial class BridgesViewModel : ViewModelBase
                 var keep = SingleBridgeId is { } only
                     ? b.Id == only
                     : FaunaFfiMethods.IsUnifiedBridgesPageBridge(b.Id);
-                if (keep) Bridges.Add(b);
+                if (keep) Bridges.Add(await WithCardReadsAsync(b));
             }
 
             // A single-bridge scope always yields exactly one card. When the provider
@@ -203,53 +201,329 @@ public partial class BridgesViewModel : ViewModelBase
         }
     }
 
-    // ── Bridge Follows ──
+    // ── Follow requests (bridges.md § Follow requests) ──
 
-    [RelayCommand]
-    private async Task LoadFollowsAsync(string bridgeId)
+    /// <summary>The per-bridge lists a linked card paints — its follows (bridges.md
+    /// § Follows) and the follow requests waiting on it (§ Follow requests) — read with
+    /// the list, each only when the provider declares it, so the card paints them with
+    /// the rest of its row (apple's <c>BridgeManagerVM.refresh</c> reads both in the same
+    /// pass). A failed read shows on <c>error-message</c> and the card paints that
+    /// section with no rows.</summary>
+    private async Task<BridgeInfo> WithCardReadsAsync(BridgeInfo bridge)
     {
-        SelectedBridgeId = bridgeId;
-        ErrorMessage = null;
+        if (!bridge.Linked) return bridge;
         try
         {
-            Follows.Clear();
-            foreach (var f in await _rpc.BridgesListFollowsAsync(bridgeId))
-                Follows.Add(f);
-        }
-        catch (Exception ex) { ShowError(ex); }
-    }
-
-    [RelayCommand]
-    private async Task AddFollowAsync(string idAndPetname)
-    {
-        if (SelectedBridgeId is null) return;
-        var parts = idAndPetname.Split('|', 2);
-        var id = parts[0].Trim();
-        var petname = parts.Length > 1 ? parts[1].Trim() : null;
-        ErrorMessage = null;
-        try
-        {
-            await _rpc.BridgesAddFollowAsync(SelectedBridgeId, id, petname);
-            await LoadFollowsAsync(SelectedBridgeId);
+            if (bridge.SupportsFollows)
+                bridge = bridge with { Follows = await _rpc.BridgesListFollowsAsync(bridge.Id) };
+            if (bridge.SupportsFollowRequests)
+                bridge = bridge with { FollowRequests = await _rpc.BridgesListFollowRequestsAsync(bridge.Id) };
         }
         catch (Exception ex)
         {
-            ShowSourceRefusalOrError(ex, SelectedBridgeId, FfiFeedSourceOperation.Follow, id);
+            ShowError(ex);
         }
+        return bridge;
     }
 
-    [RelayCommand]
-    private async Task RemoveFollowAsync(string followId)
+    /// <summary><c>bridge-follow-request-approve</c> / <c>-refuse</c>: answer one request
+    /// by the id its row carries, then re-read — non-optimistic, no confirm (bridges.md
+    /// § Follow requests → Layout, Where logic lives).</summary>
+    public async Task AnswerFollowRequestAsync(string bridgeId, string id, bool approve)
     {
-        if (SelectedBridgeId is null) return;
         ErrorMessage = null;
         try
         {
-            await _rpc.BridgesRemoveFollowAsync(SelectedBridgeId, followId);
-            await LoadFollowsAsync(SelectedBridgeId);
+            await _rpc.BridgesAnswerFollowRequestAsync(bridgeId, id, approve);
+            await LoadAsync();
+        }
+        catch (Exception ex)
+        {
+            ShowError(ex);
+        }
+    }
+
+    // ── Bridge Follows (bridges.md § Follows, § User actions) ──
+    //
+    // Per bridge, off the card's own row: the follows ride BridgeInfo.Follows (read in
+    // WithCardReadsAsync), and each write re-reads the list — non-optimistic, like the
+    // settings and the follow requests.
+
+    /// <summary><c>bridge-add-follow-button</c>: follow <paramref name="id"/> (the external
+    /// id; ActivityPub's is the remote actor URL) with an optional nickname on
+    /// <paramref name="bridgeId"/>, then re-read. A typed guardian refusal is recorded
+    /// as that follow's own triple, never the form's buffers (rule (d)).</summary>
+    public async Task AddFollowAsync(string bridgeId, string id, string? petname)
+    {
+        id = id.Trim();
+        if (id.Length == 0) return;
+        petname = string.IsNullOrWhiteSpace(petname) ? null : petname.Trim();
+        ErrorMessage = null;
+        try
+        {
+            await _rpc.BridgesAddFollowAsync(bridgeId, id, petname);
+            await LoadAsync();
+        }
+        catch (Exception ex)
+        {
+            ShowSourceRefusalOrError(ex, bridgeId, FfiFeedSourceOperation.Follow, id);
+        }
+    }
+
+    /// <summary><c>bridge-follow-remove</c>: unfollow one row's follow (idempotent), then
+    /// re-read.</summary>
+    public async Task RemoveFollowAsync(string bridgeId, string followId)
+    {
+        ErrorMessage = null;
+        try
+        {
+            await _rpc.BridgesRemoveFollowAsync(bridgeId, followId);
+            await LoadAsync();
         }
         catch (Exception ex) { ShowError(ex); }
     }
+
+    // ── The admin's hosted plugins (bridges.md § Hosted plugins on this page;
+    //    third-party.md § The runner contract → The install-approval leg). Reference
+    //    painters: tui `apps/fauna-tui/src/bridges.rs::plugin_elements`, android
+    //    `BridgesScreen.kt::PluginsSection`. The rows arrive paint-ready from shared Rust
+    //    (`installed_plugin_text`); this layer only resolves their texts. ──
+
+    /// <summary>Whether the signed-in account is this nest's admin
+    /// (<c>fauna.account.am_i_admin</c>, read by <see cref="LoadPluginsAsync"/>). Fail
+    /// closed: a failed read leaves it false, so the admin section stays hidden — the
+    /// same gate the Admin nav entry reads.</summary>
+    public bool IsAdmin { get; private set; }
+
+    /// <summary>The admin's installed plugins — <c>null</c> until a read has returned, so
+    /// the page paints neither rows nor the empty line before it (the three-state list,
+    /// <c>ui/README.md</c> § List pages).</summary>
+    internal IReadOnlyList<FfiInstalledPlugin>? Plugins { get; private set; }
+
+    /// <summary>True after an install opened its card: the page shows the
+    /// <c>bridges.plugin_install_opened</c> hint until the next install starts.</summary>
+    public bool PluginInstallOpened { get; private set; }
+
+    /// <summary>The plugin whose inline uninstall confirm is open, by install row id.</summary>
+    public string? PluginUninstallArmed { get; private set; }
+
+    /// <summary>Read the admin gate, then — for an admin only, since only an admin may
+    /// list — the installed plugins. A failed list shows on <c>error-message</c> and
+    /// leaves the list unread.</summary>
+    public async Task LoadPluginsAsync()
+    {
+        try
+        {
+            IsAdmin = await _rpc.AmIAdminAsync();
+        }
+        catch (Exception)
+        {
+            IsAdmin = false;
+        }
+        if (!IsAdmin)
+        {
+            Plugins = null;
+            return;
+        }
+        try
+        {
+            Plugins = await _rpc.PluginsListAsync();
+        }
+        catch (Exception ex)
+        {
+            ShowError(ex);
+        }
+    }
+
+    /// <summary><c>bridge-plugin-install-submit</c> — ADMIN: <c>fauna.plugins.install</c>
+    /// with the typed document URL. The nest opens the install card in Connected apps →
+    /// Requests, which the admin answers like any card; the page then shows the hint.
+    /// Returns whether the install was accepted, so the page clears the field only
+    /// then.</summary>
+    public async Task<bool> InstallPluginAsync(string documentUrl)
+    {
+        var url = documentUrl.Trim();
+        if (url.Length == 0) return false;
+        ErrorMessage = null;
+        PluginInstallOpened = false;
+        try
+        {
+            await _rpc.PluginsInstallAsync(url);
+            PluginInstallOpened = true;
+            return true;
+        }
+        catch (Exception ex)
+        {
+            ShowError(ex);
+            return false;
+        }
+    }
+
+    /// <summary><c>bridge-plugin-uninstall</c> — the first press arms the row's inline
+    /// confirm; a press on the armed row runs <c>fauna.plugins.uninstall</c> and re-reads
+    /// the list (non-optimistic).</summary>
+    public async Task PressUninstallPluginAsync(string principalIdHex)
+    {
+        if (PluginUninstallArmed != principalIdHex)
+        {
+            PluginUninstallArmed = principalIdHex;
+            return;
+        }
+        PluginUninstallArmed = null;
+        ErrorMessage = null;
+        try
+        {
+            await _rpc.PluginsUninstallAsync(principalIdHex);
+        }
+        catch (Exception ex)
+        {
+            ShowError(ex);
+            return;
+        }
+        await LoadPluginsAsync();
+    }
+
+    /// <summary>The untagged <i>Keep</i> beside an armed confirm.</summary>
+    public void CancelUninstallPlugin() => PluginUninstallArmed = null;
+
+    /// <summary>The <c>bridge-plugin-publisher</c> text: the shared row's publisher line,
+    /// resolved.</summary>
+    internal static string PluginPublisherText(FfiInstalledPlugin row) => Strings.Resolve(row.publisher);
+
+    /// <summary>The <c>bridge-plugin-status</c> text: the shared row's status lines, top to
+    /// bottom, resolved and joined.</summary>
+    internal static string PluginStatusText(FfiInstalledPlugin row)
+    {
+        var lines = row.status;
+        return string.Join("\n", lines.Select(Strings.Resolve));
+    }
+
+    // ── Every account's plugin settings cards (bridges.md § Hosted plugins on this page;
+    //    third-party.md § The principal model → Hosted principals). One more `bridge-card`
+    //    per installed plugin, composed once in shared Rust (`plugin_card_text`); Connect and
+    //    Disconnect are the connected-apps machine's `bind_plugin` / `revoke_principal`, so
+    //    the bind card waits in Connected apps → Requests, the one approve path. Reference
+    //    painters: tui `bridges.rs::plugin_card_elements`, android
+    //    `BridgesScreen.kt::PluginCard` / `BridgesVM.pressPluginCard`. ──
+
+    private readonly Func<Task<uniffi.fauna_client_connected_apps.IConnectedAppsMachine>>? _cardMachineFactory;
+    private uniffi.fauna_client_connected_apps.IConnectedAppsMachine? _cardMachine;
+
+    /// <summary>Test seam: the connected-apps machine the plugin cards' verbs go through
+    /// (the mock seam cannot build a real one).</summary>
+    internal BridgesViewModel(
+        INestRpcClient rpc,
+        Func<Task<uniffi.fauna_client_connected_apps.IConnectedAppsMachine>> cardMachineFactory)
+        : this(rpc)
+    {
+        _cardMachineFactory = cardMachineFactory;
+    }
+
+    /// <summary>The account's plugin settings cards — <c>null</c> until the read returned
+    /// (the page paints none before it).</summary>
+    internal IReadOnlyList<FfiPluginCard>? PluginCards { get; private set; }
+
+    /// <summary>True after a Connect opened the bind card: the page shows the
+    /// <c>bridges.plugin_bind_opened</c> hint until the next press.</summary>
+    public bool PluginBindOpened { get; private set; }
+
+    /// <summary><c>fauna.plugins.available</c> for this account. A failed read shows on
+    /// <c>error-message</c> and leaves the cards as they were.</summary>
+    public async Task LoadPluginCardsAsync()
+    {
+        try
+        {
+            PluginCards = await _rpc.PluginsAvailableAsync();
+        }
+        catch (Exception ex)
+        {
+            ShowError(ex);
+        }
+    }
+
+    /// <summary>The card's <c>bridge-action-button</c>: <i>Connect</i> while unbound
+    /// (<c>bind_plugin</c> on the install row — the bind card then waits in Connected apps →
+    /// Requests), <i>Disconnect</i> while bound (<c>revoke_principal</c> on this account's
+    /// binding row). The machine's page error, when it set one, is the failure; then the
+    /// cards are re-read (non-optimistic).</summary>
+    internal async Task PressPluginCardAsync(FfiPluginCard card)
+    {
+        ErrorMessage = null;
+        PluginBindOpened = false;
+        try
+        {
+            var machine = _cardMachine ??= await BuildCardMachineAsync();
+            if (card.bound && card.bindingPrincipalIdHex is { } binding)
+                await machine.RevokePrincipal(Convert.FromHexString(binding));
+            else
+                await machine.BindPlugin(Convert.FromHexString(card.principalIdHex));
+            if (machine.Snapshot().error is { } failed)
+            {
+                SetError(Strings.Resolve(failed));
+                return;
+            }
+            if (!card.bound) PluginBindOpened = true;
+        }
+        catch (Exception ex)
+        {
+            ShowError(ex);
+            return;
+        }
+        await LoadPluginCardsAsync();
+    }
+
+    private Task<uniffi.fauna_client_connected_apps.IConnectedAppsMachine> BuildCardMachineAsync() =>
+        _cardMachineFactory is { } factory
+            ? factory()
+            : _rpc.BuildConnectedAppsMachineAsync(new NoCardObserver(), null);
+
+    /// <summary>The bridges page paints the cards from its own re-read, so the machine's
+    /// change notifications have no listener here.</summary>
+    private sealed class NoCardObserver : uniffi.fauna_client_connected_apps.ConnectedAppsObserver
+    {
+        public void OnChanged()
+        {
+        }
+    }
+
+    /// <summary>A plugin card's settings row committed a value: <c>fauna.plugins.set_settings</c>
+    /// for this account's own setting, then the cards are re-read (nest-side clamping means
+    /// the re-read shows the truth, not the typed value).</summary>
+    internal async Task SetPluginSettingAsync(string principalIdHex, BridgeSettingValue value)
+    {
+        ErrorMessage = null;
+        try
+        {
+            await _rpc.PluginsSetSettingAsync(principalIdHex, value);
+        }
+        catch (Exception ex)
+        {
+            ShowError(ex);
+            return;
+        }
+        await LoadPluginCardsAsync();
+    }
+
+    /// <summary>The card's settings as the bridge cards' own rows, for the one settings
+    /// renderer. Unbound there are none.</summary>
+    internal static IReadOnlyList<BridgeSetting> PluginCardSettings(FfiPluginCard card) =>
+        card.settings.Select(BridgeSetting.FromFfi).ToList();
+
+    /// <summary>The card's badge and publisher lines, resolved.</summary>
+    internal static string PluginCardSubtitle(FfiPluginCard card) =>
+        $"{Strings.Resolve(card.badge)}\n{Strings.Resolve(card.publisher)}";
+
+    /// <summary>The <c>bridge-action-button</c> label: <i>Connect</i> or <i>Disconnect</i>.</summary>
+    internal static string PluginCardActionLabel(FfiPluginCard card) =>
+        Strings.Get(card.bound ? "bridges/plugin_disconnect" : "bridges/plugin_connect");
+
+    /// <summary>The <c>bridge-action-button</c>'s attributes, packed into the one HelpText UIA
+    /// gives it: the plugin's <c>client_id</c> (which card is which plugin's) and <c>bound</c>
+    /// (<c>true</c>/<c>false</c>).</summary>
+    internal static string PluginCardActionAttributes(FfiPluginCard card) =>
+        FaunaApp.Core.Helpers.AutomationAttributePack.Pack(
+            ("client_id", card.clientId),
+            ("bound", card.bound ? "true" : "false"));
 
     // ── Bridge Feed Subscriptions ──
 

@@ -215,34 +215,40 @@ def test_an_empty_garbled_localhost_or_single_word_greeting_is_refused(abuse_nes
 # ── Outcome 8 ─────────────────────────────────────────────────────────
 
 
+@pytest.fixture
+def selfclaim_nest(tmp_path_factory, run_seal_helper):
+    """A venue of its own for outcome 8: until the saved domain applies, every
+    probe is an accepted transaction spending the per-IP message budget."""
+    with perimeter_venue(tmp_path_factory, run_seal_helper, label="selfclaim",
+                         claim_code="SELFCL", recipients=()) as nest:
+        yield nest
+
+
 # Not yet marked for the feature: the rule was built 2026-10-13, after the
 # newest image this machine holds, so the witness waits for an image built from
 # a tree that contains it (`docs/features/mail-abuse-refused.md` outcome 8).
-def test_a_greeting_with_the_nests_own_name_is_refused(tmp_path_factory, run_seal_helper):
+def test_a_greeting_with_the_nests_own_name_is_refused(selfclaim_nest):
     """A sending server greeting with a domain this nest hosts mail for is
     refused `554 5.7.0` as an impersonation — even with the greeting-name
     identity check off and the name resolving to the peer, so nothing but the
-    self-claim rule can refuse it — while a foreign name passes the same way.
-    A venue of its own: until the saved domain applies, every probe is an
-    accepted transaction spending the per-IP message budget."""
-    with perimeter_venue(tmp_path_factory, run_seal_helper, label="selfclaim",
-                         claim_code="SELFCL", recipients=()) as nest:
-        port = nest["mail_ports"][25]
-        mail_from = f"someone@{SENDER_DOMAIN}"
-        add_local_domain(nest, HOSTED_DOMAIN)
-        publish(nest, a={HOSTED_DOMAIN: nest["gateway"]})
-        put_spam_policy(nest)
+    self-claim rule can refuse it — while a foreign name passes the same way."""
+    nest = selfclaim_nest
+    port = nest["mail_ports"][25]
+    mail_from = f"someone@{SENDER_DOMAIN}"
+    add_local_domain(nest, HOSTED_DOMAIN)
+    publish(nest, a={HOSTED_DOMAIN: nest["gateway"]})
+    put_spam_policy(nest)
 
-        refused = poll(lambda: mail_from_reply(port, helo=HOSTED_DOMAIN, mail_from=mail_from),
-                       lambda r: not r.startswith("250"),
-                       "a greeting with a hosted domain is refused", nest["diag"])
-        assert refused.startswith("554 5.7.0") and "own name" in refused, (
-            f"a greeting with the nest's own name must be refused `554 5.7.0` as a "
-            f"self-claim; got {refused!r}{nest['diag']()}")
-        accepted = mail_from_reply(port, helo=PEER_NAME, mail_from=mail_from)
-        assert accepted.startswith("250"), (
-            f"a foreign name must pass where the nest's own is refused; got {accepted!r}"
-            f"{nest['diag']()}")
+    refused = poll(lambda: mail_from_reply(port, helo=HOSTED_DOMAIN, mail_from=mail_from),
+                   lambda r: not r.startswith("250"),
+                   "a greeting with a hosted domain is refused", nest["diag"])
+    assert refused.startswith("554 5.7.0") and "own name" in refused, (
+        f"a greeting with the nest's own name must be refused `554 5.7.0` as a "
+        f"self-claim; got {refused!r}{nest['diag']()}")
+    accepted = mail_from_reply(port, helo=PEER_NAME, mail_from=mail_from)
+    assert accepted.startswith("250"), (
+        f"a foreign name must pass where the nest's own is refused; got {accepted!r}"
+        f"{nest['diag']()}")
 
 
 # ── Outcome 9 ─────────────────────────────────────────────────────────
@@ -310,8 +316,12 @@ def test_a_lookup_that_cannot_be_answered_never_refuses_mail(abuse_nest):
         UNANSWERED_NAME,
         UNANSWERED_SENDER,
     ])
-    accepted = mail_from_reply(port, helo=UNANSWERED_NAME,
-                               mail_from=f"someone@{UNANSWERED_SENDER}")
+    # The fake resolver re-reads its records and the bridge may hold the previous
+    # NXDOMAIN answers a moment longer: wait for the SERVFAIL state, then judge it.
+    accepted = poll(lambda: mail_from_reply(port, helo=UNANSWERED_NAME,
+                                            mail_from=f"someone@{UNANSWERED_SENDER}"),
+                    lambda r: r.startswith("250"),
+                    "lookups answered SERVFAIL fail open", nest["diag"])
     assert accepted.startswith("250"), (
         f"lookups answered SERVFAIL must fail open, never refuse; got {accepted!r}"
         f"{nest['diag']()}")
@@ -341,7 +351,8 @@ def test_the_default_blocklist_refuses_a_listed_server_at_the_door(abuse_nest):
         f"got {refused!r}{nest['diag']()}")
 
     publish(nest)
-    admitted = opening()
+    admitted = poll(opening, lambda r: r.startswith("250"),
+                    "a peer the list no longer names is admitted", nest["diag"])
     assert admitted.startswith("250"), (
         f"a peer the default blocklist does not name must be admitted; got {admitted!r}"
         f"{nest['diag']()}")
@@ -350,15 +361,30 @@ def test_the_default_blocklist_refuses_a_listed_server_at_the_door(abuse_nest):
 # ── Outcome 13 ────────────────────────────────────────────────────────
 
 
-def _open_greeted(port: int) -> tuple[socket.socket, bytes]:
+#: How long one connection waits for the server's first words. A late 220 on a
+#: loaded box must not read as "closed unanswered"; only a close (an empty read)
+#: or a reset is that answer, and a silent connection is reported as such.
+GREETING_S = 30.0
+
+
+def _open_greeted(port: int, seen: list | None = None) -> tuple[socket.socket, bytes]:
     """Open a TCP connection to port 25 and read what the server first says:
-    its `220` greeting, or b"" when it closes the connection unanswered."""
-    sock = socket.create_connection(("127.0.0.1", port), timeout=10)
-    sock.settimeout(10)
+    its `220` greeting, or b"" when it closes the connection unanswered. A
+    greeting that has not come within ``GREETING_S`` raises (it is neither a
+    greeting nor a refusal); ``seen`` collects what each attempt observed."""
+    sock = socket.create_connection(("127.0.0.1", port), timeout=GREETING_S)
+    sock.settimeout(GREETING_S)
     try:
         first = sock.recv(512)
-    except (TimeoutError, ConnectionResetError):
+    except ConnectionResetError:
         first = b""
+    except TimeoutError:
+        sock.close()
+        if seen is not None:
+            seen.append(f"no greeting and no close within {GREETING_S:.0f} s")
+        raise
+    if seen is not None:
+        seen.append(first[:60])
     return sock, first
 
 
@@ -404,21 +430,33 @@ def _probe_greeting(port: int) -> bytes:
 # ── Outcome 14 ────────────────────────────────────────────────────────
 
 
-@pytest.mark.feature("mail-abuse-refused")
-def test_one_address_cannot_push_more_than_fifty_messages_an_hour(tmp_path_factory,
-                                                                    run_seal_helper):
-    """From a venue of its own (the budget is the bridge process's), one sending
-    address gets fifty message transactions accepted on one connection and the
-    fifty-first answered `451 4.7.1`."""
+@pytest.fixture
+def msgrate_nest(tmp_path_factory, run_seal_helper):
+    """A venue of its own for the message budget, which is the bridge
+    process's: no other test's transactions may have spent it."""
     with perimeter_venue(tmp_path_factory, run_seal_helper, label="msgrate",
                          claim_code="MSGRAT", recipients=()) as nest:
-        publish(nest)
-        replies = mail_from_replies(nest["mail_ports"][25], helo=PEER_NAME,
-                                    mail_from=f"someone@{SENDER_DOMAIN}", count=51)
-        accepted = [r for r in replies if r.startswith("250")]
-        assert len(accepted) == 50 and len(replies) == 51, (
-            f"fifty transactions from one address must be accepted; got {replies!r}"
-            f"{nest['diag']()}")
-        assert replies[-1].startswith("451 4.7.1"), (
-            f"the fifty-first transaction in an hour must be answered `451 4.7.1`; got "
-            f"{replies[-1]!r}{nest['diag']()}")
+        yield nest
+
+
+@pytest.mark.feature("mail-abuse-refused")
+def test_one_address_cannot_push_more_than_fifty_messages_an_hour(msgrate_nest):
+    """From a venue of its own, one sending address gets fifty message
+    transactions accepted on one connection and the fifty-first answered
+    `451 4.7.1`."""
+    nest = msgrate_nest
+    publish(nest)
+    # The burst starts only once the bridge is greeting under the policy just
+    # written; a first connection that lands mid-reload would read as a refusal.
+    poll(lambda: _probe_greeting(nest["mail_ports"][25]),
+         lambda r: r.startswith(b"220"),
+         "the mail port greets a connection under the published policy", nest["diag"])
+    replies = mail_from_replies(nest["mail_ports"][25], helo=PEER_NAME,
+                                mail_from=f"someone@{SENDER_DOMAIN}", count=51)
+    accepted = [r for r in replies if r.startswith("250")]
+    assert len(accepted) == 50 and len(replies) == 51, (
+        f"fifty transactions from one address must be accepted; got {replies!r}"
+        f"{nest['diag']()}")
+    assert replies[-1].startswith("451 4.7.1"), (
+        f"the fifty-first transaction in an hour must be answered `451 4.7.1`; got "
+        f"{replies[-1]!r}{nest['diag']()}")

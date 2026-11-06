@@ -62,6 +62,9 @@ pytestmark = [
     pytest.mark.windows,
     pytest.mark.macos,
     pytest.mark.ios,
+    # android added: the shared enable_mail_plain preamble is already android-marked
+    # (test_mail_enable_then_mua_round_trip.py); after it the matrix is raw wire.
+    pytest.mark.android,
     # tui added 2026-08-21: the matrix after the enable-mail preamble
     # is pure IMAP/SMTP/CalDAV wire — driver-agnostic — and the preamble is
     # already proven on tui.

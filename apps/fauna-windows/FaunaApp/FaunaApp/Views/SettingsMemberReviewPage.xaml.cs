@@ -64,8 +64,11 @@ public sealed partial class SettingsMemberReviewPage : Page, IAsyncLoadedPage
         _vm.StoreResynced -= RenderState;
     }
 
-    private ConversationsManager Manager =>
-        _clients?.ConvSession?.Manager() ?? ConversationsManagerHost.Instance;
+    /// <summary>Null once the handed-over session is retired (an actor change landed
+    /// before the frame took this page away) — see
+    /// <see cref="ConversationsManagerHost.ManagerFor"/>.</summary>
+    private ConversationsManager? Manager =>
+        ConversationsManagerHost.ManagerFor(_clients?.ConvSession, "member review");
 
     private async void Page_Loaded(object sender, RoutedEventArgs e)
     {
@@ -117,7 +120,8 @@ public sealed partial class SettingsMemberReviewPage : Page, IAsyncLoadedPage
     private async void Remove_Click(object sender, RoutedEventArgs e)
     {
         if (_vm is null || sender is not Button btn || btn.Tag is not byte[] person) return;
-        await _vm.RemoveAsync(person, Manager);
+        if (Manager is not { } manager) return;
+        await _vm.RemoveAsync(person, manager);
         RenderState();
     }
 

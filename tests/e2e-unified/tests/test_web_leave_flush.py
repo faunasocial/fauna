@@ -14,13 +14,34 @@ modeled on `test_windows_window_close_flush.py` /
 one door a script can drive without tearing the page down (a real tab close
 would end the driver session before the assertion could run).
 
+**The window seam makes the verdict the door's own.** The page keeps running
+after a dispatched `pagehide`, exactly like iOS's background door, so the
+process-death argument the native quit legs rest on does not reach it: the
+autosave debounce is re-timed to `AUTOSAVE_WINDOW_MS` for this run
+(`drafts_autosave_window_ms`, which the web driver writes into the page origin's
+`localStorage` for `fauna-wasm`'s `e2eDraftsAutosaveWindowMs`), so it cannot fire
+anywhere in this test and a draft found on the nest can only be the flush's.
+Without the seam this leg raced web's 150 ms test cadence and could pass for the
+wrong reason.
+
 tier_3: a real app + real nest binary.
 """
 import pytest
 
 from clients.ws_rpc_admin_client import WsRpcAdminClient
 
-pytestmark = [pytest.mark.tier_3, pytest.mark.web, pytest.mark.real_conversations]
+#: What the autosave debounce is re-timed to for this run — ten minutes, the
+#: value `test_drafts_sign_out_flush.py` and `test_apple_leave_flush.py` share
+#: (two different values in one selection are refused, so sharing it keeps the
+#: three co-selectable). Nothing waits for it; it is not a wall-clock assertion.
+AUTOSAVE_WINDOW_MS = 600_000
+
+pytestmark = [
+    pytest.mark.tier_3,
+    pytest.mark.web,
+    pytest.mark.real_conversations,
+    pytest.mark.drafts_autosave_window_ms(AUTOSAVE_WINDOW_MS),
+]
 
 
 @pytest.mark.feature("drafts-survive")
@@ -35,10 +56,8 @@ def test_pagehide_forces_conversation_draft_flush(logged_in_app, nest_instance, 
     with WsRpcAdminClient(node_url, actor_id=actor_id, signing_key=signing_key) as dev:
         baseline_blob = dev.call("fauna.drafts.get", {"path": "conversations"}).get("blob")
 
-    # 1. Type a new-thread draft. Web's production debounce
-    # (`autosaveDebounceMs()`) is short under the e2e agent
-    # (`DRAFT_SAVE_DEBOUNCE_E2E_MS`), but we don't wait for it: dispatch
-    # `pagehide` IMMEDIATELY so a landed blob can only be the forced flush.
+    # 1. Type a new-thread draft. The autosave this arms is
+    # `AUTOSAVE_WINDOW_MS` out, so it saves nothing in this test.
     app.conversations.navigate()
     app.driver.click("new-conversation-button")
     app.driver.wait_for("dm-text-field", timeout=10.0)
@@ -51,7 +70,7 @@ def test_pagehide_forces_conversation_draft_flush(logged_in_app, nest_instance, 
     app.driver.eval_js("window.dispatchEvent(new Event('pagehide'))")
 
     # 3. The draft must be on the nest — reachable ONLY via the forced
-    # `pagehide` flush at this point, since no debounce could have fired yet.
+    # `pagehide` flush, since the re-timed debounce cannot fire in this test.
     def _poll_blob():
         import time
 

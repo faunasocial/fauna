@@ -3,9 +3,13 @@ in the user's rooms through the Fauna app signed in on the same device, holding
 no key (``docs/goal/behavior/conversations-oracle.md`` § Done definition, the
 journey item; § What each shell serves).
 
-tui is the custodian: alice's seat on the consent nest hosts her conversations
-engine and serves the account's door at login. A second tui seat (bob) is the
-far member. One journey:
+The app under test is the custodian — tui (on linux, macOS and windows), linux,
+macos or windows, the shells that serve the door here
+(``conversations-oracle.md`` § Implementation status today):
+alice's seat on the consent nest hosts her conversations engine and serves the
+account's door at login. A second seat of the same app (bob) is the far member.
+The test keeps the name of its first column; on the other apps, that app plays
+tui's part throughout. One journey:
 
 - alice holds three rooms, each made the way a user makes it (convention 8): an
   end-to-end 1:1 with bob, a community room bob joins, and a Nostr-bridged room
@@ -28,10 +32,16 @@ far member. One journey:
 - ``thread-room-class`` reads the same on every seat before and after —
   the oracle never moves a room's class.
 
-**The door's path.** The harness isolates every app launch, so the custodian's
-door sits under the tui seat's own private ``XDG_RUNTIME_DIR``; the shell is
-launched with that runtime dir, the place a host on the same session would find
-it (``drivers/cli_mcp.py``).
+**The door's path.** The harness isolates every app launch, so on linux the
+custodian's door sits under the custodian seat's own private ``XDG_RUNTIME_DIR``;
+the shell is launched with that runtime dir, the place a host on the same session
+would find it (``drivers/cli_mcp.py``). On macOS the door sits under the
+custodian launch's ``HOME`` (``Library/Application Support/Fauna``) and
+``XDG_RUNTIME_DIR`` is ignored, so the shell is launched with that ``HOME``; the
+launch keeps its default short home, as the door path has no ``sun_path``
+margin. On windows the door is the per-SID named
+pipe, which both sides derive from the OS user and the account alone, and the
+cli refuses it unless this user serves it.
 
 The catalog page ``docs/features/connected-apps.md`` maps this journey as
 outcome 42 (the coverage contract is not a public text — ``public-texts.md``
@@ -39,9 +49,8 @@ outcome 42 (the coverage contract is not a public text — ``public-texts.md``
 """
 
 import os
-import subprocess
+import sys
 import time
-import urllib.parse
 from pathlib import Path
 
 import pytest
@@ -52,10 +61,16 @@ from helpers import nostr_relay
 from helpers.atproto_consent import (  # noqa: F401 — pytest fixtures adopted by import
     consent_bridge,
     consent_nest,
-    consent_nest_env,
     consent_spa_url,
 )
+from helpers.client_metadata_server import (  # noqa: F401 — pytest fixtures adopted by import
+    CLI_CLIENT_ID,
+    CLI_CLIENT_NAME,
+    cli_metadata,
+    consent_nest_env,
+)
 from helpers.budgets import ORCHESTRATION_STEP_S, RECEIVE_CYCLE_S, RPC_ROUNDTRIP_S
+from i18n.strings import S
 from helpers.principal_session import alice_client
 from helpers.room_seats import (
     MESSAGE_BUDGET_S,
@@ -72,18 +87,15 @@ from helpers.room_seats import (
 )
 from tests.api import conv_api
 
-pytestmark = [pytest.mark.tier_3]
+# `real_conversations`: macOS (like windows, iOS, android) takes the real rail at
+# launch, not by a runtime toggle (`test_bridged_conversation.py`'s same marker).
+pytestmark = [pytest.mark.tier_3, pytest.mark.real_conversations]
 
-_REPO = Path(__file__).resolve().parents[3]
+#: The cli's client identity: the organisation's published document
+#: (`apps/cli.md` § Open decisions 1), which ``cli_metadata`` serves through
+#: the mapped host.
+_CLIENT_ID = CLI_CLIENT_ID
 
-#: The scope the catalog asks for (`fauna_cli::catalog::consent_scope`).
-_CONSENT_SCOPE = (
-    "fauna:feed:read fauna:feed:read:account fauna:identity:op:post.author "
-    "fauna:notifications:read fauna:notifications:write "
-    "fauna:identity:op:profile.author fauna:identity:op:conversation.read "
-    "fauna:identity:op:conversation.send fauna:profile:read"
-)
-_CLIENT_ID = "http://localhost?scope=" + urllib.parse.quote(_CONSENT_SCOPE, safe="")
 
 E2E_FIRST = "hi bob, the end-to-end one"
 COMMUNITY_FIRST = "welcome to the community room"
@@ -93,23 +105,9 @@ SENT = "sent by an assistant through the oracle"
 _MEMBERSHIP_VERBS = ("invite", "remove", "leave", "rename", "member", "transfer", "policy")
 
 
-@pytest.fixture(scope="module")
-def cli_binary():
-    """The device shell, through its build-if-stale recipe (never bare cargo)."""
-    built = subprocess.run(["just", "cli-debug"], cwd=_REPO, capture_output=True, text=True)
-    target = Path(os.environ.get("CARGO_TARGET_DIR") or _REPO / "target")
-    binary = target / "debug" / ("fauna-cli.exe" if os.name == "nt" else "fauna-cli")
-    if built.returncode != 0 or not binary.exists():
-        pytest.fail(
-            f"`just cli-debug` did not build the device shell:\n"
-            f"{built.stdout[-2000:]}\n{built.stderr[-2000:]}"
-        )
-    return str(binary)
-
-
 @pytest.fixture
 def custodian(request, app, consent_nest, consent_bridge):
-    """alice's tui seat on the consent nest — the custodian — with the real
+    """alice's seat on the consent nest — the custodian, the app under test — with the real
     conversations backend addressable and mail enabled through the app's own UI
     (the recipient key a bridged room's rows are sealed to)."""
     from conftest import _login_app_as
@@ -132,20 +130,36 @@ def custodian(request, app, consent_nest, consent_bridge):
 
 @pytest.fixture
 def far_seat(request, consent_nest, custodian):
-    """bob's tui seat — the far member of alice's rooms; he accepts her as a
-    contact so her Welcome is admitted under the default inbox mode."""
-    seat = launch_seat(consent_nest, seat_app_path(request, "tui"), "tui", request)
+    """bob's seat of the same app — the far member of alice's rooms; he accepts
+    her as a contact so her Welcome is admitted under the default inbox mode."""
+    app_name = request.node.callspec.params["app"]
+    seat = launch_seat(consent_nest, seat_app_path(request, app_name), app_name, request)
     conv_api.accept_contact(consent_nest["port"], seat.actor, custodian.actor_hex)
     yield seat
     teardown_seats([seat])
 
 
-def _runtime_dir(seat: Seat) -> str:
-    """The custodian launch's private ``XDG_RUNTIME_DIR`` — the agent socket is
-    ``<runtime>/fauna/sync-agent.sock`` and the door sits beside it."""
-    socket = seat.app.driver.sync_agent_socket
-    assert socket, "the tui seat publishes its agent socket on linux"
-    return os.path.dirname(os.path.dirname(socket))
+def _door_location(seat: Seat) -> dict:
+    """Where the cli finds the custodian's door, as ``CliMcpSession`` keywords.
+    linux and tui: the custodian launch's private ``XDG_RUNTIME_DIR`` — the agent
+    socket is ``<runtime>/fauna/sync-agent.sock`` and the door sits beside it.
+    macOS (the app, and tui, whose darwin launch relocates HOME too): the launch's ``HOME``, whose ``Library/Application Support/Fauna``
+    holds the door (the runtime dir plays no part there). Windows: nothing —
+    the door is the per-SID named pipe, one name per (OS user, account) that the
+    cli derives exactly as the custodian does, with nothing per launch to
+    point it at."""
+    if os.name == "nt":
+        return {}
+    driver = seat.app.driver
+    if sys.platform == "darwin":
+        # The macOS app driver keeps the launch HOME in `_home`; the tui driver
+        # (darwin relocates HOME for it too) keeps it in `_resolved_home`.
+        home = getattr(driver, "_home", None) or getattr(driver, "_resolved_home", None)
+        assert home, "the custodian seat's launch relocated its HOME"
+        return {"user_home": home}
+    socket = driver.sync_agent_socket
+    assert socket, "the custodian seat publishes its agent socket on linux"
+    return {"runtime_dir": os.path.dirname(os.path.dirname(socket))}
 
 
 def _end_to_end_room(alice: Seat, bob: Seat) -> tuple[str, str]:
@@ -226,6 +240,9 @@ def _until_served(cli: CliMcpSession, tool: str, arguments: dict | None = None) 
 
 @pytest.mark.feature("connected-apps")
 @pytest.mark.tui
+@pytest.mark.linux
+@pytest.mark.macos
+@pytest.mark.windows
 def test_the_cli_reads_and_sends_through_tui_as_custodian_until_revoked(
     custodian, far_seat, consent_nest, cli_binary, tmp_path
 ):
@@ -247,9 +264,7 @@ def test_the_cli_reads_and_sends_through_tui_as_custodian_until_revoked(
     assert alice_before == expected, f"alice's rooms are the three classes: {alice_before!r}"
     assert bob_before == {bob_e2e_tid: "end-to-end", bob_community_tid: "community"}, bob_before
 
-    cli = CliMcpSession(
-        cli_binary, consent_nest["url"], tmp_path, runtime_dir=_runtime_dir(alice)
-    )
+    cli = CliMcpSession(cli_binary, consent_nest["url"], tmp_path, **_door_location(alice))
     try:
         cli.initialize()
 
@@ -284,6 +299,12 @@ def test_the_cli_reads_and_sends_through_tui_as_custodian_until_revoked(
             f"typing {code} must open its card. error: {ca.current_error_text()!r}"
         )
         card = ca.request_text(index)
+        # The card names the cli by its published document, and says what the
+        # grant reaches (`apps/cli.md` § Hosting cases).
+        assert CLI_CLIENT_NAME in card, f"the card names the published client: {card!r}"
+        assert S.connected_apps.consent_assistant_reach in card, (
+            f"the cli's card says the grant reaches the assistant: {card!r}"
+        )
         ca.approve_request(index)
         assert ca.current_error_text() == "", ca.current_error_text()
 

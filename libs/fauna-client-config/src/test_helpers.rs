@@ -1114,6 +1114,8 @@ struct FakeBackupInner {
     stale_read: Option<BackupRows>,
     refuse: usize,
     not_ready: bool,
+    gated_reads: usize,
+    gate_reason: String,
     writes: usize,
 }
 
@@ -1192,6 +1194,16 @@ impl FakeBackupStateStore {
     /// Answer every call [`crate::LEDGER_NOT_READY`] (or stop).
     pub fn set_not_ready(&self, not_ready: bool) {
         self.inner.lock().unwrap().not_ready = not_ready;
+    }
+
+    /// Refuse the next `n` state reads with `reason` — the read gate of a
+    /// replica just bound (`account-client-lifecycle.md` § The client-side
+    /// lifecycle → *The first listing*), which lifts once the first listing
+    /// or the escrowed keys land.
+    pub fn gate_next_reads(&self, n: usize, reason: &str) {
+        let mut inner = self.inner.lock().unwrap();
+        inner.gated_reads = n;
+        inner.gate_reason = reason.to_owned();
     }
 
     /// How many writes (list puts and mark merges that moved a row) were
@@ -1283,6 +1295,10 @@ impl BackupStateStore for FakeBackupStateStore {
         let mut inner = self.inner.lock().unwrap();
         if inner.not_ready {
             return Err(StoreError::Load(crate::LEDGER_NOT_READY.into()));
+        }
+        if inner.gated_reads > 0 {
+            inner.gated_reads -= 1;
+            return Err(StoreError::Load(inner.gate_reason.clone()));
         }
         Ok(match inner.stale_read.take() {
             Some(stale) => fold(&stale, source_nest),

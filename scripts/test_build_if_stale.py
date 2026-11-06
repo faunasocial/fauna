@@ -337,3 +337,46 @@ def test_content_key_needs_a_stamp(tmp_path: Path) -> None:
             "--source", str(src), "--", "true"]
     result = subprocess.run(full, capture_output=True, text=True)
     assert result.returncode == 2 and "--content-key" in result.stderr
+
+
+def _module():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("build_if_stale", _SCRIPT)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_windows_bare_bash_never_resolves_to_the_wsl_launcher():
+    """On Windows a bare `bash` goes through CreateProcess, which searches the
+    system directory BEFORE PATH, so it reached C:\\Windows\\System32\\bash.exe,
+    the WSL launcher with no distribution, on GitHub's runners: the Store
+    workflow's recipe-calling runs (2026-11-06, public runs 42147359996,
+    42151589946, 42156080863) died at the first `-- bash -c` build command on
+    both legs, whatever PATH said. The command's bash is resolved over PATH with
+    the Windows directory left out."""
+    mod = _module()
+    seen = {}
+
+    def which(name, path=None):
+        seen["path"] = path
+        return r"C:\Program Files\Git\usr\bin\bash.EXE"
+
+    path = r"C:\Windows\system32;C:\Windows;C:\Program Files\Git\usr\bin;C:\tools"
+    got = mod.resolve_program("bash", nt=True, path=path, system_root=r"C:\WINDOWS", which=which)
+    assert got == r"C:\Program Files\Git\usr\bin\bash.EXE"
+    assert seen["path"] == r"C:\Program Files\Git\usr\bin;C:\tools"
+
+
+def test_resolve_program_leaves_everything_else_alone():
+    mod = _module()
+
+    def which(name, path=None):
+        raise AssertionError("not consulted")
+
+    assert mod.resolve_program("bash", nt=False, path="", system_root="", which=which) == "bash"
+    assert mod.resolve_program("cmd", nt=True, path="", system_root="C:\\Windows", which=which) == "cmd"
+    assert mod.resolve_program("/usr/bin/bash", nt=True, path="", system_root="C:\\Windows", which=which) == "/usr/bin/bash"
+    none = mod.resolve_program("bash", nt=True, path=r"C:\Windows\system32", system_root=r"C:\Windows",
+                               which=lambda name, path=None: None)
+    assert none == "bash"

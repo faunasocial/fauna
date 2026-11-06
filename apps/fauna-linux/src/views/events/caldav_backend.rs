@@ -304,7 +304,11 @@ mod tests {
             event_count: 0,
             created_at: 0,
         };
-        let row = calendar_row_from_entry(&entry, &DavRecipientKeys::derive(&MSEK)).expect("row");
+        let row = calendar_row_from_entry(
+            &entry,
+            &DavRecipientKeys::derive(fauna_client_caldav::DavKind::Calendar, &MSEK),
+        )
+        .expect("row");
         assert_eq!(row.name, "Work");
         assert_eq!(row.id, hex::encode([9u8; 32]));
     }

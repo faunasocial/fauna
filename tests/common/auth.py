@@ -3,10 +3,12 @@
 import atexit
 import http.client
 import ipaddress
+import socket
 import ssl
 import struct
 import time
 import urllib.request
+from urllib.parse import urlsplit
 
 # Nest ports known to serve HTTPS (their always-live self-signed floor cert) on
 # their API listener, rather than the usual plain-HTTP `FAUNA_INSECURE_DISABLE_TLS`
@@ -165,7 +167,32 @@ def _install_floor_cert_opener() -> None:
     urllib.request.install_opener(
         urllib.request.build_opener(_FloorCertHTTPSHandler()),
     )
+    _grant_requests_floor_cert()
     _opener_installed = True
+
+
+def _grant_requests_floor_cert() -> None:
+    """The same grant for ``requests``, which rides urllib3 and never consults
+    urllib's installed opener: every adapter send to a marked loopback nest
+    goes unverified, everything else as the caller asked. Only the default
+    ``verify=True`` is relaxed — a dial naming its own trust (``verify=<CA
+    bundle>``) is the negative-control escape hatch, as ``context=`` is
+    urllib's. Measured 2026-10-23 under ``--nest docker``: the export, custody
+    and mail-export modules each met the floor cert bare through ``requests``."""
+    try:
+        from requests.adapters import HTTPAdapter
+    except ImportError:
+        return
+    plain_send = HTTPAdapter.send
+
+    def send(self, request, *args, verify=True, **kwargs):
+        if verify is True and _is_floor_cert_authority(
+            request.url.partition("://")[2].partition("/")[0]
+        ):
+            verify = False
+        return plain_send(self, request, *args, verify=verify, **kwargs)
+
+    HTTPAdapter.send = send
 
 
 def ws_sslopt(url: str) -> dict | None:
@@ -231,6 +258,113 @@ def upstream_tls_context(url: str) -> ssl.SSLContext | None:
     if _is_floor_cert_authority(authority):
         return ssl._create_unverified_context()
     return ssl.create_default_context()
+
+
+# ── SPKI pins per authority — trusting a floor cert without turning
+# verification off ───────────────────────────────────────────────────────────
+#
+# Everything above RELAXES verification for a marked loopback nest. A pin is the
+# other posture, and the one a same-box app holds: the nest's self-signed floor
+# is trusted because its leaf's SubjectPublicKeyInfo hashes to a value the
+# caller learned out of band, per authority (`nest/common.md` § Same-box reach:
+# "SPKI-pinned per authority, so a distinct loopback port is trusted
+# identically"; `transport-trust.md` § Transport trust). No chain is validated —
+# the floor chains to nothing — and nothing but that one key is accepted: a leaf
+# whose SPKI differs is refused before one application byte is written, so the
+# bearer an authenticated upgrade carries in its subprotocol header never
+# reaches a listener the pin does not name.
+#
+# Recorded by the caller that read the pin (`helpers/windows_caldav_nest.py`
+# reads it off the nest's own `<data_dir>/acme/fullchain.pem`); consulted by the
+# WS-RPC clients' dial (`clients/_ws_rpc_core.py::_create_ws`), where a pin
+# outranks `mark_tls_nest`'s relaxation for its authority. The caller drops it
+# with the nest (`unpin_nest_spki`), because a port outlives its nest.
+_SPKI_PINS: dict[str, str] = {}
+
+
+class SpkiPinMismatch(ssl.SSLError):
+    """A pinned authority served a leaf whose SPKI is not the pinned one."""
+
+
+def _authority_key(url_or_authority: str) -> str | None:
+    """``host:port`` for a URL or a bare authority — lowercased, an IPv6 host
+    bracketed, the scheme's default port filled in for ``https``/``wss`` —
+    or ``None`` when no port can be named."""
+    target = url_or_authority if "://" in url_or_authority else "//" + url_or_authority
+    parts = urlsplit(target)
+    host = parts.hostname
+    port = parts.port or (443 if parts.scheme in ("https", "wss") else None)
+    if host is None or port is None:
+        return None
+    if ":" in host:
+        host = f"[{host}]"
+    return f"{host}:{port}"
+
+
+def pin_nest_spki(authority: str, spki_sha256_hex: str) -> None:
+    """Pin ``authority`` (``host:port``) to the leaf SPKI ``spki_sha256_hex``
+    (lowercase hex of ``sha256(SubjectPublicKeyInfo)``, `helpers/tls_spki.py`)."""
+    key = _authority_key(authority)
+    if key is None:
+        raise ValueError(f"cannot pin {authority!r}: no host:port to key it on")
+    _SPKI_PINS[key] = spki_sha256_hex.lower()
+
+
+def unpin_nest_spki(authority: str) -> None:
+    """Drop ``authority``'s pin, if any."""
+    key = _authority_key(authority)
+    if key is not None:
+        _SPKI_PINS.pop(key, None)
+
+
+def pinned_spki(url_or_authority: str) -> str | None:
+    """The SPKI pinned for the authority of ``url_or_authority``, or ``None``."""
+    key = _authority_key(url_or_authority)
+    return _SPKI_PINS.get(key) if key is not None else None
+
+
+def open_pinned_tls(url: str, timeout: float) -> ssl.SSLSocket | None:
+    """A connected TLS socket to ``url``'s authority whose leaf SPKI equals the
+    pin, or ``None`` when ``url`` is not ``https``/``wss`` or its authority
+    carries no pin (the caller then dials as it always has).
+
+    The handshake asks for no chain validation because the pin compare below
+    IS the trust decision — the same term the apps' trust callback accepts a
+    floor cert on (`spki == pin`) — and it runs before this function returns,
+    so no caller can write a byte over an unchecked session. Raises
+    :class:`SpkiPinMismatch` naming the authority and both values.
+    """
+    if url.partition("://")[0] not in ("https", "wss"):
+        return None
+    key = _authority_key(url)
+    pin = _SPKI_PINS.get(key) if key is not None else None
+    if pin is None:
+        return None
+    from helpers.tls_spki import leaf_of, spki_sha256_hex
+
+    parts = urlsplit(url)
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE  # replaced by the SPKI compare below, never skipped
+    raw = socket.create_connection((parts.hostname, parts.port or 443), timeout=timeout)
+    try:
+        tls = ctx.wrap_socket(raw, server_hostname=parts.hostname)
+    except BaseException:
+        raw.close()
+        raise
+    try:
+        served = spki_sha256_hex(leaf_of(tls))
+    except BaseException:
+        tls.close()
+        raise
+    if served != pin:
+        tls.close()
+        raise SpkiPinMismatch(
+            f"{key} served a leaf whose SPKI is {served}, not the pinned {pin} — "
+            "refused before the upgrade (a different nest holds this port, or the "
+            "floor key rotated since the pin was read)"
+        )
+    return tls
 
 
 def port_base_url(port: int, host: str | None = None) -> str:
@@ -1376,14 +1510,11 @@ def create_folder_snapshot(
 
     ``device_id`` (hex string, rides as raw bytes) attributes the snapshot to
     the capturing device — omitted, the snapshot is nest-side "unattributed"
-    (``device_id: None`` in ``fauna.filesync.snapshot.get``'s reply). Every
-    apple/windows single-file-restore client reads ``snapshot.deviceId`` to
-    key the download's decrypt, so an unattributed snapshot silently can't be
-    downloaded through that path (found via `test_download_single_file_bytes_
-    roundtrip`/`test_snapshot_file_download_button_downloads_sealed_bytes`
-    failing on macOS/iOS with zero error surfaced — a guard-let on a nil
-    deviceId, not a rendering or FFI bug). Pass the seeding device's id here
-    so seeded snapshots are attributed like a real client-created one."""
+    (``device_id: None`` in ``fauna.filesync.snapshot.get``'s reply), which
+    every app must still download: the per-file walk runs as the DOWNLOADING
+    seat's own device id on all of them, never the snapshot's owner (apple read
+    the owner's until 2026-10-22, so an unattributed seed went red there alone).
+    Pass the seeding device's id when a test is about attribution itself."""
     payload: dict = {"folder": folder}
     if device_id is not None:
         payload["device_id"] = bytes.fromhex(device_id)
@@ -1509,14 +1640,34 @@ def seed_snapshot_with_file_bytes(
 
 
 def mint_token_via_handshake(base: str, sk) -> str:
+    """The bearer string of :func:`handshake_via_ws`."""
+    return handshake_via_ws(base, sk)["token"]
+
+
+def mint_and_hold_token(base: str, sk) -> str:
+    """:func:`mint_token_via_handshake`, and hold the bearer as the actor's
+    process-wide harness sign-in (``clients.ws_rpc_admin_client.remember_bearer``),
+    so the actor's first ``WsRpcAdminClient`` reuses it instead of spending the
+    anonymous ``fauna.auth.challenge`` budget on a second sign-in
+    (``testing.md`` § Default app and nest mode, the shipped-limit fit rule)."""
+    from clients.ws_rpc_admin_client import remember_bearer
+
+    reply = handshake_via_ws(base, sk)
+    remember_bearer(
+        base, bytes(sk.verify_key).hex(), reply["token"], reply["token_id"], reply["expires_in"]
+    )
+    return reply["token"]
+
+
+def handshake_via_ws(base: str, sk) -> dict:
     """Mint a bearer over the pre-identity WS-RPC ``fauna.auth.handshake`` kind —
     the replacement for the legacy HTTP ``POST /api/v1/auth/token`` direct-auth
     mint (``transport.md`` § Pre-identity; ``api-layers.md`` § auth). Reads the
     nest's identity off the connection first and signs the tagged, nest-bound
     handshake message (``common.sig_domain``; ``login.md`` § Binding the
     nest). The nest mints with the same side effects (lockout / private-nest
-    reject). ``sk`` is a PyNaCl ``SigningKey``. Returns the opaque bearer
-    string."""
+    reject). ``sk`` is a PyNaCl ``SigningKey``. Returns the ``HandshakeReply``
+    (``token``, ``token_id``, ``expires_in``, …)."""
     import secrets
 
     from clients.ws_rpc_anon_client import WsRpcAnonClient
@@ -1538,8 +1689,7 @@ def mint_token_via_handshake(base: str, sk) -> str:
             "client_nonce": client_nonce,
             "nest_id": nest_id.hex(),
         }
-        reply = anon.call("fauna.auth.handshake", payload)
-    return reply["token"]
+        return anon.call("fauna.auth.handshake", payload)
 
 
 def create_actor_and_register(
@@ -1596,8 +1746,9 @@ def create_actor_and_register(
         )
 
     # Mint an auth token over the WS-RPC `fauna.auth.handshake` kind (replaces
-    # the retired HTTP `POST /api/v1/auth/token`).
-    token = mint_token_via_handshake(base, sk)
+    # the retired HTTP `POST /api/v1/auth/token`), held as the actor's harness
+    # sign-in so its first admin client does not sign in again.
+    token = mint_and_hold_token(base, sk)
 
     return {
         "signing_key": sk,
@@ -1617,7 +1768,7 @@ def register_same_actor_on(port: int, actor: dict, *, admin_signing_key) -> dict
     a post's id on one nest before the post exists on the other.
     """
     register_user(port, actor["actor_id_hex"], admin_signing_key=admin_signing_key)
-    token = mint_token_via_handshake(port_base_url(port), actor["signing_key"])
+    token = mint_and_hold_token(port_base_url(port), actor["signing_key"])
     return {**actor, "token": token}
 
 
@@ -1687,7 +1838,7 @@ def register_handled_actor(
     # Mint an auth token over the WS-RPC `fauna.auth.handshake` kind (replaces
     # the retired HTTP `POST /api/v1/auth/token`); same direct-auth contract as
     # create_actor_and_register's token step.
-    token = mint_token_via_handshake(base, sk)
+    token = mint_and_hold_token(base, sk)
     return {
         "signing_key": sk,
         "actor_id_hex": actor_id_hex,

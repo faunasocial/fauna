@@ -185,6 +185,13 @@ public sealed partial class DmComposeBar : UserControl
     /// </summary>
     internal void SetCapabilities(uniffi.fauna_conversations.ThreadCapabilities caps)
     {
+        // `can_send` (shared Rust): false on an archive thread (a record of the past)
+        // and on a bridged room no bridge serves. The body and send button stay in
+        // view, readable and never writable (conversations.md § Element IDs: "stay in
+        // view, disabled — no new id"); the e2e driver reads UIA IsEnabled. Programmatic
+        // draft seeding (MessageText) still works — only IsReadOnly blocks SetText.
+        MessageBox.IsEnabled = caps.canSend;
+        SendButton.IsEnabled = caps.canSend;
         AttachButton.IsEnabled = caps.supportsAttachments;
         TopicToggleButton.IsEnabled = caps.supportsSubject;
         Toolbar.SetToolbarEnabled(caps.supportsMarkdown);

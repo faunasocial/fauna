@@ -17,8 +17,28 @@
 //! unit. The rule is the discipline, not the helper: a new pass step that
 //! loops over rows without breathing re-creates the stall.
 
+use std::cell::Cell;
+
+thread_local! {
+    /// Breaths taken on this thread — the pass driver's way to tell a pass
+    /// that breathed from one waiting on the network (`breaths_taken`).
+    static BREATHS: Cell<u64> = const { Cell::new(0) };
+}
+
 /// One scheduler yield. Returns `Pending` exactly once (waking itself), so a
 /// test can count the breaths a pass takes by polling it by hand.
 pub async fn pass_breath() {
+    BREATHS.with(|n| n.set(n.get().wrapping_add(1)));
     tokio::task::yield_now().await;
+}
+
+/// How many breaths this thread has taken. The pass driver reads it around a
+/// poll of the pass: a `Pending` poll across which it moved is a breath, the
+/// point at which a put parked behind the pass is re-asked for its tip
+/// (`account-client-lifecycle.md` § The client-side lifecycle, the pump
+/// bullet → *Commands and passes*, the tip wait). Per thread because the pass
+/// and its driver share one — the store thread, or the web host's task.
+#[cfg(feature = "account-driver")]
+pub(crate) fn breaths_taken() -> u64 {
+    BREATHS.with(Cell::get)
 }

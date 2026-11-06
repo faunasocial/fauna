@@ -452,6 +452,28 @@ public class AdminUsersViewModelTests
 
         Assert.False(vm.Users[0].EvictionActive);
         Assert.True(vm.Users[1].EvictionActive);
+        Assert.False(vm.Users[0].CanRestore);
+        Assert.True(vm.Users[1].CanRestore);
+    }
+
+    [Fact]
+    public async Task DeletingRow_OffersNoRestore_NoEvict_NoSuspend()
+    {
+        // admin-users-cancel-eviction-button: once the ladder has reached `deleting`
+        // the row still has an eviction row but the shared decision refuses restore.
+        var rpc = SeededRpc();
+        rpc.NextAdminUsers = new[]
+        {
+            MockNestRpcClient.MakeAdminUser(AdminActor, "free", "joiner",
+                eviction: MockNestRpcClient.MakeAdminEviction(status: "deleting")),
+        };
+        rpc.NextAdminUsersTotal = 1;
+        var vm = new AdminUsersViewModel(rpc);
+        await vm.LoadCommand.ExecuteAsync(null);
+
+        Assert.False(vm.Users[0].CanRestore);
+        Assert.False(vm.Users[0].CanEvict);
+        Assert.False(vm.Users[0].CanSuspend);
     }
 
     [Fact]
@@ -675,6 +697,61 @@ public class AdminUsersViewModelTests
         int list = calls.LastIndexOf("AdminUsersList");
         Assert.True(create >= 0 && list > create, $"expected a users refetch after admit; calls=[{string.Join(",", calls)}]");
         Assert.Null(vm.ActionError);
+    }
+
+    // ── Admit: the guardian picker and its band (family-safety.md § The guardianship
+    //    link, *Set at admission*; account-age-band.md § Age-band surfaces) ──
+
+    private static readonly byte[] AdmitGuardian = Enumerable.Repeat((byte)0x42, 32).ToArray();
+
+    [Fact]
+    public async Task AdmitUser_WithAGuardianAndBand_SendsBothToUsersCreate()
+    {
+        var rpc = SeededRpc();
+        var vm = new AdminUsersViewModel(rpc);
+        await vm.LoadCommand.ExecuteAsync(null);
+        vm.AdmitActorInput = JoinerActor;
+        vm.AdmitHandleInput = "ward";
+        vm.AdmitTierDraft = "free";
+        vm.AdmitGuardianActor = AdmitGuardian;
+        Assert.True(vm.AdmitAgeBandEnabled, "the band select opens once a guardian is picked");
+        vm.AdmitAgeBand = "13-15";
+
+        await vm.AdmitUserCommand.ExecuteAsync(null);
+
+        Assert.Equal(AdmitGuardian, rpc.LastUsersCreate!.Value.guardianActor);
+        Assert.Equal("13-15", rpc.LastUsersCreate!.Value.ageBand);
+        Assert.Null(vm.ActionError);
+    }
+
+    [Fact]
+    public async Task AdmitUser_DefaultsToNoGuardianAndSendsNoBand()
+    {
+        var rpc = SeededRpc();
+        var vm = new AdminUsersViewModel(rpc);
+        await vm.LoadCommand.ExecuteAsync(null);
+        vm.AdmitActorInput = JoinerActor;
+        vm.AdmitHandleInput = "adult";
+        Assert.False(vm.AdmitAgeBandEnabled, "no guardian: the band select is disabled");
+
+        await vm.AdmitUserCommand.ExecuteAsync(null);
+
+        Assert.Null(rpc.LastUsersCreate!.Value.guardianActor);
+        Assert.Null(rpc.LastUsersCreate!.Value.ageBand);
+    }
+
+    [Fact]
+    public async Task ClearingTheAdmitGuardian_ResetsTheBandAndDisablesIt()
+    {
+        var vm = new AdminUsersViewModel(SeededRpc());
+        await vm.LoadCommand.ExecuteAsync(null);
+        vm.AdmitGuardianActor = AdmitGuardian;
+        vm.AdmitAgeBand = "u13";
+
+        vm.AdmitGuardianActor = null;
+
+        Assert.Equal(uniffi.fauna_ffi.FaunaFfiMethods.AgeBandNotSetValue(), vm.AdmitAgeBand);
+        Assert.False(vm.AdmitAgeBandEnabled);
     }
 
     [Fact]

@@ -26,10 +26,11 @@ The second journey witnesses the lock's other edge (``devices.md`` § The locked
 state; ``sessions`` catalog outcome 24): a locked app stops retrying, and signs
 back in by itself once the lock ends. The lock is a hard-coded 24 hours, so the
 nest's test hook (``account_lock_test_hook.rs``) arranges a NEAR unlock time —
-set while the relaunched app's sign-in is parked at the gate, so the refusal the
-app meets carries it — and counts every sign-in it refuses as locked, which is
-the outside witness for "stops retrying". No app hook: the app's own one
-scheduled refresh comes due inside the run.
+armed before the relaunch and written at the gate by the relaunched app's own
+first sign-in, so the refusal the app meets carries it — and counts every
+sign-in it refuses as locked, which is the outside witness for "stops
+retrying". No app hook: the app's own one scheduled refresh comes due inside
+the run.
 """
 from __future__ import annotations
 
@@ -41,26 +42,13 @@ import pytest
 from clients._ws_rpc_core import RpcCallError
 from common.launch_harness import reached_authenticated_app
 from clients.ws_rpc_admin_client import WsRpcAdminClient
-from helpers.app_surface import app_name, skip_unbuilt
-from helpers.rpc_hold import arm_rpc_hold, release_rpc_hold, wait_for_held_rpc
+from helpers.app_surface import require_surface
+from helpers.relaunch import pin_store_across_relaunch
 from helpers.succession_ceremony import SECRET_HEX_LEN, wait_for_successor_actor
 from helpers.waiting import wait_until
 from i18n.strings import S
 
 pytestmark = pytest.mark.tier_3
-
-
-def _require_locked_surface(driver) -> None:
-    """Convention 7: tui is the lead app (built first); linux, web and android have
-    followed; the other three route ``FfiError::AccountLocked`` to this surface
-    in their trickle-down leg."""
-    if app_name(driver) not in ("tui", "linux", "web", "android"):
-        skip_unbuilt(
-            driver,
-            surface="locked launch surface",
-            detail="tui leads; this app paints launch-account-locked-notice in its trickle-down leg",
-            tracked="docs/goal/behavior/devices.md § Implementation status today (gap 4)",
-        )
 
 
 def _verify_refusal(nest_url: str, user: dict) -> str | None:
@@ -84,14 +72,13 @@ def test_lock_then_the_locked_surface_then_the_kit_signs_you_in_as_the_successor
 ):
     app, user = succeedable_app
     driver = app.driver
-    _require_locked_surface(driver)
     nest_url = nest_instance["url"]
     old_actor = user["actor_id_hex"]
 
     # ── 0. The kit, minted while the owner can still sign in ──────────────
     # The credential the thief does not hold: without one minted earlier, a
     # locked account has no remedy at all.
-    app.settings.open_recovery_kit_or_skip()
+    app.settings.open_recovery_kit()
     app.settings.create_recovery_kit()
     app.wait_for("recovery-kit-secret-display", timeout=30.0)
     held = app.settings.recovery_kit_secret()
@@ -160,15 +147,12 @@ def test_lock_then_the_locked_surface_then_the_kit_signs_you_in_as_the_successor
     )
 
 
-#: The silent challenge's mint — the request every app launch signs in with.
-VERIFY_KIND = "fauna.auth.verify"
-
 #: How long the arranged lock lasts, counted from the moment the relaunched
-#: app's sign-in is parked at the gate (not from the relaunch, whose latency is
-#: unknowable). It must cover the refusal reaching the app and the locked notice
-#: painting — so a slow box lengthens what happens INSIDE the window, never moves
-#: the window itself — and it is long against any reconnect back-off, so an app
-#: that kept retrying would be refused again inside it.
+#: app's first sign-in reaches the nest's gate (not from the relaunch, whose
+#: latency is unknowable). It must cover the refusal reaching the app and the
+#: locked notice painting — so a slow box lengthens what happens INSIDE the
+#: window, never moves the window itself — and it is long against any reconnect
+#: back-off, so an app that kept retrying would be refused again inside it.
 LOCK_WINDOW_S = 45
 
 #: The app's refresh lands a few seconds past ``locked_until``
@@ -177,16 +161,22 @@ LOCK_WINDOW_S = 45
 LAPSE_SIGN_IN_BUDGET_S = LOCK_WINDOW_S + 120
 
 
-def _lock_near(port: int, actor_hex: str, in_secs: int) -> int:
-    """Lock ``actor_hex`` until ``now + in_secs`` on the nest's clock (test
-    hook); return the unlock time the nest wrote."""
+def _lock_at_next_sign_in(port: int, actor_hex: str, in_secs: int) -> None:
+    """Arm a lock of ``actor_hex`` that its next ``fauna.auth.verify`` — the
+    silent challenge's mint, the sign-in every app launch makes — writes at the
+    nest's gate as ``now + in_secs`` (test hook). The window opens at the gate,
+    never while the app is still relaunching: parking the verify and writing the
+    lock from here instead raced the verify's own 5-second client deadline, and
+    a relaunch slower to hand back control than that timed the app out into its
+    offline surface before the lock existed."""
     req = urllib.request.Request(
-        f"http://127.0.0.1:{port}/api/v1/test/account_lock/{actor_hex}?in_secs={in_secs}",
+        f"http://127.0.0.1:{port}/api/v1/test/account_lock/{actor_hex}/at_next_verify"
+        f"?in_secs={in_secs}",
         data=b"",
         method="POST",
     )
     with urllib.request.urlopen(req) as resp:
-        return json.loads(resp.read())["locked_until"]
+        assert json.loads(resp.read())["ok"] is True
 
 
 def _locked_refusals(port: int, actor_hex: str) -> int:
@@ -203,39 +193,21 @@ def test_a_locked_app_stops_retrying_and_signs_back_in_when_the_lock_ends(
 ):
     app, user = succeedable_app
     driver = app.driver
-    _require_locked_surface(driver)
     # The relaunch must come back as this identity, signing itself in from its
     # own store: the store has to survive (the default relaunch hands the app a
     # fresh one), and the injected identity has to have reached it.
-    if not driver.preserve_state_across_relaunch():
-        skip_unbuilt(
-            driver,
-            surface="a client store that can be pinned across a relaunch",
-            detail="the relaunched app would return to a fresh store and never meet the lock",
-            tracked="drivers/http_bridge.py::preserve_state_across_relaunch",
-        )
-    if not driver.relaunch_preserves_injected_identity():
-        skip_unbuilt(
-            driver,
-            surface="a login that survives a relaunch",
-            detail="the relaunched app would return signed out and never meet the lock",
-            tracked="drivers/http_bridge.py::relaunch_preserves_injected_identity",
-        )
+    pin_store_across_relaunch(driver)
+    require_surface(driver, "relaunch-injected-identity")
     port = nest_instance["port"]
     actor = user["actor_id_hex"]
 
     # ── 1. Relaunch into a near lock ──────────────────────────────────────
-    # Armed BEFORE the relaunch: the relaunched app's first sign-in parks at
-    # the gate, and only then is the lock written — so the refusal it meets
-    # carries an unlock time LOCK_WINDOW_S away from a moment the test
-    # observed, whatever the relaunch cost.
-    arm_rpc_hold(port, VERIFY_KIND)
-    try:
-        assert driver.recover(), "the app did not come back up after the relaunch"
-        wait_for_held_rpc(port, VERIFY_KIND)
-        _lock_near(port, actor, LOCK_WINDOW_S)
-    finally:
-        release_rpc_hold(port, VERIFY_KIND)
+    # Armed BEFORE the relaunch and written by the nest when the relaunched
+    # app's first sign-in reaches the gate — so the refusal it meets carries an
+    # unlock time LOCK_WINDOW_S away from that moment, whatever the relaunch
+    # cost.
+    _lock_at_next_sign_in(port, actor, LOCK_WINDOW_S)
+    assert driver.recover(), "the app did not come back up after the relaunch"
 
     # ── 2. Locked, and refused at the gate ────────────────────────────────
     notice = app.sessions.wait_for_locked_notice()

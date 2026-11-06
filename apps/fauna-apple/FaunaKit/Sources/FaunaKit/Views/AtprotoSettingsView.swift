@@ -101,6 +101,13 @@ public struct AtprotoSettingsView: View {
                 if isFullPds {
                     fullPdsSection
                 }
+
+                // Gated on the DELEGATION, not the level (`atproto.md` § Layout
+                // & flow, the delegation paragraph): a held grant renders whole
+                // at every level; the empty state is reachable only at full PDS.
+                if isFullPds || snapshot?.delegation != nil {
+                    delegationSection
+                }
             }
             .padding(24)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -266,17 +273,21 @@ public struct AtprotoSettingsView: View {
 
     private func transitionCardSection(_ card: TransitionCardModel) -> some View {
         let lines = card.lines.map(renderLocalizedText).joined(separator: "\n")
+        // The opt-in names the nest's count of posts a backfill would publish;
+        // the shared machine composes the label, apps render it verbatim.
+        let backfillLabel = renderLocalizedText(card.historyBackfillLabel)
         return VStack(alignment: .leading, spacing: 8) {
             Text(L.atprotoSettings.depthCardHeading).font(.headline)
             Text(lines)
             if card.showHistoryBackfill {
-                Toggle(L.atprotoSettings.historyBackfillLabel, isOn: Binding(
+                Toggle(backfillLabel, isOn: Binding(
                     get: { snapshot?.historyBackfill ?? false },
                     set: { vm.setHistoryBackfill($0) }
                 ))
                 .accessibilityIdentifier(Ids.atprotoHistoryBackfill)
                 .automationActivate(
                     Ids.atprotoHistoryBackfill,
+                    text: { backfillLabel },
                     value: { (snapshot?.historyBackfill ?? false) ? "on" : "off" }
                 ) {
                     vm.setHistoryBackfill(!(snapshot?.historyBackfill ?? false))
@@ -380,7 +391,8 @@ public struct AtprotoSettingsView: View {
         }
         .buttonStyle(.plain)
         .accessibilityIdentifier(id)
-        .automationActivate(id, value: { selected ? "selected" : "unselected" }) {
+        // `state` = active | inactive — the depth rungs' vocabulary, the same on every app.
+        .automationActivate(id, value: { selected ? "active" : "inactive" }) {
             vm.setDidMethod(wire)
         }
     }
@@ -510,7 +522,8 @@ public struct AtprotoSettingsView: View {
             .automationValue(Ids.atprotoAppCredentialsList, text: { "\(snapshot?.credentials.count ?? 0)" })
 
             // The account's external-apps switch lives on the Connected apps page.
-            delegationSection
+            // The authoring-delegation group renders from the page body, outside this
+            // full-PDS-only section (it is gated on the delegation, not the level).
         }
     }
 

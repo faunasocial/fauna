@@ -1,0 +1,120 @@
+# The THIN crate of the fauna-ffi rlib + thin-cdylib split
+# (docs/goal/architecture/build-target-layout-windows.md § UniFFI cdylib
+# rebuild cost (win) → The rlib + thin-cdylib split). Package `fauna-ffi`,
+# lib `fauna_ffi`: the one crate that LINKS the shipped artifacts
+# (`fauna_ffi.dll`, `libfauna_ffi.so`, `libfauna_ffi.a`, the gnullvm
+# `libfauna_ffi.dll.a`), so its cross-checkout cache miss costs a link. Every
+# line of FFI code — with `uniffi.toml` and the tests — is the core package
+# `fauna-ffi-core` in `libs/fauna-ffi/`, but `status_text`, the one export
+# that reads the build stamp (src/status_text.rs: the stamp is read only in
+# the crate that IS the artifact, ui/status.md § State & data shape, the
+# build leg). The core's lib is ALSO
+# named `fauna_ffi`, because UniFFI names every exported symbol after the
+# crate. Two lib crates of one name is deliberate; commands tell them apart
+# by package: `-p fauna-ffi` builds an artifact, `-p fauna-ffi-core` runs the
+# tests.
+[package]
+name = "fauna-ffi"
+description = "The linked UniFFI artifacts of Fauna's native apps (re-exports fauna-ffi-core)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+# The core's features, forwarded name for name, and the same `default`: every
+# artifact build passes its flavor flags HERE (`-p fauna-ffi`), and the code
+# behind each flag is the core's. Kept equal to libs/fauna-ffi/Cargo.toml by
+# tests/e2e-unified/tests/test_ffi_feature_mirror.py, which prints the lines
+# a new core feature needs here. The one addition is the stamp's: this crate's
+# own `status_text` module is compiled under its own `value-format`, so
+# `value-format` also enables `fauna-client-status`, and every forward whose
+# core feature implies `value-format` names this crate's `"value-format"` too
+# — the thin cfg is true exactly when the core's is (the test computes which).
+default = ["store-safe", "payments", "zaps", "p2p-share"]
+account-runtime = ["fauna-ffi-core/account-runtime"]
+accounts-registry = ["fauna-ffi-core/accounts-registry"]
+archive-import = ["fauna-ffi-core/archive-import"]
+atproto-settings = ["fauna-ffi-core/atproto-settings"]
+backup-audit = ["fauna-ffi-core/backup-audit", "value-format"]
+backup-destinations = ["fauna-ffi-core/backup-destinations", "value-format"]
+connected-apps = ["fauna-ffi-core/connected-apps"]
+contact-overlays = ["fauna-ffi-core/contact-overlays", "value-format"]
+conversations-session = ["fauna-ffi-core/conversations-session"]
+custody = ["fauna-ffi-core/custody"]
+deployment-seed = ["fauna-ffi-core/deployment-seed", "value-format"]
+drafts = ["fauna-ffi-core/drafts"]
+e2e-harness = ["fauna-ffi-core/e2e-harness"]
+feed-badge = ["fauna-ffi-core/feed-badge"]
+feed-client = ["fauna-ffi-core/feed-client"]
+feed-manager = ["fauna-ffi-core/feed-manager"]
+feed-rules = ["fauna-ffi-core/feed-rules"]
+file-provider-host = ["fauna-ffi-core/file-provider-host"]
+filter-marks = ["fauna-ffi-core/filter-marks"]
+folders = ["fauna-ffi-core/folders"]
+folders-author = ["fauna-ffi-core/folders-author"]
+host-address = ["fauna-ffi-core/host-address"]
+kids-floor = ["fauna-ffi-core/kids-floor"]
+kids-safe = ["fauna-ffi-core/kids-safe", "value-format"]
+labeler = ["fauna-ffi-core/labeler"]
+labeler-catalog = ["fauna-ffi-core/labeler-catalog"]
+logs = ["fauna-ffi-core/logs"]
+mail-admin = ["fauna-ffi-core/mail-admin"]
+mail-import = ["fauna-ffi-core/mail-import"]
+markdown-authoring = ["fauna-ffi-core/markdown-authoring"]
+member-review = ["fauna-ffi-core/member-review"]
+mime = ["fauna-ffi-core/mime"]
+moderation-badge = ["fauna-ffi-core/moderation-badge"]
+muted-keywords = ["fauna-ffi-core/muted-keywords"]
+nest-rules = ["fauna-ffi-core/nest-rules"]
+nest-trust = ["fauna-ffi-core/nest-trust"]
+nostr-npub-confirm = ["fauna-ffi-core/nostr-npub-confirm"]
+offline-share = ["fauna-ffi-core/offline-share"]
+p2p-share = ["fauna-ffi-core/p2p-share"]
+pairing = ["fauna-ffi-core/pairing"]
+payments = ["fauna-ffi-core/payments"]
+personalization = ["fauna-ffi-core/personalization"]
+profile-client = ["fauna-ffi-core/profile-client"]
+push-subscription = ["fauna-ffi-core/push-subscription"]
+qr-render = ["fauna-ffi-core/qr-render"]
+recovery-aftermath = ["fauna-ffi-core/recovery-aftermath"]
+recovery-ceremony = ["fauna-ffi-core/recovery-ceremony"]
+render = ["fauna-ffi-core/render"]
+rule-editor = ["fauna-ffi-core/rule-editor"]
+search = ["fauna-ffi-core/search"]
+search-client = ["fauna-ffi-core/search-client"]
+search-manager = ["fauna-ffi-core/search-manager"]
+sessions = ["fauna-ffi-core/sessions"]
+snapshots-immediate-delete = ["fauna-ffi-core/snapshots-immediate-delete"]
+spam-threshold-override = ["fauna-ffi-core/spam-threshold-override"]
+store-safe = ["fauna-ffi-core/store-safe", "value-format"]
+subscriptions-author = ["fauna-ffi-core/subscriptions-author"]
+sync-agent-provisioning = ["fauna-ffi-core/sync-agent-provisioning"]
+sync-engine-host = ["fauna-ffi-core/sync-engine-host"]
+sync-prefs = ["fauna-ffi-core/sync-prefs"]
+task-delegation = ["fauna-ffi-core/task-delegation"]
+test-helpers = ["fauna-ffi-core/test-helpers"]
+value-format = ["fauna-ffi-core/value-format", "dep:fauna-client-status"]
+web-content = ["fauna-ffi-core/web-content"]
+zaps = ["fauna-ffi-core/zaps"]
+
+[lib]
+name = "fauna_ffi"
+crate-type = ["staticlib", "cdylib"]
+
+[dependencies]
+# `package =` on the key makes the extern name `fauna_ffi_core`, never this
+# crate's own `fauna_ffi`; defaults off so `--no-default-features --features
+# store-safe` reaches the core exactly as spelled.
+fauna-ffi-core = { package = "fauna-ffi-core", path = "../fauna-ffi", default-features = false }
+# `status_text` (src/status_text.rs), the one export that reads the build
+# stamp: the `commit!()` macro, expanded here because this crate IS the
+# artifact, and the projection it calls (the core's `value-format` enables the
+# same crate with the same feature).
+fauna-build-commit = { path = "../fauna-build-commit" }
+fauna-client-status = { path = "../fauna-client-status", features = ["local-clock"], optional = true }
+# The `uniffi-bindgen` bin below (`cli`).
+uniffi = { workspace = true, features = ["cli"] }
+
+[[bin]]
+name = "uniffi-bindgen"
+path = "uniffi-bindgen.rs"

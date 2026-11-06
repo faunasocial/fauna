@@ -136,7 +136,11 @@ pub mod generation_unkeyable;
 /// this replica's own store.
 #[cfg(feature = "preference-store")]
 pub mod group_authority_revocation;
+/// The group pump leg's store half — the scopes to pull, this device's
+/// endpoints cell, the erased channel the walk runs over.
+pub mod group_pump;
 pub mod group_scope_view;
+pub mod group_set;
 pub mod group_share_rows;
 pub mod group_state_plane;
 /// The host seams' shared vocabulary: the native legs' report shapes and the
@@ -152,6 +156,7 @@ pub mod kind_manifest_rows;
 pub mod linked_leg;
 pub mod mail_import_source_rows;
 pub mod mail_rows;
+pub mod moderation_rows;
 pub mod nostr_confirmation_rows;
 /// The T1 body-rendered browse trigger: the shared intake that turns an app's
 /// "this body was displayed" report into a seen-set membership
@@ -220,6 +225,10 @@ pub mod unkeyed_hold;
 /// (ruling (4)'s decision (f)).
 #[cfg(all(target_arch = "wasm32", feature = "account-driver"))]
 pub mod web_host;
+
+/// The web host's in-band device bind over the session's one socket.
+#[cfg(all(any(target_arch = "wasm32", test), feature = "account-driver"))]
+pub mod web_device_bind;
 
 /// The frontier writer-count ceiling the page loop enforces. Re-exported
 /// because the nest derives the admin-settable `AdminTier::max_devices` bound

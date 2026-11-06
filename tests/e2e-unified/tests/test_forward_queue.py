@@ -33,7 +33,7 @@ feed for the delivered post. No sleep stands in for the outbox worker's pass.
 
 tier_3 (two real `fauna-nest` binaries, the real federation channel between
 them, the real app). tui leads; the other six apps paint the page but do not
-yet render the block — gated in-body as `skip_unbuilt` (convention 7), never
+yet render the block — gated in-body as `require_surface` (convention 7), never
 silently omitted; each app's trickle-down flips its gate.
 """
 from __future__ import annotations
@@ -43,7 +43,7 @@ import subprocess
 import pytest
 
 from common import register_user, start_nest
-from helpers.app_surface import app_name, skip_unbuilt
+from helpers.app_surface import app_name
 from helpers.waiting import wait_until
 from tests.api import ws_api
 
@@ -58,10 +58,6 @@ pytestmark = [
     pytest.mark.android,
 ]
 
-# The apps whose Nests page renders `nests-forward-*`. Each trickle-down adds
-# itself here.
-_DRIVING_APPS = {"tui", "linux", "web", "windows", "android", "macos", "ios"}
-
 # The outbox worker polls every 5 s when idle and backs off 30 s after the
 # first refusal, so the first attempt — and with it the recorded reason — lands
 # within seconds of the post; delivery after the link is a nudge — due at once,
@@ -69,19 +65,6 @@ _DRIVING_APPS = {"tui", "linux", "web", "windows", "android", "macos", "ios"}
 # one worker pass. Generous budgets, since the box is shared.
 _FIRST_ATTEMPT_S = 60.0
 _DELIVERY_S = 90.0
-
-
-def _require_driving_app(driver):
-    """Skip-with-a-reason on an app that paints the Nests page but not the
-    forward-queue block yet."""
-    if app_name(driver) not in _DRIVING_APPS:
-        skip_unbuilt(
-            driver,
-            surface="nests forward-queue block",
-            detail="the shared LinkedNestsSnapshot carries forward_queue and the "
-            "two actions, but this app's Nests shell does not render "
-            "nests-forward-* yet (ui/nests.md § Forward queue)",
-        )
 
 
 def _stop(nest):
@@ -186,7 +169,6 @@ def test_a_refused_forward_shows_on_the_nests_page_and_linking_the_relay_deliver
     nothing (the relay still refuses) → linking the relay FROM THIS PAGE grants
     forwarding on the relay's side and nudges the queue → the post reaches the
     relay's own feed and the block disappears."""
-    _require_driving_app(app.driver)
     world = home_behind_refusing_relay
     _sign_in_to_home(app, request, world)
 
@@ -255,7 +237,6 @@ def test_stop_forwarding_drops_the_queue_and_keeps_the_post(
     """Post → refused → *Stop forwarding these* → the block is gone on the
     next re-entered page, the relay never receives the post, and the post is
     still on the home nest's own feed (only its relay left)."""
-    _require_driving_app(app.driver)
     world = home_behind_refusing_relay
     _sign_in_to_home(app, request, world)
 

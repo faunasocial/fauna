@@ -408,25 +408,10 @@ pub enum SeedRotateConfirmState {
     Ready(Box<fauna_client_admin::SeedRotationConfirmView>),
 }
 
-/// The outside-app sign-in key set's read, as the `admin-nest-oauth-*` section
-/// paints it — mirrors tui's `admin::OauthKeysRead`
-/// (`apps/fauna-tui/src/admin/mod.rs`).
-///
-/// Three honest states, never collapsed into an empty list: "we haven't asked"
-/// and "we couldn't find out" must not read like "no keys", and the forced
-/// arm's confirm can only name what it drops once the set has answered.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub enum OauthKeysRead {
-    /// Not read yet — the section's state until the first read lands.
-    #[default]
-    Unread,
-    /// The set answered (`AdminClient::issuer_key_status_view`); the shared
-    /// folds decide every line painted from it.
-    Ready(fauna_client_admin::IssuerKeyView),
-    /// The read failed — already worded (`oauth_keys_error`), the section's
-    /// reason line. Any read error (e.g. a transport fault) lands here.
-    Failed(String),
-}
+/// The outside-app sign-in key set's read — one owner in `fauna-client-admin`
+/// (tui shares it), re-exported so every `views::admin::OauthKeysRead` path
+/// stays valid.
+pub use fauna_client_admin::OauthKeysRead;
 
 /// The armed forced-rotation confirm (`admin-nest-oauth-confirm-*`): which arm,
 /// and its cost as folded when it was armed — mirrors tui's `ArmedOauthForced`.
@@ -843,6 +828,12 @@ pub fn build_admin_view(client: &Rc<FaunaClient>) -> (gtk::Box, gtk::Box, AdminH
         dns_adding_first_domain,
     ) = build_dns_page(client);
     stack.add_titled(&dns_page, Some("admin-dns"), admin::dns::TITLE);
+    {
+        // `render_admin_dns` leaves the rows alone while the page is off screen,
+        // so a visit re-reads: the reply re-renders them from every cached fetch.
+        let client = Rc::clone(client);
+        dns_records_list.connect_map(move |_| client.fetch_local_domains());
+    }
 
     // --- Aliases sub-page (`admin-aliases`): the admin-tier alias surface —
     // external forwarders (Kind 7) + (deferred) catch-all designation
@@ -888,13 +879,26 @@ pub fn build_admin_view(client: &Rc<FaunaClient>) -> (gtk::Box, gtk::Box, AdminH
         admin::logs_page::TITLE,
     );
 
-    // Entering `admin-logs` re-reads the audit section: it was last read when
-    // the admin shell opened, and admin actions since then are rows it lacks.
+    // Entering `admin-logs` fetches the nest's ring and re-reads the audit
+    // section — once per entry, as tui's page does (`admin/logs.rs`): what the
+    // nest and its helpers logged since the admin last looked is what the page
+    // is for. The ring used to be fetched only at admin login, so a page
+    // entered later showed a snapshot from before the lines it was opened to
+    // read.
     {
         let client = Rc::clone(client);
         stack.connect_visible_child_name_notify(move |s| {
-            if s.visible_child_name().as_deref() == Some("admin-logs") {
-                client.fetch_admin_audit(None);
+            match s.visible_child_name().as_deref() {
+                Some("admin-logs") => {
+                    client.fetch_admin_logs();
+                    client.fetch_admin_audit(None);
+                }
+                // The custody-hosting registry, likewise once per entry: a
+                // member's ask deposited after the admin signed in is exactly
+                // the row the page is opened to see, and a login-time read
+                // never held it.
+                Some("admin-custody-hosting") => client.fetch_custody_hosting(),
+                _ => {}
             }
         });
     }
@@ -1017,12 +1021,12 @@ pub fn build_admin_view(client: &Rc<FaunaClient>) -> (gtk::Box, gtk::Box, AdminH
         &stack,
         ids::ADMIN_NAV_ROW,
         |child| {
-            Some(match child {
+            Some(crate::views::nav_rail::RailRowId::PageKey(match child {
                 "dashboard" => "admin-dashboard",
                 "users" => "admin-users",
                 "settings" => "admin-settings",
                 other => admin_nav.iter().map(|e| e.0).find(|n| *n == other)?,
-            })
+            }))
         },
     );
 
@@ -8070,8 +8074,13 @@ fn build_add_credential_form(client: &Rc<FaunaClient>) -> gtk::Box {
             if fields.is_empty() || fields.iter().any(|f| f.value.trim().is_empty()) {
                 return;
             }
-            // No label input on the add-form, so the provider id is the label.
-            client.dns_put_credentials(pid.clone(), fields, pid);
+            // No label input on the add-form, so the provider's translated
+            // display name is the label (same as Apple, web, android, tui).
+            let label = PROVIDERS
+                .iter()
+                .find(|p| p.id.as_str() == pid)
+                .map_or_else(|| pid.clone(), |p| resolve_i18n(p.display_name_key));
+            client.dns_put_credentials(pid, fields, label);
             reset();
         });
     }
@@ -8215,6 +8224,15 @@ pub fn render_admin_dns(handles: &AdminHandles, client: &Rc<FaunaClient>) {
         handles
             .dns_add_domain_warning
             .set_visible(adding_first_domain);
+    }
+
+    // The rows are domains × (catch-all + role addresses) drop-downs over every
+    // account, built on the UI thread. An admin's sign-in feeds this render several
+    // times with the page off screen, and on a large nest one rebuild held the main
+    // loop past the agent's 25 s (e2e-conventions.md convention 11). Rows nobody can
+    // see wait for the visit: the `connect_map` in `build_admin_view` re-reads.
+    if !handles.dns_records_list.is_mapped() {
+        return;
     }
 
     clear_list_box(&handles.dns_records_list);

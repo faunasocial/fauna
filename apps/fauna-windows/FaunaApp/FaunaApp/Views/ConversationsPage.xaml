@@ -243,17 +243,46 @@
             <Grid x:Name="DetailView" Visibility="Collapsed">
                 <Grid.RowDefinitions>
                     <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
                     <RowDefinition Height="*" />
                     <RowDefinition Height="Auto" />
                 </Grid.RowDefinitions>
 
                 <controls:ThreadHeader Grid.Row="0" x:Name="DetailThreadHeader" />
 
-                <ScrollViewer Grid.Row="1" Padding="16,0">
+                <!-- The community room's search strip (room-search.md § The surface): the
+                     field and its submit, present only while the strip is open (Collapsed
+                     = no UIA peer). Enter submits; Esc closes. -->
+                <Grid Grid.Row="1" x:Name="RoomSearchStrip" Margin="16,0,16,8" ColumnSpacing="8"
+                      Visibility="Collapsed">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <TextBox Grid.Column="0" x:Name="RoomSearchField"
+                             AutomationProperties.AutomationId="{x:Bind ids:Ids.RoomSearchField}"
+                             PlaceholderText="{loc:Localize Key=conversations/unified/room_search_placeholder}"
+                             KeyDown="RoomSearchField_KeyDown" />
+                    <Button Grid.Column="1" x:Name="RoomSearchSubmitButton"
+                            AutomationProperties.AutomationId="{x:Bind ids:Ids.RoomSearchSubmitButton}"
+                            Content="{loc:Localize Key=common/search}"
+                            Click="RoomSearchSubmit_Click" />
+                </Grid>
+
+                <ScrollViewer Grid.Row="2" Padding="16,0" x:Name="MessagesScroll">
                     <StackPanel x:Name="MessagesList" Spacing="6" />
                 </ScrollViewer>
 
-                <controls:DmComposeBar Grid.Row="2" x:Name="DetailComposeBar"
+                <!-- The room-search results take the message stream's place while a
+                     submitted query stands: one row per hit in the order served, or the empty
+                     state. In flight and failed paint no result region at all — a driver waits
+                     on a row, the empty state or `error-message`, never a "searching" element. -->
+                <ScrollViewer Grid.Row="2" Padding="16,0" x:Name="RoomSearchScroll"
+                              Visibility="Collapsed">
+                    <StackPanel x:Name="RoomSearchResults" Spacing="6" />
+                </ScrollViewer>
+
+                <controls:DmComposeBar Grid.Row="3" x:Name="DetailComposeBar"
                                        Margin="16,0" />
             </Grid>
 
@@ -343,19 +372,6 @@
                     Visibility="Collapsed" />
             </StackPanel>
         </Grid>
-
-        <!-- Image Lightbox Dialog -->
-        <ContentDialog
-            x:Name="ImageLightboxDialog"
-            AutomationProperties.AutomationId="{x:Bind ids:Ids.ImageLightbox}"
-            CloseButtonText="{loc:Localize Key=common/close}"
-            FullSizeDesired="True">
-            <ScrollViewer ZoomMode="Enabled" MinZoomFactor="0.5" MaxZoomFactor="5"
-                          HorizontalScrollBarVisibility="Auto"
-                          VerticalScrollBarVisibility="Auto">
-                <Image x:Name="LightboxImage" Stretch="Uniform" MaxHeight="800" MaxWidth="1200" />
-            </ScrollViewer>
-        </ContentDialog>
 
         <!-- Inline rename overlay (visible when rename is initiated from ThreadHeader) -->
         <Border x:Name="RenameOverlay"

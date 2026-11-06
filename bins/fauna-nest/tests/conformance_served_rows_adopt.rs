@@ -485,6 +485,99 @@ async fn the_recorder_refuses_the_three_unadoptable_shapes() {
     assert!(n.rows(SET).await.is_empty(), "no refused record landed");
 }
 
+/// The recorder refuses a row no change-log page could serve — heading a
+/// reader's page it would end every reader's walk of the set at its seq
+/// (`transport.md` § Max frame, *count-paged serve replies are
+/// byte-budgeted*) — and lands nothing.
+#[tokio::test]
+async fn the_recorder_refuses_an_unservable_row() {
+    let n = nest().await;
+    let path = "huge-label.txt";
+    let err = n
+        .dav(SET, path, |r| {
+            let mut sealed =
+                fauna_core::path_crypto::SealedLabel::from_bytes(&label(path, Some(GENERATION)))
+                    .unwrap();
+            sealed.ct =
+                serde_bytes::ByteBuf::from(vec![7; fauna_nest::segments::SERVE_PAGE_BUDGET_BYTES]);
+            r.path_sealed = Some(ByteBuf::from(sealed.to_bytes().unwrap()));
+        })
+        .await
+        .expect_err("an unservable row");
+    assert_eq!(err.code, "fauna.bridges.change_too_large", "{err:?}");
+    assert!(n.rows(SET).await.is_empty(), "no refused record landed");
+}
+
+/// The recorder measures its row at the SIGNED size (`transport.md` § Max
+/// frame, *count-paged serve replies are byte-budgeted*): `served_rows.adopt` fills a 64-byte signature and a
+/// 32-byte key into the row in place and measures nothing, so a row servable
+/// only unsigned would outgrow the cap through the owner's own adoption and
+/// end every reader's walk at its seq. The largest label the door accepts is
+/// found through the door; that row, adopted, must still head a served page.
+#[tokio::test]
+async fn the_recorder_measures_the_row_at_its_adopted_size() {
+    let n = nest().await;
+    let write = |len: usize| {
+        move |r: &mut WebdavRecordChangeRequest| {
+            let mut sealed =
+                fauna_core::path_crypto::SealedLabel::from_bytes(&label(&r.path, Some(GENERATION)))
+                    .unwrap();
+            sealed.ct = serde_bytes::ByteBuf::from(vec![7; len]);
+            r.path_sealed = Some(ByteBuf::from(sealed.to_bytes().unwrap()));
+        }
+    };
+    // Bisect the label length: `lo` is accepted, `hi` is refused (the budget
+    // alone is over the cap — `the_recorder_refuses_an_unservable_row`).
+    let (mut lo, mut hi) = (fauna_nest::segments::SERVE_PAGE_BUDGET_BYTES - 4096, {
+        fauna_nest::segments::SERVE_PAGE_BUDGET_BYTES
+    });
+    let mut best: Option<(i64, usize)> = None;
+    while hi - lo > 1 {
+        let mid = (lo + hi) / 2;
+        let path = format!("probe-{mid}.txt");
+        match n.dav(SET, &path, write(mid)).await {
+            Ok(seq) => {
+                lo = mid;
+                best = Some((seq, mid));
+            }
+            Err(e) => {
+                assert_eq!(e.code, "fauna.bridges.change_too_large", "{e:?}");
+                hi = mid;
+            }
+        }
+    }
+    let (seq, _) = best.expect("some probe was accepted");
+    async fn page(n: &Nest, since: i64) -> Vec<SyncChange> {
+        let reply: SyncChangesListReply = n
+            .call(
+                "fauna.sync.changes.list",
+                SyncChangesListRequest {
+                    folder: Some(SET.into()),
+                    since,
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("list");
+        reply.changes
+    }
+    let before = page(&n, seq - 1).await;
+    assert_eq!(
+        before.first().map(|r| r.seq),
+        Some(seq),
+        "servable as recorded"
+    );
+    n.adopt(SET, vec![n.sign(&before[0], NONCE)])
+        .await
+        .expect("adopt");
+    let after = page(&n, seq - 1).await;
+    assert_eq!(
+        after.first().map(|r| r.seq),
+        Some(seq),
+        "the adopted row still heads a served page — it did not outgrow the cap"
+    );
+}
+
 /// Plant a pseudo-device content row with no stamp — what a lying nest could
 /// hold, and what the recorder now refuses — straight into the store.
 async fn plant_unstamped(n: &Nest, set: &str, path: &str) -> i64 {

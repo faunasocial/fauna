@@ -80,7 +80,7 @@ CRITICAL_ALERT = "critical-alert"
 # A distinctive fragment of the headline, so the assertion pins the *feeder*
 # rather than "some alert is up" — a custody alarm from another feeder would
 # otherwise satisfy a bare presence check.
-_HEADLINE_FRAGMENT = "replacement of your account recovery key"
+_HEADLINE_FRAGMENT = "replacement of your recovery kit"
 
 
 def _alert_text(app) -> str:
@@ -157,31 +157,13 @@ def test_session_start_sweep_raises_the_pending_replacement_on_a_page_it_never_v
     passes_before_ceremony = (alert_sweep_passes(app.driver) or (0, 0))[1]
 
     app.settings.navigate()
-    try:
-        app.settings.open_recovery_kit()
-    except TimeoutError:
-        # `open_recovery_kit()` hard-waits on the section (correct for the
-        # apps that have it); an app without it yet raises rather than
-        # returning, so the presence check below — this test's own designed
-        # skip path — must run regardless of whether the wait succeeded.
-        pass
-
-    if not app.is_visible("recovery-kit-create-button"):
-        from helpers.app_surface import skip_unbuilt
-
-        skip_unbuilt(
-            app.driver,
-            surface="recovery-kit-section",
-            detail=(
-                "settings.md § Recovery kit; the sweep needs this section to "
-                "create the condition, so an app without it cannot run this "
-                "journey yet — tui leads and the other six follow"
-            ),
-            tracked=(
-                "docs/goal/behavior/critical-alerts.md "
-                "§ Implementation status today"
-            ),
-        )
+    # Every app paints the section (all seven ui-actual files list
+    # `recovery-kit-section`), so its absence is a red from the wait.
+    app.settings.open_recovery_kit()
+    assert app.is_visible("recovery-kit-create-button"), (
+        "the recovery-kit section is open but offers no create button — the "
+        "sweep needs it to create the condition"
+    )
 
     # ── 1. A kit exists, so the seed-alone path is offered at all. ──
     app.settings.create_recovery_kit()

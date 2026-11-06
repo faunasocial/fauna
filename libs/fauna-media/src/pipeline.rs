@@ -210,18 +210,17 @@ pub fn process_and_seal_with_mime(raw: &[u8], audience: &Audience) -> (UploadPay
     )
 }
 
-/// Generate + seal ONLY the thumbnail for `raw` under `audience`.
+/// Render ONLY the thumbnail for `raw` — the JPEG pixels, unsealed.
 ///
 /// `None` when `process_media` produces no thumbnail (non-image, ≤300px, or the
-/// curated `process_media` feature is off → stub). For producers that upload the
-/// primary by another path (the device-sync chunk pipeline) and need just the
-/// thumbnail sidecar blob plus its content hash to record on the member. The
-/// sealed bytes and sidecar are identical to the thumbnail [`process_and_seal`]
-/// produces for the same `raw` + `audience`, so a client fetches + decrypts it
-/// uniformly.
-pub fn seal_thumbnail_only(raw: &[u8], audience: &Audience) -> Option<SealedThumbnail> {
-    let thumbnail_bytes = process_media(raw).thumbnail_bytes?;
-    Some(seal_rendered_thumbnail(&thumbnail_bytes, audience))
+/// curated `process_media` feature is off → stub). For producers that store a
+/// folder file through the chunk pipeline: a folder file's thumbnail rests as
+/// its file rests, sealed by the caller through the same pipeline under the
+/// file's own root (`media.md` § Encryption at rest → *A thumbnail rests as its
+/// file rests*), never as an audience blob. The pixels are the ones
+/// [`process_and_seal`] seals for the same `raw`.
+pub fn render_thumbnail_only(raw: &[u8]) -> Option<Vec<u8>> {
+    process_media(raw).thumbnail_bytes
 }
 
 /// Seal an **already-rendered** thumbnail under `audience`.
@@ -234,9 +233,7 @@ pub fn seal_thumbnail_only(raw: &[u8], audience: &Audience) -> Option<SealedThum
 /// thumbnailer, so a re-seal on such a build would record `thumbnail_hash: None`
 /// over a file that *has* a thumbnail — dropping the pointer instead of moving
 /// the seal. Opening the existing sealed thumbnail and handing its plaintext
-/// here moves it under the new key with no thumbnailer in sight
-/// (`identity-succession.md` § Implementation status today, the raw-AEAD Library
-/// plane bullet; `SyncEngine::move_recorded_thumbnail`).
+/// here moves it under the new key with no thumbnailer in sight.
 ///
 /// Shares [`seal_thumbnail`]'s body, so a moved thumbnail's sidecar is
 /// byte-shaped exactly like a freshly-rendered one — a consumer cannot tell
@@ -252,33 +249,21 @@ pub fn seal_rendered_thumbnail(thumbnail_bytes: &[u8], audience: &Audience) -> S
     }
 }
 
-/// Generate + seal ONLY the thumbnail for the image at `path`, reading the
-/// source **incrementally from disk** (`image::ImageReader::open`) instead of
-/// loading the whole file into memory.
+/// Render ONLY the thumbnail for the image at `path`, reading the source
+/// **incrementally from disk** (`image::ImageReader::open`) instead of loading
+/// the whole file into memory.
 ///
-/// The from-path twin of [`seal_thumbnail_only`], for the device-sync
+/// The from-path twin of [`render_thumbnail_only`], for the device-sync
 /// **streaming** upload path (files ≥ 64 MiB), which is O(MAX_CHUNK) memory by
-/// design and must not re-read the whole file to thumbnail it. The sealed bytes
-/// and sidecar are identical in shape to what [`seal_thumbnail_only`] produces
-/// for the same source image + audience (the thumbnail pixels are the same; only
-/// the per-call AEAD nonce differs), so a client fetches + decrypts a
-/// streamed-file thumbnail exactly as it does a small-file one.
+/// design and must not re-read the whole file to thumbnail it. The pixels are
+/// the ones [`render_thumbnail_only`] renders for the same source image.
 ///
 /// `None` when no thumbnail is warranted: non-image, ≤300px, a missing /
 /// unreadable / undecodable file, or the curated `process_media` feature is off
-/// (stub). Skips the EXIF/IPTC strip [`seal_thumbnail_only`] runs on its input —
-/// the thumbnail is a freshly re-encoded JPEG that carries no source metadata,
-/// so the pixels (hence the thumbnail) are identical to stripping first.
-pub fn seal_thumbnail_only_from_path(
-    path: &std::path::Path,
-    audience: &Audience,
-) -> Option<SealedThumbnail> {
-    let thumbnail_bytes = crate::process::render_thumbnail_from_path(path)?;
-    let (sealed, sidecar) = seal_thumbnail(audience, &thumbnail_bytes);
-    let hash = *blake3::hash(&sealed.bytes).as_bytes();
-    Some(SealedThumbnail {
-        bytes: sealed.bytes,
-        sidecar,
-        hash,
-    })
+/// (stub). Skips the EXIF/IPTC strip [`render_thumbnail_only`] runs on its input
+/// — the thumbnail is a freshly re-encoded JPEG that carries no source
+/// metadata, so the pixels (hence the thumbnail) are identical to stripping
+/// first.
+pub fn render_thumbnail_only_from_path(path: &std::path::Path) -> Option<Vec<u8>> {
+    crate::process::render_thumbnail_from_path(path)
 }

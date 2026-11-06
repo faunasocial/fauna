@@ -131,6 +131,41 @@ pub trait WebdavServedSets: MaybeSendSync {
     async fn serves_any(&self, rows: Vec<fauna_protocol::folders::FolderSummary>) -> bool;
 }
 
+// The calendar and card recipient **public** halves an actor registers beside
+// its mail pair in the one `provision_recipient_mls_pubkey` request
+// (`owner-key-material.md` § Path B-sibling-5 → *Registration*). Owned, with
+// its one derivation, by `fauna_mls::wrapped_blob`.
+pub use fauna_mls::wrapped_blob::DavSealPubkeys;
+
+/// The X25519 public halves of an actor's standing registration as the nest
+/// reads it back (`fauna.bridges.fetch_recipient_mls_pubkey`): the mail pair
+/// and its calendar and card siblings, which the nest keeps in one row and
+/// answers whole or not at all (`owner-key-material.md` § Path B-sibling-5 →
+/// *Registration*). The connect-time refresh names the custody generation that
+/// derives all three ([`MailSettingsMachine::refresh_epoch_schedule`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RegisteredRecipientPubkeys {
+    /// The recipient-mail X25519 public key.
+    pub mail: [u8; 32],
+    /// The recipient-calendar X25519 public key.
+    pub calendar: [u8; 32],
+    /// The recipient-card X25519 public key.
+    pub card: [u8; 32],
+}
+
+impl RegisteredRecipientPubkeys {
+    /// Whether `msek` derives this whole registration — the mail pair and
+    /// both DAV pairs.
+    #[must_use]
+    pub fn derived_from(&self, msek: &[u8; 32]) -> bool {
+        if derive_recipient_hpke_keypair(msek).1 != self.mail {
+            return false;
+        }
+        let dav = DavSealPubkeys::derive(msek);
+        dav.calendar_pubkey == self.calendar && dav.card_pubkey == self.card
+    }
+}
+
 // Dual `async_trait` arm + `MaybeSendSync` supertrait so the one seam serves
 // native + wasm (see `fauna_protocol::MaybeSendSync`); the wasm `rpc_glue` arm
 // wraps the `Rc`-based, `!Send` `WsRpcClient`. Mirrors the admin `…Nest` traits.
@@ -165,6 +200,12 @@ pub trait NestClient: MaybeSendSync {
     /// (`architecture/security/post-quantum.md` § Capability negotiation, the
     /// 2026-09-24 ruling).
     ///
+    /// `dav` carries the calendar and card recipient public halves the same
+    /// request registers beside the mail pair — all three pairs required, so a
+    /// half-registered actor is unrepresentable (`owner-key-material.md`
+    /// § Path B-sibling-5 → *Registration*); [`DavSealPubkeys::derive`] from the
+    /// same MSEK as `pubkey`.
+    ///
     /// `epoch_keys` is the content-sealing-epoch publication horizon
     /// (design 2026-07-18 § 3), likewise always sent by the machine
     /// (`architecture/encryption-at-rest.md` § Content-sealing epochs).
@@ -173,19 +214,22 @@ pub trait NestClient: MaybeSendSync {
         actor_id: [u8; 32],
         pubkey: [u8; 32],
         mlkem_ek: Vec<u8>,
+        dav: DavSealPubkeys,
         epoch_keys: Option<Vec<EpochSealKey>>,
     ) -> Result<(), NestError>;
 
-    /// Read back the actor's own standing recipient X25519 pubkey
-    /// (`fauna.bridges.fetch_recipient_mls_pubkey`, the standing key — never
-    /// an epoch key; a `User` caller reads its own only). `None` when the nest
-    /// has none on file. The connect-time refresh compares it with the
+    /// Read back the actor's own standing registration — the mail, calendar
+    /// and card X25519 pubkeys (`fauna.bridges.fetch_recipient_mls_pubkey`,
+    /// the standing keys — never an epoch key; a `User` caller reads its own
+    /// only). `None` when the nest has none on file; a reply carrying the mail
+    /// key without both DAV keys is `Rejected` (the nest never answers half a
+    /// registration). The connect-time refresh compares it with the
     /// generations its custody holds before it re-seals
     /// ([`MailSettingsMachine::refresh_epoch_schedule`]).
     async fn fetch_own_recipient_pubkey(
         &self,
         actor_id: [u8; 32],
-    ) -> Result<Option<[u8; 32]>, NestError>;
+    ) -> Result<Option<RegisteredRecipientPubkeys>, NestError>;
 
     /// Whether the home nest advertises capability `token` in its
     /// `fauna.nest.info` reply (`fauna_protocol::discovery::capability`).
@@ -203,13 +247,12 @@ pub trait NestClient: MaybeSendSync {
     /// its own [`SetMailEnabledError::UnavailableHere`].
     async fn set_mail_enabled(&self, enabled: bool) -> Result<(), SetMailEnabledError>;
 
-    /// Whether this box cannot enable mail (`fauna.setup.status` through
-    /// `SetupStatusReply::mail_unavailable_here`; `mail-bridge-lifecycle.md`
-    /// § Default-off on first claim → *A box with no content scanners cannot
-    /// enable mail*). Best-effort, like [`Self::get_caldav_port`]: the caller
-    /// reads a failure as "available" — the nest's own refusal stands behind
-    /// it.
-    async fn mail_unavailable_here(&self) -> Result<bool, NestError>;
+    /// What the deployment serves and whether this box can enable mail — one
+    /// `fauna.setup.status` read ([`DeploymentStatus::of`]). Best-effort, like
+    /// [`Self::get_caldav_port`]: the caller reads a failure as "available"
+    /// and as serving nothing — the nest's own refusal stands behind the
+    /// first, and an unread DAV toggle only hides an affordance.
+    async fn deployment_status(&self) -> Result<DeploymentStatus, NestError>;
 
     /// Flip whether this nest serves the *calling* actor's mailbox over
     /// IMAP/CalDAV to external MUAs (`fauna.bridges.set_mail_serving_enabled`).
@@ -228,6 +271,17 @@ pub trait NestClient: MaybeSendSync {
     /// actor reads back `true` (default-on). The Admin-scoped audit read of
     /// *another* actor's flag is a separate (admin) surface, not this trait.
     async fn get_mail_serving_enabled(&self) -> Result<bool, NestError>;
+
+    /// Set the calling actor's own mail-off flag
+    /// (`fauna.bridges.set_actor_mail_enabled`) — the nest-side half of
+    /// "Disable mail", read by the nest's IMAP serving gate and nothing else
+    /// (`mail-credentials.md` § Trigger taxonomy, the Disable-mail row).
+    /// User-class, caller-scoped; default on / absent ⇒ on.
+    async fn set_actor_mail_enabled(&self, enabled: bool) -> Result<(), NestError>;
+
+    /// Read the calling actor's own mail-off flag
+    /// (`fauna.bridges.get_actor_mail_enabled`); a never-set actor reads `true`.
+    async fn get_actor_mail_enabled(&self) -> Result<bool, NestError>;
 
     /// Read the deployment's effective CalDAV listener port
     /// (`fauna.bridges.get_caldav_port`). `User | Admin` and **not**
@@ -719,8 +773,47 @@ pub struct SpamModelClientWrite {
     pub sample_count: u32,
 }
 
+/// What `fauna.setup.status` says of the deployment, as the mail page folds
+/// it: whether this box can enable mail (`mail-bridge-lifecycle.md`
+/// § Default-off on first claim → *A box with no content scanners cannot
+/// enable mail*) and which of mail, CalDAV and CardDAV it serves — the
+/// deployment's toggles, which decide the calendar-only credential
+/// (`mail-credentials.md` § Trigger taxonomy, *The calendar-only credential*).
+/// The default — nothing read — is "available, serving nothing".
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DeploymentStatus {
+    pub mail_unavailable_here: bool,
+    /// `email_enabled`.
+    pub mail_enabled: bool,
+    /// `caldav_enabled` (the nest applies the mail fallback).
+    pub caldav_enabled: bool,
+    /// `carddav_enabled` (likewise).
+    pub carddav_enabled: bool,
+}
+
+impl DeploymentStatus {
+    pub fn of(reply: &fauna_protocol::discovery::SetupStatusReply) -> Self {
+        Self {
+            mail_unavailable_here: reply.mail_unavailable_here(),
+            mail_enabled: reply.email_enabled,
+            caldav_enabled: reply.caldav_enabled,
+            carddav_enabled: reply.carddav_enabled,
+        }
+    }
+
+    /// The deployment serves CalDAV or CardDAV while its mail is off — where
+    /// the first credential is the read recipe and Add credential is the way
+    /// to it (`mail-settings.md` § Credential-management reachability).
+    pub fn serves_dav_without_mail(&self) -> bool {
+        (self.caldav_enabled || self.carddav_enabled) && !self.mail_enabled
+    }
+}
+
 struct Inner {
     snapshot: MailSettingsSnapshot,
+    /// The last hydrate's [`DeploymentStatus`]; the snapshot's DAV fields and
+    /// its reachability predicate fold it.
+    deployment: DeploymentStatus,
 }
 
 /// The state machine. Single instance per actor on each Fauna
@@ -747,6 +840,18 @@ pub struct MailSettingsMachine {
     /// snapshot writes by the instants it chose, never by where the box's
     /// clock-second boundary happened to fall.
     retirement_clock: RetirementClock,
+    /// One custody operation at a time: [`Self::dispatch`] and
+    /// [`Self::hydrate`] each hold it for their whole run. A hydrate reads
+    /// the custody, then awaits several nest reads, then folds what it read
+    /// into the snapshot — so one overlapping a dispatch could fold a read
+    /// taken mid-dispatch over the snapshot the finished dispatch left (a
+    /// first enable's standing sentinel painted back as "rotation in
+    /// progress" after the enable cleared it), and its generation-marker heal
+    /// would write beside the dispatch's own writes. The page's live status
+    /// reads [`Self::snapshot`], a plain lock, so a hydrate waiting here
+    /// never hides a running change (`ui/mail-settings.md` § Status
+    /// indicator).
+    op: futures_util::lock::Mutex<()>,
 }
 
 /// [`MailSettingsMachine`]'s retirement clock, in unix seconds.
@@ -775,8 +880,12 @@ impl MailSettingsMachine {
             mail,
             signer,
             mua,
-            inner: Mutex::new(Inner { snapshot }),
+            inner: Mutex::new(Inner {
+                snapshot,
+                deployment: DeploymentStatus::default(),
+            }),
             retirement_clock: Arc::new(|| Timestamp::now_secs().max(0) as u64),
+            op: futures_util::lock::Mutex::new(()),
         }
     }
 
@@ -1673,7 +1782,7 @@ impl MailSettingsMachine {
         Ok(Some(String::from_utf8_lossy(&bytes).into_owned()))
     }
 
-    // ─── EnableMail: turn email on (fresh, dormant-MSEK or DAV upgrade) ───
+    // ─── EnableMail: turn email on (fresh, dormant-MSEK, or the upgrade of kept credentials) ───
 
     async fn enable_mail(
         &self,
@@ -1686,12 +1795,35 @@ impl MailSettingsMachine {
         // covers a machine that never hydrated (the claim-time launch glue)
         // and a page hydrated before the box changed.
         let hydrated_unavailable = self.inner.lock().unwrap().snapshot.mail_unavailable_here;
-        if hydrated_unavailable || self.nest.mail_unavailable_here().await.unwrap_or(false) {
+        if hydrated_unavailable
+            || self
+                .nest
+                .deployment_status()
+                .await
+                .is_ok_and(|d| d.mail_unavailable_here)
+        {
             self.inner.lock().unwrap().snapshot.mail_unavailable_here = true;
             return Err(DispatchError::mail_unavailable_here());
         }
         let rows = self.mail.load_rows().await?;
         let mail = rows.config();
+        // A rotation that did not finish is resumed, never overtaken: a fresh
+        // mint here would write a new sentinel over a staged MSEK the nest may
+        // already hold (`start_rotation`'s refusal, same reason). Asked FIRST:
+        // first-enable's own sentinel stands beside its email flag — a first
+        // enable stopped at its publish or any later step reads enabled AND
+        // pending — and the hint the page must give is the banner's Resume,
+        // never "use AddCredential" (`mail-credentials.md`
+        // § Partial-state-during-minting: "Enable mail" while any sentinel
+        // stands is refused with a resume hint).
+        if mail.pending_rotation.is_some() {
+            self.set_snapshot_from(&rows);
+            return Err(DispatchError::InvalidState(
+                "a previous mail-key change didn't finish — resume it before turning email on"
+                    .into(),
+            ));
+        }
+
         if mail.is_mail_enabled() {
             // The page offered Enable, so its snapshot predates what the
             // custody now holds — rows another device (or this device's
@@ -1706,42 +1838,33 @@ impl MailSettingsMachine {
             ));
         }
 
-        // A rotation that did not finish — first-enable's own included, though
-        // that one reads enabled above — is resumed, never overtaken: a fresh
-        // mint here would write a new sentinel over a staged MSEK the nest may
-        // already hold (`start_rotation`'s refusal, same reason).
-        if mail.pending_rotation.is_some() {
-            self.set_snapshot_from(&rows);
-            return Err(DispatchError::InvalidState(
-                "a previous mail-key change didn't finish — resume it before turning email on"
-                    .into(),
-            ));
-        }
-
         self.set_status(SettingsStatus::Syncing);
 
-        let upgrade = mail
-            .live_credentials()
-            .next()
-            .filter(|_| mail.msek.is_some())
-            .cloned();
-        match upgrade {
-            // ── Upgrade: a **DAV-only** mailbox already holds the shared MSEK
-            //    + a live read credential (read-only recipe — no submission
-            //    token). Enabling email is *additive*: reuse them and provision
-            //    only the missing outbound submission token (one shared bridge
-            //    password serves IMAP + SMTP + CalDAV — `caldav-server.md`
-            //    § Independent enablement, "no separate CalDAV credential"),
-            //    rather than minting a second mailbox that would force the user to
-            //    reconfigure their MUA. The passed `credential`/`display_name` are
-            //    unused — the user keeps the credential they already AUTH CalDAV
-            //    with. ──
-            Some(row) => {
-                let credential_id = row.credential_id.clone();
-                let existing = Credential::of_row(&row)?;
+        let kept: Vec<MailCredential> = if mail.msek.is_some() {
+            mail.live_credentials().cloned().collect()
+        } else {
+            Vec::new()
+        };
+        match kept.is_empty() {
+            // ── Upgrade: the mailbox already holds the shared MSEK + live
+            //    credentials without submission tokens — a mailbox whose mail
+            //    was turned off (Disable mail keeps the credentials) or a
+            //    DAV-only one. Enabling email is *additive*: turn the nest's
+            //    per-actor mail flag back on (reading resumes) and provision a
+            //    submission token under EVERY kept credential (sending resumes),
+            //    so the user's mail apps work again with no new set-up
+            //    (`mail-credentials.md` § Trigger taxonomy, the Disable-mail
+            //    row); the flag goes on in `turn_mail_subsystem_on`, the last
+            //    step of every enable. The passed `credential`/`display_name`
+            //    are unused — the user keeps the credentials their apps already
+            //    AUTH with. ──
+            false => {
                 let _ = (display_name, credential);
-                self.provision_submission_token(&credential_id, &existing)
-                    .await?;
+                for row in &kept {
+                    let existing = Credential::of_row(row)?;
+                    self.provision_submission_token(&row.credential_id, &existing)
+                        .await?;
+                }
                 let mail = self.mail.load().await?;
                 self.mail
                     .write_state(MailStateRow {
@@ -1752,24 +1875,28 @@ impl MailSettingsMachine {
                 self.refresh_snapshot().await?;
                 self.turn_mail_subsystem_on().await
             }
-            // ── Fresh, or a **dormant** MSEK (one a teardown or a succession
+            // ── Fresh, or a **dormant** MSEK (one a full revoke or a succession
             //    burn left with no live credential): make sure the account holds
             //    an MSEK, then run first-enable as the degenerate rotation onto
             //    it — under the resume sentinel, so a stop anywhere in the blob
             //    set (snapshot → recipient-pubkey → wrapped-MSEK →
             //    submission-token) reads pending and resumes
             //    (`mail-credentials.md` § Partial-state-during-minting). ──
-            None => {
+            true => {
                 let (msek, mail) = self.ensure_msek(mail).await?;
                 crate::rotation::first_enable(self, msek, &mail, display_name, &credential).await
             }
         }
     }
 
-    /// Flip the deployment-wide mail subsystem on — the last step of every
-    /// email enable (the upgrade arm here, and first-enable's step 4 in
-    /// [`crate::rotation`], fresh or resumed).
+    /// Turn the actor's mail on at the nest — the last step of every email
+    /// enable (the upgrade arm here, and first-enable's step 4 in
+    /// [`crate::rotation`], fresh or resumed): the per-actor mail-off flag goes
+    /// back on (a mailbox whose mail was turned off reads again —
+    /// `mail-credentials.md` § Trigger taxonomy, the Disable-mail row), then
+    /// the deployment-wide mail subsystem is flipped on.
     pub(crate) async fn turn_mail_subsystem_on(&self) -> Result<(), DispatchError> {
+        self.nest.set_actor_mail_enabled(true).await?;
         // Flip the deployment-wide mail subsystem on (design A). On a real
         //    deployment (Docker/systemd) the mail-bridge s6 services are gated
         //    on the `/data/imap-enabled` flag that `fauna.bridges.set_mail_enabled`
@@ -1872,103 +1999,60 @@ impl MailSettingsMachine {
         Ok(())
     }
 
-    // ─── Enable{Caldav,Carddav}Mailbox: mint the shared mailbox key material
-    //     for a DAV-only user (email never enabled) ───
+    // ─── EnableDavMailbox: mint the shared mailbox key material for a user
+    //     of a deployment serving CalDAV or CardDAV (email never enabled) ───
 
-    /// Provision the per-actor **mailbox key material** (the shared MSEK + the
-    /// `default` read credential + the recovery-safe `bridge_*` blobs) for a user
-    /// enabling **CalDAV** independently of email (`caldav-server.md`
-    /// § Independent enablement — calendar-only is the privacy-maximal supported
-    /// config). This is the calendar-side twin of [`Self::enable_mail`]; the MSEK
-    /// is **shared** (one credential serves IMAP + SMTP + CalDAV + CardDAV,
-    /// § Authentication — "no separate CalDAV credential"), so a user who later
-    /// also enables email reuses this same MSEK.
+    /// Provision the per-actor **mailbox key material** — the shared MSEK + one
+    /// read credential + the recovery-safe `bridge_*` blobs — for a user of a
+    /// deployment that serves CalDAV or CardDAV: the calendar-only credential
+    /// (`mail-credentials.md` § Trigger taxonomy). One credential serves every
+    /// protocol (`caldav-server.md` § Authentication — "no separate CalDAV
+    /// credential"), so there is one mint, whichever DAV protocol is served,
+    /// and a user who later also enables email reuses this same MSEK.
     ///
     /// Two deliberate differences from [`Self::enable_mail`]:
-    /// - **No submission token** — CalDAV needs no *outbound* mail capability, so
-    ///   this uses the read recipe ([`Self::provision_mailbox_blobs`], the
-    ///   same one `provision_relay_mailbox` uses). The user provisions the
-    ///   outbound submission token only if/when they enable email.
-    /// - **No deployment toggle flip** — the Admin-class `set_caldav_enabled`
-    ///   deployment toggle is owned by the [`BridgeApprovalMachine`]
-    ///   (`SetCalDavEnabled`), which the onboarding launch glue fires separately;
-    ///   this method is strictly the per-user MSEK mint.
+    /// - **No submission token** — the read recipe
+    ///   ([`Self::provision_mailbox_blobs`], the same one
+    ///   `provision_relay_mailbox` uses); the outbound token comes only if and
+    ///   when the user enables email.
+    /// - **No deployment toggle flip** — the Admin-class DAV toggles are the
+    ///   [`BridgeApprovalMachine`]'s, and they, not this account, say what is
+    ///   served.
     ///
-    /// Minting the MSEK does **not** make the user email-reachable: an email route
-    /// is a separate `account_aliases` row (an admin/onboarding concern), never a
-    /// side effect of `enable_mail`/`enable_caldav_mailbox` — so a CalDAV-only user
-    /// stays genuinely mailbox-less (the nest `resolve_recipient` → Reject the MDA
-    /// auto-schedule gateway classifies as the sealed scheduling rail).
+    /// Minting the MSEK does **not** make the user email-reachable: an email
+    /// route is a separate `account_aliases` row, never a side effect of a
+    /// mint — so a DAV-only user stays genuinely mailbox-less (the nest
+    /// `resolve_recipient` → Reject the MDA auto-schedule gateway classifies
+    /// as the sealed scheduling rail).
     ///
-    /// **Idempotent:** a mailbox that already holds the MSEK and a live
-    /// credential (email or a DAV protocol already enabled) is reduced to
-    /// recording the per-actor flag — the existing shared mailbox already backs
-    /// the calendar store.
-    pub async fn enable_caldav_mailbox(
+    /// **Idempotent:** an account already holding the MSEK and a live
+    /// credential is left as it is — the existing shared mailbox already backs
+    /// every DAV store.
+    pub async fn enable_dav_mailbox(
         &self,
         display_name: String,
         credential: Credential,
-    ) -> Result<(), DispatchError> {
-        self.enable_dav_mailbox(display_name, credential, DavProtocol::Caldav)
-            .await
-    }
-
-    /// The **contacts** twin of [`Self::enable_caldav_mailbox`] — provision the
-    /// shared mailbox key material for a user enabling **CardDAV** independently
-    /// of email and calendar (`carddav-server.md` § Independent enablement). The
-    /// address-book store (`bridge_carddav_*`) seals to the same MSEK-derived
-    /// recipient keypair the calendar store uses, and the same `default` read
-    /// credential AUTHs the CardDAV listener, so the recipe is identical — only
-    /// the per-actor flag recorded differs. The Admin-class `set_carddav_enabled`
-    /// deployment toggle is owned by [`BridgeApprovalMachine`]
-    /// (`SetCardDavEnabled`), fired separately by the onboarding launch glue.
-    pub async fn enable_carddav_mailbox(
-        &self,
-        display_name: String,
-        credential: Credential,
-    ) -> Result<(), DispatchError> {
-        self.enable_dav_mailbox(display_name, credential, DavProtocol::Carddav)
-            .await
-    }
-
-    /// Shared core of the two DAV-only mailbox enables — one recipe, one flag
-    /// selector, so the calendar and contacts paths can never drift
-    /// (`carddav-server.md` § Architectural rules: same concepts as CalDAV,
-    /// never a parallel invention).
-    async fn enable_dav_mailbox(
-        &self,
-        display_name: String,
-        credential: Credential,
-        protocol: DavProtocol,
     ) -> Result<(), DispatchError> {
         let rows = self.mail.load_rows().await?;
         let mail = rows.config();
-        let provisioned = mail.msek.is_some() && mail.live_credentials().next().is_some();
-        if provisioned && protocol.enabled_in(&mail) {
-            // The shared mailbox is already provisioned and this protocol is
-            // already on — the launch glue may call this unconditionally.
+        if mail.msek.is_some() && mail.live_credentials().next().is_some() {
             return Ok(());
         }
 
         self.set_status(SettingsStatus::Syncing);
-        if !provisioned {
-            // Fresh, or a dormant MSEK with no live credential: the DAV store
-            // seals under the account's MSEK (minted here only when none
-            // rests), and its listener AUTHs a read credential — `enable_mail`'s
-            // path, minus the submission token and the `set_mail_enabled`
-            // deployment flip.
-            let (msek, mail) = self.ensure_msek(mail).await?;
-            self.mint_credential_under(&msek, &mail, &rows, display_name, &credential)
-                .await?;
-        }
-        // Record that this protocol is now on (so a later "Disable mail"
-        // preserves the shared MSEK it still needs — see
-        // [`Self::disable_mail`]). An email flag never written reads as OFF:
-        // a DAV-only mailbox must render "mail disabled" (`is_mail_enabled()`
-        // keys on the flag, not on `msek.is_some()`).
+        // Fresh, or a dormant MSEK with no live credential: the DAV store
+        // seals under the account's MSEK (minted here only when none rests),
+        // and its listener AUTHs a read credential — `enable_mail`'s path,
+        // minus the submission token and the `set_mail_enabled` deployment
+        // flip.
+        let (msek, mail) = self.ensure_msek(mail).await?;
+        self.mint_credential_under(&msek, &mail, &rows, display_name, &credential)
+            .await?;
+        // An email flag never written reads as OFF; write it so, explicitly —
+        // a DAV-only mailbox renders "mail disabled" (`is_mail_enabled()` keys
+        // on the flag, not on `msek.is_some()`).
         let mail = self.mail.load().await?;
         let mut state = MailStateRow::recreatable_of(&mail);
-        protocol.set_enabled(&mut state);
         state.mail_enabled = Some(mail.mail_enabled.unwrap_or(false));
         self.mail.write_state(state).await?;
         self.refresh_snapshot().await?;
@@ -2019,6 +2103,7 @@ impl MailSettingsMachine {
                 self.actor_id,
                 recipient_pubkey,
                 mlkem_ek,
+                DavSealPubkeys::derive(msek),
                 Some(epoch_keys),
             )
             .await?;
@@ -2147,9 +2232,26 @@ impl MailSettingsMachine {
     ) -> Result<(), DispatchError> {
         let rows = self.mail.load_rows().await?;
         let mail = rows.config();
-        let msek = mail.msek.clone().ok_or_else(|| {
-            DispatchError::InvalidState("mail not enabled — use EnableMail first".into())
-        })?;
+        let Some(msek) = mail.msek.clone() else {
+            // On a deployment serving CalDAV or CardDAV with mail off the first
+            // credential IS the enable — the read recipe (`mail-settings.md`
+            // § Layout & flow → *CalDAV-only mailbox*). Anywhere else the
+            // enable toggle is the way in. The hydrated status decides on the
+            // page; the fresh read covers a machine that never hydrated.
+            let hydrated = self.inner.lock().unwrap().deployment;
+            let dav_only = hydrated.serves_dav_without_mail()
+                || self
+                    .nest
+                    .deployment_status()
+                    .await
+                    .is_ok_and(|d| d.serves_dav_without_mail());
+            if dav_only {
+                return self.enable_dav_mailbox(display_name, credential).await;
+            }
+            return Err(DispatchError::InvalidState(
+                "mail not enabled — use EnableMail first".into(),
+            ));
+        };
 
         self.set_status(SettingsStatus::Syncing);
 
@@ -2161,9 +2263,18 @@ impl MailSettingsMachine {
             wrap::seal_msek_under_credential(&msek, &self.actor_id, &credential_id, &credential)?;
         self.nest.provision_wrapped_mls_blob(msek_blob).await?;
 
-        let minted_at = self
-            .provision_submission_token(&credential_id, &credential)
-            .await?;
+        // Mail off (Disable mail kept the MSEK) → the read half only: no
+        // sending token while mail is off, and the re-enable's upgrade arm
+        // mints this credential's along with every other kept one
+        // (`mail-credentials.md` § Trigger taxonomy, the Disable-mail row).
+        let minted_at = if mail.is_mail_enabled() {
+            Some(
+                self.provision_submission_token(&credential_id, &credential)
+                    .await?,
+            )
+        } else {
+            None
+        };
 
         self.mail
             .put_credential(MailCredential {
@@ -2176,7 +2287,7 @@ impl MailSettingsMachine {
                 // The generation marker: this row's blob was just wrapped under
                 // `msek` (`mail-credentials.md` § *The generation marker*).
                 wrapped_under: Some(MsekFingerprint::of(&msek)),
-                token_minted_at: Some(minted_at),
+                token_minted_at: minted_at,
                 revoked_at_unix: None,
                 burned: None,
             })
@@ -2220,23 +2331,30 @@ impl MailSettingsMachine {
         Ok(())
     }
 
-    // ─── DisableMail: turn email off; tear the mailbox down when email is all
-    //     it served ───
+    // ─── DisableMail: turn email off — mail only ───
 
-    /// Per `mail-settings.md` § Disable mail. Deliberately does **not** call the
-    /// Admin-scoped, deployment-wide `set_mail_enabled(false)`: that flag
-    /// boots/tears the box-level s6 mail subsystem (`/data/imap-enabled`),
-    /// shared by every mailbox — one user disabling their own mail must not
-    /// turn mail off for everyone. The asymmetry with `enable_mail` (which
-    /// *does* flip the subsystem on, admin-gated) is intentional.
+    /// **Turning mail off stops mail, and only mail** (`mail-credentials.md`
+    /// § Trigger taxonomy, the Disable-mail row). Three steps, in this order:
     ///
-    /// **The MSEK outlives the teardown.** The mail custody's state row keeps
-    /// its MSEK present-wins (the key is irrecoverable, so no write can clear
-    /// it — `config-dissolution.md` § *The mail plane*), so an email-only
-    /// disable revokes every credential and turns email off, and the MSEK and
-    /// its grace window stay, dormant: a later enable mints a fresh credential
-    /// under the same key, and mail sealed before the disable stays openable
-    /// (`mail-credentials.md`, the Disable-mail row).
+    /// 1. the nest's per-actor mail-off flag goes **off** first, so the MDA
+    ///    refuses the actor's IMAP operations at once (no more reading);
+    /// 2. every live credential's outbound **submission token** is revoked (no
+    ///    more sending);
+    /// 3. the custody records `mail_enabled = Some(false)`.
+    ///
+    /// The credentials, the MSEK and its grace window — and any pending
+    /// rotation — are **kept**: one credential AUTHs IMAP + SMTP + CalDAV +
+    /// CardDAV + WebDAV, and the DAV protocols are enabled independently of
+    /// mail, so the calendar, contacts and file apps keep working; a
+    /// credential is torn down only by Revoke or Rotate. A stop between the
+    /// steps is safe: the custody still reads enabled, the page offers Disable
+    /// again, and every step is idempotent; a stop after step 3 with the flag
+    /// somehow back on is repaired at hydrate ([`Self::heal_actor_mail_flag`]).
+    ///
+    /// Deliberately does **not** call the Admin-scoped, deployment-wide
+    /// `set_mail_enabled(false)`: that flag boots/tears the box-level s6 mail
+    /// subsystem (`/data/imap-enabled`), shared by every mailbox — one user
+    /// disabling their own mail must not turn mail off for everyone.
     async fn disable_mail(&self) -> Result<(), DispatchError> {
         let mail = self.mail.load().await?;
         if !mail.is_mail_enabled() {
@@ -2247,44 +2365,13 @@ impl MailSettingsMachine {
 
         self.set_status(SettingsStatus::Syncing);
 
-        if mail.caldav_enabled || mail.carddav_enabled {
-            // ── CalDAV/CardDAV still need the shared mailbox material, so
-            //    disabling *email* must NOT revoke the read credentials — that
-            //    AEAD-unwrap blob also authenticates the DAV listeners and both
-            //    DAV stores seal under the MSEK (`caldav-server.md` /
-            //    `carddav-server.md` § Independent enablement: "no separate DAV
-            //    credential"). Revoke only the outbound **submission tokens**
-            //    (no more sending) and flip email off. ──
-            for c in mail.live_credentials() {
-                self.nest
-                    .revoke_wrapped_submission_token(self.actor_id, c.credential_id.clone())
-                    .await?;
-            }
-            let mail = self.mail.load().await?;
-            self.mail
-                .write_state(MailStateRow {
-                    mail_enabled: Some(false),
-                    ..MailStateRow::recreatable_of(&mail)
-                })
+        self.nest.set_actor_mail_enabled(false).await?;
+        for c in mail.live_credentials() {
+            self.nest
+                .revoke_wrapped_submission_token(self.actor_id, c.credential_id.clone())
                 .await?;
-            self.refresh_snapshot().await?;
-            return Ok(());
-        }
-
-        // ── Email only (no DAV): full teardown — revoke every credential the
-        //    fold still shows (burned rows included: their deletes are
-        //    idempotent), each through `revoke_row`, so a mid-loop transient
-        //    nest failure leaves the already-revoked rows marked and a
-        //    re-dispatched `DisableMail` resumes from the rest. ──
-        for c in &mail.credentials {
-            self.revoke_row(c.credential_id.clone()).await?;
         }
         let mail = self.mail.load().await?;
-        // A rotation this teardown abandons is cleared by name: a sentinel
-        // another device set after this load is not this teardown's to clear.
-        if let Some(pending) = &mail.pending_rotation {
-            self.mail.clear_rotation(pending.new_msek.clone()).await?;
-        }
         self.mail
             .write_state(MailStateRow {
                 mail_enabled: Some(false),
@@ -2455,12 +2542,13 @@ impl MailSettingsMachine {
         // separately). The DAV lines are whatever the last hydrate's
         // `MuaInstructions::apply_dav_listener` made of the nest's listener —
         // or the for-node-URL default before the first.
-        let (serving_enabled, serves_webdav_set, mail_unavailable_here, prior_mua) = {
+        let (serving_enabled, serves_webdav_set, mail_unavailable_here, deployment, prior_mua) = {
             let g = self.inner.lock().unwrap();
             (
                 g.snapshot.serving_enabled,
                 g.snapshot.serves_webdav_set,
                 g.snapshot.mail_unavailable_here,
+                g.deployment,
                 g.snapshot.mua.clone(),
             )
         };
@@ -2471,23 +2559,25 @@ impl MailSettingsMachine {
             // CalDAV-only actor holds the shared MSEK but must render mail OFF
             // (`MailConfig::is_mail_enabled`; § Independent enablement).
             enabled: mail.is_mail_enabled(),
-            // CalDAV (calendar) enablement, independent of email — drives the
-            // page to render the shared credential-management section even when
-            // email is off, so a CalDAV-only actor can obtain + manage its bridge
-            // password (`mail-settings.md` § CalDAV-only mailbox).
-            caldav_enabled: mail.caldav_enabled,
-            // CardDAV (contacts) enablement, the contacts sibling — same
-            // credential-section predicate role for an address-book-only actor
-            // (`carddav-server.md` § Independent enablement).
-            carddav_enabled: mail.carddav_enabled,
+            // Whether the DEPLOYMENT serves CalDAV / CardDAV (`fauna.setup.status`,
+            // the last hydrate's read; unread ⇒ false) — independent of email;
+            // the page's per-protocol connection rows gate on them
+            // (`mail-settings.md` § CalDAV-only mailbox).
+            caldav_enabled: deployment.caldav_enabled,
+            carddav_enabled: deployment.carddav_enabled,
             serves_webdav_set,
             // The one place the credential-management reachability predicate is
             // evaluated — every app reads the field (priority #2/#4), so a
-            // future DAV sibling widens it here, not in 6 UIs.
+            // future DAV sibling widens it here, not in 7 UIs. A credential the
+            // user holds stays revocable and rotatable whatever the flags say —
+            // turning mail off keeps it; and on a deployment serving CalDAV or
+            // CardDAV without mail, Add credential is a bare account's way to
+            // its first (`mail-settings.md` § Credential-management
+            // reachability).
             credential_management_reachable: mail.is_mail_enabled()
-                || mail.caldav_enabled
-                || mail.carddav_enabled
-                || serves_webdav_set,
+                || mail.live_credentials().next().is_some()
+                || serves_webdav_set
+                || deployment.serves_dav_without_mail(),
             serving_enabled,
             mail_unavailable_here,
             // A credential of a kind this build does not name is kept in the
@@ -2591,6 +2681,9 @@ impl MailSettingsMachine {
     /// `common.needs_other_device`; `account-client-lifecycle.md` § The
     /// client-side lifecycle → *The first listing*, clauses (4) and (5)).
     async fn hydrate_inner(&self, heal: bool) -> Result<(), DispatchError> {
+        // Behind any dispatch in flight, so the custody it reads is the one
+        // that dispatch left (`Self::op`).
+        let _op = self.op.lock().await;
         let result = self.hydrate_reads(heal).await;
         if let Err(e) = &result {
             let reason = match e {
@@ -2619,33 +2712,64 @@ impl MailSettingsMachine {
         // not fail the whole page hydrate — an unknown serve state reads as "not
         // serving", which merely hides the WebDAV URL row.
         let serves_webdav_set = self.nest.serves_any_webdav_set().await.unwrap_or(false);
-        // Best-effort as well: an unread box reads "available", and the nest's
-        // own refusal of the enable stands behind it.
-        let mail_unavailable_here = self.nest.mail_unavailable_here().await.unwrap_or(false);
+        // Best-effort as well: an unread box reads "available" and serving
+        // nothing — the nest's own refusal of the enable stands behind the
+        // first, and an unread DAV toggle only hides an affordance.
+        let deployment = self.nest.deployment_status().await.unwrap_or_default();
         // Best-effort: the generation marker's heal and its delete dual — a
         // failure logs and leaves the rows owed for the next hydrate.
         let rows = match heal && self.heal_generation_markers(&rows).await {
             true => self.mail.load_rows().await?,
             false => rows,
         };
-        self.set_snapshot_from(&rows);
+        if heal {
+            self.heal_actor_mail_flag(&rows.config()).await;
+        }
         {
+            // The nest-sourced fields go in BEFORE the fold, which carries them
+            // forward — so the reachability predicate is evaluated once, in
+            // `set_snapshot_from`, over the fresh serve state.
             let mut inner = self.inner.lock().unwrap();
             inner.snapshot.serving_enabled = serving_enabled;
             inner.snapshot.serves_webdav_set = serves_webdav_set;
-            inner.snapshot.mail_unavailable_here = mail_unavailable_here;
-            // Recompute the predicate: `set_snapshot_from` folded in the
-            // *carried-forward* serve state, which the fresh nest read may have
-            // just changed (first-ever hydrate, or a set served since the last).
-            inner.snapshot.credential_management_reachable = inner.snapshot.enabled
-                || inner.snapshot.caldav_enabled
-                || inner.snapshot.carddav_enabled
-                || serves_webdav_set;
-            if let Some(listener) = dav_listener {
-                inner.snapshot.mua.apply_dav_listener(listener);
-            }
+            inner.snapshot.mail_unavailable_here = deployment.mail_unavailable_here;
+            inner.deployment = deployment;
+        }
+        self.set_snapshot_from(&rows);
+        if let Some(listener) = dav_listener {
+            self.inner
+                .lock()
+                .unwrap()
+                .snapshot
+                .mua
+                .apply_dav_listener(listener);
         }
         Ok(())
+    }
+
+    /// Best-effort repair of a Disable or Enable mail stopped between its
+    /// steps: the nest's per-actor mail-off flag is made to agree with the
+    /// custody's `mail_enabled` (`mail-credentials.md` § Trigger taxonomy, the
+    /// Disable-mail row). Custody says off but the nest says on → re-send off
+    /// (a kept credential must not go on reading); custody says on but the
+    /// nest says off → re-send on. A never-provisioned mailbox (no
+    /// `mail_enabled` recorded) is left alone. A failure logs; the next
+    /// hydrate retries.
+    async fn heal_actor_mail_flag(&self, mail: &MailConfig) {
+        let Some(want) = mail.mail_enabled else {
+            return;
+        };
+        match self.nest.get_actor_mail_enabled().await {
+            Ok(on_nest) if on_nest == want => {}
+            Ok(_) => {
+                if let Err(e) = self.nest.set_actor_mail_enabled(want).await {
+                    tracing::warn!(error = %e, "mail flag heal: set failed; retried next hydrate");
+                }
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "mail flag heal: read failed; retried next hydrate");
+            }
+        }
     }
 }
 
@@ -2672,10 +2796,11 @@ impl MailSettingsMachine {
     /// nest has moved (the stale-sibling rule, same §): a replica that listed
     /// the fleet scope before another device rotated and has not walked since
     /// reads the pre-rotation `msek` with no sentinel, and a reconnect runs
-    /// this before the runtime's own walk. So the nest's standing recipient
-    /// pubkey is read first: none on file, the custody's own generation or one
-    /// it retired → the custody is current or ahead, re-seal; a generation it
-    /// has never held → walk ([`MailStore::walk`]) and re-read, moving nothing
+    /// this before the runtime's own walk. So the nest's standing registration
+    /// — the mail pubkey and its calendar and card siblings — is read first:
+    /// none on file, or one the custody's own generation or one it retired
+    /// derives whole → the custody is current or ahead, re-seal; anything
+    /// else → walk ([`MailStore::walk`]) and re-read, moving nothing
     /// when no walk can be taken now (the next connect retries).
     pub async fn refresh_epoch_schedule(&self) -> Result<(), DispatchError> {
         let mut mail = self.mail.load().await?;
@@ -2683,13 +2808,16 @@ impl MailSettingsMachine {
             return Ok(());
         }
         let on_nest = self.nest.fetch_own_recipient_pubkey(self.actor_id).await?;
-        let custody_holds = |mail: &MailConfig, pubkey: &[u8; 32]| {
+        // One generation must derive the whole row: a mail key the custody
+        // holds beside a calendar or card key it does not names no generation
+        // this replica knows, and is walked like one.
+        let custody_holds = |mail: &MailConfig, on_nest: &RegisteredRecipientPubkeys| {
             Self::snapshot_mseks(mail)
                 .iter()
-                .any(|m| derive_recipient_hpke_keypair(m).1 == *pubkey)
+                .any(|m| on_nest.derived_from(m))
         };
-        if let Some(pubkey) = on_nest
-            && !custody_holds(&mail, &pubkey)
+        if let Some(registered) = on_nest
+            && !custody_holds(&mail, &registered)
         {
             if let Err(e) = self.mail.walk().await {
                 // tier_3 `test_mail_stale_sibling_after_key_rotation.py` waits on
@@ -2732,6 +2860,7 @@ impl MailSettingsMachine {
                 self.actor_id,
                 recipient_pubkey,
                 mlkem_ek,
+                DavSealPubkeys::derive(msek),
                 Some(epoch_keys),
             )
             .await?;
@@ -2814,115 +2943,77 @@ impl MailSettingsMachine {
         Ok(password)
     }
 
-    /// Auto-enable mail for a freshly-registered user at their **first
-    /// authenticated client setup**. Mints a mailbox with a generated password
-    /// (returned **once** for the one-time reveal, via
-    /// [`Self::enable_mail_with_generated_password`]) **iff** the deployment has
-    /// mail on, the auto-enable-for-new-users policy is on, and the actor has no
-    /// mailbox yet. Returns `Ok(None)` — *not* an error — when any gate fails
-    /// (policy off, or a mailbox already exists), so the per-app launch glue
-    /// can call it unconditionally on the non-admin first-setup path without
-    /// special-casing the already-enabled actor.
+    /// Auto-provision a freshly-registered user's bridge credential at their
+    /// **first authenticated client setup** — one policy, whatever the
+    /// deployment serves (`mail-credentials.md` § Auto-enable for new users):
+    /// with deployment mail on, the full mailbox
+    /// ([`Self::enable_mail_with_generated_password`]); with mail off but CalDAV
+    /// or CardDAV served, the read recipe
+    /// ([`Self::enable_dav_mailbox_with_generated_password`], *The DAV-only
+    /// deployment*). Either way only when the auto-enable-for-new-users policy
+    /// is on and the account holds no MSEK, and the generated password is
+    /// returned **once** for the one-time reveal. Returns `Ok(None)` — *not*
+    /// an error — when any gate fails, so the launch glue can call it
+    /// unconditionally on the non-admin first-setup path.
     ///
-    /// The two policy flags are passed in (the [`NestClient`] seam carries no
-    /// `setup.status` read); the caller reads them from `fauna.setup.status`
-    /// (`SetupStatusReply.{email_enabled, auto_enable_mail_for_new_users}`).
-    /// `mail-credentials.md` § Auto-enable for new users.
+    /// The deployment flags are passed in; the caller reads them from
+    /// `fauna.setup.status` (`email_enabled`, `caldav_enabled ||
+    /// carddav_enabled`, `auto_enable_mail_for_new_users`).
     pub async fn auto_enable_mail_for_new_user(
         &self,
         deployment_mail_enabled: bool,
+        deployment_dav_enabled: bool,
         auto_enable_policy: bool,
         display_name: String,
     ) -> Result<Option<SecretString>, DispatchError> {
-        if !deployment_mail_enabled || !auto_enable_policy {
+        if !auto_enable_policy || !(deployment_mail_enabled || deployment_dav_enabled) {
             return Ok(None);
         }
         // Idempotency gate (3): never re-mint an existing mailbox. The trigger
         // site (fresh-onboarding launch glue) already guarantees once-per-user;
         // this is the belt-and-suspenders check that also keeps the call a
         // graceful no-op rather than an `InvalidState` error.
-        // An MSEK a teardown left dormant counts: the user disabled mail on
+        // An MSEK of a mailbox whose mail was turned off counts: the user did it on
         // purpose, and a new-user auto-enable must not turn it back on.
         if self.mail.load().await?.msek.is_some() {
             return Ok(None);
         }
-        Ok(Some(
+        let password = if deployment_mail_enabled {
             self.enable_mail_with_generated_password(display_name)
-                .await?,
-        ))
+                .await?
+        } else {
+            self.enable_dav_mailbox_with_generated_password(display_name)
+                .await?
+        };
+        Ok(Some(password))
     }
 
-    /// The "auto-mint a CalDAV mailbox with a generated password" path — the
-    /// calendar twin of [`Self::enable_mail_with_generated_password`]. The
-    /// per-app onboarding launch glue calls this (when the user enabled CalDAV
-    /// but not email) so a CalDAV-only user gets the shared MSEK their calendar
-    /// store seals under, with no hand-entered password. Uses a `Plain` credential
-    /// whose secret is the generated bridge password (the same one a stock CalDAV
-    /// client AUTHs with — § Authentication). Returns the password for the
-    /// one-time reveal. Idempotent (delegates to [`Self::enable_caldav_mailbox`],
-    /// a no-op if the shared MSEK already exists, so the launch glue can call it
-    /// unconditionally on a CalDAV-enable).
-    pub async fn enable_caldav_mailbox_with_generated_password(
+    /// [`Self::enable_dav_mailbox`] under a freshly generated bridge password,
+    /// returned for the one-time reveal — the calendar-only twin of
+    /// [`Self::enable_mail_with_generated_password`]: the admin's claim-time
+    /// mint on a box serving CalDAV or CardDAV with mail off, and the
+    /// new-user one ([`Self::auto_enable_mail_for_new_user`]). Idempotent.
+    pub async fn enable_dav_mailbox_with_generated_password(
         &self,
         display_name: String,
     ) -> Result<SecretString, DispatchError> {
         let password = crate::password_gen::generate_bridge_password();
         let credential = Credential::Plain(Zeroizing::new(password.as_str().as_bytes().to_vec()));
-        self.enable_caldav_mailbox(display_name, credential).await?;
+        self.enable_dav_mailbox(display_name, credential).await?;
         Ok(password)
     }
 
-    /// Enable a CalDAV mailbox under a **caller-provided** PLAIN bridge password —
-    /// the password twin of [`Self::enable_caldav_mailbox_with_generated_password`].
-    /// The e2e uses it to mint a CalDAV-only organizer mailbox whose bridge
-    /// password the test knows, so a stock CalDAV client can AUTH with it (the
-    /// generated-password variant drops the secret, leaving it reachable only via
-    /// the mail-settings reveal UI, which a CalDAV-only actor doesn't render). It
-    /// is also the shape a future "choose your own CalDAV password" UI would call.
-    /// Idempotent (delegates to [`Self::enable_caldav_mailbox`], a no-op once the
-    /// shared MSEK exists).
-    pub async fn enable_caldav_mailbox_with_password(
+    /// [`Self::enable_dav_mailbox`] under a **caller-provided** PLAIN bridge
+    /// password — what the raw-protocol e2e mints a DAV-only mailbox with, so
+    /// a stock CalDAV or CardDAV client can AUTH with a password the test
+    /// knows. Idempotent.
+    pub async fn enable_dav_mailbox_with_password(
         &self,
         display_name: String,
         password: String,
     ) -> Result<(), DispatchError> {
         let credential = Credential::Plain(Zeroizing::new(password.into_bytes()));
-        self.enable_caldav_mailbox(display_name, credential).await
-    }
-
-    /// The "auto-mint a CardDAV mailbox with a generated password" path — the
-    /// contacts twin of [`Self::enable_caldav_mailbox_with_generated_password`].
-    /// The per-app onboarding launch glue calls this (when the user enabled
-    /// CardDAV but neither email nor CalDAV) so a CardDAV-only user gets the
-    /// shared MSEK their address-book store seals under, with no hand-entered
-    /// password. Returns the password for the one-time reveal. Idempotent
-    /// (delegates to [`Self::enable_carddav_mailbox`], reduced to recording the
-    /// per-actor flag once the shared MSEK exists, so the launch glue can call
-    /// it unconditionally on a CardDAV-enable).
-    pub async fn enable_carddav_mailbox_with_generated_password(
-        &self,
-        display_name: String,
-    ) -> Result<SecretString, DispatchError> {
-        let password = crate::password_gen::generate_bridge_password();
-        let credential = Credential::Plain(Zeroizing::new(password.as_str().as_bytes().to_vec()));
-        self.enable_carddav_mailbox(display_name, credential)
-            .await?;
-        Ok(password)
-    }
-
-    /// Enable a CardDAV mailbox under a **caller-provided** PLAIN bridge
-    /// password — the password twin of
-    /// [`Self::enable_carddav_mailbox_with_generated_password`], mirroring the
-    /// CalDAV pair (the e2e mints a CardDAV-only mailbox whose bridge password a
-    /// stock CardDAV client AUTHs with). Idempotent (delegates to
-    /// [`Self::enable_carddav_mailbox`]).
-    pub async fn enable_carddav_mailbox_with_password(
-        &self,
-        display_name: String,
-        password: String,
-    ) -> Result<(), DispatchError> {
-        let credential = Credential::Plain(Zeroizing::new(password.into_bytes()));
-        self.enable_carddav_mailbox(display_name, credential).await
+        self.enable_dav_mailbox(display_name, credential).await
     }
 
     /// Whether a spam-model write would take the **sealed client-side** path —
@@ -3128,6 +3219,9 @@ impl MailSettingsMachine {
     /// to completion (or sets an error on the snapshot) before
     /// returning.
     pub async fn dispatch(&self, action: MailSettingsAction) -> Result<(), DispatchError> {
+        // One custody operation at a time (`Self::op`): no hydrate folds a
+        // read taken mid-dispatch over this dispatch's outcome.
+        let _op = self.op.lock().await;
         let result = match action {
             MailSettingsAction::EnableMail {
                 display_name,
@@ -3168,32 +3262,6 @@ impl MailSettingsMachine {
             self.set_error(e.to_string());
         }
         result
-    }
-}
-
-/// Which DAV protocol a DAV-only mailbox enable is recording — the single
-/// axis on which [`MailSettingsMachine::enable_caldav_mailbox`] and
-/// [`MailSettingsMachine::enable_carddav_mailbox`] differ (the per-actor
-/// `MailConfig` flag). Private: the public surface is the two named methods.
-#[derive(Debug, Clone, Copy)]
-enum DavProtocol {
-    Caldav,
-    Carddav,
-}
-
-impl DavProtocol {
-    fn enabled_in(self, mail: &MailConfig) -> bool {
-        match self {
-            Self::Caldav => mail.caldav_enabled,
-            Self::Carddav => mail.carddav_enabled,
-        }
-    }
-
-    fn set_enabled(self, state: &mut MailStateRow) {
-        match self {
-            Self::Caldav => state.caldav_enabled = true,
-            Self::Carddav => state.carddav_enabled = true,
-        }
     }
 }
 

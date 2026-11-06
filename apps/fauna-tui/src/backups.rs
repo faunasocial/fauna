@@ -103,7 +103,8 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use fauna_backups_machine::{
-    BackupOp, BackupsMachine, BackupsObserver, BackupsSnapshot, PolicyState, SnapshotState,
+    BackupOp, BackupsMachine, BackupsObserver, BackupsSnapshot, NullObserver, PolicyState,
+    SnapshotState,
 };
 use fauna_client::NestClient;
 use fauna_client_backup::audit::{DestinationAuditRecord, run_audit_pass};
@@ -130,15 +131,9 @@ use crate::pages::Page;
 /// and the account store's backup-state door.
 type DestSession = (Arc<NestClient>, [u8; 32], Arc<dyn BackupStateStore>);
 
-/// The `restore-kind-checkbox` set in paint order — `backups.md:61` ("two
-/// checkboxes, `mail`, `calendar`"). The token is the wire kind, the second
-/// field the localized label; `conv` is deliberately absent until the
-/// conversations rollout's Plan 9 lands (`backups.md:68`), and widening the set
-/// is a ui.yaml change made then, with approval.
-const RESTORE_KINDS: [(&str, &str); 2] = [
-    ("mail", t::RESTORE_KINDS_MAIL),
-    ("calendar", t::RESTORE_KINDS_CALENDAR),
-];
+// The `restore-kind-checkbox` set (token, localized label) is the shared
+// table in `fauna-client-snapshots`, the same one linux paints.
+use fauna_client_snapshots::RESTORE_KINDS;
 
 // ── State ────────────────────────────────────────────────────────────────────
 
@@ -153,17 +148,6 @@ pub enum FormMode {
     /// `backup-destination-edit-button[i]` opened it, prefilled from that row —
     /// confirm renames / re-points the destination with this `destination_id`.
     Edit(String),
-}
-
-/// [`BackupsObserver`] is a construction requirement only. `BackupsMachine`
-/// notifies it synchronously after every gesture, but this page re-reads
-/// `machine.snapshot()` right after each awaited [`Op`] instead — the same
-/// awaited-hydrate shape the destination half above and the Settings sub-pages
-/// use, rather than linux's push-observer render loop.
-struct NoopObserver;
-
-impl BackupsObserver for NoopObserver {
-    fn on_changed(&self) {}
 }
 
 /// Which destination kind the add dialog is composing — the two implemented
@@ -237,8 +221,9 @@ impl DestinationKindChoice {
 
 /// Which `restore-kind-checkbox` boxes are ticked, parallel to [`RESTORE_KINDS`].
 ///
-/// A newtype rather than a bare `[bool; 2]` so "both checked" (`backups.md:61`)
-/// is the type's own [`Default`] and [`BackupsState`] keeps its derive — the
+/// A newtype rather than a bare bool array so "all checked" (`backups.md`
+/// § Restore from backup destination) is the type's own [`Default`] and
+/// [`BackupsState`] keeps its derive — the
 /// default lives in one place instead of being re-asserted at every
 /// construction site.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -277,8 +262,18 @@ pub enum ReseedView {
     #[default]
     Closed,
     /// `backup-destination-reseed-confirm-modal` is open over the source
-    /// pressed: `None` for the orphaned store, `Some(id)` for a destination row.
+    /// pressed: `None` for the orphaned store, `Some(id)` for this device's
+    /// own custodian row.
     Confirming(Option<String>),
+    /// A nest-kind row was pressed: the pull-back's preflight is reading the
+    /// surviving copy against this device's pins, and no modal is open yet
+    /// (`ui/backups.md` § Restore after losing the nest).
+    Preflighting(String),
+    /// The modal is open over a nest-kind row, carrying the preflight's lines;
+    /// confirming accepts exactly that preflight
+    /// (`client-device-custodian.md` § *What the pull-back trusts the holder
+    /// for*, the confirm).
+    ConfirmingPullBack(String, Box<fauna_client_backup::reseed::PullBackPreflight>),
     Running,
     Done(fauna_client_backup::reseed::ReseedOutcome),
 }
@@ -581,11 +576,23 @@ impl BackupsState {
             .map(|row| row.id.to_string())
     }
 
+    /// Whether the selected snapshot's kind has its `restore-kind-checkbox`
+    /// ticked. A row of a kind with no box is not the checkboxes' to refuse.
+    fn selected_kind_ticked(&self) -> bool {
+        self.snapshots
+            .get(self.selected_snapshot)
+            .and_then(|row| row.message_kind.as_deref())
+            .and_then(|kind| RESTORE_KINDS.iter().position(|(token, _)| *token == kind))
+            .is_none_or(|index| self.restore_kinds.checked(index))
+    }
+
     /// Whether `restore-confirm-button` is armed: the typed text must equal the
-    /// **selected** snapshot's id, and no restore may already be in flight —
-    /// both halves of `backups.md:63`.
+    /// **selected** snapshot's id, no restore may already be in flight (both
+    /// halves of `backups.md:63`), and the user must not have unticked that
+    /// snapshot's kind.
     fn restore_armed(&self) -> bool {
         self.restore_progress != RestoreProgress::Running
+            && self.selected_kind_ticked()
             && self
                 .selected_snapshot_id()
                 .is_some_and(|id| id == self.restore_confirm)
@@ -644,7 +651,7 @@ fn build_machine(
         Some(fauna_core::crypto::BackupKey::derive(&secret)),
     )
     .with_predecessors(succession_predecessors.to_vec());
-    let observer: Arc<dyn BackupsObserver> = Arc::new(NoopObserver);
+    let observer: Arc<dyn BackupsObserver> = Arc::new(NullObserver);
     fauna_backups_machine::build_backups_machine(nest, observer, custody)
 }
 
@@ -1282,29 +1289,55 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
             // Armed only over a row carrying the button right now — the same
             // keyboard-actuation backstop as the reclaim's — and never while a
             // run is in flight.
-            if st.reseed == ReseedView::Running
+            if matches!(st.reseed, ReseedView::Running | ReseedView::Preflighting(_))
                 || !reseed_rows(st, custodian_handle.device_id()).contains(&source)
             {
                 return None;
             }
-            st.reseed = ReseedView::Confirming(source);
             st.form = None;
             st.removing = None;
             st.reclaiming = false;
             app.errors.remove(&Page::Backups);
+            // A nest-kind row's confirm carries the pull-back's preflight, so
+            // the press reads it first and the modal opens on its answer.
+            if reseed_leg(st, custodian_handle.device_id(), &source)
+                == Some(fauna_client_backup::reseed::ReseedLeg::NestHeldPullBack)
+            {
+                let id = source?;
+                let destination = st
+                    .destinations
+                    .iter()
+                    .find(|d| d.destination_id == id)
+                    .cloned()?;
+                let (_, secret) = st.session()?;
+                st.reseed = ReseedView::Preflighting(id);
+                return Some(Op::PullBackPreflight {
+                    secret,
+                    destination: Box::new(destination),
+                });
+            }
+            st.reseed = ReseedView::Confirming(source);
             None
         }
         Action::CancelReseed => {
-            if matches!(st.reseed, ReseedView::Confirming(_)) {
+            if matches!(
+                st.reseed,
+                ReseedView::Confirming(_) | ReseedView::ConfirmingPullBack(..)
+            ) {
                 st.reseed = ReseedView::Closed;
             }
             app.errors.remove(&Page::Backups);
             None
         }
         Action::ConfirmReseed => {
-            let ReseedView::Confirming(source) = &st.reseed else {
-                return None;
+            let (source, accepted) = match &st.reseed {
+                ReseedView::Confirming(source) => (source.clone(), None),
+                ReseedView::ConfirmingPullBack(id, preflight) => {
+                    (Some(id.clone()), Some((**preflight).clone()))
+                }
+                _ => return None,
             };
+            let source = &source;
             let leg = reseed_leg(st, custodian_handle.device_id(), source)?;
             let destination = source
                 .as_ref()
@@ -1322,6 +1355,8 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
                     folder_keys,
                     destination: Box::new(destination?),
                     custodian: custodian_handle,
+                    // The modal over a nest row only ever opens on a preflight.
+                    accepted: Box::new(accepted?),
                 });
             }
             Some(Op::Reseed {
@@ -1864,6 +1899,16 @@ pub enum Op {
         destination: Box<BackupDestination>,
         /// For this device's sync id and the page read afterwards.
         custodian: crate::sync_agent::CustodianStoreHandle,
+        /// The preflight whose lines the owner confirmed — the run's
+        /// acceptance.
+        accepted: Box<fauna_client_backup::reseed::PullBackPreflight>,
+    },
+    /// The press on a nest-kind row's `backup-destination-reseed-button`: the
+    /// shared `fauna_sync_engine::reseed_pull::pull_back_preflight` against
+    /// this device's audit pins, whose answer opens the confirm.
+    PullBackPreflight {
+        secret: [u8; 32],
+        destination: Box<BackupDestination>,
     },
     /// Recover what the owner's nest lost from `destination`'s copy — the
     /// confirmed `backup-audit-recover-button` action, by the row's leg
@@ -1996,6 +2041,12 @@ pub enum Outcome {
     Reseeded {
         result: fauna_client_backup::reseed::ReseedOutcome,
         page: Box<Outcome>,
+    },
+    /// The pull-back's preflight answered for `destination_id`'s row: the
+    /// confirm opens on `Ok`, and `Err` is a failed gesture.
+    PullBackPreflighted {
+        destination_id: String,
+        result: Result<fauna_client_backup::reseed::PullBackPreflight, String>,
     },
     /// The recovery reached the shared driver's end — the [`Self::Reseeded`]
     /// shape, for the same reason.
@@ -2184,7 +2235,37 @@ impl Op {
                 folder_keys,
                 destination,
                 custodian,
-            } => pull_back(nest, secret, store, folder_keys, destination, custodian).await,
+                accepted,
+            } => {
+                pull_back(
+                    nest,
+                    secret,
+                    store,
+                    folder_keys,
+                    destination,
+                    custodian,
+                    *accepted,
+                )
+                .await
+            }
+            Op::PullBackPreflight {
+                secret,
+                destination,
+            } => {
+                let audit =
+                    crate::backup_audit::store(&ActorKeypair::from_secret(secret).actor_id_hex());
+                Outcome::PullBackPreflighted {
+                    destination_id: destination.destination_id.clone(),
+                    result: fauna_sync_engine::reseed_pull::pull_back_preflight(
+                        fauna_sync_engine::reseed_pull::NativePullBackPreflight {
+                            owner_secret: secret,
+                            destination: &destination,
+                            audit: &audit,
+                        },
+                    )
+                    .await,
+                }
+            }
             Op::Recover {
                 nest,
                 secret,
@@ -2468,19 +2549,14 @@ async fn restore_snapshot(
 /// written and where, and — when any failed to fetch, open or verify — which,
 /// by their redacted paths, with everything else said to be written.
 fn restore_result_line(summary: &fauna_sync_engine::engine::RestoreSummary, path: &str) -> String {
-    let files = summary.files_restored.to_string();
-    if summary.unverified.is_empty() {
-        let size =
-            crate::format::byte_size(i64::try_from(summary.bytes_written).unwrap_or(i64::MAX));
-        t::snapshot_restore_done(&files, &size, path)
-    } else {
-        t::snapshot_restore_partial(
-            &files,
-            path,
-            &summary.unverified.len().to_string(),
-            &summary.unverified.join(", "),
-        )
-    }
+    let size = crate::format::byte_size(i64::try_from(summary.bytes_written).unwrap_or(i64::MAX));
+    fauna_backups_machine::snapshot_restore_result_text(
+        summary.files_restored,
+        &size,
+        path,
+        &summary.unverified,
+    )
+    .resolve(fauna_i18n::strings::lookup)
 }
 
 /// A remote-supplied name as one safe file name: only its last non-empty path
@@ -2963,6 +3039,7 @@ async fn pull_back(
     folder_keys: Arc<dyn fauna_client_folders::FolderKeyStore>,
     destination: Box<BackupDestination>,
     custodian: crate::sync_agent::CustodianStoreHandle,
+    accepted: fauna_client_backup::reseed::PullBackPreflight,
 ) -> Outcome {
     let device = custodian
         .device_id()
@@ -2973,6 +3050,7 @@ async fn pull_back(
             "this device has no sync identity to record the restore under",
         ));
     };
+    let audit = crate::backup_audit::store(&ActorKeypair::from_secret(secret).actor_id_hex());
     let ran = fauna_sync_engine::reseed_pull::pull_back_from_destination(
         fauna_sync_engine::reseed_pull::NativePullBack {
             target: Arc::clone(&nest),
@@ -2981,6 +3059,8 @@ async fn pull_back(
             destination: &destination,
             store: store.as_ref(),
             folder_keys,
+            audit: Some(&audit),
+            accepted: Some(accepted),
         },
     )
     .await;
@@ -3565,7 +3645,10 @@ pub fn apply_outcome(app: &mut App, outcome: Outcome) {
                 app.backups.restore_progress = RestoreProgress::Idle;
             }
             // Same for the re-seed: a stuck `Running` would disarm its button.
-            if app.backups.reseed == ReseedView::Running {
+            if matches!(
+                app.backups.reseed,
+                ReseedView::Running | ReseedView::Preflighting(_)
+            ) {
                 app.backups.reseed = ReseedView::Closed;
             }
             if app.backups.recover == RecoverView::Running {
@@ -3575,6 +3658,28 @@ pub fn apply_outcome(app: &mut App, outcome: Outcome) {
             app.errors.insert(Page::Backups, msg);
         }
         Outcome::Refreshed { since, page } => fold_refresh(app, since, *page),
+        Outcome::PullBackPreflighted {
+            destination_id,
+            result,
+        } => {
+            // Only the press still waiting opens: a cancel or a later press
+            // in between owns the view now.
+            if app.backups.reseed != ReseedView::Preflighting(destination_id.clone()) {
+                return;
+            }
+            match result {
+                Ok(preflight) => {
+                    app.backups.reseed =
+                        ReseedView::ConfirmingPullBack(destination_id, Box::new(preflight));
+                }
+                Err(e) => {
+                    app.backups.reseed = ReseedView::Closed;
+                    app.backups.failure_seq += 1;
+                    app.errors
+                        .insert(Page::Backups, t::backup_reseed_failed(&e));
+                }
+            }
+        }
         Outcome::Reseeded { result, page } => {
             // The page read first, so its fold cannot clear the result; the
             // result lands whether or not that read succeeded, because the
@@ -4468,7 +4573,7 @@ fn reseed_button(st: &BackupsState, source: Option<String>) -> Element {
     Element::gesture_button(
         ids::BACKUP_DESTINATION_RESEED_BUTTON,
         t::BACKUP_DESTINATION_RESEED_BUTTON,
-        st.reseed != ReseedView::Running,
+        !matches!(st.reseed, ReseedView::Running | ReseedView::Preflighting(_)),
         Gesture::Backups(Action::OpenReseedConfirm { source }),
     )
 }
@@ -4478,9 +4583,30 @@ fn reseed_button(st: &BackupsState, source: Option<String>) -> Element {
 /// `fauna_client_backup::reseed::result_lines`, verdict first; nothing about
 /// what "restored" means is decided here.
 fn reseed_elements(st: &BackupsState, out: &mut Vec<Element>) {
-    match &st.reseed {
-        ReseedView::Closed => {}
-        ReseedView::Confirming(source) => {
+    let (source, preflight) = match &st.reseed {
+        ReseedView::Closed | ReseedView::Preflighting(_) => (None, None),
+        ReseedView::Confirming(source) => (Some(source.clone()), None),
+        ReseedView::ConfirmingPullBack(id, preflight) => (Some(Some(id.clone())), Some(preflight)),
+        ReseedView::Running => {
+            out.push(Element::label(
+                ids::BACKUP_DESTINATION_RESEED_RESULT,
+                t::BACKUP_RESEED_RUNNING,
+            ));
+            (None, None)
+        }
+        ReseedView::Done(result) => {
+            let text = fauna_client_backup::reseed::result_lines(result)
+                .iter()
+                .map(|line| line.resolve_nested(fauna_i18n::strings::lookup))
+                .collect::<Vec<_>>()
+                .join("\n");
+            out.push(Element::label(ids::BACKUP_DESTINATION_RESEED_RESULT, text));
+            (None, None)
+        }
+    };
+    match source {
+        None => {}
+        Some(source) => {
             // A surviving nest's row names the copy it pulls back; every other
             // source is this device's own store.
             let nest_source = source
@@ -4512,6 +4638,17 @@ fn reseed_elements(st: &BackupsState, out: &mut Vec<Element>) {
             // The consequence, stated where the decision is made (the reclaim
             // modal's idiom); ui.yaml scopes no id to it.
             out.push(Element::chrome(body));
+            // The pull-back's preflight: what this device can and cannot vouch
+            // for in the copy, the lines the confirm accepts (the modal's
+            // body; no id of its own — `ui/backups.md` § Restore after losing
+            // the nest).
+            if let Some(preflight) = preflight {
+                for line in fauna_client_backup::reseed::preflight_lines(preflight) {
+                    out.push(Element::chrome(
+                        line.resolve_nested(fauna_i18n::strings::lookup),
+                    ));
+                }
+            }
             out.push(
                 Element::gesture_button(
                     ids::BACKUP_DESTINATION_RESEED_CONFIRM_BUTTON,
@@ -4530,18 +4667,6 @@ fn reseed_elements(st: &BackupsState, out: &mut Vec<Element>) {
                 )
                 .within(ids::BACKUP_DESTINATION_RESEED_CONFIRM_MODAL, 0),
             );
-        }
-        ReseedView::Running => out.push(Element::label(
-            ids::BACKUP_DESTINATION_RESEED_RESULT,
-            t::BACKUP_RESEED_RUNNING,
-        )),
-        ReseedView::Done(result) => {
-            let text = fauna_client_backup::reseed::result_lines(result)
-                .iter()
-                .map(|line| line.resolve_nested(fauna_i18n::strings::lookup))
-                .collect::<Vec<_>>()
-                .join("\n");
-            out.push(Element::label(ids::BACKUP_DESTINATION_RESEED_RESULT, text));
         }
     }
 }
@@ -4873,9 +4998,11 @@ fn status_row(
 /// One `restore-snapshot-select` option, via the shared
 /// [`fauna_client_snapshots::snapshot_restore_option_label`] — this body and
 /// linux's were byte-identical, so both now defer to the one implementation
-/// (android/apple/windows consume the same logic over UniFFI).
+/// (android/apple/windows consume the same logic over UniFFI). A kind is named
+/// by its checkbox label, never its wire token: `card` and `conv` mean nothing
+/// to the reader.
 fn snapshot_label(row: &SnapshotSummaryRow) -> String {
-    fauna_client_snapshots::snapshot_restore_option_label(row.message_kind.as_deref(), row.id)
+    fauna_client_snapshots::snapshot_restore_kind_option_label(row.message_kind.as_deref(), row.id)
 }
 
 /// The restore half: the local-restore action card, the restore-history
@@ -4940,7 +5067,7 @@ fn restore_elements(st: &BackupsState, out: &mut Vec<Element>) {
     }
 
     // The kinds set. ui.yaml types the container a `component` and gives it no
-    // text of its own — it is a pure grouping node, so its two children carry
+    // text of its own — it is a pure grouping node, so its children carry
     // the labels and it registers with an empty string rather than an invented
     // heading.
     out.push(Element::label(ids::RESTORE_KINDS_CHECKBOXES, String::new()));
@@ -5504,15 +5631,48 @@ mod tests {
             ReseedView::Closed,
             "a row that carries no button arms nothing"
         );
-        apply_local(
+        // The press reads the preflight first; no modal opens until it answers.
+        match apply_local(
             &mut app,
             Action::OpenReseedConfirm {
                 source: Some("off".into()),
             },
+        ) {
+            Some(Op::PullBackPreflight { destination, .. }) => {
+                assert_eq!(destination.destination_id, "off");
+            }
+            _ => panic!("a nest row's press runs the preflight"),
+        }
+        assert_eq!(app.backups.reseed, ReseedView::Preflighting("off".into()));
+        assert_eq!(count_id(&app, "backup-destination-reseed-confirm-modal"), 0);
+        assert!(
+            apply_local(&mut app, Action::ConfirmReseed).is_none(),
+            "nothing to confirm before the preflight answers"
+        );
+
+        let preflight = fauna_client_backup::reseed::PullBackPreflight {
+            sets: vec![fauna_client_backup::reseed::SetPreflight {
+                set_name: "__mail".into(),
+                ledgers: vec![fauna_client_backup::reseed::LedgerPreflight {
+                    path: "p".into(),
+                    manifest_hash_hex: "00".into(),
+                    verdict: fauna_client_backup::reseed::LedgerVerdict::Unvouched {
+                        generation: 3,
+                    },
+                }],
+            }],
+            folder_sets: vec!["__folder/aa/7".into()],
+        };
+        apply_outcome(
+            &mut app,
+            Outcome::PullBackPreflighted {
+                destination_id: "off".into(),
+                result: Ok(preflight.clone()),
+            },
         );
         assert_eq!(
             app.backups.reseed,
-            ReseedView::Confirming(Some("off".into()))
+            ReseedView::ConfirmingPullBack("off".into(), Box::new(preflight.clone()))
         );
         let body: Vec<String> = elements(&app).into_iter().map(|e| e.text).collect();
         assert!(
@@ -5523,14 +5683,58 @@ mod tests {
             body.contains(&t::backup_reseed_pull_back_confirm_body("Off-site")),
             "{body:?}"
         );
+        for line in fauna_client_backup::reseed::preflight_lines(&preflight) {
+            let text = line.resolve_nested(fauna_i18n::strings::lookup);
+            assert!(body.contains(&text), "the confirm shows {text:?}: {body:?}");
+        }
 
         match apply_local(&mut app, Action::ConfirmReseed) {
-            Some(Op::PullBack { destination, .. }) => {
+            Some(Op::PullBack {
+                destination,
+                accepted,
+                ..
+            }) => {
                 assert_eq!(destination.destination_id, "off");
+                assert_eq!(
+                    *accepted, preflight,
+                    "the run accepts exactly what was shown"
+                );
             }
             _ => panic!("a nest row's confirm runs the pull-back"),
         }
         assert_eq!(app.backups.reseed, ReseedView::Running);
+    }
+
+    /// A preflight that fails is a failed gesture: no modal opens, the error
+    /// line says why, and the button is armed again.
+    #[test]
+    fn a_failed_preflight_opens_no_confirm_and_says_why() {
+        let mut app = backups_app();
+        app.backups.destinations = vec![destination("off", "http://b.test", Some("Off-site"))];
+        apply_local(
+            &mut app,
+            Action::OpenReseedConfirm {
+                source: Some("off".into()),
+            },
+        );
+        apply_outcome(
+            &mut app,
+            Outcome::PullBackPreflighted {
+                destination_id: "off".into(),
+                result: Err("unreachable".into()),
+            },
+        );
+        assert_eq!(app.backups.reseed, ReseedView::Closed);
+        assert_eq!(count_id(&app, "backup-destination-reseed-confirm-modal"), 0);
+        assert_eq!(
+            app.errors.get(&Page::Backups),
+            Some(&t::backup_reseed_failed("unreachable"))
+        );
+        let button = elements(&app)
+            .into_iter()
+            .find(|e| e.id == "backup-destination-reseed-button")
+            .expect("the button stays painted");
+        assert!(button.enabled);
     }
 
     /// This device's own custodian row keeps the custodian ceremony.
@@ -7275,7 +7479,7 @@ mod tests {
         }]);
         let api: Arc<dyn fauna_backups_machine::BackupsNestApi> = fake;
         let mut app = backups_app();
-        app.backups.machine = Some(BackupsMachine::new(Arc::new(NoopObserver), api));
+        app.backups.machine = Some(BackupsMachine::new(Arc::new(NullObserver), api));
 
         // `dummy_nest` answers nothing, so `load_destinations` fails.
         let op = nav_enter_op(&app.backups, Default::default()).expect("authenticated");
@@ -8671,16 +8875,58 @@ mod tests {
         assert_eq!(count_id(&app, "restore-divergence-details-modal"), 0);
     }
 
-    /// Both kinds start checked (`backups.md:61`) and each toggles on its own.
+    /// Every kind starts checked and each toggles on its own.
     #[test]
-    fn both_restore_kinds_start_checked_and_toggle_independently() {
+    fn every_restore_kind_starts_checked_and_toggles_independently() {
         let mut app = backups_app();
-        assert!(app.backups.restore_kinds.checked(0));
-        assert!(app.backups.restore_kinds.checked(1));
+        for index in 0..RESTORE_KINDS.len() {
+            assert!(app.backups.restore_kinds.checked(index));
+        }
+
+        apply_local(&mut app, Action::ToggleRestoreKind { index: 2 });
+        for index in 0..RESTORE_KINDS.len() {
+            assert_eq!(app.backups.restore_kinds.checked(index), index != 2);
+        }
+    }
+
+    /// The checkbox set is the shared kind table's, in its order.
+    #[test]
+    fn the_restore_kinds_are_the_kinds_the_nest_snapshots() {
+        let tokens: Vec<&str> = RESTORE_KINDS.iter().map(|(kind, _)| *kind).collect();
+        let shared: Vec<&str> = fauna_backups_machine::KIND_ENTRIES
+            .iter()
+            .map(|(kind, _)| *kind)
+            .collect();
+        assert_eq!(tokens, shared);
+    }
+
+    /// Unticking the selected snapshot's kind disarms the restore; another
+    /// kind's box leaves it armed.
+    #[test]
+    fn an_unticked_kind_disarms_the_restore_of_its_snapshot() {
+        let mut app = backups_app();
+        app.backups.snapshots = vec![snapshot(7, "card")];
+        let _ = app.set_field(
+            Field::Backups(BackupsField::RestoreConfirm),
+            "7".to_string(),
+        );
+        assert!(enabled_of(&app, "restore-confirm-button"));
 
         apply_local(&mut app, Action::ToggleRestoreKind { index: 0 });
-        assert!(!app.backups.restore_kinds.checked(0));
-        assert!(app.backups.restore_kinds.checked(1));
+        assert!(enabled_of(&app, "restore-confirm-button"));
+
+        apply_local(&mut app, Action::ToggleRestoreKind { index: 2 });
+        assert!(!enabled_of(&app, "restore-confirm-button"));
+        assert!(apply_local(&mut app, Action::SubmitRestore).is_none());
+    }
+
+    /// A picker option names its kind as the checkbox does, never by wire token.
+    #[test]
+    fn a_picker_option_names_its_kind_by_the_checkbox_label() {
+        assert_eq!(
+            snapshot_label(&snapshot(7, "card")),
+            format!("{} (#7)", t::RESTORE_KINDS_CONTACTS)
+        );
     }
 
     /// The pickers select by their painted label, which is all a `select`

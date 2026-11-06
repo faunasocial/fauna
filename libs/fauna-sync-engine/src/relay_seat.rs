@@ -184,6 +184,10 @@ impl RelaySeat {
             FolderRef::Foreign(_) => home_nest_url
                 .filter(|url| !url.is_empty())
                 .map(|url| Some(url.to_string())),
+            // A group set has no home nest to announce on: its members' reach
+            // is their own endpoints cells (decision 8), and no relay serves
+            // it (`p2p.md` § The relay → *Across nests*).
+            FolderRef::Group(_) => None,
         };
         let registered = home.is_some();
         if let Some(home) = home {

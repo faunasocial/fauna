@@ -48,6 +48,7 @@ pub mod conformance;
 pub mod db;
 #[cfg(target_arch = "wasm32")]
 pub mod indexeddb;
+pub mod lock_outcome;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod locks;
 /// Web's leg of the store's locks, under the same path and names as the

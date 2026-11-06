@@ -42,6 +42,10 @@ pytestmark = [
     pytest.mark.tui,
     pytest.mark.linux,
     pytest.mark.web,
+    pytest.mark.macos,
+    pytest.mark.windows,
+    pytest.mark.android,
+    pytest.mark.ios,
     pytest.mark.real_conversations,
 ]
 

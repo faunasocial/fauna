@@ -27,6 +27,7 @@ from pathlib import Path
 
 import pytest
 
+from helpers.app_surface import declared_absence, skip_environment
 from helpers.fuse_mount import mount_type
 
 # Content sync crosses two processes and a nest round-trip; the engine is
@@ -198,29 +199,127 @@ def on_demand_mount_stands(location: Path) -> bool:
     return mount_type(location) == "fuse.fauna"
 
 
+def on_demand_root_stands(location: Path) -> bool:
+    """Whether the agent's on-demand root stands over ``location`` right now,
+    on whichever host this is: on linux the FUSE mount in the kernel's mount
+    table (:func:`on_demand_mount_stands`), on windows the cloud-files sync-root
+    registration the filter answers (`helpers.windows_cfapi.is_sync_root`). Each
+    is the answer every other process on the box gets — never the app's or the
+    agent's claim."""
+    if sys.platform == "win32":
+        from helpers.windows_cfapi import is_sync_root
+
+        return is_sync_root(location)
+    return on_demand_mount_stands(location)
+
+
+def require_fuse_host(driver) -> None:
+    """Skip, with its class, a witness that reads the linux FUSE root on a host
+    that serves none — tui runs on all three. ``driver`` is a driver or the app id.
+
+    A macOS host offers no per-binding on-demand root by design; a windows host
+    serves a cloud-files root, which the FUSE witnesses' mount table and block
+    counts cannot read (its legs are `test_folder_location_free_space.py` and
+    the `test_folder_on_demand_*_windows.py` twins).
+    """
+    if sys.platform == "darwin":
+        declared_absence(
+            driver,
+            capability="on-demand root over a bound location on a macOS host (always-resident)",
+            doc=(
+                "docs/goal/behavior/on-demand-files.md § On-Demand Files — \"on macOS a "
+                "bound location is always-resident by design (on-demand-files-apple.md § Apple File Provider binding)\""
+            ),
+        )
+    if sys.platform == "win32":
+        skip_environment("this witness reads a FUSE mount; a windows host serves cloud files")
+
+
 def bind_location_under_set(app, set_name: str, location: Path, *, seat: str) -> int:
     """Bind ``location`` under ``set_name``'s expander and wait for the row.
 
     The binding form is nested per set (the set is contextual — there is no
     free-text set name), so the unindexed ``folder-location-*`` IDs resolve to the
     one expanded set.
+
+    The open, the type and the click are retried until the form takes them,
+    polled on the form being there (convention 14): linux rebuilds the whole
+    folder list on every devices snapshot, collapsing the open row, and on an
+    account carrying many sets — the run-scoped user late in a whole run, 54
+    sets measured  — the member-roster loads keep the snapshots
+    coming for seconds after the page mounts, so a single open-then-type lost
+    the form to a rebuild (``LookupError: not found`` on the path input) while
+    the same cell passed alone. The wait for the bound row re-opens the row for
+    the same reason.
     """
     b = app.backups
     b.navigate_folders()
-    # The row may already be open (the owner's, from the share gesture).
-    idx = b.open_folder(set_name)
-    app.driver.type_text("folder-location-path-input", str(location))
-    app.driver.click("folder-location-add-button")
+    deadline = time.monotonic() + 60
+    while True:
+        # The row may already be open (the owner's, from the share gesture).
+        idx = b.open_folder(set_name)
+        try:
+            app.driver.type_text("folder-location-path-input", str(location))
+            app.driver.click("folder-location-add-button")
+            break
+        except LookupError:
+            if time.monotonic() >= deadline:
+                pytest.fail(
+                    f"[{seat}] {set_name!r}'s binding form never held still long "
+                    f"enough to take the path (60s of re-opens); "
+                    f"error={app.error_text()!r}"
+                )
+            time.sleep(0.3)  # sleep-ok: bounded poll cadence inside the deadline
 
     deadline = time.monotonic() + 30
     while time.monotonic() < deadline:
         if app.driver.count("folder-location-row", scope=f"folder-row[{idx}]") >= 1:
             return idx
+        if not app.driver.is_visible("folder-location-path-input"):
+            # A rebuild shut the row after the add: open it again to read it.
+            idx = b.open_folder(set_name)
         time.sleep(0.3)
     pytest.fail(
         f"[{seat}] bound location never rendered as a folder-location-row under "
         f"{set_name!r}; error={app.error_text()!r}"
     )
+
+
+def open_bound_row(app, set_name: str, *, diagnose=None) -> str:
+    """Leave ``set_name``'s row open with its bound location's switch painted,
+    and return the row's scope.
+
+    The row's index is re-read every time: a second set can sort ahead of the
+    first and move it. Checked on the row's OWN switch, not an unscoped body
+    widget, since another set's row may be open too; re-expanded on any poll
+    that finds the row shut, because linux rebuilds the list (collapsing every
+    row) on each observer tick (`BackupActions.find_and_expand_folder_until`'s
+    reason), and the windows list may rebuild after a bind. Shut is read off the
+    binding form's path input, which every open owner row paints
+    (`BackupActions.open_folder`'s probe): the expand is a toggle, so clicking a
+    row that is open but still painting its bound locations would shut it.
+
+    ``diagnose`` returns the failure's account of the engine (default: the app's
+    own agent tail, :func:`agent_diagnosis`); a seat run passes its seat's.
+    """
+    b = app.backups
+    b.navigate_folders()
+    deadline = time.monotonic() + 60
+    while True:
+        scope = f"folder-row[{b.wait_for_folder_row(set_name)}]"
+        if app.sync_locations.mode_toggle_visible(scope=scope):
+            return scope
+        if time.monotonic() >= deadline:
+            engine = diagnose() if diagnose is not None else agent_diagnosis(app, "owner")
+            pytest.fail(
+                f"{set_name!r}'s row never showed its folder-location-mode-toggle; "
+                f"{app.driver.diagnose('folder-location-mode-toggle')} "
+                f"{app.driver.diagnose('folder-location-path-input')} "
+                f"{app.driver.diagnose('folder-location-path')} "
+                f"error={app.error_text()!r}\n{engine}"
+            )
+        if not app.driver.is_visible_scrolled("folder-location-path-input", scope=scope):
+            b.expand_folder(b.wait_for_folder_row(set_name))
 
 
 def _log_path(relative: str) -> str:
@@ -283,6 +382,49 @@ def upload_count(app, filename: str) -> int:
     except Exception:
         return 0
     return sum(1 for line in text.splitlines() if "file uploaded" in line and logged in line)
+
+
+def hold_custody_reread(app) -> Path:
+    """Hold this seat's agent from re-reading custody: create the file its
+    launch's ``FAUNA_E2E_CUSTODY_HOLD_FILE`` names (the compile-gated seam
+    ``content_keys::custody_reread_held``). While it exists each resolve keeps
+    the custody reading the agent holds and takes only the fresh folder list,
+    so a rotation that raised a set's floor reads *Keys pending* until
+    :func:`release_custody_reread`. Returns the file. Loud, never a skip, on a
+    driver that sets no hold file: the test would otherwise pass vacuously."""
+    path = getattr(app.driver, "custody_hold_file", lambda: None)()
+    if not path:
+        raise RuntimeError(
+            f"{type(app.driver).__name__} sets no FAUNA_E2E_CUSTODY_HOLD_FILE "
+            "(the tui, linux, macos and windows drivers do, at launch)"
+        )
+    hold = Path(path)
+    hold.parent.mkdir(parents=True, exist_ok=True)
+    hold.touch()
+    return hold
+
+
+def release_custody_reread(app) -> None:
+    """Release :func:`hold_custody_reread`: delete the hold file. The agent
+    re-reads custody at its next edge — the resident tick's row read, which
+    wakes the custody task while a bound set's floor is ahead of the generation
+    it holds."""
+    path = getattr(app.driver, "custody_hold_file", lambda: None)()
+    if path:
+        Path(path).unlink(missing_ok=True)
+
+
+def custody_hold_applied(app) -> bool:
+    """Whether this seat's agent has kept a held custody reading at least once —
+    its ``custody re-read held by the e2e custody hold`` log line. The proof a
+    hold took effect, for a failure message that must tell "the hold was never
+    adopted" (a release build, an unset variable) from "the status never read
+    it"."""
+    try:
+        text = app.driver.app_stderr_text()
+    except Exception:
+        return False
+    return "custody re-read held by the e2e custody hold" in text
 
 
 def engine_restart_count(app, set_name: str) -> int:

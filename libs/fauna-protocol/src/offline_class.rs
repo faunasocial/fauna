@@ -219,6 +219,7 @@ fn build_table() -> BTreeMap<&'static str, OfflineClass> {
     m.insert("fauna.bridges.get_mail_quotas", Read);
     m.insert("fauna.bridges.get_mail_switches", Read);
     m.insert("fauna.bridges.get_mail_config", Read);
+    m.insert("fauna.bridges.get_actor_mail_enabled", Read);
     m.insert("fauna.bridges.get_mail_serving_enabled", Read);
     m.insert("fauna.bridges.get_message_scan_result", Read);
     m.insert("fauna.bridges.get_primary_domain_rename_status", Read);
@@ -300,6 +301,7 @@ fn build_table() -> BTreeMap<&'static str, OfflineClass> {
     m.insert("fauna.bridges.set_forward_per_hour", OnlineOnly);
     m.insert("fauna.bridges.set_mail_switches", OnlineOnly);
     m.insert("fauna.bridges.set_mail_enabled", OnlineOnly);
+    m.insert("fauna.bridges.set_actor_mail_enabled", OnlineOnly);
     m.insert("fauna.bridges.set_mail_serving_enabled", OnlineOnly);
     m.insert("fauna.bridges.set_microsoft_registration", OnlineOnly);
     m.insert("fauna.bridges.set_role_address", OnlineOnly);
@@ -448,6 +450,9 @@ fn build_table() -> BTreeMap<&'static str, OfflineClass> {
     // The propagation gate's live readiness probe — a cached answer is worse
     // than useless here (the whole point is "has it published *yet*").
     m.insert("fauna.dns.probe_txt_visible", OnlineOnly);
+    // The web e2e fake provider's mirror (a `test-hooks` nest alone): a write
+    // into a live name server, meaningless queued.
+    m.insert("fauna.dns.e2e_mirror_txt", OnlineOnly);
 
     // ── register_domain_kinds ───────────────────────────────────────
     // The domain-expiry watch's read. `Read`, not `OnlineOnly`: it serves a
@@ -889,6 +894,8 @@ fn build_table() -> BTreeMap<&'static str, OfflineClass> {
     m.insert("fauna.bridges.conversation.rooms.open", OnlineOnly);
     m.insert("fauna.bridges.conversation.inbox.fetch", Read);
     m.insert("fauna.bridges.conversation.send", OnlineOnly);
+    m.insert("fauna.bridges.conversation.messages.remove", OnlineOnly);
+    m.insert("fauna.bridges.conversation.rooms.remove", OnlineOnly);
 
     // ── register_nostr_zap_signer_kinds ─────────────────────────────
     // `zaps` cargo feature. Authorized zap signers — an authorization roster.
@@ -1127,6 +1134,7 @@ fn build_table() -> BTreeMap<&'static str, OfflineClass> {
     m.insert("fauna.auth.verify", OnlineOnly);
     m.insert("fauna.auth.nest_handshake", OnlineOnly);
     m.insert("fauna.auth.device_handshake", OnlineOnly);
+    m.insert("fauna.auth.device_bind", OnlineOnly);
     m.insert("fauna.auth.custody_handshake", OnlineOnly);
     m.insert("fauna.auth.custodied_fleet_handshake", OnlineOnly);
     // ⚠ The one member of this family that is NOT an auth ceremony, and the
@@ -1324,6 +1332,9 @@ fn build_table() -> BTreeMap<&'static str, OfflineClass> {
     m.insert("fauna.sync.backup_status", Read);
     m.insert("fauna.sync.devices.list", Read);
     m.insert("fauna.sync.devices.delete", OfflineSafe);
+    // A rename overwrites the row's label pair whole with an owner-keyed
+    // value, so a replay lands the same name — the delete's class.
+    m.insert("fauna.sync.devices.rename", OfflineSafe);
     // W2.3's class-2 write leg is the charter's own worked example of
     // `OfflineSafe`: the effect is a client-assigned-id, state-based mergeable
     // entry (`account-data-plane.md` § The class-2 entry form), so a replica

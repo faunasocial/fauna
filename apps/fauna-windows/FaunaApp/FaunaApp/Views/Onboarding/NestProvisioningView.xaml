@@ -61,6 +61,10 @@
                                Visibility="{x:Bind local:NestProvisioningView.BoolToVisibility(ViewModel.ProvisioningBomVpsLineVisible), Mode=OneWay}" />
                 </StackPanel>
 
+                <!-- By-continuing terms notice: below the price recap, before the
+                     Buy and set up CTA (terms-and-content-guidelines.md item 3). -->
+                <controls:TermsNotice />
+
                 <!-- Top-region "Buy and set up" CTA. Visible only at Idle
                      per target doc §6 click-handler table. -->
                 <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.ProvisioningStartButton}"
@@ -114,6 +118,20 @@
                            Text="{x:Bind ViewModel.ProvisioningElapsedText, Mode=OneWay}"
                            Opacity="0.7"
                            Visibility="{x:Bind local:NestProvisioningView.BoolToVisibility(ViewModel.ProvisioningElapsedVisible), Mode=OneWay}" />
+
+                <!-- The SSH door's command, only once a door run succeeded
+                     (onboarding-provisioning.md § 5): `ssh <domain>`, the one
+                     admitted address, the path of the key this device wrote to
+                     %USERPROFILE%\.ssh and its fingerprint. A desktop app, so no
+                     save-key button (ui.yaml scopes it to ios/android/web).
+                     Selectable so the admin can copy the command. Mirrors linux's
+                     nest_provisioning.rs. -->
+                <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.ProvisioningSshDoorCommand}"
+                           Text="{x:Bind ViewModel.ProvisioningSshDoorCommandText, Mode=OneWay}"
+                           FontFamily="Consolas"
+                           IsTextSelectionEnabled="True"
+                           TextWrapping="Wrap"
+                           Visibility="{x:Bind local:NestProvisioningView.TextToVisibility(ViewModel.ProvisioningSshDoorCommandText), Mode=OneWay}" />
 
                 <!-- Bottom row: Back, Cancel (Running), Retry (Failed),
                      Continue (enabled when Succeeded). All four are always

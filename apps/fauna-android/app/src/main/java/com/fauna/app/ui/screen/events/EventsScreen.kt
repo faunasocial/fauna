@@ -32,6 +32,7 @@ import com.fauna.ffi.FfiCalendarViewMode
 import com.fauna.ffi.FfiEventDrafts
 import com.fauna.ffi.FfiRefusedChange
 import com.fauna.ffi.calendarViewModes
+import com.fauna.ffi.workingDayStart
 import uniffi.fauna_core.RsvpResponse
 import com.fauna.app.data.api.CreateEventRequest
 import com.fauna.app.data.api.EventSummary
@@ -614,6 +615,15 @@ fun EventsContent(
                                     onDayClick = {
                                         onSelectDate(it)
                                         onSelectView(FfiCalendarViewMode.DAY)
+                                    },
+                                    // Empty-day double tap: a fresh timed event on that
+                                    // day at the shared working-day start (09:00), not
+                                    // midnight (events.md § User actions).
+                                    onDayDoubleClick = { day ->
+                                        val start = workingDayStart()
+                                        newEventSlot = day.atTime(start.hour.toInt(), start.minute.toInt())
+                                        onStartFreshDraft()
+                                        showEventForm = true
                                     })
                             }
                         }

@@ -32,14 +32,14 @@ Stamped 2026-09-26 at ef1315baff.
 | App | Status | Stamp |
 |---|---|---|
 | web | — absent | |
-| linux | ✅ full | 0.1.4-dev+ea391d07 standalone |
+| linux | ✅ full | 0.1.5-dev+cbd813be standalone |
 | windows | ✅ full | 0.1.3-dev+7135fff0.dirty standalone |
-| macos | ✅ full | 0.1.2-dev+f85ee000 standalone |
+| macos | ✅ full | 0.1.5-dev+3f9f2b95 standalone |
 | ios | — absent | |
 | android | — absent | |
-| tui | ✅ full | 0.1.2-dev+831d48ef live |
+| tui | ✅ full | 0.1.5 docker |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
-| 1 | app | `tests/e2e-unified/tests/test_task_delegation.py::test_pinning_the_kind_this_app_runs_to_this_device_persists` | linux (linux): passed, windows (windows): passed, macos (macos): passed, tui (linux): passed |
+| 1 | app | `tests/e2e-unified/tests/test_task_delegation.py::test_pinning_the_kind_this_app_runs_to_this_device_persists` | linux (linux): passed, windows (windows): passed, macos (macos): passed, tui (linux): passed, tui (macos): passed |
 <!-- features-render:end -->

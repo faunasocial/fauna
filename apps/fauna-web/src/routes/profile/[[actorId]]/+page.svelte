@@ -27,6 +27,7 @@
     contactOverlays,
     contactOverlaysSettled,
     contactsRevision,
+    conversationsManagerIfReady,
     engineRoleDenied,
     getConversationsManager,
     refreshConversations,
@@ -52,9 +53,10 @@
     subscriptionsSubscribersList,
     subscriptionsRemoveSubscriber,
     subscriptionsOffersList,
-    subscriptionsSubscribePublishingEk,
+    subscriptionsSubscribeAcrossNests,
     subscriptionsStatusGet,
     profileHeaderRead,
+    postBlobGet,
     loadProfileEditBase,
     profileSet,
     sendKnock,
@@ -66,8 +68,9 @@
   import {
     ensureWasm,
     decodeProfileDisplay,
-    knockRecipientNestUrl,
-    buildEditedProfile,
+    decodeOwnProfileDisplay,
+    actorHome,
+    postBlobHome,
     buildEditedProfileWithImages,
     processAndSealPublicPost,
     logMessage,
@@ -87,6 +90,7 @@
   import FeedReplyDialog from '#lib/components/FeedReplyDialog.svelte';
   import FeedTrainSheet from '#lib/components/FeedTrainSheet.svelte';
   import { blobUrl, createFeedPostHost } from '#lib/feed-post-host.svelte';
+  import { setViewedProfile } from '#lib/profile-viewed';
   import { getFeedManager } from '#lib/feed';
   import { setPendingSearchNav } from '#lib/search';
   import type { WasmFeedManager } from '../../../../static/fauna_wasm.js';
@@ -145,6 +149,11 @@
   const targetActorId = $derived(page.params.actorId);
   const viewedActorId = $derived(targetActorId ?? $identity?.actorId ?? '');
   const isSelf = $derived(!targetActorId || targetActorId === $identity?.actorId);
+  // The home the open target carried (`?home=<nest URL>`: the Find User result,
+  // the author line, the contact row, or the state-protocol nav patch) — the
+  // seed of the actor-home slot below (profile.md § Layout & flow → *Reaching
+  // another actor's profile with their home carried*).
+  const carriedHome = $derived(page.url.searchParams.get('home') || null);
 
   // §1 My tiers (SELF)
   let tiers = $state<SubscriptionTier[]>([]);
@@ -228,11 +237,13 @@
   // OTHER — `profile-request-contact-button`, the knock (profile.md § Where
   // logic lives → Request contact), and the supervised ward's ask pair beside
   // it (family-safety.md § Child-initiated contact requests → App affordance).
-  // `knockRoute` is where the knock goes: the shared
-  // `fauna_client_profile::knock_recipient_nest_url` over the profile this open
-  // fetched (`null` = this nest). `knockAsk` belongs to the actor it names and
-  // is replaced on every open, so a refusal never carries to the next profile.
-  let knockRoute = $state<string | null>(null);
+  // `actorHomeSlot` is the page's actor-home slot (`null` = this nest): the
+  // shared `fauna_client_profile::actor_home` over the home the open carried,
+  // re-derived once the header read answers. The follow, the knock and the
+  // remote header read all read this one slot. `knockAsk` belongs to the actor
+  // it names and is replaced on every open, so a refusal never carries to the
+  // next profile.
+  let actorHomeSlot = $state<string | null>(null);
   let knockAsk = $state<KnockAskState>(knockStateFor(null));
   let knockBusy = $state(false);
   let askingGuardian = $state(false);
@@ -255,18 +266,47 @@
   // mail-primary-domain-rename.md § Display-handle interaction) → actor_id
   // when no profile is published yet.
   let publishedDisplayName = $state<string | null>(null);
-  // The pictures the header read found named (hex blob hashes), and whether
-  // this nest served the profile — so its blob route holds them.
-  let headerPictures = $state<{ avatar: string | null; banner: string | null; local: boolean }>({
+  // The pictures the header read found named (hex blob hashes), and the home
+  // that served the profile — `null` when this nest did (its blob route holds
+  // them), else the post-blob plane's pick over `relayedFrom` and the stamped
+  // `homeNestActorId`, whose bytes are read DIRECT from that home.
+  let headerPictures = $state<{ avatar: string | null; banner: string | null; relayed: boolean }>({
     avatar: null,
     banner: null,
-    local: true,
+    relayed: false,
   });
+  // A relayed profile's picture bytes, as object URLs once they land. A home
+  // serving a self-signed certificate is unreachable from a browser (no pin —
+  // `transport-trust.md` § The post arm → *The browser's leg*): the read
+  // rejects and the picture stays a placeholder, never substituted.
+  let relayedPictureUrls = $state<Record<string, string>>({});
+  const relayedPicturePending = new Set<string>();
+  function loadRelayedPicture(actor: string, hash: string, home: unknown): void {
+    const s = secret();
+    if (!s || relayedPicturePending.has(hash) || relayedPictureUrls[hash]) return;
+    relayedPicturePending.add(hash);
+    void postBlobGet(s, home, hash)
+      .then((bytes) => {
+        if (pageDestroyed || viewedActorId !== actor) return;
+        relayedPictureUrls[hash] = URL.createObjectURL(new Blob([new Uint8Array(bytes)]));
+      })
+      .catch((e) => logMessage('warn', 'fauna_web::profile', `relayed header picture: ${e}`))
+      .finally(() => relayedPicturePending.delete(hash));
+  }
+  function revokeRelayedPictures(): void {
+    // Untracked: the load effect calls this, and reading what it then writes
+    // would make the effect depend on itself (effect_update_depth_exceeded).
+    untrack(() => {
+      for (const url of Object.values(relayedPictureUrls)) URL.revokeObjectURL(url);
+      relayedPictureUrls = {};
+    });
+  }
   // The hashes whose `<img>` has decoded — `data-state="painted"`; anything
   // else (loading, a failed fetch) is `placeholder`, never `error-message`.
   let paintedPictures = $state<Record<string, boolean>>({});
   function pictureSrc(hash: string | null): string | undefined {
-    return hash && headerPictures.local ? blobUrl(hash) : undefined;
+    if (!hash) return undefined;
+    return headerPictures.relayed ? relayedPictureUrls[hash] : blobUrl(hash);
   }
   // On another's profile both names come from the private overlay's one
   // resolver: the viewer's nickname heads the page and the public name it
@@ -386,6 +426,21 @@
   // The current stored signed bytes — the read-modify-write base. `null` ⇒
   // first publish (the actor has no profile yet → minimal defaults).
   let editBaseBody = $state<Uint8Array | null>(null);
+  // The owner's last identity-signed row, read with the base — the builder's
+  // `last_direct_body` (profile.md § Where logic lives → *Edit surface*).
+  let editLastDirectBody = $state<Uint8Array | null>(null);
+  // `profile-edit-audience-toggle`: the audience the form opened on (the
+  // own-form projection's `audience_everyone`) and the staged press — `null`
+  // while the toggle is untouched, so the save leaves the stored audience
+  // alone; a press that lands back on the base is no edit (tui's `EditBase`
+  // rule).
+  let editAudienceBase = $state(false);
+  let editAudienceEdit = $state<boolean | null>(null);
+  const editAudience = $derived(editAudienceEdit ?? editAudienceBase);
+  function toggleAudience(): void {
+    const next = !editAudience;
+    editAudienceEdit = next !== editAudienceBase ? next : null;
+  }
 
   // `profile-edit-avatar` / `profile-edit-banner` — a real OS file picker (web
   // has one, unlike tui — profile.md § Element IDs). Picking stages the file's
@@ -417,31 +472,46 @@
   // The same read names the header's stored pictures (`profile-avatar` /
   // `profile-banner`, profile.md § Layout & flow): rendered only while the
   // profile names one, painted from the blob route of the nest that served
-  // it. web reads this nest only (no `home` yet — the header relay is web's
-  // remote-read trickle-down), so a picture painted here is always this nest's
-  // `blobUrl`; a profile relayed from a home renders its pictures empty.
-  async function refreshHeaderName(): Promise<void> {
+  // it — this nest's `blobUrl`, or, for a profile relayed from a home, the
+  // home's bytes through the post-blob plane (`relayedFrom` and the stamped
+  // `homeNestActorId`).
+  //
+  // The OTHER header reads through the actor-home slot as the open seeded it
+  // (the shared `ProfileClient::profile_get_or_relay`): a remote actor that has
+  // not opted in is not-found, which falls to the id, never `error-message`.
+  async function refreshHeaderName(home: string | null): Promise<void> {
     const s = secret();
     const actor = viewedActorId;
     const other = !isSelf;
     if (!s || !actor) return;
     try {
-      const read = await profileHeaderRead(s, actor, null);
+      const read = await profileHeaderRead(s, actor, other ? home : null);
       if (viewedActorId !== actor) return;
       const display = decodeProfileDisplay(read.body);
       publishedDisplayName = display.display_name;
+      const blobHome =
+        read.relayedFrom === null
+          ? null
+          : postBlobHome({
+              home_nest_url: read.relayedFrom,
+              home_nest_actor_id: read.homeNestActorId,
+            });
       headerPictures = {
         avatar: display.avatar_hash_hex,
         banner: display.banner_hash_hex,
-        local: read.relayedFrom === null,
+        relayed: read.relayedFrom !== null,
       };
+      if (blobHome) {
+        if (display.avatar_hash_hex) loadRelayedPicture(actor, display.avatar_hash_hex, blobHome);
+        if (display.banner_hash_hex) loadRelayedPicture(actor, display.banner_hash_hex, blobHome);
+      }
       if (other) {
-        knockRoute = knockRecipientNestUrl(actor, read.body, nodeUrl());
+        actorHomeSlot = actorHome(carriedHome, actor, read.body, nodeUrl());
       }
     } catch {
       if (viewedActorId !== actor) return;
       publishedDisplayName = null;
-      headerPictures = { avatar: null, banner: null, local: true };
+      headerPictures = { avatar: null, banner: null, relayed: false };
     }
   }
 
@@ -456,20 +526,25 @@
     if (!s || !actorId) return;
     error = '';
     try {
-      const body = await loadProfileEditBase(s);
-      if (!body) throw new Error('not published yet');
-      editBaseBody = body;
-      const d = decodeProfileDisplay(body);
+      const base = await loadProfileEditBase(s);
+      if (!base) throw new Error('not published yet');
+      editBaseBody = base.body;
+      editLastDirectBody = base.lastDirectBody;
+      const d = decodeOwnProfileDisplay(actorId, base.body, base.lastDirectBody);
+      editAudienceBase = d.audience_everyone;
       editDisplayName = d.display_name ?? '';
       editBio = d.bio ?? '';
       editLinks = d.links.map((l) => ({ label: l.label, uri: l.uri }));
     } catch {
       // Not published yet (or a transient read failure) → first-publish defaults.
       editBaseBody = null;
+      editLastDirectBody = null;
+      editAudienceBase = false;
       editDisplayName = '';
       editBio = '';
       editLinks = [];
     }
+    editAudienceEdit = null;
     // A fresh open starts every image field at Keep/empty (same as tui and
     // the feed composer) — rendering the *stored* picture is the future
     // `user-header` image ID's job, not this form's.
@@ -546,11 +621,13 @@
         avatarHash,
         editBannerClear,
         bannerHash,
+        editAudienceEdit,
+        editLastDirectBody,
       );
       await profileSet(s, wire);
       error = '';
       editFormVisible = false;
-      await refreshHeaderName();
+      await refreshHeaderName(actorHomeSlot);
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
     }
@@ -784,6 +861,8 @@
 
   onDestroy(() => {
     pageDestroyed = true;
+    setViewedProfile(null);
+    revokeRelayedPictures();
     postsHost.destroy();
   });
 
@@ -798,37 +877,64 @@
     }
   });
 
+  // Publish the viewed actor and the actor-home slot (`profile` state key —
+  // `#lib/profile-viewed`; memory only, nothing reads it in production).
+  $effect(() => {
+    setViewedProfile(viewedActorId ? { actor_id: viewedActorId, home_nest_url: actorHomeSlot } : null);
+  });
+
   // Load (re-load on actor change — SvelteKit reuses the component across
   // `/app/profile/<a>` → `/app/profile/<b>` param changes, so an $effect keyed on
   // the viewed actor is the web equivalent of the native "on becoming visible"
-  // refresh). Reads the deps synchronously, then dispatches to the right loader.
+  // refresh). Reads the deps synchronously, then dispatches to the right loader
+  // UNTRACKED: everything the loaders read before their first await (the
+  // identity store through `secret()`, the tier selection, …) would otherwise
+  // become a dependency, and any re-set of it re-ran the whole open — the
+  // header pictures reset to none (the avatar `<img>` re-created before it could
+  // paint) and a second `loadSelf` racing the first, its older read of §2
+  // landing last ("No pending requests" over a queued one) and the request
+  // rows rebuilt under an Approve click.
   $effect(() => {
     const id = viewedActorId;
     const self = isSelf;
+    const home = carriedHome;
     if (!wasmReady || !id) return;
+    untrack(() => openViewed(id, self, home));
+  });
+
+  function openViewed(id: string, self: boolean, home: typeof carriedHome): void {
     // Reset the OTHER overlay state when the viewed actor changes.
     copiedActorId = '';
     pendingTiers = new Set();
     followedOverride = null;
     blockEdge = unknownBlockEdge();
     blockBusy = false;
-    knockRoute = null;
     knockAsk = knockStateFor(self ? null : id);
     knockBusy = false;
     askingGuardian = false;
-    headerPictures = { avatar: null, banner: null, local: true };
-    void refreshHeaderName();
+    headerPictures = { avatar: null, banner: null, relayed: false };
+    revokeRelayedPictures();
+    // Seed the actor-home slot from the home the open carried; the header read
+    // below replaces it once the profile answers.
+    const seeded = self ? null : actorHome(home, id, null, nodeUrl());
+    actorHomeSlot = seeded;
+    void refreshHeaderName(seeded);
     if (self) {
       void loadSelf();
     } else {
       void loadOffers();
       void refreshBlockState();
+      // The OTHER header holds no handle: re-read the contact roster now, so a
+      // contact accepted a moment ago is named by the roster's handle rather
+      // than the short id until the poll tick (`value-formatting.md` § Peer
+      // display label → *the roster handle*). Never rejects.
+      void conversationsManagerIfReady()?.refreshContactRoster();
       // The ward's own outstanding asks, so `contact-request-pending` is honest
       // on an open that never saw the refusal.
       const s = secret();
       if (s) void refreshWardAsks(s);
     }
-  });
+  }
 
   // The Posts tab is the default: the page's open — and an open of another
   // actor in the same component — reads the window afresh.
@@ -987,7 +1093,7 @@
     if (!s || !viewedActorId) return;
     offerBusy = true;
     try {
-      const r = await subscriptionsSubscribePublishingEk(s, viewedActorId, tier.name);
+      const r = await subscriptionsSubscribeAcrossNests(s, viewedActorId, tier.name, actorHomeSlot);
       error = '';
       if (r.outcome === 'approved') {
         // Granted inline (auto-approve / plaintext) → re-read so the row flips to
@@ -1008,7 +1114,7 @@
     const s = secret();
     if (!s || !viewedActorId) return;
     try {
-      await subscriptionsSubscribePublishingEk(s, viewedActorId, FOLLOWERS_TIER);
+      await subscriptionsSubscribeAcrossNests(s, viewedActorId, FOLLOWERS_TIER, actorHomeSlot);
       error = '';
       followedOverride = true;
       await loadOffers();
@@ -1122,7 +1228,7 @@
     knockBusy = true;
     let result: KnockSendResult;
     try {
-      await sendKnock(s, peer, knockRoute);
+      await sendKnock(s, peer, actorHomeSlot);
       result = KNOCK_SENT;
     } catch (e) {
       result = classifyKnockFailure(e);
@@ -1344,6 +1450,14 @@
         class="input" rows="3" placeholder={t.profile.edit_bio}
         data-testid={IDS.PROFILE_EDIT_BIO} bind:value={editBio}
       ></textarea>
+
+      <label class="row">
+        <input
+          type="checkbox" checked={editAudience} data-checked={editAudience ? 'true' : 'false'}
+          data-testid={IDS.PROFILE_EDIT_AUDIENCE_TOGGLE} onchange={toggleAudience}
+        />
+        <span>{t.profile.edit_audience_toggle}</span>
+      </label>
 
       <div class="list" data-testid={IDS.PROFILE_EDIT_LINK_LIST}>
         {#each editLinks as link, i (i)}

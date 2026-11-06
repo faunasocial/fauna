@@ -37,7 +37,12 @@ from helpers.room_seats import (  # noqa: F401 — `room_app`/`room_seat_pair` a
     wait_for,
 )
 
-pytestmark = [pytest.mark.tier_3]
+pytestmark = [
+    pytest.mark.tier_3,
+    # The room seats need the real conversations session (tui always runs
+    # it; the marker keeps the session-wide env consistent cross-app).
+    pytest.mark.real_conversations,
+]
 
 READ_BUDGET_S = 30.0
 """For the author's post to list on the neighbour's feed with its face."""

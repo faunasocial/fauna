@@ -68,11 +68,17 @@ type Announcer struct {
 }
 
 // New builds an announcer for hostname (the PDS host, no scheme or port). A nil
-// client gets a plain one with a request timeout. With no relays it is inert:
-// Notify and Run do nothing.
+// client gets a plain one with a request timeout that follows no redirect: a
+// 3xx from a relay is a refusal (it takes the retry), never a way to steer the
+// POST to another address. With no relays it is inert: Notify and Run do nothing.
 func New(hostname string, relays []string, client *http.Client, logger *slog.Logger) *Announcer {
 	if client == nil {
-		client = &http.Client{Timeout: requestTimeout}
+		client = &http.Client{
+			Timeout: requestTimeout,
+			CheckRedirect: func(*http.Request, []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
+		}
 	}
 	if logger == nil {
 		logger = slog.Default()

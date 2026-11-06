@@ -8,11 +8,16 @@ guide: docs/guides/cloud-backup.md § Backup destinations: surviving the loss of
 
 ## What a user gets
 
-Your nest can copy its sealed backups somewhere else: another nest, a device of
-yours, or a friend's device, which holds only what it cannot read. The Backups page
-shows when each destination last received a copy, audits it and warns when one goes
-dark or its store rots, attaches destinations to individual folders, and restores
-mail from a snapshot with a history of every restore.
+Your nest can copy its encrypted backups somewhere else: another nest, yours or
+a friend's, or a device of yours. Another nest cannot read what it holds, apart
+from a folder you have made public; a copy on a device of yours can be read by
+anyone who can unlock that device. The Backups page shows when each destination
+last received a copy, audits it and warns when one goes dark or its store rots,
+restores your mail from a snapshot your nest keeps, with a history of every
+restore, and, if you lose your nest, brings your mail, calendar, contacts and
+posts, and any folder you attached, back from a destination's copy — from
+another nest's copy once the lost nest is rebuilt with its own identity; a
+folder's own settings attach a destination to it.
 
 ## Coverage contract
 
@@ -60,6 +65,7 @@ Stamped 2026-10-21 at 77c610862e.
     - `tests/e2e-unified/tests/test_backups_restore.py::test_a_restore_reports_progress_and_says_when_it_is_done`
 15. [app] You see who holds sealed copies for you and when they last confirmed they still have them, and you can take that back — `docs/goal/ui/devices.md` § Custody facet
     - `tests/e2e-unified/tests/test_custody_ceremony_journey.py::test_custody_ceremony_two_accounts`
+    - `tests/e2e-unified/tests/test_custody_ceremony_journey.py::test_a_custody_minted_on_another_device_renders_and_revokes_here`
 16. [app] An offer to hold copies for someone states what your device would see before you accept, and you can stop holding at any time — `docs/goal/ui/devices.md` § Custody facet
     - `tests/e2e-unified/tests/test_custody_ceremony_journey.py::test_custody_ceremony_two_accounts`
 17. [nest] A conversation snapshot your nest holds restores the way a mail one does, and the restore is listed like any other — `docs/goal/behavior/backup-restore.md` § 6. Message-kind restore
@@ -76,55 +82,59 @@ Stamped 2026-10-21 at 77c610862e.
     - `tests/e2e-unified/tests/test_backups.py::test_a_nest_that_went_back_in_time_gets_its_lost_mail_back_from_this_devices_copy`
 23. [app] A destination that stops accepting your nest's backup says so on its row instead of showing a queue, and shows the queue again once it accepts — `docs/goal/behavior/backup-destinations.md` § Per-destination status read
     - `tests/e2e-unified/tests/test_backups.py::test_a_destination_that_refuses_this_box_reads_refused_not_queued`
+24. [app] The restore section offers a box for each kind your nest restores (mail, calendar, contacts, posts and conversations), and a contacts snapshot restores from it — `docs/goal/ui/backups.md` § Restore from backup destination
+    - `tests/e2e-unified/tests/test_backups_restore.py::test_a_contacts_snapshot_restores_from_the_restore_section`
 
 ## Status
 
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ⚠ partial | 0.1.5-dev+61b844ca standalone |
-| linux | ⚠ partial | 0.1.4-dev+ea391d07 standalone |
-| windows | ⚠ partial | 0.1.5-dev+61b844ca standalone |
-| macos | ⚠ partial | 0.1.5-dev+61b844ca standalone |
-| ios | ⚠ partial | 0.1.5-dev+61b844ca standalone |
+| web | ⚠ partial | 0.1.5-dev+390d61b5 standalone |
+| linux | ⚠ partial | 0.1.5-dev+390d61b5 standalone |
+| windows | ⚠ partial | 0.1.5-dev+390d61b5 standalone |
+| macos | ⚠ partial | 0.1.5-dev+3f9f2b95 standalone |
+| ios | ⚠ partial | 0.1.5-dev+390d61b5 standalone |
 | android |  no run recorded | |
-| tui | ⚠ partial | 0.1.2-dev+7663afa6 standalone |
+| tui | ✅ full | 0.1.5-dev+390d61b5 standalone |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
-| 1 | app | `tests/e2e-unified/tests/test_backups.py::test_backup_destination_crud` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): failed |
-| 1 | app | `tests/e2e-unified/tests/test_backups.py::test_client_device_custodian_destination` | web (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 2 | app | `tests/e2e-unified/tests/test_backups.py::test_backup_destination_last_upload_time_reflects_a_nest_side_pass` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 2 | app | `tests/e2e-unified/tests/test_backups.py::test_a_hosted_custodian_pulls_checks_in_and_the_owners_row_reports_it` | linux (linux): passed, windows (windows): passed, tui (linux): passed |
-| 3 | app | `tests/e2e-unified/tests/test_backups.py::test_backup_audit_pass_advances_the_last_checked_row` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 3 | app | `tests/e2e-unified/tests/test_backups.py::test_backup_audit_alerts_when_the_destination_goes_dark` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): failed |
-| 3 | app | `tests/e2e-unified/tests/test_backups.py::test_a_custodian_whose_store_rots_reports_a_failing_row_to_its_owner` | tui (linux): passed |
+| 1 | app | `tests/e2e-unified/tests/test_backups.py::test_backup_destination_crud` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 1 | app | `tests/e2e-unified/tests/test_backups.py::test_client_device_custodian_destination` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 2 | app | `tests/e2e-unified/tests/test_backups.py::test_backup_destination_last_upload_time_reflects_a_nest_side_pass` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 2 | app | `tests/e2e-unified/tests/test_backups.py::test_a_hosted_custodian_pulls_checks_in_and_the_owners_row_reports_it` | linux (linux): passed, windows (windows): passed, tui (linux): passed, tui (macos): passed |
+| 3 | app | `tests/e2e-unified/tests/test_backups.py::test_backup_audit_pass_advances_the_last_checked_row` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 3 | app | `tests/e2e-unified/tests/test_backups.py::test_backup_audit_alerts_when_the_destination_goes_dark` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 3 | app | `tests/e2e-unified/tests/test_backups.py::test_a_custodian_whose_store_rots_reports_a_failing_row_to_its_owner` | tui (linux): passed, tui (macos): passed |
 | 3 | app | `tests/e2e-unified/tests/test_backup_audit_observation.py::test_rendering_the_conversation_list_feeds_the_audit_observation` | web (linux): passed |
-| 3 | app | `tests/e2e-unified/tests/test_backup_audit_folder_replica.py::test_a_delisted_covered_folder_row_is_caught_by_the_replica_anchor` | linux (linux): passed, windows (windows): passed, tui (linux): passed |
-| 4 | app | `tests/e2e-unified/tests/test_backups.py::test_removing_a_custodian_without_the_opt_in_leaves_a_reclaimable_orphaned_store` | linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 4 | app | `tests/e2e-unified/tests/test_backups.py::test_removing_a_custodian_with_the_opt_in_frees_the_local_store` | linux (linux): passed, tui (linux): passed |
-| 5 | app | `tests/e2e-unified/tests/test_custody_ceremony_journey.py::test_custody_ceremony_two_accounts` | linux (linux): failed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 5 | app | `tests/e2e-unified/tests/test_custody_ceremony_journey.py::test_custody_ceremony_nest_anchored` | linux (linux): passed, windows (windows): passed, macos (macos): passed, tui (linux): passed, tui (macos): passed |
+| 3 | app | `tests/e2e-unified/tests/test_backup_audit_folder_replica.py::test_a_delisted_covered_folder_row_is_caught_by_the_replica_anchor` | linux (linux): passed, windows (windows): passed, macos (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 4 | app | `tests/e2e-unified/tests/test_backups.py::test_removing_a_custodian_without_the_opt_in_leaves_a_reclaimable_orphaned_store` | linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 4 | app | `tests/e2e-unified/tests/test_backups.py::test_removing_a_custodian_with_the_opt_in_frees_the_local_store` | linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 5 | app | `tests/e2e-unified/tests/test_custody_ceremony_journey.py::test_custody_ceremony_two_accounts` | linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 5 | app | `tests/e2e-unified/tests/test_custody_ceremony_journey.py::test_custody_ceremony_nest_anchored` | linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 6 | app | `tests/e2e-unified/tests/test_folder_destination_places.py::test_folder_destination_place_attach_and_detach` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 7 | app | `tests/e2e-unified/tests/test_backups_restore.py::test_restore_history_renders` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 7 | app | `tests/e2e-unified/tests/test_backups_restore.py::test_local_restore_action_restores_mail` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 7 | app | `tests/e2e-unified/tests/test_backups_restore.py::test_restore_divergence_banner_and_modal` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): failed |
+| 7 | app | `tests/e2e-unified/tests/test_backups_restore.py::test_restore_divergence_banner_and_modal` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 8 | nest | `tests/e2e-unified/tests/api/test_dr_restore.py::test_mail_snapshot_create_restore_and_caldav_divergence` | nest (linux): passed |
 | 8 | nest | `tests/e2e-unified/tests/api/test_dr_restore.py::test_restore_message_kind_confirm_mismatch_rejected` | nest (linux): passed |
-| 9 | app | `tests/e2e-unified/tests/test_backups.py::test_client_device_custodian_destination` | web (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 10 | app | `tests/e2e-unified/tests/test_backups.py::test_client_device_custodian_destination` | web (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 11 | app | `tests/e2e-unified/tests/test_backups.py::test_backup_destination_last_upload_time_reflects_a_nest_side_pass` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 12 | app | `tests/e2e-unified/tests/test_backups.py::test_after_losing_the_nest_the_devices_copy_restores_the_mail_onto_the_rebuilt_one` | linux (linux): passed, windows (windows): passed, macos (macos): passed, tui (linux): passed |
-| 12 | app | `tests/e2e-unified/tests/test_backups.py::test_after_losing_the_nest_a_surviving_nest_destination_restores_the_mail` | web (linux): passed, linux (linux): passed, tui (linux): passed |
+| 9 | app | `tests/e2e-unified/tests/test_backups.py::test_client_device_custodian_destination` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 10 | app | `tests/e2e-unified/tests/test_backups.py::test_client_device_custodian_destination` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 11 | app | `tests/e2e-unified/tests/test_backups.py::test_backup_destination_last_upload_time_reflects_a_nest_side_pass` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 12 | app | `tests/e2e-unified/tests/test_backups.py::test_after_losing_the_nest_the_devices_copy_restores_the_mail_onto_the_rebuilt_one` | linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 12 | app | `tests/e2e-unified/tests/test_backups.py::test_after_losing_the_nest_a_surviving_nest_destination_restores_the_mail` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 13 | app | `tests/e2e-unified/tests/test_backups_restore.py::test_local_restore_action_restores_mail` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 14 | app | `tests/e2e-unified/tests/test_backups_restore.py::test_a_restore_reports_progress_and_says_when_it_is_done` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 15 | app | `tests/e2e-unified/tests/test_custody_ceremony_journey.py::test_custody_ceremony_two_accounts` | linux (linux): failed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 16 | app | `tests/e2e-unified/tests/test_custody_ceremony_journey.py::test_custody_ceremony_two_accounts` | linux (linux): failed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 14 | app | `tests/e2e-unified/tests/test_backups_restore.py::test_a_restore_reports_progress_and_says_when_it_is_done` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 15 | app | `tests/e2e-unified/tests/test_custody_ceremony_journey.py::test_custody_ceremony_two_accounts` | linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 15 | app | `tests/e2e-unified/tests/test_custody_ceremony_journey.py::test_a_custody_minted_on_another_device_renders_and_revokes_here` | web (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 16 | app | `tests/e2e-unified/tests/test_custody_ceremony_journey.py::test_custody_ceremony_two_accounts` | linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
 | 17 | nest | `tests/e2e-unified/tests/api/test_dr_restore.py::test_conv_snapshot_create_restore_and_history` | nest (linux): passed |
-| 18 | app | `tests/e2e-unified/tests/test_backups_restore.py::test_restore_divergence_flags_a_reconnected_mail_app_as_it_does_a_calendar` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 19 | app | `tests/e2e-unified/tests/test_backups_restore.py::test_a_restore_without_the_account_configuration_says_so_and_a_complete_one_does_not` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): failed |
+| 18 | app | `tests/e2e-unified/tests/test_backups_restore.py::test_restore_divergence_flags_a_reconnected_mail_app_as_it_does_a_calendar` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 19 | app | `tests/e2e-unified/tests/test_backups_restore.py::test_a_restore_without_the_account_configuration_says_so_and_a_complete_one_does_not` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 20 | app | `tests/e2e-unified/tests/test_backup_rotated_source_journey.py::test_a_rotated_source_box_keeps_backing_up_with_no_gesture` | tui (linux): passed |
-| 21 | app | `tests/e2e-unified/tests/test_backups.py::test_a_nest_that_went_back_in_time_gets_its_lost_mail_back_from_the_backup` | web (linux): passed, linux (linux): passed, macos (macos): passed, tui (linux): passed |
-| 22 | app | `tests/e2e-unified/tests/test_backups.py::test_a_nest_that_went_back_in_time_gets_its_lost_mail_back_from_this_devices_copy` | linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
-| 23 | app | `tests/e2e-unified/tests/test_backups.py::test_a_destination_that_refuses_this_box_reads_refused_not_queued` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 21 | app | `tests/e2e-unified/tests/test_backups.py::test_a_nest_that_went_back_in_time_gets_its_lost_mail_back_from_the_backup` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 22 | app | `tests/e2e-unified/tests/test_backups.py::test_a_nest_that_went_back_in_time_gets_its_lost_mail_back_from_this_devices_copy` | linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 23 | app | `tests/e2e-unified/tests/test_backups.py::test_a_destination_that_refuses_this_box_reads_refused_not_queued` — requires `backup-destination-trust-rows` (test harness) (not built: android) | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 24 | app | `tests/e2e-unified/tests/test_backups_restore.py::test_a_contacts_snapshot_restores_from_the_restore_section` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 <!-- features-render:end -->

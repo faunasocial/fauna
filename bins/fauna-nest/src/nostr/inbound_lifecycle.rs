@@ -188,14 +188,19 @@ pub async fn ingest_translated_event(
     store::index_into_search_corpus(&conn, event, false, Some(&id_bytes));
     drop(conn);
 
-    // A threaded reply or quote moves its target's counter, exactly as
-    // `fauna.posts.create` does for a local post — idempotent on this post's
-    // content id, non-fatal. Only then: a reaction's or repost's target is
-    // still a synthetic id no row carries, and must not mint engagement rows.
+    // A threaded reply or quote, and a reaction, moves its target's counter
+    // exactly as `fauna.posts.create` does for a local post — idempotent on
+    // this post's content id, non-fatal. Each of those arms carries a target
+    // the translator resolved to a local post (`feed.md` § Layout & flow →
+    // *Reaction posts count and paint*, ruling 5). A repost's target is still
+    // a synthetic id no row carries, and must not mint engagement rows.
     let threads = post.references.iter().any(|r| {
         matches!(
             r,
-            fauna_core::data::Reference::Reply { .. } | fauna_core::data::Reference::Quote { .. }
+            fauna_core::data::Reference::Reply { .. }
+                | fauna_core::data::Reference::Quote { .. }
+                | fauna_core::data::Reference::Upvote { .. }
+                | fauna_core::data::Reference::React { .. }
         )
     });
     if threads {

@@ -26,13 +26,16 @@
 //! measured is reported with a non-positive height (or omitted); the tracker
 //! holds it rather than treating it as gone.
 //!
-//! Playback progress comes from the inline player: a media row's
-//! `media_played_pm` is what `views::feed::take_played_pm`
-//! hands over for its post (the peak since the last sample), so a video played
-//! to the end derives the media `watch-complete`.
+//! Playback progress comes from the inline player: it notes each progress
+//! report on the tracker ([`note_played`] → `CueTracker::note_played`), which
+//! holds the per-post peak itself, so a video played to the end derives the
+//! media `watch-complete`; and each media row's player
+//! engagement (`views::feed::is_engaged`) is relayed through
+//! `CueTracker::note_playing` before the sample — a play is attention, so a
+//! card its own player grew under the skip gate still carries its play.
 
 use std::cell::{Cell, RefCell};
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
@@ -86,6 +89,7 @@ pub fn wire(
     error_label: &gtk::Label,
 ) {
     let probe = Rc::new(RefCell::new(Probe::new()));
+    LIVE_PROBE.with(|l| *l.borrow_mut() = Rc::downgrade(&probe));
     let ticking = Rc::new(Cell::new(false));
 
     // The close path's drain (`drain_for_close`): the latest wiring is the
@@ -157,6 +161,23 @@ thread_local! {
     /// The most recently wired capture's drain — one wiring per auth, so the
     /// latest is the live feed view. Main-thread only, like the probe.
     static LIVE_DRAIN: RefCell<Option<Box<dyn Fn()>>> = const { RefCell::new(None) };
+    /// The most recently wired capture's probe, for the inline player's
+    /// progress notes ([`note_played`]). Main-thread only.
+    static LIVE_PROBE: RefCell<Weak<RefCell<Probe>>> = const { RefCell::new(Weak::new()) };
+}
+
+/// The inline player's progress report, handed to the live tracker
+/// (`CueTracker::note_played`): the tracker clamps it to per-mille and keeps
+/// the per-post peak itself, so the probe passes `media_played_pm: None`.
+/// A no-op while no feed view is wired or a sample is mid-flight.
+pub(crate) fn note_played(post_id: &str, position: f64, duration: f64) {
+    LIVE_PROBE.with(|l| {
+        if let Some(probe) = l.borrow().upgrade()
+            && let Ok(mut p) = probe.try_borrow_mut()
+        {
+            p.tracker.note_played(post_id, position, duration);
+        }
+    });
 }
 
 /// Exposures handed to [`emit`] whose `record_observation` has not finished.
@@ -220,6 +241,7 @@ fn sample(
     let viewport_end = f64::from(scrolled.height());
 
     let mut rows: Vec<CueRow> = Vec::new();
+    let mut engagement: Vec<(String, bool)> = Vec::new();
     let mut child = list.first_child();
     while let Some(w) = child {
         child = w.next_sibling();
@@ -253,12 +275,11 @@ fn sample(
         } else {
             0.0
         };
+        if is_media {
+            engagement.push((post_id.clone(), crate::views::feed::is_engaged(&post_id)));
+        }
         rows.push(CueRow {
-            media_played_pm: if is_media {
-                crate::views::feed::take_played_pm(&post_id)
-            } else {
-                None
-            },
+            media_played_pm: None,
             post_id,
             top: f64::from(bounds.y()),
             // A not-yet-allocated row reports a non-positive height; deciding
@@ -270,6 +291,9 @@ fn sample(
 
     let window_post_ids: Vec<String> = posts.iter().map(|p| p.post_id.clone()).collect();
     let mut p = probe.borrow_mut();
+    for (post_id, engaged) in &engagement {
+        p.tracker.note_playing(post_id, *engaged);
+    }
     let mono_now_ms = p.mono_now_ms();
     let left = p.tracker.sample(
         &rows,

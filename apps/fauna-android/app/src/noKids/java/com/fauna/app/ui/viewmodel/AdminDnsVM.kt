@@ -26,6 +26,7 @@ import uniffi.fauna_client_mail_settings.LocalDomainStatus
 import uniffi.fauna_client_mail_settings.LocalDomainView
 import uniffi.fauna_client_mail_settings.PrimaryDomainRenameView
 import uniffi.fauna_client_mail_settings.RoleAddressKind
+import uniffi.fauna_client_mail_settings.localDomainActionMovesRecordMatrix
 import javax.inject.Inject
 
 /** One actor option for the per-domain catch-all picker (admin-dns-domain-catch-all-select). */
@@ -356,8 +357,17 @@ class AdminDnsVM @Inject constructor(
     fun setAutoRenew(domain: String, enabled: Boolean) =
         dispatchDns(DnsAction.SetAutoRenew(domain = domain, enabled = enabled))
 
+    /** A local-domain action, then — when it moved the record matrix — the
+     *  shared `recheck_matrix` before the one publish, so an added domain
+     *  appears with its records and their status (mail-multidomain.md § Wizard
+     *  steps, step 8). A thrown dispatch skips the re-check. */
     private fun dispatchLd(action: LocalDomainAction) {
-        viewModelScope.launch { withWorking { ldMachine?.dispatch(action) } }
+        viewModelScope.launch {
+            withWorking {
+                ldMachine?.dispatch(action)
+                if (localDomainActionMovesRecordMatrix(action)) dnsMachine?.recheckMatrix()
+            }
+        }
     }
 
     private fun dispatchDns(action: DnsAction) {

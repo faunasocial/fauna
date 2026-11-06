@@ -124,6 +124,14 @@
                                IsTextSelectionEnabled="True" />
                 </StackPanel>
 
+                <!-- Terms and content guidelines link beside the version
+                     (terms-and-content-guidelines.md item 4 (b)); opens the
+                     shared fauna_ffi_terms_url() through UrlOpener. -->
+                <HyperlinkButton AutomationProperties.AutomationId="{x:Bind ids:Ids.SettingsTermsLink}"
+                                 Padding="0"
+                                 Content="{loc:Localize Key=settings/terms_link}"
+                                 Click="TermsLink_Click" />
+
                 <!-- The label carries the check's state (Checking… / Up to date /
                      Check failed / <version> available). Never disabled while in
                      flight — a disabled WinUI button cannot be Invoked; UpdateCheck

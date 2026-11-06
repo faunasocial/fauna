@@ -100,17 +100,35 @@ public struct MediaExplorerContent: View {
         }
         // A `search-result-item` File-arm deep link (`ui/search.md` § Where
         // logic lives → Result navigation): actively resolve via `locate_file`
-        // once the machine is configured, and again for every link staged
-        // after that. The id is `-1` until the machine exists, then the
-        // staging generation: a fresh mount fires on the machine arriving
+        // once the machine's first read has landed, and again for every link
+        // staged after that. The id is `-1` until `vm.loaded`, then the
+        // staging generation: a fresh mount fires on that first read landing
         // (macOS remounts this page on every sidebar navigation,
         // `MediaSplitView`'s own doc comment), and a page already on screen —
         // iOS's search overlay leaves the Media tab mounted beneath it — fires
-        // on the new generation.
-        .task(id: vm.machine == nil ? -1 : MediaFileLocate.shared.generation) {
+        // on the new generation. Keying on the machine alone fired before the
+        // aggregate held anything: `locate_file` missed and the link was spent.
+        .task(id: vm.loaded ? MediaFileLocate.shared.generation : -1) {
             if let match = MediaFileLocate.shared.consume(machine: vm.machine) {
                 selectedItem = match
             }
+        }
+        // A `fauna://share-link` route (Finder's / the Files app's Share action,
+        // `macos.md` § Sync → *Finder's Share entry*, link 4): re-read the
+        // aggregate — a file the file manager shows has typically just synced,
+        // and the page's read predates it — then locate it through the shared
+        // `locatePath`, open its `media-item-detail` and the machine's create
+        // surface (the machine refuses an ineligible file itself). A file this
+        // account cannot see leaves the page with nothing open. Keyed like the
+        // search deep link above, for the same two mount cases.
+        .task(id: vm.machine == nil ? -1 : ShareRouteOpen.shared.generation) {
+            guard vm.machine != nil, ShareRouteOpen.shared.shareLink != nil else { return }
+            await vm.refresh()
+            guard let target = ShareRouteOpen.shared.takeShareLink(),
+                  let item = vm.machine?.locatePath(folderId: target.folderId, path: target.path)
+            else { return }
+            selectedItem = item
+            vm.openShareCreate(folder: item.folder, path: item.path)
         }
         // Re-read the cross-set aggregate on a fauna.sync.changed push while this
         // page is on screen — a file recorded by this device's own sync engine, a
@@ -246,8 +264,13 @@ public struct MediaExplorerContent: View {
     private func filterPicker(_ snap: MediaPageSnapshot?) -> some View {
         Picker("", selection: filterBinding) {
             Text(L.media.filterAll).tag(Self.filterAllValue)
-            ForEach(snap?.folders ?? [], id: \.self) { name in
-                Text(name).tag(name)
+            // One option per set ROW, minted in shared Rust: `value` goes back to
+            // `set_filter` verbatim (an own set's name, a shared set's
+            // `local:<id>`), `label` is the owner-disambiguated display text
+            // (`media.md` § Encryption at rest → *The filter and the upload
+            // target address the row*, (a)/(b)).
+            ForEach(Self.filterEntries(snap?.folderOptions ?? []), id: \.value) { entry in
+                Text(entry.label).tag(entry.value)
             }
             // The followed browse scopes, AFTER the own-set options
             // (`ui/media.md` § Followed public folders). Both halves are
@@ -268,9 +291,22 @@ public struct MediaExplorerContent: View {
         .accessibilityIdentifier(Ids.mediaFolderFilter)
         .automationSelect(Ids.mediaFolderFilter,
                           value: { vm.snapshot?.filter ?? Self.filterAllValue },
-                          options: { [Self.filterAllValue] + (snap?.folders ?? [])
-                                     + (snap?.followed ?? []).map(\.value) },
+                          // Painted texts (labels) beside the stable keys (values): a
+                          // same-named own / shared pair paints two distinct labels.
+                          options: { [L.media.filterAll]
+                                     + Self.filterEntries(snap?.folderOptions ?? []).map(\.label)
+                                     + (snap?.followed ?? []).map(\.label) },
+                          optionKeys: { [Self.filterAllValue]
+                                        + Self.filterEntries(snap?.folderOptions ?? []).map(\.value)
+                                        + (snap?.followed ?? []).map(\.value) },
                           set: { applyFilter($0) })
+    }
+
+    /// The picker's own-set / shared-set entries: each option's minted `value`
+    /// (handed back to `setFilter` verbatim) paired with its minted `label`.
+    /// Two sets sharing a name stay distinct by value and by label.
+    static func filterEntries(_ options: [MediaFolderOption]) -> [(value: String, label: String)] {
+        options.map { (value: $0.value, label: $0.label) }
     }
 
     // MARK: - Items

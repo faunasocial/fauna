@@ -258,6 +258,10 @@ pub(crate) async fn start(
         owed_nests: Some(owed_nest_deliverer(road_seeds)),
         // The restore gesture's dial of a custodian nest.
         custodian_dial: Some(WebCustodianDial),
+        device_bind: Some({
+            let nest_url = nest_url.to_string();
+            Box::new(move || LocalStoragePinStore.get(&nest_url))
+        }),
     };
     let handle = web_host::start(params, Arc::new(WebIdentityStore))
         .await
@@ -779,6 +783,7 @@ where
         linked_nests: None,
         owed_nests: None,
         custodian_dial: None::<WebCustodianDial>,
+        device_bind: None,
     };
     web_host::start(params, Arc::clone(removed))
         .await
@@ -916,6 +921,36 @@ pub fn account_enrolled_device_row() -> js_sys::Promise {
     })
 }
 
+/// Who holds this account's generation-key escrow — the identities whose
+/// recorded `fauna.state.escrow-receipt` rows are live, as lowercase hex, or
+/// `undefined` while no runtime runs or the read fails (the page keeps what it
+/// last painted). The Nests page's escrow-holder badge reads it
+/// (`ui/nests.md` § Implementation status today, the badge bullet); the SAME
+/// shared read native calls (`AccountStoreHandle::escrow_holders`), the twin
+/// of `fauna-ffi`'s `custody_escrow_holders`.
+#[wasm_bindgen(
+    js_name = accountEscrowHolders,
+    unchecked_return_type = "Promise<string[] | undefined>"
+)]
+pub fn account_escrow_holders() -> js_sys::Promise {
+    wasm_bindgen_futures::future_to_promise(async {
+        let Some(handle) = handle() else {
+            return Ok(JsValue::UNDEFINED);
+        };
+        Ok(match handle.escrow_holders().await {
+            Ok(holders) => holders
+                .iter()
+                .map(|id| JsValue::from_str(&hex::encode(id)))
+                .collect::<js_sys::Array>()
+                .into(),
+            Err(e) => {
+                tracing::debug!("account escrow holders: {e}");
+                JsValue::UNDEFINED
+            }
+        })
+    })
+}
+
 /// The **store-change notice** for this tab's open pages
 /// (`account-runtime.md` § Multi-instance concurrency → *A runtime's own pump
 /// is a source of the notice too*, parts 4 and 5): resolves with the notice
@@ -985,6 +1020,28 @@ pub fn account_read_marker_state_json(channel_id_hex: String) -> js_sys::Promise
         let view = fauna_account_plane::account_driver::e2e_readers::read_marker_state(
             handle().as_ref(),
             &channel_id_hex,
+        )
+        .await;
+        Ok(JsValue::from_str(
+            &serde_json::to_string(&view).unwrap_or_else(|_| r#"{"found":false}"#.into()),
+        ))
+    })
+}
+
+/// e2e-only: the `escrow_wrap_coordinates` command's body — where this
+/// browser's account store's escrow-wrap rows sit on the fleet feed, as the
+/// JSON every hosting app answers (`{"found": false}` with no runtime): the
+/// recovery-kit let-go journey's staging read (`fleet-scope-reclamation.md`
+/// § *Fleet-scope reclamation*, clause (3)(j)). The SAME reader the native
+/// dispatchers call
+/// (`fauna_account_plane::account_driver::e2e_readers::escrow_wrap_coordinates_view`),
+/// never a twin; gated like [`account_device_set_state_json`].
+#[cfg(feature = "test-helpers")]
+#[wasm_bindgen(js_name = accountEscrowWrapCoordinatesJsonForTest, unchecked_return_type = "Promise<string>")]
+pub fn account_escrow_wrap_coordinates_json() -> js_sys::Promise {
+    wasm_bindgen_futures::future_to_promise(async move {
+        let view = fauna_account_plane::account_driver::e2e_readers::escrow_wrap_coordinates_view(
+            handle().as_ref(),
         )
         .await;
         Ok(JsValue::from_str(
@@ -1235,6 +1292,7 @@ mod tests {
             linked_nests: None,
             owed_nests: None,
             custodian_dial,
+            device_bind: None,
         }
     }
 
@@ -1396,7 +1454,7 @@ mod tests {
     async fn a_pass_beside_local_commands_records_both_planes_own_rows() {
         use fauna_account_store::backend::StoreBackend;
         use fauna_account_store::indexeddb::IndexedDbBackend;
-        use fauna_protocol::merge_policy::KIND_MODERATION;
+        use fauna_protocol::merge_policy::KIND_SYNC_PREFS;
 
         crate::logs::install_logging();
         let mut nonce = [0u8; 8];
@@ -1407,22 +1465,20 @@ mod tests {
             .await
             .expect("the runtime assembles over IndexedDB");
 
-        let moderation =
-            fauna_core::encoding::canonical_encode(&fauna_core::data::ModerationConfig {
-                muted_keywords: vec![fauna_core::data::MutedKeyword::new("muted")],
-                ..Default::default()
-            })
-            .expect("encode moderation")
-            .to_vec();
+        let prefs = fauna_core::encoding::canonical_encode(&fauna_core::data::SyncPrefsConfig {
+            default_conflict_policy: Some("auto".into()),
+        })
+        .expect("encode sync prefs")
+        .to_vec();
         handle
-            .put_preference(KIND_MODERATION, moderation)
+            .put_preference(KIND_SYNC_PREFS, prefs)
             .await
             .expect("the delegable plane's own row is written");
 
         let reads = async {
             for _ in 0..100 {
                 handle
-                    .get_preference(KIND_MODERATION)
+                    .get_preference(KIND_SYNC_PREFS)
                     .await
                     .expect("a local read is served inside the pass");
             }
@@ -1645,7 +1701,7 @@ mod tests {
 
     /// The folders chunk's forwarder, with the SPA's `sharedAccountPort` hop
     /// replaced by a direct call into the core chunk's dispatch.
-    struct CoreChunk(String);
+    struct CoreChunk(String, Rc<dyn Fn() -> bool>);
 
     #[async_trait::async_trait(?Send)]
     impl fauna_account_port::PortTransport for CoreChunk {
@@ -1654,18 +1710,33 @@ mod tests {
             door: &'static str,
             payload: Vec<u8>,
         ) -> Result<Vec<u8>, fauna_account_port::PortFault> {
-            crate::account_port::dispatch(self.0.clone(), door, &payload).await
+            crate::account_port::dispatch(self.0.clone(), door, &payload, &*self.1).await
         }
     }
 
     fn port_for(actor_id_hex: String) -> fauna_devices_machine::port::PortFleetRemoval<CoreChunk> {
-        fauna_devices_machine::port::PortFleetRemoval::new(CoreChunk(actor_id_hex))
+        port_expecting(actor_id_hex, Rc::new(|| false))
+    }
+
+    fn port_expecting(
+        actor_id_hex: String,
+        coming: Rc<dyn Fn() -> bool>,
+    ) -> fauna_devices_machine::port::PortFleetRemoval<CoreChunk> {
+        fauna_devices_machine::port::PortFleetRemoval::new(CoreChunk(actor_id_hex, coming))
     }
 
     /// Start a runtime for [`SEED`]'s account over a fresh store and install
     /// it as this tab's, as `start` does; answers the store's writer — this
     /// browser's own fleet id.
     async fn install_seed_runtime(tag: &str) -> [u8; 32] {
+        let (actor_id_hex, handle, me) = assemble_seed_runtime(tag).await;
+        install_for_test(actor_id_hex, handle).await;
+        me
+    }
+
+    /// [`install_seed_runtime`] short of the install — a runtime this tab does
+    /// not serve from yet.
+    async fn assemble_seed_runtime(tag: &str) -> (String, AccountStoreHandle, [u8; 32]) {
         crate::logs::install_logging();
         shutdown().await;
         let mut nonce = [0u8; 8];
@@ -1683,8 +1754,58 @@ mod tests {
             .expect("the writer reads back")
             .verifying_key()
             .to_bytes();
-        install_for_test(actor_id_hex, handle).await;
-        me
+        (actor_id_hex, handle, me)
+    }
+
+    /// The read that arrives before the runtime: with a start on its way it is
+    /// answered once the runtime installs, where the same read with none
+    /// coming is refused — the order a reloaded mail page lost, forced here
+    /// rather than left to which of the two won the race.
+    #[wasm_bindgen_test]
+    async fn a_read_ahead_of_the_starting_runtime_is_answered_when_it_installs() {
+        use fauna_devices_machine::FleetRemoval;
+        let (actor_id_hex, handle, me) = assemble_seed_runtime("ahead").await;
+        assert!(
+            port_for(actor_id_hex.clone())
+                .fleet_members(Vec::new())
+                .await
+                .is_err(),
+            "the read's order: no runtime is installed yet"
+        );
+        let installing = actor_id_hex.clone();
+        wasm_bindgen_futures::spawn_local(async move {
+            fauna_sleep::sleep(std::time::Duration::from_millis(600)).await;
+            install_for_test(installing, handle).await;
+        });
+        let view = port_expecting(actor_id_hex, Rc::new(|| true))
+            .fleet_members(Vec::new())
+            .await
+            .expect("the read waits for the runtime on its way");
+        assert_eq!(view.me, me);
+        shutdown().await;
+    }
+
+    /// A start that is given up mid-wait (the role went to another tab, the
+    /// build failed) refuses at the next poll, not at the end of the bound.
+    #[wasm_bindgen_test]
+    async fn a_start_given_up_ends_the_reads_wait_at_once() {
+        use fauna_devices_machine::FleetRemoval;
+        shutdown().await;
+        let coming = Rc::new(std::cell::Cell::new(true));
+        let answer = {
+            let coming = Rc::clone(&coming);
+            port_expecting(
+                ActorKeypair::from_secret(SEED).actor_id_hex(),
+                Rc::new(move || coming.get()),
+            )
+        };
+        wasm_bindgen_futures::spawn_local(async move {
+            fauna_sleep::sleep(std::time::Duration::from_millis(100)).await;
+            coming.set(false);
+        });
+        let asked = js_sys::Date::now();
+        assert!(answer.fleet_members(Vec::new()).await.is_err());
+        assert!(js_sys::Date::now() - asked < 5_000.0);
     }
 
     /// No runtime in the tab: the member read and the removal are refused —
@@ -1730,7 +1851,7 @@ mod tests {
             .expect("the running account's member read is served");
         assert_eq!(view.me, me);
         assert_eq!(
-            crate::account_port::dispatch(actor_id_hex, "no_such.door", &[]).await,
+            crate::account_port::dispatch(actor_id_hex, "no_such.door", &[], || false).await,
             Err(fauna_account_port::PortFault::UnknownDoor(
                 "no_such.door".into()
             ))
@@ -1917,6 +2038,10 @@ mod tests {
         });
         assert_eq!(mismatch["outcome"]["IdentityMismatch"]["expected"][0], 1);
         assert_eq!(mismatch["outcome"]["IdentityMismatch"]["got"][31], 2);
+        assert_eq!(
+            tagged(O::IdentityUnchecked),
+            serde_json::json!({ "outcome": "IdentityUnchecked" })
+        );
     }
 
     /// The answer carries the outcome's own notice parts and form decision,

@@ -84,7 +84,7 @@
              in sell mode (UpdateSellFieldsVisibility). The sell composer is inside the
              payments plane (dynamic-features.md section Platform-family surface
              excision, The price-and-route class): its fields live in
-             Views/Payments/SellComposeFields and are hosted through this ContentControl
+             Views/Payments/SellControls and are hosted through this ContentControl
              exactly like ProfilePage's TierMoneyFieldsHost, and the "Sell this post…"
              answer itself is added only under this file's #if PAYMENTS, so a store-safe
              build can stage no sale at all. No id of the plane may be spelled here: XAML

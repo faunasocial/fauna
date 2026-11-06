@@ -1098,8 +1098,8 @@ machinery **kinds**, the **device-set merge**, the **mint protocol**, the
   `export: Export` field with the ratified vocabulary, the down-only
   ratchet (`tests::the_unreviewed_export_backlog_only_shrinks`), and a
   first evidence-backed tranche of verdicts (the secret-bearing planes the
-  row named plus the two full-coverage shaped domains); the rest of the
-  registry is `Export::Unreviewed`. **The emission now executes those
+  row named plus the two full-coverage shaped domains); the skeleton left the rest of the
+  registry `Export::Unreviewed`; every entry now carries a verdict (the backlog reached zero, below). **The emission now executes those
   verdicts:** `CacheDb::gather_actor_export` walks `export_emit_legs()` and
   `export_routes.rs` emits `export/tables/<name>.ndjson` per
   `Verbatim`/`Redacted` entry — read `WHERE <column> = ?1` bound in the
@@ -1117,9 +1117,9 @@ machinery **kinds**, the **device-set merge**, the **mint protocol**, the
   the registry's own verdicts** — mutation found the first version asking
   `ACTOR_TABLES` which tables to check, so demoting one to `Verbatim`
   removed it from the check and the leak passed green. **The judgment
-  passes draining the `Unreviewed` tail are
-  underway: 151 → 140 → 132 → 123 → 107 → 93 → 81 → 71 → 65 → 56 → 51 → 45 →
-  41 → 39 → 33 → 27 → 19 → 12.** Cluster 1 (2026-08-15) took the
+  passes that drained the `Unreviewed` tail ran
+  151 → 140 → 132 → 123 → 107 → 93 → 81 → 71 → 65 → 56 → 51 → 45 →
+  41 → 39 → 33 → 27 → 19 → 12 → 0.** Cluster 1 (2026-08-15) took the
   key/credential/escrow plane, all `WithheldSecret`; cluster 2 (2026-08-15)
   took the bearer/verification-secret plane — the tables whose secret is a
   redeemable code, a shared verification secret, or a key sealed inside an

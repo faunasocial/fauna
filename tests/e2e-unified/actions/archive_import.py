@@ -2,6 +2,9 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from helpers import budgets
+from helpers.waiting import wait_until
+
 if TYPE_CHECKING:
     from drivers.base import PlatformDriver
 
@@ -58,7 +61,19 @@ class ArchiveImportActions:
 
     # ── step 1 — source ──────────────────────────────────────────────────
 
+    def _when_enabled(self, element_id: str, budget_s: float) -> None:
+        """Wait until the wizard takes input again: a page holds its controls
+        disabled while the machine works — web's first hydrate waits on the
+        account runtime's settle — and a disabled control refuses actuation
+        rather than queueing it (convention 11)."""
+        wait_until(
+            lambda: self.driver.is_enabled(element_id),
+            budget_s,
+            diagnose=lambda: f"{element_id} stayed disabled; error {self.error_text()!r}",
+        )
+
     def select_source(self, label: str) -> None:
+        self._when_enabled("archive-import-source-picker", budgets.ACCOUNT_RUNTIME_ASSEMBLY_S)
         self.driver.select("archive-import-source-picker", label)
 
     def source_help(self) -> str:
@@ -74,6 +89,7 @@ class ArchiveImportActions:
 
     def next(self) -> None:
         self.driver.wait_for("wizard-next-button", timeout=10.0)
+        self._when_enabled("wizard-next-button", budgets.UI_SETTLE_S)
         self.driver.click("wizard-next-button")
 
     def back(self) -> None:
@@ -83,6 +99,21 @@ class ArchiveImportActions:
     # ── step 2 — archive ─────────────────────────────────────────────────
 
     def set_archive_path(self, path: str) -> None:
+        """Type ``path`` — a file on the pytest host — into the path field.
+
+        android's app runs on a device where no host path exists, so its
+        driver copies the file's bytes onto the device first
+        (``AndroidBridgeDriver.push_input_file``) and the field gets that
+        device path; web's field is a real ``<input type=file>`` (ui.yaml's
+        web note), set by path — picking a file opens it, as the user's pick
+        does, so the following :meth:`open_archive` only re-offers the picker;
+        every other app reads the host path as given."""
+        if self.driver.is_web():
+            self.driver.set_input_files("archive-import-archive-path", path)
+            return
+        push = getattr(self.driver, "push_input_file", None)
+        if push is not None:
+            path = push(path)
         self.driver.clear_and_type("archive-import-archive-path", path)
 
     def open_archive(self) -> None:
@@ -190,3 +221,12 @@ class ArchiveImportActions:
 
     def review_skipped(self) -> None:
         self.driver.click("archive-import-review-skipped-button")
+
+    def profile_prefill_enabled(self) -> bool:
+        """The one-tap profile prefill is on offer: the archive carried a
+        profile and the tap has not applied it yet (§ What each category
+        becomes, the Profile row)."""
+        return self.driver.get_attr("archive-import-profile-prefill-button", "disabled") != "true"
+
+    def apply_profile_prefill(self) -> None:
+        self.driver.click("archive-import-profile-prefill-button")

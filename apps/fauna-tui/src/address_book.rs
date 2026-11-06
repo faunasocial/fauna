@@ -93,7 +93,8 @@ pub async fn load_addressbooks(
     else {
         return Ok(Vec::new());
     };
-    let keys = DavRecipientKeys::from_mseks(&msek, &prior_mseks);
+    let keys =
+        DavRecipientKeys::from_mseks(fauna_client_carddav::DavKind::Card, &msek, &prior_mseks);
     let books = CardDavClient::new(nest)
         .list_addressbooks_decoded(
             ListAddressbooksRequest {
@@ -132,7 +133,8 @@ pub async fn load_cards(
     else {
         return Ok(Vec::new());
     };
-    let keys = DavRecipientKeys::from_mseks(&msek, &prior_mseks);
+    let keys =
+        DavRecipientKeys::from_mseks(fauna_client_carddav::DavKind::Card, &msek, &prior_mseks);
     let page = CardDavClient::new(nest)
         .query_cards_decoded(
             QueryCardsRequest {

@@ -286,7 +286,8 @@ def tunnel_spec(login: str = "", dev_vm_address: str = "") -> str:
 # because the tunnel alone carries one forward per port of three ranges -- a
 # plist written by hand would be a second home for every number in this file.
 
-#: Where the SDK lands with either install channel (host.md step 1). Left for
+#: Where the three hand-unpacked, SHA-256-verified archives land (host.md step 1:
+#: the emulator's machine carries no development tool and no source). Left for
 #: the shell that writes the plists to expand: `launchd` expands neither `$HOME`
 #: nor `~`.
 _SDK = "$HOME/Library/Android/sdk"
@@ -349,7 +350,7 @@ def launch_agents(login: str = "", dev_vm_address: str = "") -> str:
         "    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/$agent.plist",
         "done",
         "",
-        "# Then, on the dev VM, `just android-venue-probe` answers `venue UP` once",
+        "# Then, on the dev VM, `just android-venue-probe` answers `emulator up` once",
         "# the emulator has booted (about a minute).",
     ]
     return "\n".join(lines)
@@ -372,20 +373,21 @@ def probe_venue(timeout: float = 5) -> tuple[bool, str]:
     try:
         result = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
     except subprocess.TimeoutExpired:
-        return False, (f"venue DOWN: the adb server at {ADB_SERVER_SPEC} did not answer "
+        return False, (f"emulator down: the adb server at {ADB_SERVER_SPEC} did not answer "
                        f"in {timeout:g} s")
     except OSError as exc:
-        return False, f"venue UNKNOWN: adb cannot run on this machine ({exc.strerror or exc})"
+        return False, f"emulator unknown: adb cannot run on this machine ({exc.strerror or exc})"
     if result.returncode != 0:
-        return False, (f"venue DOWN: nothing answers at {ADB_SERVER_SPEC} -- the tunnel "
-                       f"from the emulator's machine is not up, or its adb server is stopped")
+        return False, (f"emulator down: nothing answers at {ADB_SERVER_SPEC} -- the venue on "
+                       f"the emulator's machine is not installed, its tunnel is not up, or "
+                       f"its adb server is stopped")
     rows = android_device.parse_adb_devices(result.stdout)
     ready = [serial for serial, state in rows if state == "device"]
     if not ready:
         seen = ", ".join(f"{serial} {state}" for serial, state in rows) or "none attached"
-        return False, (f"venue DOWN: the tunnel and adb server answer, but no device is "
+        return False, (f"emulator down: the tunnel and adb server answer, but no device is "
                        f"ready ({seen}) -- the emulator is stopped or still booting")
-    return True, f"venue UP: {ADB_SERVER_SPEC} serves {', '.join(ready)}"
+    return True, f"emulator up: {ADB_SERVER_SPEC} serves {', '.join(ready)}"
 
 
 if __name__ == "__main__":

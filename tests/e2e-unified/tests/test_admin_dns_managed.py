@@ -37,9 +37,8 @@ import secrets
 
 import pytest
 
-from helpers.app_surface import skip_unbuilt
+from helpers.app_surface import require_surface
 from helpers.budgets import PROVIDER_VERIFY_S, RPC_ROUNDTRIP_S, UI_SETTLE_S
-from helpers.dns_recheck import require_dns_background_recheck
 from helpers.waiting import wait_until
 
 pytestmark = [pytest.mark.tier_2]
@@ -131,8 +130,7 @@ def test_admin_dns_managed_publish_success(admin_app, nest_instance):
     try:
         # Defensive: start from a clean held-credential list (a prior managed
         # test in the same session may have left one if its cleanup was skipped).
-        while admin_app.admin.dns_credential_count() > 0:
-            admin_app.admin.clear_dns_credential(0)
+        admin_app.admin.clear_all_dns_credentials()
 
         # --- 1. Add a credential the fake provider verifies. ---
         # Cloudflare has a single Secret field (`api-token`); the sentinel value
@@ -188,15 +186,7 @@ def test_admin_dns_managed_publish_success(admin_app, nest_instance):
 
         # --- 3. The opt-in published the domain's records. ---
         # A driver that reads no app log cannot see the witness.
-        if admin_app.driver.log_scope_across_relaunch() == "none":
-            skip_unbuilt(
-                admin_app.driver,
-                surface="app-log reader in the e2e driver",
-                detail=(
-                    "the managed opt-in succeeded, but the fake provider's publish "
-                    "witness line cannot be read without the app's log"
-                ),
-            )
+        require_surface(admin_app.driver, "app-log-reader")
         wait_until(
             lambda: _publish_witnessed(admin_app.driver, _DOMAIN) or None,
             PROVIDER_VERIFY_S,
@@ -218,8 +208,7 @@ def test_admin_dns_managed_publish_success(admin_app, nest_instance):
                 modes = admin_app.admin.dns_domain_modes()
                 if i < len(modes) and modes[i] == _LABEL_MANAGED:
                     admin_app.admin.toggle_domain_mode(index=i)
-            while admin_app.admin.dns_credential_count() > 0:
-                admin_app.admin.clear_dns_credential(0)
+            admin_app.admin.clear_all_dns_credentials()
         except Exception:
             pass
 
@@ -250,12 +239,7 @@ def _log_lines(driver, needle: str, *also: str) -> list[str]:
 
 
 def _require_log_reader(admin_app, what: str) -> None:
-    if admin_app.driver.log_scope_across_relaunch() == "none":
-        skip_unbuilt(
-            admin_app.driver,
-            surface="app-log reader in the e2e driver",
-            detail=f"{what} is witnessed only by the fake provider's line in the app's log",
-        )
+    require_surface(admin_app.driver, "app-log-reader")
 
 
 def _error_text(admin_app) -> str | None:
@@ -300,8 +284,7 @@ def _open_with_domains(admin_app, nest_instance, domains) -> None:
             f"{admin_app.admin.dns_domain_names()!r}"
         ),
     )
-    while admin_app.admin.dns_credential_count() > 0:
-        admin_app.admin.clear_dns_credential(0)
+    admin_app.admin.clear_all_dns_credentials()
 
 
 def _add_credential(admin_app, token: str) -> None:
@@ -331,8 +314,7 @@ def _cleanup(admin_app, domains) -> None:
         for d in domains:
             if _mode_of(admin_app, d) == _LABEL_MANAGED:
                 _toggle_mode(admin_app, d)
-        while admin_app.admin.dns_credential_count() > 0:
-            admin_app.admin.clear_dns_credential(0)
+        admin_app.admin.clear_all_dns_credentials()
     except Exception:
         pass
 
@@ -356,7 +338,6 @@ def test_admin_dns_managed_records_republished_and_superseded_policy_taken_down(
        ``p=reject`` record down rather than leaving two DMARC records — the
        fake provider's withdrawal line names it.
     """
-    require_dns_background_recheck(admin_app.driver)
     zone = f"rp-{secrets.token_hex(4)}.test"
     domain = f"m.{zone}"
     _open_with_domains(admin_app, nest_instance, [domain])
@@ -471,13 +452,9 @@ def test_admin_dns_manage_all_and_the_credential_that_makes_it_actionable(
     # The sentinel names every hosted domain as a covered zone, so the switch
     # can manage the whole nest — the primary and other journeys' domains too.
     token = "fake-dns-ok:" + ",".join(every)
-    if admin_app.admin.manage_all_state() is None:
-        skip_unbuilt(
-            admin_app.driver,
-            surface="admin-dns-manage-all-toggle state attr",
-            detail="the master switch's checked state is not mirrored for the driver",
-            tracked="docs/goal/behavior/dns-management.md § Implementation status today",
-        )
+    assert admin_app.admin.manage_all_state() is not None, (
+        "the master switch mirrors its checked state in the `state` test-attr"
+    )
     try:
         _add_credential(admin_app, token)
         assert admin_app.admin.manage_all_state() == "off"

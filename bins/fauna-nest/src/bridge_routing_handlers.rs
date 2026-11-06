@@ -259,6 +259,48 @@ pub(crate) async fn ensure_actor_mail_serving_enabled(
     Ok(())
 }
 
+/// Per-actor mail-off gate — the nest-side half of the user's "Disable mail"
+/// (`docs/goal/behavior/mail-credentials.md` § Trigger taxonomy, the
+/// Disable-mail row). Reads the actor's own mail-off flag (default ON / absent
+/// ⇒ ON) and returns [`mail_disabled_by_user`] while the user has turned mail
+/// off. Called by `require_local_mail_serving` (every IMAP handler and the
+/// mail-import handlers) and by the outbound doors that send as the actor (no
+/// sending): `enqueue_outbound_mail`'s MTA door, the app's own compose
+/// (`fauna.email.send`), a list send (`fauna.bridges.send_list_message`, as the
+/// list's owner), `forward_message` for the forwarding actor and
+/// `send_auto_reply` for the vacationing recipient; `promote_due_forwards`
+/// reads the flag per parked row, on the same rule as `forward_message`. The CalDAV, CardDAV and WebDAV handlers never read it, so the
+/// same credential keeps serving the calendar, contacts and file apps while
+/// mail is off.
+pub(crate) async fn ensure_actor_mail_enabled(
+    state: &Arc<AppState>,
+    target: &[u8; 32],
+) -> Result<(), RpcError> {
+    let enabled = state
+        .db
+        .get_actor_mail_enabled(target)
+        .await
+        .map_err(internal)?
+        .unwrap_or(true);
+    if !enabled {
+        return Err(mail_disabled_by_user());
+    }
+    Ok(())
+}
+
+/// The actor has turned their mail off (`ensure_actor_mail_enabled`). Distinct
+/// from [`mail_serving_disabled`] (serve-here off: the user reads elsewhere).
+pub(crate) fn mail_disabled_by_user() -> RpcError {
+    let mut e = RpcError::new(
+        "fauna.bridges.mail_disabled_by_user",
+        "error.bridges.mail_disabled_by_user",
+    );
+    e.details = Some(Box::new(Value::String(
+        "this actor has turned their mail off".into(),
+    )));
+    e
+}
+
 /// Shared caller-scoping gate for the CalDAV and CardDAV bridge handlers:
 /// only the mail bridge may act on another actor's data, a pure-backup
 /// destination refuses to serve/mutate this kind for every caller class, and
@@ -2408,10 +2450,38 @@ fn generate_disposable_alias_handler() -> RpcHandler {
 // app (and all 6) drive these over WS-RPC via the shared
 // `fauna_client_bridges::MailAdminClient`.
 
+/// The effective deployment-wide DMARC record policy — the `mail.dmarc.*`
+/// catalog overlaid onto the shipped default — that every domain's own partial
+/// is overlaid onto, both when the record is assembled (`dns_handlers`) and when
+/// a domain's published `p=` is projected for the admin surface
+/// ([`mail_domain_to_row`]) or a per-domain policy choice is merged.
+async fn dmarc_publish_base(
+    state: &Arc<AppState>,
+) -> Result<fauna_mail::dmarc_publish::DmarcPublishPolicy, RpcError> {
+    Ok(state
+        .db
+        .get_dmarc_policy()
+        .await
+        .map_err(internal)?
+        .publish_base())
+}
+
 /// DB row → wire row. Parses the JSON-text `dkim_algorithms` column into
 /// a real list for the wire (falls back to empty on a malformed column —
 /// pre-prod, the column always carries valid JSON from the schema default).
-fn mail_domain_to_row(d: &crate::db::mail_domains::MailDomain) -> MailDomainRow {
+/// `dmarc_base` is [`dmarc_publish_base`]: the domain's published `p=` is its
+/// partial overlaid on it, the value the per-domain policy select shows
+/// (`dmarc-reporting.md` § Multi-domain deployments).
+fn mail_domain_to_row(
+    d: &crate::db::mail_domains::MailDomain,
+    dmarc_base: &fauna_mail::dmarc_publish::DmarcPublishPolicy,
+) -> MailDomainRow {
+    let dmarc_overrides =
+        fauna_mail::dmarc_publish::parse_stored_overrides(d.dmarc_overrides_json.as_deref());
+    let effective_dmarc_policy_mode = Some(
+        fauna_mail::dmarc_publish::apply_overrides(dmarc_base.clone(), &dmarc_overrides)
+            .policy_mode,
+    );
     MailDomainRow {
         domain_id: ByteBuf::from(d.domain_id.to_vec()),
         domain_name: d.domain_name.clone(),
@@ -2433,9 +2503,8 @@ fn mail_domain_to_row(d: &crate::db::mail_domains::MailDomain) -> MailDomainRow 
         role_address_overrides: fauna_mail::aliases::role_overrides::parse_stored(
             d.role_address_overrides_json.as_deref(),
         ),
-        dmarc_overrides: fauna_mail::dmarc_publish::parse_stored_overrides(
-            d.dmarc_overrides_json.as_deref(),
-        ),
+        dmarc_overrides,
+        effective_dmarc_policy_mode,
         spf_record: d.spf_record.clone(),
         dkim_selector_activated_at: d.dkim_selector_activated_at,
         // Due-ness is "as of now" by definition, so read the clock at projection
@@ -2652,7 +2721,9 @@ fn set_mail_switches_handler() -> RpcHandler {
 /// through calls it: the authenticated submission's per-RCPT quota check,
 /// `fauna.email.send`, and `fauna.bridges.send_list_message`. Mail the nest
 /// composes on its own (an NDR, the auto-reply, a forward of mail received) is
-/// not the user sending, and is not gated here.
+/// not the user sending, and is not gated here; nor is the MDA's iMIP door on
+/// `enqueue_outbound_mail` — an organizer's invitations are calendar traffic and
+/// keep flowing, as they do while mail is off.
 pub(crate) async fn refuse_if_send_disabled(
     state: &Arc<AppState>,
     sender: &[u8; 32],
@@ -2747,7 +2818,7 @@ fn add_local_domain_handler() -> RpcHandler {
                 .map_err(internal)?
             {
                 return encode_reply(&AddLocalDomainReply {
-                    domain: mail_domain_to_row(&existing),
+                    domain: mail_domain_to_row(&existing, &dmarc_publish_base(&state).await?),
                     skipped: true,
                 });
             }
@@ -2813,7 +2884,7 @@ fn add_local_domain_handler() -> RpcHandler {
             }
             notify_bridges_config_changed(&state, config_change_reason::LOCAL_DOMAINS).await;
             encode_reply(&AddLocalDomainReply {
-                domain: mail_domain_to_row(&row),
+                domain: mail_domain_to_row(&row, &dmarc_publish_base(&state).await?),
                 skipped: false,
             })
         })
@@ -2845,7 +2916,7 @@ fn remove_local_domain_handler() -> RpcHandler {
                     notify_bridges_config_changed(&state, config_change_reason::LOCAL_DOMAINS)
                         .await;
                     encode_reply(&RemoveLocalDomainReply {
-                        domain: mail_domain_to_row(&row),
+                        domain: mail_domain_to_row(&row, &dmarc_publish_base(&state).await?),
                     })
                 }
                 Err(e) => Err(map_mail_domain_err(e)),
@@ -2864,7 +2935,7 @@ fn restore_local_domain_handler() -> RpcHandler {
                     notify_bridges_config_changed(&state, config_change_reason::LOCAL_DOMAINS)
                         .await;
                     encode_reply(&RestoreLocalDomainReply {
-                        domain: mail_domain_to_row(&row),
+                        domain: mail_domain_to_row(&row, &dmarc_publish_base(&state).await?),
                     })
                 }
                 Err(e) => Err(map_mail_domain_err(e)),
@@ -2888,9 +2959,16 @@ fn list_local_domains_handler() -> RpcHandler {
                 .list_soft_deleted_within_30d_mail_domains()
                 .await
                 .map_err(internal)?;
+            let base = dmarc_publish_base(&state).await?;
             encode_reply(&ListLocalDomainsReply {
-                active: active.iter().map(mail_domain_to_row).collect(),
-                soft_deleted_within_30d: soft.iter().map(mail_domain_to_row).collect(),
+                active: active
+                    .iter()
+                    .map(|d| mail_domain_to_row(d, &base))
+                    .collect(),
+                soft_deleted_within_30d: soft
+                    .iter()
+                    .map(|d| mail_domain_to_row(d, &base))
+                    .collect(),
             })
         })
     })
@@ -2919,10 +2997,25 @@ fn update_local_domain_config_handler() -> RpcHandler {
                 .update_mail_domain_config(&req.domain, update)
                 .await;
             // The DMARC policy merges into the stored override partial (other
-            // keys kept; the default clears both policy keys), so it is its own
-            // read-merge-write rather than a column overwrite.
+            // keys kept; a choice the deployment policy already publishes
+            // clears both policy keys), so it is its own read-merge-write
+            // rather than a column overwrite.
             let result = match (result, req.dmarc_policy_mode) {
-                (Ok(_), Some(mode)) => state.db.set_dmarc_policy_mode(&req.domain, mode).await,
+                (Ok(_), Some(mode)) => {
+                    let result = state.db.set_dmarc_policy_mode(&req.domain, mode).await;
+                    if let Ok(row) = &result {
+                        let _ = state
+                            .db
+                            .audit(
+                                Some(actor_id.as_slice()),
+                                "mail.domain_dmarc_policy_set",
+                                Some(&row.domain_name),
+                                Some(mode.as_tag()),
+                            )
+                            .await;
+                    }
+                    result
+                }
                 (result, _) => result,
             };
             match result {
@@ -2930,7 +3023,7 @@ fn update_local_domain_config_handler() -> RpcHandler {
                     notify_bridges_config_changed(&state, config_change_reason::LOCAL_DOMAINS)
                         .await;
                     encode_reply(&UpdateLocalDomainConfigReply {
-                        domain: mail_domain_to_row(&row),
+                        domain: mail_domain_to_row(&row, &dmarc_publish_base(&state).await?),
                     })
                 }
                 Err(e) => Err(map_mail_domain_err(e)),
@@ -3344,7 +3437,7 @@ fn set_catch_all_actor_handler() -> RpcHandler {
                     notify_bridges_config_changed(&state, config_change_reason::LOCAL_DOMAINS)
                         .await;
                     encode_reply(&SetCatchAllActorReply {
-                        domain: mail_domain_to_row(&row),
+                        domain: mail_domain_to_row(&row, &dmarc_publish_base(&state).await?),
                     })
                 }
                 Err(e) => Err(map_mail_domain_err(e)),
@@ -3389,7 +3482,7 @@ fn set_role_address_handler() -> RpcHandler {
                     notify_bridges_config_changed(&state, config_change_reason::LOCAL_DOMAINS)
                         .await;
                     encode_reply(&SetRoleAddressReply {
-                        domain: mail_domain_to_row(&row),
+                        domain: mail_domain_to_row(&row, &dmarc_publish_base(&state).await?),
                     })
                 }
                 Err(e) => Err(map_mail_domain_err(e)),
@@ -3425,7 +3518,7 @@ fn set_dkim_rotation_days_handler() -> RpcHandler {
                     notify_bridges_config_changed(&state, config_change_reason::LOCAL_DOMAINS)
                         .await;
                     encode_reply(&SetDkimRotationDaysReply {
-                        domain: mail_domain_to_row(&row),
+                        domain: mail_domain_to_row(&row, &dmarc_publish_base(&state).await?),
                     })
                 }
                 Err(e) => Err(map_mail_domain_err(e)),
@@ -3473,7 +3566,7 @@ fn force_rotate_dkim_handler() -> RpcHandler {
                     notify_bridges_config_changed(&state, config_change_reason::LOCAL_DOMAINS)
                         .await;
                     encode_reply(&ForceRotateDkimReply {
-                        domain: mail_domain_to_row(&updated),
+                        domain: mail_domain_to_row(&updated, &dmarc_publish_base(&state).await?),
                     })
                 }
                 Ok(None) => Err(no_dkim_selector_to_rotate(&row.domain_name)),
@@ -4185,6 +4278,26 @@ async fn recipient_mls_pubkey_reply(
         .get_recipient_mail_seal_key(target, mail_new_ingest && state.epoch_sealing_enabled())
         .await
         .map_err(internal)?;
+    // The calendar and card pairs ride the same row (`owner-key-material.md`
+    // § Path B-sibling-5 → *Registration*): present whenever the standing row
+    // is, since one write registers all three.
+    let dav_keys = match seal_key {
+        Some(_) => state
+            .db
+            .get_recipient_seal_keys(target)
+            .await
+            .map_err(internal)?,
+        None => None,
+    };
+    let halves = |k: crate::db::bridge_routing::RecipientSealKey| RecipientSealKeyHalves {
+        mls_pubkey: ByteBuf::from(k.mls_pubkey.to_vec()),
+        mlkem_ek: ByteBuf::from(k.mlkem_ek),
+        extra: Default::default(),
+    };
+    let (calendar_key, card_key) = match dav_keys {
+        Some(k) => (Some(halves(k.calendar)), Some(halves(k.card))),
+        None => (None, None),
+    };
     let (key, succession_pending) = match seal_key {
         None => {
             // No key on file. Distinguish "this actor is a
@@ -4200,18 +4313,21 @@ async fn recipient_mls_pubkey_reply(
                 .map_err(internal)?;
             (None, succession_pending)
         }
-        Some(k) => (
-            Some(RecipientSealKeyHalves {
-                mls_pubkey: ByteBuf::from(k.mls_pubkey.to_vec()),
-                mlkem_ek: ByteBuf::from(k.mlkem_ek),
-                extra: Default::default(),
-            }),
-            false,
-        ),
+        Some(k) => (Some(halves(k)), false),
     };
+    // A mail key without its siblings — the standing row deleted between the
+    // two reads, or a published epoch key outliving it (schema 157's recreate
+    // keeps `actor_epoch_seal_keys`) — is never answered as half a
+    // registration: the error tempfails the caller until the owner's next
+    // connect re-registers the row.
+    if key.is_some() && calendar_key.is_none() {
+        return Err(internal("recipient seal keys changed during the read"));
+    }
     encode_reply(&FetchRecipientMlsPubkeyReply {
         key,
         succession_pending,
+        calendar_key,
+        card_key,
     })
 }
 
@@ -4268,9 +4384,44 @@ fn provision_recipient_mls_pubkey_handler() -> RpcHandler {
             if req.mlkem_ek.len() != ML_KEM_768_ENCAPS_KEY_LEN {
                 return Err(malformed("mlkem_ek must be 1184 bytes (ML-KEM-768)"));
             }
+            // The calendar and card pairs (`owner-key-material.md` § Path
+            // B-sibling-5 / -6) are required and checked the same way, so the
+            // one write below registers all three or nothing — a
+            // half-registered actor is unrepresentable.
+            let pair = |pk_field: &str, pk: &[u8], ek_field: &str, ek: &[u8]| {
+                let mls_pubkey =
+                    crate::rpc_errors::require_bytes32(pk_field, pk).map_err(malformed)?;
+                if ek.len() != ML_KEM_768_ENCAPS_KEY_LEN {
+                    return Err(malformed(format!(
+                        "{ek_field} must be 1184 bytes (ML-KEM-768)"
+                    )));
+                }
+                Ok(crate::db::bridge_routing::RecipientSealKey {
+                    mls_pubkey,
+                    mlkem_ek: ek.to_vec(),
+                })
+            };
+            let keys = crate::db::bridge_routing::RecipientSealKeys {
+                mail: crate::db::bridge_routing::RecipientSealKey {
+                    mls_pubkey: pubkey,
+                    mlkem_ek: req.mlkem_ek.to_vec(),
+                },
+                calendar: pair(
+                    "calendar_pubkey",
+                    &req.calendar_pubkey,
+                    "calendar_mlkem_ek",
+                    &req.calendar_mlkem_ek,
+                )?,
+                card: pair(
+                    "card_pubkey",
+                    &req.card_pubkey,
+                    "card_mlkem_ek",
+                    &req.card_mlkem_ek,
+                )?,
+            };
             state
                 .db
-                .put_actor_recipient_seal_key(&target, &pubkey, &req.mlkem_ek)
+                .put_actor_recipient_seal_keys(&target, &keys)
                 .await
                 .map_err(internal)?;
             // Content-sealing-epoch schedule (design 2026-07-18 § 3): store
@@ -5098,13 +5249,84 @@ fn dmarc_destination(field: &str, value: Option<String>) -> Result<Option<String
     if value.is_empty() {
         return Ok(None);
     }
-    let address = value.strip_prefix("mailto:").unwrap_or("");
-    if address.is_empty() || !address.contains('@') {
+    let uri = fauna_mail::dmarc_uri::parse_dmarc_uri(value).map_err(|e| {
+        malformed(format!(
+            "{field} must be one mailto: URI naming an address: {e}"
+        ))
+    })?;
+    // Stored canonical — rebuilt from the validated parts only, so a `?query`
+    // never reaches the published record.
+    let canonical = uri.canonical();
+    if canonical.len() > DMARC_DESTINATION_MAX_BYTES {
         return Err(malformed(format!(
-            "{field} must be a mailto: URI naming an address"
+            "{field} must be at most {DMARC_DESTINATION_MAX_BYTES} bytes"
         )));
     }
-    Ok(Some(value.to_string()))
+    Ok(Some(canonical))
+}
+
+/// The longest `rua=`/`ruf=` destination the admin may set. The `_dmarc` body
+/// is published as ONE TXT character-string (`fauna_mail::dns::per_domain`'s
+/// `txt()`), which RFC 1035 §3.3 caps at 255 bytes; the body's fixed tags take
+/// at most about 100 of them (`p=quarantine`, `sp=quarantine`, a ten-digit
+/// `ri=`), so two destinations of this size still fit.
+const DMARC_DESTINATION_MAX_BYTES: usize = 72;
+
+#[cfg(test)]
+mod dmarc_destination_tests {
+    use super::*;
+
+    fn refused(v: &str) -> bool {
+        dmarc_destination("rua_destination", Some(v.to_string())).is_err()
+    }
+
+    #[test]
+    fn accepts_one_mailto_and_stores_it_canonical() {
+        assert_eq!(
+            dmarc_destination(
+                "rua_destination",
+                Some(" MAILTO:agg@third.example!10m ".into())
+            )
+            .unwrap(),
+            Some("mailto:agg@third.example!10m".into())
+        );
+        assert_eq!(
+            dmarc_destination(
+                "rua_destination",
+                Some("mailto:a@b.example?subject=x".into())
+            )
+            .unwrap(),
+            Some("mailto:a@b.example".into())
+        );
+        assert_eq!(
+            dmarc_destination("rua_destination", Some("  ".into())).unwrap(),
+            None
+        );
+    }
+
+    /// Each class would otherwise be pasted into every domain's `_dmarc` TXT
+    /// body as is.
+    #[test]
+    fn refuses_separator_quote_control_and_over_length() {
+        // Tag separator — a smuggled `ruf=` would bypass the forensic opt-in.
+        assert!(refused(
+            "mailto:a@b.example; ruf=mailto:x@elsewhere.example; fo=1"
+        ));
+        assert!(refused("mailto:a@b.example,mailto:c@d.example"));
+        // Quote — would close the TXT string.
+        assert!(refused("mailto:a\"@b.example"));
+        // Control characters.
+        assert!(refused("mailto:a@b.example\nv=DMARC1"));
+        assert!(refused("mailto:a@b\u{0}.example"));
+        // Over the single-string budget (a valid address, just too long to
+        // publish beside the other tags).
+        let long = format!("mailto:{}@b.example", "a".repeat(60));
+        assert!(fauna_mail::dmarc_uri::parse_dmarc_uri(&long).is_ok());
+        assert!(refused(&long));
+        // Not a mailto, no address.
+        assert!(refused("https://r.example/x"));
+        assert!(refused("mailto:nobody"));
+    }
 }
 
 /// Admin write path for the deployment-wide `mail.dmarc.*` catalog
@@ -5160,12 +5382,22 @@ fn put_dmarc_policy_handler() -> RpcHandler {
                 },
                 aggregate_retention_days: req.aggregate_retention_days,
                 forensic_retention_days: req.forensic_retention_days,
+                outbound_aggregate_enabled: req.outbound_aggregate_enabled,
             };
             state
                 .db
                 .put_dmarc_policy(overrides)
                 .await
                 .map_err(internal)?;
+            let _ = state
+                .db
+                .audit(
+                    Some(actor_id.as_slice()),
+                    "mail.dmarc_policy_set",
+                    None,
+                    None,
+                )
+                .await;
             encode_reply(&PutPolicyReply {
                 ok: true,
                 extra: Default::default(),
@@ -5676,11 +5908,21 @@ async fn ingest_dmarc_report(
             .map_err(internal)?
             .to_vec(),
     };
-    let stored = state
+    use crate::db::dmarc_reports::ReportInsert;
+    let inserted = state
         .db
         .insert_dmarc_aggregate_report(&row)
         .await
         .map_err(internal)?;
+    if inserted == ReportInsert::Full {
+        // Dropped, never an eviction; the MTA still answers 250.
+        dmarc_metric(
+            "dmarc_inbound_aggregate_table_full_total",
+            "aggregate table at its row or byte cap",
+        );
+        return reply(ReportIngestOutcome::Full);
+    }
+    let stored = inserted == ReportInsert::Stored;
     tracing::info!(
         target: "nest_metrics",
         metric = "dmarc_inbound_aggregate_total",
@@ -5731,6 +5973,23 @@ async fn store_dmarc_forensic_report(
     use fauna_protocol::bridge_routing::ReportIngestOutcome;
     use sha2::{Digest, Sha256};
 
+    // § Default off: a deployment that has not opted in receives zero forensic
+    // reports, whatever a sender mails — the promise is the nest's, not DNS's.
+    // A policy read failure stores nothing (the PII-safe side).
+    let opted_in = match state.db.get_dmarc_policy().await {
+        Ok(overrides) => overrides.effective().ruf_publish,
+        Err(e) => {
+            tracing::error!("dmarc policy read failed, forensic report dropped: {e}");
+            false
+        }
+    };
+    if !opted_in {
+        dmarc_forensic_metric(
+            "dmarc_inbound_forensic_not_opted_in_total",
+            "mail.dmarc.ruf_publish is off",
+        );
+        return Ok(ReportIngestOutcome::NotOptedIn);
+    }
     let raw = req.raw_message;
     let (raw, parsed) = tokio::task::spawn_blocking(move || {
         let parsed = dmarc_forensic::parse_forensic_report(&raw);
@@ -5798,11 +6057,20 @@ async fn store_dmarc_forensic_report(
             .map_err(internal)?
             .to_vec(),
     };
-    let stored = state
+    use crate::db::dmarc_reports::ReportInsert;
+    let inserted = state
         .db
         .insert_dmarc_forensic_report(&row)
         .await
         .map_err(internal)?;
+    if inserted == ReportInsert::Full {
+        dmarc_forensic_metric(
+            "dmarc_inbound_forensic_table_full_total",
+            "forensic table at its row or byte cap",
+        );
+        return Ok(ReportIngestOutcome::Full);
+    }
+    let stored = inserted == ReportInsert::Stored;
     // The log line names the domain and submitter, never the reported
     // message's addresses (§ Storage PII rule).
     tracing::info!(
@@ -6155,11 +6423,21 @@ async fn ingest_tlsrpt_report(
             .map_err(internal)?
             .to_vec(),
     };
-    let stored = state
+    let inserted = state
         .db
         .insert_tlsrpt_inbound_report(&row)
         .await
         .map_err(internal)?;
+    if inserted == crate::db::dmarc_reports::ReportInsert::Full {
+        tracing::info!(
+            target: "nest_metrics",
+            metric = "tlsrpt_inbound_table_full_total",
+            policy_published_domain = %row.policy_published_domain,
+            "tlsrpt inbound report dropped: table at its row or byte cap"
+        );
+        return reply(ReportIngestOutcome::Full);
+    }
+    let stored = inserted == crate::db::dmarc_reports::ReportInsert::Stored;
     tracing::info!(
         target: "nest_metrics",
         metric = "tlsrpt_inbound_total",
@@ -6340,9 +6618,12 @@ async fn persist_inbound_mail_request(
     // recipient envelopes at the wire edge (the Go MTA seals both,
     // unconditionally, in both modes) — nothing unsealed can reach the
     // backup-eligible `__mail` segment store. `mem::take` so the typed values
-    // are the only copy that flows onward.
-    let body = SealedRecordBytes::verify(body_bytes)
-        .map_err(|_| malformed("encrypted_body is not a sealed recipient envelope"))?;
+    // are the only copy that flows onward. The body is a mail record — a
+    // calendar or card record belongs to its own store
+    // (`owner-key-material.md` § Path B-sibling-5 → *AEAD and envelope*).
+    let body =
+        SealedRecordBytes::verify_of_kind(body_bytes, fauna_mls::wrapped_blob::RecordKind::Mail)
+            .map_err(|_| malformed("encrypted_body is not a sealed mail record"))?;
     let hint = SealedRecordBytes::verify(std::mem::take(&mut req.encrypted_index_hint))
         .map_err(|_| malformed("encrypted_index_hint is not a sealed recipient envelope"))?;
     // The envelope sender the MTA carried. Empty = the SMTP null reverse-path
@@ -6380,7 +6661,10 @@ async fn persist_inbound_mail_request(
 
 /// Seal `plaintext` to `recipient_pubkey`, selecting the post-quantum X-Wing
 /// suite iff `mlkem_ek` is a valid-length (1184-B) ML-KEM ek; otherwise the
-/// classical X25519 seal. A recipient's seal key always carries its ek, so
+/// classical X25519 seal. `kind` names the record kind — the envelope tag and
+/// the AAD binding travel with it, and the caller hands the recipient key of
+/// the same kind (`owner-key-material.md` § Path B-sibling-5 → *AEAD and
+/// envelope*). A recipient's seal key always carries its ek, so
 /// `None` is passed only for a key no ek pairs with — the index hint sealed
 /// to a recipient's separate index key. Both the
 /// in-domain body and the companion index hint route through this one selector
@@ -6392,6 +6676,7 @@ async fn persist_inbound_mail_request(
 /// self → no cross-user DoS). `what` labels the warn-log so a *systemic* "PQ
 /// silently off" regression stays observable.
 pub(crate) fn seal_recipient_blob(
+    kind: fauna_mls::wrapped_blob::RecordKind,
     plaintext: &[u8],
     recipient_pubkey: &[u8; 32],
     mlkem_ek: Option<&[u8]>,
@@ -6403,7 +6688,7 @@ pub(crate) fn seal_recipient_blob(
         ek_arr.copy_from_slice(ek);
         let xwing_pk =
             fauna_mls::wrapped_blob::XWingPublicKey::from_parts(ek_arr, *recipient_pubkey);
-        match fauna_mls::wrapped_blob::seal_to_recipient_xwing(plaintext, &xwing_pk) {
+        match fauna_mls::wrapped_blob::seal_record_to_recipient_xwing(kind, plaintext, &xwing_pk) {
             Ok(env) => return env.to_canonical_bytes().map_err(internal),
             Err(e) => {
                 tracing::warn!(
@@ -6414,7 +6699,7 @@ pub(crate) fn seal_recipient_blob(
             }
         }
     }
-    fauna_mls::wrapped_blob::seal_to_recipient(plaintext, recipient_pubkey)
+    fauna_mls::wrapped_blob::seal_record_to_recipient(kind, plaintext, recipient_pubkey)
         .map_err(internal)?
         .to_canonical_bytes()
         .map_err(internal)
@@ -6628,8 +6913,9 @@ async fn seal_and_persist_local(
     let (body, hint) = {
         let pubkey = &seal_key.mls_pubkey;
         let mlkem_ek = Some(seal_key.mlkem_ek.as_slice());
-        let sealed_body = seal_recipient_blob(raw_rfc5322, pubkey, mlkem_ek, "body")?;
-        let sealed_hint = seal_recipient_blob(&index_hint, pubkey, mlkem_ek, "index-hint")?;
+        let mail = fauna_mls::wrapped_blob::RecordKind::Mail;
+        let sealed_body = seal_recipient_blob(mail, raw_rfc5322, pubkey, mlkem_ek, "body")?;
+        let sealed_hint = seal_recipient_blob(mail, &index_hint, pubkey, mlkem_ek, "index-hint")?;
         (sealed_body, sealed_hint)
     };
     let now = fauna_core::data::Timestamp::now_secs_or_zero();
@@ -6933,11 +7219,7 @@ pub(crate) async fn persist_decoded_inbound_mail(
             .await
             .map_err(internal)?;
     }
-    let disposition_str = match req.spam_disposition {
-        SpamDisposition::Accept => "accept",
-        SpamDisposition::AcceptToSpamFolder => "accept_to_spam_folder",
-        SpamDisposition::PolicyJunk => "policy_junk",
-    };
+    let disposition_str = req.spam_disposition.as_wire();
     // The uniform scoring-metadata bus rows (content-scoring.md § The
     // scoring-metadata bus, the contract phase): the perimeter minted them
     // (`fauna_core::scoring::perimeter_mail_score_rows`, called by the Go MTA
@@ -7705,6 +7987,14 @@ async fn promote_due_forwards(state: &Arc<AppState>) -> anyhow::Result<()> {
         .effective()
         .max_per_day;
     for actor in actors {
+        // "Disable mail" stops sending, row by row on `forward_message`'s
+        // rule: the actor's own parked forwards stay parked — a `redirect` row
+        // is the only copy of accepted mail, so it is held, never dropped —
+        // and promote once mail is back on, while an admin external
+        // forwarder's row (deployment routing, `mail-aliases.md` § Kind 7)
+        // promotes whatever the admin's own flag says (`mail-credentials.md`
+        // § Trigger taxonomy, Disable-mail).
+        let mail_off = state.db.get_actor_mail_enabled(&actor).await? == Some(false);
         let per_account = state.db.get_forward_per_hour(&actor).await?;
         let cap = per_account.min(fauna_mail::FORWARD_MAX_PER_ACCOUNT_PER_HOUR_CEILING);
         let window = state
@@ -7715,10 +8005,21 @@ async fn promote_due_forwards(state: &Arc<AppState>) -> anyhow::Result<()> {
         if allowance == 0 {
             continue;
         }
-        let parked = state
-            .db
-            .fetch_forward_queue_oldest(&actor, allowance)
-            .await?;
+        let parked = if mail_off {
+            state
+                .db
+                .fetch_forward_queue_oldest_of_rule(
+                    &actor,
+                    fauna_mail::aliases::ALIAS_KIND_FORWARDER,
+                    allowance,
+                )
+                .await?
+        } else {
+            state
+                .db
+                .fetch_forward_queue_oldest(&actor, allowance)
+                .await?
+        };
         for row in parked {
             // The day's allowance is spent → the rest stay parked, oldest
             // first, until a later day's poll.
@@ -7738,11 +8039,7 @@ async fn promote_due_forwards(state: &Arc<AppState>) -> anyhow::Result<()> {
                     original_sender: &row.original_sender,
                     recipients: &[row.destination_address.as_str()],
                     raw_message: &row.raw_message,
-                    inbound_verdicts: InboundVerdictsSnapshot {
-                        spf: "none".into(),
-                        dmarc: "none".into(),
-                        dmarc_policy: "none".into(),
-                    },
+                    inbound_verdicts: row.inbound_verdicts.clone(),
                     is_forwarded: true,
                     forward_actor_id: Some(&actor),
                     forward_rule_id: Some(&row.rule_id_or_forward_all),
@@ -8618,6 +8915,15 @@ fn enqueue_outbound_mail_handler() -> RpcHandler {
                     req.recipients.len(),
                 )
                 .await?;
+                // "Disable mail" stops sending as well as reading: the proven
+                // submitter's mail-off flag refuses the submission whatever
+                // token the MTA holds (`mail-credentials.md` § Trigger
+                // taxonomy, the Disable-mail row). The MDA's iMIP door is
+                // calendar traffic and keeps flowing while mail is off — and
+                // while the send switch is off, which the MTA's submission
+                // meets at `check_submission_quota` (mail-policy-config.md
+                // § Tier 3, the `mail.account.send_enabled` row).
+                ensure_actor_mail_enabled(&state, &submitter).await?;
             }
             // A DKIM-signed body over the inline request budget arrives as a
             // staged envelope (smtp-server.md § Message size limits, the
@@ -8884,6 +9190,10 @@ fn send_auto_reply_handler() -> RpcHandler {
                 req.recipient_actor_id.as_slice(),
             )
             .map_err(malformed)?;
+            // "Disable mail" stops sending: a vacation rule of a recipient who
+            // has turned their mail off sends nothing (`mail-credentials.md`
+            // § Trigger taxonomy, the Disable-mail row).
+            ensure_actor_mail_enabled(&state, &recipient_id).await?;
             let from = req.envelope_from.trim();
             if from.is_empty() {
                 // A null envelope-from never auto-replies (the perimeter loop
@@ -9094,6 +9404,18 @@ fn forward_message_handler() -> RpcHandler {
             let forwarder: [u8; 32] =
                 crate::rpc_errors::require_bytes32("actor_id", req.actor_id.as_slice())
                     .map_err(malformed)?;
+            // "Disable mail" stops sending: a forward rule (or forward-all) of
+            // an actor who has turned their mail off forwards nothing — refused
+            // before the rate-cap park, so nothing waits in `forward_queue`
+            // either. The MTA reads the refusal as a dropped forward and a
+            // `redirect` falls back to its local copy. An admin external
+            // forwarder (`mail-aliases.md` § Kind 7) is deployment routing the
+            // admin is only accountable for, not the admin's own mail, so the
+            // admin's personal flag does not stop it (`mail-credentials.md`
+            // § Trigger taxonomy, the Disable-mail row).
+            if req.rule_id_or_forward_all != fauna_mail::aliases::ALIAS_KIND_FORWARDER {
+                ensure_actor_mail_enabled(&state, &forwarder).await?;
+            }
             if req.original_msgid.trim().is_empty() {
                 return Err(malformed("original_msgid must not be empty"));
             }
@@ -9115,6 +9437,27 @@ fn forward_message_handler() -> RpcHandler {
             if req.raw_message.is_empty() {
                 return Err(malformed("raw_message must not be empty"));
             }
+            // The source message's inbound verdicts ride the forward row so a
+            // permanent failure's forwarder NDR honours the backscatter
+            // suppressors (`mail-forwarding.md` § Suppression matches the
+            // outbound shape). The submission door sends none: its sender
+            // authenticated, so nothing is suppressed for it.
+            let inbound_verdicts = match &req.auth_results {
+                Some(v) => {
+                    let snap =
+                        fauna_mail::outbound::backscatter::InboundVerdictsSnapshot::from_auth(v);
+                    InboundVerdictsSnapshot {
+                        spf: snap.spf,
+                        dmarc: snap.dmarc,
+                        dmarc_policy: snap.dmarc_policy,
+                    }
+                }
+                None => InboundVerdictsSnapshot {
+                    spf: "none".into(),
+                    dmarc: "none".into(),
+                    dmarc_policy: "none".into(),
+                },
+            };
             if req.raw_message.len() > ENQUEUE_OUTBOUND_MAX_BYTES {
                 return Err(malformed(format!(
                     "raw_message exceeds ceiling ({} > {})",
@@ -9193,6 +9536,7 @@ fn forward_message_handler() -> RpcHandler {
                             rule_id_or_forward_all: &req.rule_id_or_forward_all,
                             raw_message: &req.raw_message,
                             copy_mode: req.copy_mode,
+                            inbound_verdicts: inbound_verdicts.clone(),
                         },
                         ceiling,
                     )
@@ -9228,14 +9572,9 @@ fn forward_message_handler() -> RpcHandler {
                     original_sender: &req.original_sender,
                     recipients: &[req.destination.as_str()],
                     raw_message: &req.raw_message,
-                    // The forward's own SPF/DMARC is set by the SRS rewrite at
-                    // queue-out (we become the sender); record the "none"
-                    // triple like the submission path.
-                    inbound_verdicts: InboundVerdictsSnapshot {
-                        spf: "none".into(),
-                        dmarc: "none".into(),
-                        dmarc_policy: "none".into(),
-                    },
+                    // The SOURCE message's verdicts (the forward's own SPF is
+                    // set by the SRS rewrite at queue-out), for the NDR check.
+                    inbound_verdicts,
                     is_forwarded: true,
                     forward_actor_id: Some(&forwarder),
                     forward_rule_id: Some(&req.rule_id_or_forward_all),
@@ -13612,6 +13951,179 @@ mod tests {
         assert!(stored.dmarc_overrides_json.is_none());
     }
 
+    /// 2026-11-05 fix: under a deployment-wide `p=none`, choosing `reject`
+    /// for one domain must make that domain PUBLISH `p=reject` — the old merge
+    /// rule cleared the override because `reject` is the shipped default, so
+    /// the domain kept the deployment's `p=none` while the select read back
+    /// `Reject`. The reply's effective policy is the published `p=`, the change
+    /// is audited, and choosing the deployment's own policy inherits it again.
+    #[tokio::test]
+    async fn update_local_domain_config_reject_under_a_soft_deployment_publishes_reject() {
+        use crate::db::mail_policy::DmarcPolicyOverrides;
+        let state = fixture_state().await;
+        let admin = [7u8; 32];
+        add_admin(&state.db, &admin).await;
+        for d in ["primary.example", "cfg.example"] {
+            let _ = add_local_domain_handler()(state.clone(), admin, add_req(d))
+                .await
+                .unwrap();
+        }
+        state
+            .db
+            .put_dmarc_policy(DmarcPolicyOverrides {
+                record: DmarcOverrides {
+                    policy_mode: Some(DmarcMode::None),
+                    subdomain_policy_mode: Some(DmarcMode::None),
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let call = |mode: DmarcMode| {
+            let state = state.clone();
+            async move {
+                let req = Bytes::from(
+                    encode_canonical(&UpdateLocalDomainConfigRequest {
+                        domain: "cfg.example".into(),
+                        dmarc_policy_mode: Some(mode),
+                        ..Default::default()
+                    })
+                    .unwrap()
+                    .to_vec(),
+                );
+                let reply = update_local_domain_config_handler()(state, admin, req)
+                    .await
+                    .expect("update ok");
+                decode::<UpdateLocalDomainConfigReply>(&reply)
+                    .unwrap()
+                    .domain
+            }
+        };
+        let published_p = |domain: &'static str| {
+            let state = state.clone();
+            async move {
+                let views = crate::dns_handlers::assemble_domain_views(&state, Some(domain))
+                    .await
+                    .unwrap();
+                let body = views[0]
+                    .records
+                    .iter()
+                    .find(|r| r.name == format!("_dmarc.{domain}"))
+                    .unwrap()
+                    .expected
+                    .trim_matches('"')
+                    .to_string();
+                body.split("; ")
+                    .find_map(|t| t.strip_prefix("p="))
+                    .unwrap()
+                    .to_string()
+            }
+        };
+
+        // An untouched domain publishes — and reports — the deployment's p=none.
+        assert_eq!(published_p("cfg.example").await, "none");
+        let list = list_local_domains_handler()(
+            state.clone(),
+            admin,
+            Bytes::from(
+                encode_canonical(&ListLocalDomainsRequest::default())
+                    .unwrap()
+                    .to_vec(),
+            ),
+        )
+        .await
+        .unwrap();
+        let list: ListLocalDomainsReply = decode(&list).unwrap();
+        let cfg = list
+            .active
+            .iter()
+            .find(|d| d.domain_name == "cfg.example")
+            .unwrap();
+        assert_eq!(cfg.effective_dmarc_policy_mode, Some(DmarcMode::None));
+
+        let row = call(DmarcMode::Reject).await;
+        assert_eq!(published_p("cfg.example").await, "reject");
+        assert_eq!(row.effective_dmarc_policy_mode, Some(DmarcMode::Reject));
+        // The other domain still inherits the deployment policy.
+        assert_eq!(published_p("primary.example").await, "none");
+
+        let audit = state.db.list_audit(10, None).await.unwrap();
+        let entry = audit
+            .iter()
+            .find(|a| a.action == "mail.domain_dmarc_policy_set")
+            .expect("the per-domain change is audited");
+        assert_eq!(entry.target.as_deref(), Some("cfg.example"));
+        assert_eq!(entry.detail.as_deref(), Some("reject"));
+        assert_eq!(entry.actor_id.as_deref(), Some(&admin[..]));
+
+        // Choosing what the deployment publishes inherits it again.
+        let row = call(DmarcMode::None).await;
+        assert_eq!(row.dmarc_overrides, DmarcOverrides::default());
+        assert_eq!(row.effective_dmarc_policy_mode, Some(DmarcMode::None));
+        assert_eq!(published_p("cfg.example").await, "none");
+    }
+
+    /// An out-of-enum `dmarc_policy_mode` is refused as malformed and changes
+    /// nothing.
+    #[tokio::test]
+    async fn update_local_domain_config_refuses_an_unknown_dmarc_policy_mode() {
+        #[derive(serde::Serialize)]
+        struct Raw {
+            domain: String,
+            dmarc_policy_mode: String,
+        }
+        let state = fixture_state().await;
+        let admin = [7u8; 32];
+        add_admin(&state.db, &admin).await;
+        let _ = add_local_domain_handler()(state.clone(), admin, add_req("cfg.example"))
+            .await
+            .unwrap();
+        let req = Bytes::from(
+            encode_canonical(&Raw {
+                domain: "cfg.example".into(),
+                dmarc_policy_mode: "monitor".into(),
+            })
+            .unwrap()
+            .to_vec(),
+        );
+        let err = update_local_domain_config_handler()(state.clone(), admin, req)
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "fauna.protocol.malformed");
+        let stored = state
+            .db
+            .lookup_active_mail_domain("cfg.example")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(stored.dmarc_overrides_json.is_none());
+    }
+
+    #[tokio::test]
+    async fn put_dmarc_policy_is_audited() {
+        let state = fixture_state().await;
+        let admin = [7u8; 32];
+        add_admin(&state.db, &admin).await;
+        let req = Bytes::from(
+            encode_canonical(&PutDmarcPolicyRequest {
+                policy_mode: Some(DmarcMode::None),
+                ..Default::default()
+            })
+            .unwrap()
+            .to_vec(),
+        );
+        put_dmarc_policy_handler()(state.clone(), admin, req)
+            .await
+            .expect("put ok");
+        let audit = state.db.list_audit(10, None).await.unwrap();
+        assert!(
+            audit.iter().any(|a| a.action == "mail.dmarc_policy_set"
+                && a.actor_id.as_deref() == Some(&admin[..])),
+            "{audit:?}"
+        );
+    }
+
     #[tokio::test]
     async fn set_catch_all_actor_designates_then_clears() {
         let state = fixture_state().await;
@@ -14274,6 +14786,46 @@ mod tests {
 
     // ── provision_recipient_mls_pubkey: User self-registration ──
 
+    /// The calendar and card pairs every provision request carries — distinct
+    /// bytes from the mail pair, so a column mix-up reads as a wrong key.
+    const CAL_PK: [u8; 32] = [0xCA; 32];
+    const CARD_PK: [u8; 32] = [0xCD; 32];
+
+    fn with_dav_pairs(
+        req: ProvisionRecipientMlsPubkeyRequest,
+    ) -> ProvisionRecipientMlsPubkeyRequest {
+        ProvisionRecipientMlsPubkeyRequest {
+            calendar_pubkey: ByteBuf::from(CAL_PK.to_vec()),
+            calendar_mlkem_ek: ByteBuf::from(vec![0xC1u8; 1184]),
+            card_pubkey: ByteBuf::from(CARD_PK.to_vec()),
+            card_mlkem_ek: ByteBuf::from(vec![0xD1u8; 1184]),
+            ..req
+        }
+    }
+
+    /// All three seal keys around a mail pair, the fixture rows the fetch
+    /// tests read back.
+    fn fixture_seal_keys(
+        mail_pk: [u8; 32],
+        mail_ek: Vec<u8>,
+    ) -> crate::db::bridge_routing::RecipientSealKeys {
+        use crate::db::bridge_routing::{RecipientSealKey, RecipientSealKeys};
+        RecipientSealKeys {
+            mail: RecipientSealKey {
+                mls_pubkey: mail_pk,
+                mlkem_ek: mail_ek,
+            },
+            calendar: RecipientSealKey {
+                mls_pubkey: CAL_PK,
+                mlkem_ek: vec![0xC1u8; 1184],
+            },
+            card: RecipientSealKey {
+                mls_pubkey: CARD_PK,
+                mlkem_ek: vec![0xD1u8; 1184],
+            },
+        }
+    }
+
     #[tokio::test]
     async fn provision_recipient_mls_pubkey_user_self_permitted() {
         // A regular user registering their OWN recipient pubkey (the
@@ -14282,20 +14834,63 @@ mod tests {
         let user = [70u8; 32];
         state.db.create_user(&user, "free", "test").await.unwrap();
         let pubkey = [71u8; 32];
-        let req = ProvisionRecipientMlsPubkeyRequest {
+        let req = with_dav_pairs(ProvisionRecipientMlsPubkeyRequest {
             actor_id: ByteBuf::from(user.to_vec()),
             mls_pubkey: ByteBuf::from(pubkey.to_vec()),
             mlkem_ek: ByteBuf::from(vec![0x55u8; 1184]),
             ..Default::default()
-        };
+        });
         let payload = Bytes::from(encode_canonical(&req).unwrap().to_vec());
         provision_recipient_mls_pubkey_handler()(state.clone(), user, payload)
             .await
             .expect("user self-registration ok");
         assert_eq!(
-            state.db.get_actor_mls_pubkey(&user).await.unwrap(),
-            Some(pubkey)
+            state.db.get_recipient_seal_keys(&user).await.unwrap(),
+            Some(fixture_seal_keys(pubkey, vec![0x55u8; 1184])),
+            "one write registers all three pairs"
         );
+    }
+
+    #[tokio::test]
+    async fn provision_recipient_mls_pubkey_refuses_a_missing_or_malformed_dav_pair() {
+        // Every pair is required: a request short of its calendar or card
+        // half writes nothing (`owner-key-material.md` § Path B-sibling-5 →
+        // *Registration*, "a half-registered actor is unrepresentable").
+        let state = fixture_state().await;
+        let user = [74u8; 32];
+        state.db.create_user(&user, "free", "test").await.unwrap();
+        let full = with_dav_pairs(ProvisionRecipientMlsPubkeyRequest {
+            actor_id: ByteBuf::from(user.to_vec()),
+            mls_pubkey: ByteBuf::from([75u8; 32].to_vec()),
+            mlkem_ek: ByteBuf::from(vec![0x55u8; 1184]),
+            ..Default::default()
+        });
+        let broken = [
+            ProvisionRecipientMlsPubkeyRequest {
+                calendar_pubkey: ByteBuf::new(),
+                ..full.clone()
+            },
+            ProvisionRecipientMlsPubkeyRequest {
+                calendar_mlkem_ek: ByteBuf::from(vec![0xC1u8; 1183]),
+                ..full.clone()
+            },
+            ProvisionRecipientMlsPubkeyRequest {
+                card_pubkey: ByteBuf::from(vec![0xCDu8; 31]),
+                ..full.clone()
+            },
+            ProvisionRecipientMlsPubkeyRequest {
+                card_mlkem_ek: ByteBuf::new(),
+                ..full.clone()
+            },
+        ];
+        for req in broken {
+            let payload = Bytes::from(encode_canonical(&req).unwrap().to_vec());
+            let err = provision_recipient_mls_pubkey_handler()(state.clone(), user, payload)
+                .await
+                .unwrap_err();
+            assert_eq!(err.code, "fauna.protocol.malformed");
+            assert_eq!(state.db.get_recipient_seal_keys(&user).await.unwrap(), None);
+        }
     }
 
     #[tokio::test]
@@ -14305,12 +14900,12 @@ mod tests {
         let state = fixture_state().await;
         let user = [70u8; 32];
         let victim = [99u8; 32];
-        let req = ProvisionRecipientMlsPubkeyRequest {
+        let req = with_dav_pairs(ProvisionRecipientMlsPubkeyRequest {
             actor_id: ByteBuf::from(victim.to_vec()),
             mls_pubkey: ByteBuf::from([71u8; 32].to_vec()),
             mlkem_ek: ByteBuf::from(vec![0x55u8; 1184]),
             ..Default::default()
-        };
+        });
         let payload = Bytes::from(encode_canonical(&req).unwrap().to_vec());
         let err = provision_recipient_mls_pubkey_handler()(state.clone(), user, payload)
             .await
@@ -14332,7 +14927,7 @@ mod tests {
         let pubkey = [73u8; 32];
         state
             .db
-            .put_actor_recipient_seal_key(&user, &pubkey, &[0x55u8; 1184])
+            .put_actor_recipient_seal_keys(&user, &fixture_seal_keys(pubkey, vec![0x55u8; 1184]))
             .await
             .unwrap();
         let own = Bytes::from(
@@ -14375,12 +14970,12 @@ mod tests {
         add_admin(&state.db, &admin).await;
         let target = [81u8; 32];
         let pubkey = [82u8; 32];
-        let req = ProvisionRecipientMlsPubkeyRequest {
+        let req = with_dav_pairs(ProvisionRecipientMlsPubkeyRequest {
             actor_id: ByteBuf::from(target.to_vec()),
             mls_pubkey: ByteBuf::from(pubkey.to_vec()),
             mlkem_ek: ByteBuf::from(vec![0x55u8; 1184]),
             ..Default::default()
-        };
+        });
         let payload = Bytes::from(encode_canonical(&req).unwrap().to_vec());
         provision_recipient_mls_pubkey_handler()(state.clone(), admin, payload)
             .await
@@ -14418,7 +15013,7 @@ mod tests {
         let pubkey = [9u8; 32];
         state
             .db
-            .put_actor_recipient_seal_key(&target, &pubkey, &[7u8; 1184])
+            .put_actor_recipient_seal_keys(&target, &fixture_seal_keys(pubkey, vec![7u8; 1184]))
             .await
             .unwrap();
 
@@ -14434,6 +15029,15 @@ mod tests {
         let got = reply.key.expect("expected a key on file");
         assert_eq!(got.mls_pubkey.as_slice(), &pubkey[..]);
         assert_eq!(got.mlkem_ek.as_slice(), &[7u8; 1184][..]);
+        // The calendar and card pairs ride the same reply, each its own.
+        let cal = reply
+            .calendar_key
+            .expect("the calendar pair rides the reply");
+        assert_eq!(cal.mls_pubkey.as_slice(), &CAL_PK[..]);
+        assert_eq!(cal.mlkem_ek.as_slice(), &[0xC1u8; 1184][..]);
+        let card = reply.card_key.expect("the card pair rides the reply");
+        assert_eq!(card.mls_pubkey.as_slice(), &CARD_PK[..]);
+        assert_eq!(card.mlkem_ek.as_slice(), &[0xD1u8; 1184][..]);
     }
 
     #[tokio::test]
@@ -14453,6 +15057,7 @@ mod tests {
             .expect("handler ok");
         let reply: FetchRecipientMlsPubkeyReply = decode(&reply_bytes).unwrap();
         assert!(reply.key.is_none());
+        assert!(reply.calendar_key.is_none() && reply.card_key.is_none());
         assert!(!reply.succession_pending);
     }
 
@@ -14516,7 +15121,10 @@ mod tests {
         let standing_pubkey = [9u8; 32];
         state
             .db
-            .put_actor_recipient_seal_key(&target, &standing_pubkey, &[7u8; 1184])
+            .put_actor_recipient_seal_keys(
+                &target,
+                &fixture_seal_keys(standing_pubkey, vec![7u8; 1184]),
+            )
             .await
             .unwrap();
         let e_now =
@@ -18290,6 +18898,59 @@ mod tests {
         assert!(recipients.contains(&"carol@other.test".to_string()));
     }
 
+    /// "Disable mail" stops sending at the nest: a proven submitter whose
+    /// mail-off flag is set is refused at the MTA door, whatever token the
+    /// MTA holds — and turning mail back on lets the same token through
+    /// (`mail-credentials.md` § Trigger taxonomy, the Disable-mail row).
+    #[tokio::test]
+    async fn enqueue_outbound_mail_refuses_an_actor_whose_mail_is_off() {
+        let state = fixture_state().await;
+        let mta = [1u8; 32];
+        approve_bridge(&state.db, &mta, BridgeRole::Mta).await;
+        let (submitter, token) = proven_submitter(&state).await;
+        let req = EnqueueOutboundMailRequest {
+            original_msgid: "off@example.com".into(),
+            original_sender: "alice@example.com".into(),
+            recipients: vec!["bob@dest.test".into()],
+            raw_message: b"body\r\n".to_vec(),
+            on_behalf_of_actor: Some(submitter.to_vec()),
+            submission_token: Some(token),
+            ..Default::default()
+        };
+        let payload = Bytes::from(encode_canonical(&req).unwrap().to_vec());
+
+        state
+            .db
+            .set_actor_mail_enabled(&submitter, false)
+            .await
+            .unwrap();
+        let err = enqueue_outbound_mail_handler()(state.clone(), mta, payload.clone())
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "fauna.bridges.mail_disabled_by_user");
+        assert!(
+            state
+                .db
+                .fetch_all_outbound_for_test()
+                .await
+                .unwrap()
+                .is_empty()
+        );
+
+        state
+            .db
+            .set_actor_mail_enabled(&submitter, true)
+            .await
+            .unwrap();
+        enqueue_outbound_mail_handler()(state.clone(), mta, payload)
+            .await
+            .expect("mail back on: the same token sends");
+        assert_eq!(
+            state.db.fetch_all_outbound_for_test().await.unwrap().len(),
+            1
+        );
+    }
+
     #[tokio::test]
     async fn enqueue_outbound_mail_rejects_empty_recipients() {
         let state = fixture_state().await;
@@ -19139,6 +19800,67 @@ mod tests {
             .unwrap()
     }
 
+    /// "Disable mail" stops sending (2026-11-03): a vacation rule of a recipient
+    /// whose mail is off sends no auto-reply and spends no rate-limit slot;
+    /// back on, the same rule replies (`mail-credentials.md` § Trigger
+    /// taxonomy, the Disable-mail row).
+    #[tokio::test]
+    async fn auto_reply_refuses_a_recipient_whose_mail_is_off() {
+        let state = fixture_state_with_email_domain("example.com").await;
+        let mta = [1u8; 32];
+        approve_bridge(&state.db, &mta, BridgeRole::Mta).await;
+        let vacationer = [5u8; 32];
+        state
+            .db
+            .put_exact_alias("example.com", "vac", "exact", &vacationer)
+            .await
+            .unwrap();
+        let rule_id = store_vacation_rule(&state, &vacationer).await;
+        let req = SendAutoReplyRequest {
+            recipient_actor_id: vacationer.to_vec(),
+            envelope_from: "carol@elsewhere.test".into(),
+            from_address: "vac@example.com".into(),
+            in_reply_to: "<ar-off@elsewhere.test>".into(),
+            rule_id,
+        };
+        let payload = Bytes::from(encode_canonical(&req).unwrap().to_vec());
+
+        state
+            .db
+            .set_actor_mail_enabled(&vacationer, false)
+            .await
+            .unwrap();
+        let err = send_auto_reply_handler()(state.clone(), mta, payload.clone())
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "fauna.bridges.mail_disabled_by_user");
+        assert!(
+            state
+                .db
+                .fetch_all_outbound_for_test()
+                .await
+                .unwrap()
+                .is_empty()
+        );
+
+        state
+            .db
+            .set_actor_mail_enabled(&vacationer, true)
+            .await
+            .unwrap();
+        let reply: SendAutoReplyReply = decode(
+            &send_auto_reply_handler()(state.clone(), mta, payload)
+                .await
+                .expect("mail back on: the rule replies"),
+        )
+        .unwrap();
+        assert!(reply.sent, "the refused attempt spent no rate-limit slot");
+        assert_eq!(
+            state.db.fetch_all_outbound_for_test().await.unwrap().len(),
+            1
+        );
+    }
+
     #[tokio::test]
     async fn auto_reply_to_in_domain_sender_delivers_locally_no_relay() {
         // A vacation auto-reply addressed back to an in-domain envelope-from must
@@ -19854,6 +20576,7 @@ mod tests {
             raw_message: b"From: carol@sender.test\r\nSubject: hi\r\n\r\nbody\r\n".to_vec(),
             rule_id_or_forward_all: "forward-all".into(),
             copy_mode: ForwardCopyMode::Copy,
+            auth_results: None,
         }
     }
 
@@ -20043,6 +20766,86 @@ mod tests {
         assert!(String::from_utf8_lossy(&row.raw_message).contains("body"));
     }
 
+    /// "Disable mail" stops sending (2026-11-03): a forward-all, and a per-rule
+    /// forward parked by the rate cap, of an actor whose mail is off queue
+    /// nothing — neither on the outbound queue nor in `forward_queue` — and
+    /// the forward goes through again once mail is back on
+    /// (`mail-credentials.md` § Trigger taxonomy, the Disable-mail row).
+    #[tokio::test]
+    async fn forward_message_refuses_an_actor_whose_mail_is_off() {
+        let state = fixture_state().await;
+        let mta = [1u8; 32];
+        approve_bridge(&state.db, &mta, BridgeRole::Mta).await;
+        let forwarder = [7u8; 32];
+        state
+            .db
+            .set_actor_mail_enabled(&forwarder, false)
+            .await
+            .unwrap();
+
+        let err = call_forward_message(&state, mta, forward_all_req(forwarder, "bob@example.net"))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "fauna.bridges.mail_disabled_by_user");
+        let mut rule = forward_all_req(forwarder, "bob@example.net");
+        rule.rule_id_or_forward_all = "42".into();
+        rule.copy_mode = ForwardCopyMode::Redirect;
+        let err = call_forward_message(&state, mta, rule).await.unwrap_err();
+        assert_eq!(err.code, "fauna.bridges.mail_disabled_by_user");
+        assert!(
+            state
+                .db
+                .fetch_all_outbound_for_test()
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            state.db.count_forward_queue(&forwarder).await.unwrap(),
+            0,
+            "nothing parked behind the rate cap either"
+        );
+
+        state
+            .db
+            .set_actor_mail_enabled(&forwarder, true)
+            .await
+            .unwrap();
+        call_forward_message(&state, mta, forward_all_req(forwarder, "bob@example.net"))
+            .await
+            .expect("mail back on: the forward enqueues");
+        assert_eq!(
+            state.db.fetch_all_outbound_for_test().await.unwrap().len(),
+            1
+        );
+    }
+
+    /// An admin external forwarder (`mail-aliases.md` § Kind 7) is
+    /// deployment routing attributed to the managing admin, not the admin's
+    /// own mail: the admin's personal mail-off flag does not stop it.
+    #[tokio::test]
+    async fn forward_message_admin_forwarder_ignores_the_admins_mail_off_flag() {
+        let state = fixture_state().await;
+        let mta = [1u8; 32];
+        approve_bridge(&state.db, &mta, BridgeRole::Mta).await;
+        let admin = [9u8; 32];
+        state
+            .db
+            .set_actor_mail_enabled(&admin, false)
+            .await
+            .unwrap();
+        let mut req = forward_all_req(admin, "owner@example.net");
+        req.rule_id_or_forward_all = fauna_mail::aliases::ALIAS_KIND_FORWARDER.into();
+        req.copy_mode = ForwardCopyMode::Redirect;
+        call_forward_message(&state, mta, req)
+            .await
+            .expect("the deployment forwarder keeps forwarding");
+        assert_eq!(
+            state.db.fetch_all_outbound_for_test().await.unwrap().len(),
+            1
+        );
+    }
+
     #[tokio::test]
     async fn forward_message_redirect_still_enqueues_with_rule_id() {
         // The local-delivery skip for Redirect is the MTA's decision; nest
@@ -20137,6 +20940,80 @@ mod tests {
             vec![
                 ("42".to_string(), Some("copy".to_string())),
                 ("43".to_string(), Some("redirect".to_string())),
+            ]
+        );
+    }
+
+    /// The source message's inbound verdicts ride the forward onto its outbound
+    /// row on BOTH arms — dispatched under the cap, parked over it and then
+    /// promoted — so the forwarder NDR's backscatter suppressors see a real
+    /// SPF/DMARC failure (`mail-forwarding.md` § Suppression matches the
+    /// outbound shape). Without them the forward reads as the "none" triple.
+    #[tokio::test]
+    async fn forward_message_carries_the_source_verdicts_on_both_arms() {
+        use fauna_protocol::bridge_routing::{AuthVerdicts, DmarcPolicy, DmarcVerdict, SpfVerdict};
+        let state = fixture_state().await;
+        let mta = [1u8; 32];
+        approve_bridge(&state.db, &mta, BridgeRole::Mta).await;
+        let forwarder = [7u8; 32];
+        seed_forward_per_hour(&state, &forwarder, 1).await;
+        let req = |rule: &str, auth: Option<AuthVerdicts>| {
+            let mut r = forward_all_req(forwarder, "bob@example.net");
+            r.rule_id_or_forward_all = rule.into();
+            r.auth_results = auth;
+            r
+        };
+        let spf_fail = AuthVerdicts {
+            spf: SpfVerdict::Fail,
+            ..Default::default()
+        };
+        let dmarc_reject = AuthVerdicts {
+            dmarc: DmarcVerdict::Fail {
+                policy: DmarcPolicy::Reject,
+            },
+            ..Default::default()
+        };
+
+        let direct = call_forward_message_reply(&state, mta, req("direct", Some(spf_fail)))
+            .await
+            .unwrap();
+        assert!(!direct.queued);
+        let parked = call_forward_message_reply(&state, mta, req("parked", Some(dmarc_reject)))
+            .await
+            .unwrap();
+        assert!(parked.queued);
+        let unsent = call_forward_message_reply(&state, mta, req("no-verdicts", None))
+            .await
+            .unwrap();
+        assert!(unsent.queued);
+        seed_forward_per_hour(&state, &forwarder, 10).await;
+        promote_due_forwards(&state).await.unwrap();
+
+        let mut got: Vec<(String, String, String, String)> = state
+            .db
+            .fetch_all_outbound_for_test()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|r| {
+                (
+                    r.forward_rule_id.unwrap(),
+                    r.inbound_verdicts.spf,
+                    r.inbound_verdicts.dmarc,
+                    r.inbound_verdicts.dmarc_policy,
+                )
+            })
+            .collect();
+        got.sort();
+        let row = |a: &str, b: &str, c: &str, d: &str| {
+            (a.to_string(), b.to_string(), c.to_string(), d.to_string())
+        };
+        assert_eq!(
+            got,
+            vec![
+                row("direct", "fail", "none", ""),
+                row("no-verdicts", "none", "none", "none"),
+                row("parked", "none", "fail", "reject"),
             ]
         );
     }
@@ -20422,6 +21299,7 @@ mod tests {
                     rule_id_or_forward_all: "forward-all",
                     raw_message: b"body",
                     copy_mode: ForwardCopyMode::Copy,
+                    inbound_verdicts: Default::default(),
                 },
                 1000,
             )
@@ -20550,6 +21428,7 @@ mod tests {
                         rule_id_or_forward_all: "forward-all",
                         raw_message: b"body",
                         copy_mode: ForwardCopyMode::Copy,
+                        inbound_verdicts: Default::default(),
                     },
                     1000,
                 )
@@ -20587,6 +21466,132 @@ mod tests {
             2
         );
         assert_eq!(state.db.count_forward_queue(&forwarder).await.unwrap(), 1);
+    }
+
+    /// A forward parked behind the rate cap before its actor turned mail off
+    /// is held, not promoted, while mail is off, and promotes once it is back
+    /// on (`mail-credentials.md` § Trigger taxonomy, the Disable-mail row).
+    #[tokio::test]
+    async fn a_parked_forward_is_held_while_mail_is_off() {
+        let state = fixture_state().await;
+        let mta = [1u8; 32];
+        approve_bridge(&state.db, &mta, BridgeRole::Mta).await;
+        let forwarder = [7u8; 32];
+        seed_forward_per_hour(&state, &forwarder, 1).await;
+        let mut req = forward_all_req(forwarder, "bob@example.net");
+        req.rule_id_or_forward_all = "44".into();
+        req.copy_mode = ForwardCopyMode::Redirect;
+        assert!(
+            !call_forward_message_reply(&state, mta, req.clone())
+                .await
+                .unwrap()
+                .queued
+        );
+        assert!(
+            call_forward_message_reply(&state, mta, req)
+                .await
+                .unwrap()
+                .queued
+        );
+
+        state
+            .db
+            .set_actor_mail_enabled(&forwarder, false)
+            .await
+            .unwrap();
+        seed_forward_per_hour(&state, &forwarder, 2).await;
+        promote_due_forwards(&state).await.unwrap();
+        assert_eq!(
+            state.db.fetch_all_outbound_for_test().await.unwrap().len(),
+            1
+        );
+        assert_eq!(state.db.count_forward_queue(&forwarder).await.unwrap(), 1);
+
+        state
+            .db
+            .set_actor_mail_enabled(&forwarder, true)
+            .await
+            .unwrap();
+        promote_due_forwards(&state).await.unwrap();
+        assert_eq!(
+            state.db.fetch_all_outbound_for_test().await.unwrap().len(),
+            2
+        );
+        assert_eq!(state.db.count_forward_queue(&forwarder).await.unwrap(), 0);
+    }
+
+    /// The parked rows follow the inline forward's rule: an admin external
+    /// forwarder (`mail-aliases.md` § Kind 7) parked behind the rate cap
+    /// promotes while the admin's own mail is off, and the admin's own parked
+    /// forward beside it stays held — never dropped (`mail-credentials.md`
+    /// § Trigger taxonomy, the Disable-mail row).
+    #[tokio::test]
+    async fn a_parked_admin_forwarder_row_promotes_while_the_admins_mail_is_off() {
+        let state = fixture_state().await;
+        let mta = [1u8; 32];
+        approve_bridge(&state.db, &mta, BridgeRole::Mta).await;
+        let admin = [9u8; 32];
+        seed_forward_per_hour(&state, &admin, 1).await;
+        let own = |dest: &str| {
+            let mut r = forward_all_req(admin, dest);
+            r.rule_id_or_forward_all = "45".into();
+            r.copy_mode = ForwardCopyMode::Redirect;
+            r
+        };
+        let deployment = || {
+            let mut r = forward_all_req(admin, "owner@example.net");
+            r.rule_id_or_forward_all = fauna_mail::aliases::ALIAS_KIND_FORWARDER.into();
+            r.copy_mode = ForwardCopyMode::Redirect;
+            r
+        };
+        // The first dispatches under the cap; the admin's own forward parks
+        // first (the oldest), the deployment forward behind it.
+        assert!(
+            !call_forward_message_reply(&state, mta, own("bob@example.net"))
+                .await
+                .unwrap()
+                .queued
+        );
+        assert!(
+            call_forward_message_reply(&state, mta, own("carol@example.net"))
+                .await
+                .unwrap()
+                .queued
+        );
+        assert!(
+            call_forward_message_reply(&state, mta, deployment())
+                .await
+                .unwrap()
+                .queued
+        );
+
+        state
+            .db
+            .set_actor_mail_enabled(&admin, false)
+            .await
+            .unwrap();
+        seed_forward_per_hour(&state, &admin, 3).await;
+        promote_due_forwards(&state).await.unwrap();
+        let outbound = state.db.fetch_all_outbound_for_test().await.unwrap();
+        assert_eq!(outbound.len(), 2, "the deployment forward promoted");
+        assert!(outbound.iter().any(
+            |r| r.forward_rule_id.as_deref() == Some(fauna_mail::aliases::ALIAS_KIND_FORWARDER)
+        ));
+        let parked = state
+            .db
+            .fetch_forward_queue_oldest(&admin, 10)
+            .await
+            .unwrap();
+        assert_eq!(parked.len(), 1, "the admin's own forward is held");
+        assert_eq!(parked[0].rule_id_or_forward_all, "45");
+
+        state.db.set_actor_mail_enabled(&admin, true).await.unwrap();
+        promote_due_forwards(&state).await.unwrap();
+        assert_eq!(
+            state.db.fetch_all_outbound_for_test().await.unwrap().len(),
+            3
+        );
+        assert_eq!(state.db.count_forward_queue(&admin).await.unwrap(), 0);
     }
 
     /// The handler-level shape of the ceiling rule: a queue full of
@@ -20719,6 +21724,7 @@ mod tests {
                         rule_id_or_forward_all: "forward-all",
                         raw_message: b"body",
                         copy_mode: ForwardCopyMode::Copy,
+                        inbound_verdicts: Default::default(),
                     },
                     1000,
                 )
@@ -21491,6 +22497,276 @@ mod tests {
         .into_bytes()
     }
 
+    /// § Default off: the forensic leg stores only once the deployment has
+    /// opted in (`mail.dmarc.ruf_publish`).
+    async fn opt_in_forensic(state: &Arc<AppState>) {
+        state
+            .db
+            .put_dmarc_policy(DmarcPolicyOverrides {
+                record: fauna_mail::dmarc_publish::DmarcOverrides {
+                    ruf_publish: Some(true),
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+    }
+
+    /// A deployment that has not opted in stores no forensic report, whatever
+    /// a sender mails; opting in opens the leg.
+    #[tokio::test]
+    async fn dmarc_forensic_report_is_dropped_until_the_deployment_opts_in() {
+        use fauna_protocol::bridge_routing::{DmarcReportKind, ReportIngestOutcome};
+        let state = fixture_state().await;
+        let mta = [1u8; 32];
+        approve_bridge(&state.db, &mta, BridgeRole::Mta).await;
+        state
+            .db
+            .add_mail_domain("fauna.test", true, "enforce", "expand_primary", None, None)
+            .await
+            .unwrap();
+        let now = now_epoch_secs();
+        let raw = dmarc_forensic_message("fauna.test", "f-off");
+        let reply = ingest_dmarc_reply(&state, mta, raw.clone(), now).await;
+        assert_eq!(
+            (reply.outcome, reply.kind),
+            (ReportIngestOutcome::NotOptedIn, DmarcReportKind::Forensic)
+        );
+        assert!(
+            state
+                .db
+                .list_dmarc_forensic_reports(0, None, 10)
+                .await
+                .unwrap()
+                .is_empty(),
+            "opt-in off: nothing stored"
+        );
+        opt_in_forensic(&state).await;
+        assert_eq!(
+            ingest_dmarc_reply(&state, mta, raw, now).await.outcome,
+            ReportIngestOutcome::Stored
+        );
+    }
+
+    /// Past the forensic table's row cap the next report is dropped and
+    /// answered `Full`; the rows already stored stay (no eviction).
+    #[tokio::test]
+    async fn dmarc_forensic_table_cap_drops_the_next_report() {
+        use crate::db::dmarc_reports::{
+            DMARC_FORENSIC_ROW_CAP, DmarcForensicReportRow, ReportInsert,
+        };
+        use fauna_protocol::bridge_routing::ReportIngestOutcome;
+        let state = fixture_state().await;
+        let mta = [1u8; 32];
+        approve_bridge(&state.db, &mta, BridgeRole::Mta).await;
+        state
+            .db
+            .add_mail_domain("fauna.test", true, "enforce", "expand_primary", None, None)
+            .await
+            .unwrap();
+        opt_in_forensic(&state).await;
+        let now = now_epoch_secs();
+        let row = |i: i64| DmarcForensicReportRow {
+            id: 0,
+            submitter: "s".into(),
+            our_domain: "fauna.test".into(),
+            received_at: now,
+            reported_message_id: format!("m-{i}"),
+            reported_arrival_date: now,
+            payload_sha256: i.to_be_bytes().to_vec(),
+            payload_raw_gz: Vec::new(),
+            parsed_summary_cbor: Vec::new(),
+            source_envelope_blob: Vec::new(),
+        };
+        for i in 0..DMARC_FORENSIC_ROW_CAP {
+            assert_eq!(
+                state
+                    .db
+                    .insert_dmarc_forensic_report(&row(i))
+                    .await
+                    .unwrap(),
+                ReportInsert::Stored
+            );
+        }
+        assert_eq!(
+            state
+                .db
+                .insert_dmarc_forensic_report(&row(DMARC_FORENSIC_ROW_CAP))
+                .await
+                .unwrap(),
+            ReportInsert::Full
+        );
+        assert_eq!(
+            ingest_dmarc_reply(
+                &state,
+                mta,
+                dmarc_forensic_message("fauna.test", "f-cap"),
+                now
+            )
+            .await
+            .outcome,
+            ReportIngestOutcome::Full,
+            "the ingest answers Full and stores nothing past the cap"
+        );
+        assert_eq!(
+            state
+                .db
+                .list_dmarc_forensic_reports(0, None, 1 << 20)
+                .await
+                .unwrap()
+                .len() as i64,
+            DMARC_FORENSIC_ROW_CAP,
+            "nothing older was evicted"
+        );
+    }
+
+    /// The aggregate table's row cap: its dedupe key is three strings of the
+    /// sender's own XML, so past the cap a fresh report is dropped and the
+    /// ingest answers `Full` (the MTA still accepts with 250), nothing older
+    /// evicted.
+    #[tokio::test]
+    async fn dmarc_aggregate_table_cap_drops_the_next_report() {
+        use crate::db::dmarc_reports::{
+            DMARC_AGGREGATE_ROW_CAP, DmarcAggregateReportRow, ReportInsert,
+        };
+        use fauna_protocol::bridge_routing::ReportIngestOutcome;
+        let state = fixture_state().await;
+        let mta = [1u8; 32];
+        approve_bridge(&state.db, &mta, BridgeRole::Mta).await;
+        state
+            .db
+            .add_mail_domain("fauna.test", true, "enforce", "expand_primary", None, None)
+            .await
+            .unwrap();
+        let now = now_epoch_secs();
+        state
+            .db
+            .seed_dmarc_aggregate_reports_for_test(DMARC_AGGREGATE_ROW_CAP, now)
+            .await
+            .unwrap();
+        let row = DmarcAggregateReportRow {
+            submitter: "s".into(),
+            our_domain: "fauna.test".into(),
+            report_id: "past-the-cap".into(),
+            begin_at: 0,
+            end_at: 1,
+            received_at: now,
+            payload_xml_gz: Vec::new(),
+            parsed_summary_cbor: Vec::new(),
+            source_envelope_blob: Vec::new(),
+        };
+        assert_eq!(
+            state.db.insert_dmarc_aggregate_report(&row).await.unwrap(),
+            ReportInsert::Full
+        );
+        assert_eq!(
+            ingest_dmarc_reply(
+                &state,
+                mta,
+                dmarc_report_message(&dmarc_report_xml("fauna.test", "r-cap")),
+                now
+            )
+            .await
+            .outcome,
+            ReportIngestOutcome::Full,
+            "the ingest answers Full and stores nothing past the cap"
+        );
+        assert_eq!(
+            state
+                .db
+                .count_dmarc_aggregate_reports_for_test()
+                .await
+                .unwrap(),
+            DMARC_AGGREGATE_ROW_CAP,
+            "nothing older was evicted"
+        );
+    }
+
+    /// The aggregate table's byte cap over the archives: a few large reports
+    /// fill it long before the row cap.
+    #[tokio::test]
+    async fn dmarc_aggregate_table_byte_cap_drops_the_next_report() {
+        use crate::db::dmarc_reports::{DmarcAggregateReportRow, ReportInsert};
+        let state = fixture_state().await;
+        let row = |i: i64, bytes: usize| DmarcAggregateReportRow {
+            submitter: "s".into(),
+            our_domain: "fauna.test".into(),
+            report_id: format!("r-{i}"),
+            begin_at: 0,
+            end_at: 1,
+            received_at: 1,
+            payload_xml_gz: vec![0u8; bytes],
+            parsed_summary_cbor: Vec::new(),
+            source_envelope_blob: Vec::new(),
+        };
+        // The production insert at a 4 KiB byte cap (the real cap's scale is
+        // too large to fill in a unit test): the cap counts the archive column.
+        let insert = |i: i64, bytes: usize| {
+            let db = state.db.clone();
+            async move {
+                db.insert_dmarc_aggregate_report_capped(&row(i, bytes), i64::MAX, 4096)
+                    .await
+                    .unwrap()
+            }
+        };
+        assert_eq!(insert(0, 3000).await, ReportInsert::Stored);
+        assert_eq!(insert(1, 1096).await, ReportInsert::Stored);
+        assert_eq!(insert(2, 1).await, ReportInsert::Full);
+        assert_eq!(
+            insert(0, 3000).await,
+            ReportInsert::Full,
+            "a full table answers Full before the dedupe is consulted"
+        );
+    }
+
+    /// The TLSRPT table's row cap: its dedupe key is the sender's own
+    /// `report-id`, so past the cap a fresh id is dropped, never stored.
+    #[tokio::test]
+    async fn tlsrpt_inbound_table_cap_drops_the_next_report() {
+        use crate::db::dmarc_reports::ReportInsert;
+        use crate::db::tlsrpt_inbound_reports::{TLSRPT_INBOUND_ROW_CAP, TlsrptInboundReportRow};
+        let state = fixture_state().await;
+        let row = |i: i64| TlsrptInboundReportRow {
+            submitter: "s".into(),
+            policy_published_domain: "fauna.test".into(),
+            report_id: format!("r-{i}"),
+            begin_at: 0,
+            end_at: 1,
+            received_at: 1,
+            payload_json_gz: Vec::new(),
+            parsed_summary_cbor: Vec::new(),
+            source_envelope_blob: Vec::new(),
+        };
+        for i in 0..TLSRPT_INBOUND_ROW_CAP {
+            assert_eq!(
+                state
+                    .db
+                    .insert_tlsrpt_inbound_report(&row(i))
+                    .await
+                    .unwrap(),
+                ReportInsert::Stored
+            );
+        }
+        assert_eq!(
+            state
+                .db
+                .insert_tlsrpt_inbound_report(&row(TLSRPT_INBOUND_ROW_CAP))
+                .await
+                .unwrap(),
+            ReportInsert::Full
+        );
+        assert_eq!(
+            state
+                .db
+                .insert_tlsrpt_inbound_report(&row(0))
+                .await
+                .unwrap(),
+            ReportInsert::Full,
+            "a full table answers Full before the dedupe is consulted"
+        );
+    }
+
     #[tokio::test]
     async fn dmarc_forensic_report_is_classified_stored_listed_and_fetched() {
         use fauna_protocol::bridge_routing::{
@@ -21507,6 +22783,7 @@ mod tests {
             .add_mail_domain("fauna.test", true, "enforce", "expand_primary", None, None)
             .await
             .unwrap();
+        opt_in_forensic(&state).await;
         let now = now_epoch_secs();
         let raw = dmarc_forensic_message("fauna.test", "f-1");
 
@@ -21620,6 +22897,7 @@ mod tests {
             .add_mail_domain("fauna.test", true, "enforce", "expand_primary", None, None)
             .await
             .unwrap();
+        opt_in_forensic(&state).await;
         let now = now_epoch_secs();
         let abuse = String::from_utf8(dmarc_forensic_message("fauna.test", "f-2"))
             .unwrap()
@@ -21655,6 +22933,7 @@ mod tests {
             .add_mail_domain("fauna.test", true, "enforce", "expand_primary", None, None)
             .await
             .unwrap();
+        opt_in_forensic(&state).await;
         let now = now_epoch_secs();
         let day = 86_400;
         let old = now - (DMARC_FORENSIC_RETENTION_DAYS + 1) * day;
@@ -21692,6 +22971,10 @@ mod tests {
         state
             .db
             .put_dmarc_policy(DmarcPolicyOverrides {
+                record: fauna_mail::dmarc_publish::DmarcOverrides {
+                    ruf_publish: Some(true),
+                    ..Default::default()
+                },
                 forensic_retention_days: Some(2),
                 ..Default::default()
             })
@@ -23574,7 +24857,10 @@ mod tests {
             )
             .await
             .unwrap();
-        let wire = mail_domain_to_row(&row);
+        let wire = mail_domain_to_row(
+            &row,
+            &fauna_mail::dmarc_publish::DmarcPublishPolicy::default(),
+        );
         assert!(wire.role_address_overrides.is_empty());
         assert_eq!(wire.dmarc_overrides, Default::default());
         // And it still encodes: the reply this row rides in is answerable.
@@ -24550,6 +25836,58 @@ mod tests {
         );
     }
 
+    /// The send switch stops the user's own sending, not their calendar: an
+    /// organizer's iMIP invitations, which the MDA's auto-schedule gateway
+    /// enqueues, keep going out while the organizer's send switch is off,
+    /// exactly as they do while mail is off (`mail-policy-config.md` § Tier 3,
+    /// the `mail.account.send_enabled` row; `mail-credentials.md` § Trigger
+    /// taxonomy, the Disable-mail row). The same organizer's submission is
+    /// refused at the MTA's quota door.
+    #[tokio::test]
+    async fn enqueue_outbound_mail_mda_imip_flows_while_send_is_off() {
+        let state = fixture_state().await;
+        let mda = [9u8; 32];
+        approve_bridge(&state.db, &mda, BridgeRole::Mda).await;
+        let mta = [1u8; 32];
+        approve_bridge(&state.db, &mta, BridgeRole::Mta).await;
+        let organizer = [3u8; 32];
+        state
+            .db
+            .create_user(&organizer, "free", "test")
+            .await
+            .unwrap();
+        state
+            .db
+            .put_exact_alias("example.com", "organizer", "exact", &organizer)
+            .await
+            .unwrap();
+        set_switches(&state, organizer, None, Some(false)).await;
+
+        let err =
+            check_submission_quota_handler()(state.clone(), mta, quota_call(&organizer, 1, false))
+                .await
+                .unwrap_err();
+        assert_eq!(err.code, SEND_DISABLED_CODE, "the user's own send is off");
+
+        let req = EnqueueOutboundMailRequest {
+            original_msgid: "evt@example.com".into(),
+            original_sender: "organizer@example.com".into(),
+            recipients: vec!["bob@dest.test".into()],
+            raw_message: b"BEGIN:VCALENDAR\r\nMETHOD:REQUEST\r\nEND:VCALENDAR\r\n".to_vec(),
+            on_behalf_of_actor: Some(organizer.to_vec()),
+            ..Default::default()
+        };
+        let payload = Bytes::from(encode_canonical(&req).unwrap().to_vec());
+        let bytes = enqueue_outbound_mail_handler()(state.clone(), mda, payload)
+            .await
+            .expect("the MDA's iMIP is calendar traffic, not gated by the send switch");
+        let reply: EnqueueOutboundMailReply = decode(&bytes).unwrap();
+        assert_eq!(reply.ids.len(), 1);
+        let rows = state.db.fetch_all_outbound_for_test().await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].recipient, "bob@dest.test");
+    }
+
     /// An unlimited alias never pays the count, and never rejects.
     #[tokio::test]
     async fn resolve_recipient_ignores_hit_history_without_a_cap() {
@@ -25082,6 +26420,64 @@ mod tests {
         .await
         .expect_err("a bad client_ip is malformed");
         assert_eq!(err.code, "fauna.protocol.malformed");
+    }
+
+    /// Every string the window holds is a stranger's: the nest's record path
+    /// clips each to a named length and the DKIM results to a named count, so
+    /// the held bytes are bounded per row, not only the row count.
+    #[tokio::test]
+    async fn report_dmarc_observation_clips_the_strings_it_holds() {
+        use fauna_mail::outbound::dmarc::{
+            DMARC_OBSERVATION_MAX_DKIM_RESULTS, DMARC_OBSERVATION_NAME_MAX_BYTES,
+            DMARC_OBSERVATION_TOKEN_MAX_BYTES,
+        };
+        let state = fixture_state().await;
+        let mta = [1u8; 32];
+        approve_bridge(&state.db, &mta, BridgeRole::Mta).await;
+        let huge = "a".repeat(50_000);
+        let req = ReportDmarcObservationRequest {
+            client_ip: "192.0.2.1".into(),
+            dmarc: fauna_protocol::bridge_routing::DmarcVerdict::Pass,
+            observation: fauna_protocol::bridge_routing::DmarcObservation {
+                header_from_domain: "peer.test".into(),
+                envelope_from_domain: huge.clone(),
+                dkim_results: (0..50)
+                    .map(|_| fauna_core::mail_auth::DkimAuthResult {
+                        domain: huge.clone(),
+                        selector: huge.clone(),
+                        result: huge.clone(),
+                    })
+                    .collect(),
+                spf_result: huge.clone(),
+                ..Default::default()
+            },
+        };
+        let reply = report_dmarc_observation_handler()(
+            state.clone(),
+            mta,
+            Bytes::from(encode_canonical(&req).unwrap().to_vec()),
+        )
+        .await
+        .expect("observation ok");
+        let reply: ReportDmarcObservationReply = decode(&reply).unwrap();
+        assert!(reply.counted);
+        let rows = state
+            .email
+            .dmarc_aggregator
+            .lock()
+            .unwrap()
+            .rows("peer.test");
+        let row = &rows[0];
+        assert_eq!(row.envelope_from.len(), DMARC_OBSERVATION_NAME_MAX_BYTES);
+        assert_eq!(row.spf_result.len(), DMARC_OBSERVATION_TOKEN_MAX_BYTES);
+        assert_eq!(row.dkim_results.len(), DMARC_OBSERVATION_MAX_DKIM_RESULTS);
+        assert!(
+            row.dkim_results
+                .iter()
+                .all(|(d, s, r)| d.len() == DMARC_OBSERVATION_NAME_MAX_BYTES
+                    && s.len() == DMARC_OBSERVATION_NAME_MAX_BYTES
+                    && r.len() == DMARC_OBSERVATION_TOKEN_MAX_BYTES)
+        );
     }
 
     #[tokio::test]

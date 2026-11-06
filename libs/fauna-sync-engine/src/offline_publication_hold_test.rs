@@ -124,7 +124,14 @@ fn pending(engine: &SyncEngine) -> Vec<(String, Option<u64>, Option<String>)> {
         .own_pending_changes(16)
         .unwrap()
         .into_iter()
-        .map(|r| (r.path, r.content_key_version, r.manifest_hash))
+        .map(|r| {
+            (
+                r.path,
+                r.content_stamp
+                    .and_then(fauna_core::blob_seal::SealStamp::version),
+                r.manifest_hash,
+            )
+        })
         .collect()
 }
 

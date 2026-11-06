@@ -31,10 +31,10 @@ import (
 //     the client's chosen filename is ignored — we rewrite Location.
 //  4. Tokenize the re-encoded text into a CanonicalTokenSet (encrypted-
 //     mode SEARCH-axis index hint).
-//  5. HPKE-seal raw body to actor's MLS pubkey; HPKE-seal hint bytes to
-//     actor's index pubkey (falling back to MLS pubkey when the actor
-//     has no index key yet, mirroring imap/append.go's Phase-E gap
-//     fallback). Wire bytes never see plaintext.
+//  5. HPKE-seal raw body as a `calendar-record` to the session's calendar
+//     key; HPKE-seal hint bytes to actor's index pubkey (falling back to
+//     the calendar key when the actor has no index key yet — see
+//     sealEventForSession). Wire bytes never see plaintext.
 //  6. wsrpc.PutEventCiphertext → outcome dispatch:
 //     - Created/Updated → 201 + ETag + Location (emersion hard-codes
 //     201; v1 accepts the wart per goal doc row 101 commentary).
@@ -168,34 +168,29 @@ func (b *Backend) PutCalendarObject(
 // the AUTH'd actor — the write half every event the MDA stores goes through (a
 // PUT, and the re-seal a MOVE/COPY performs). Encrypt-only.
 //
-// Phase-3 D1 (`2026-07-07-phase-3-sealed-both-modes-design.md`): sealed at
-// rest in BOTH storage modes — one at-rest byte shape. The body seals X-Wing
-// to the actor's two key halves (leg D2a), and so does the index hint while
-// its key is the MLS-pubkey fallback. The
-// index hint falls back to the MLS pubkey when the actor has no index key
-// (the Phase-E gap), mirroring imap/append.go so REPORT opens both shapes.
+// The body is a `calendar-record` sealed X-Wing to the session's calendar key
+// (`owner-key-material.md` § Path B-sibling-5 → *Protects*); the index hint
+// seals to the actor's index key when one is registered, else to the calendar
+// key as a `calendar-record` (mailfauna.SealRecordIndexHint — the nest's own
+// invitation placement applies the same rule).
 //
 // Every call yields FRESH ciphertext (HPKE encapsulation is randomized), and
 // that is load-bearing: nest files a body as a content record keyed by its
 // hash, so two rows holding byte-identical ciphertext would share one record,
 // and deleting either row would tombstone the other's body.
 func sealEventForSession(sess *davauth.Session, raw []byte) (body, hint []byte, err error) {
-	mlsPubkey := sess.MLSPubkey()
-	if mlsPubkey == nil {
+	calPubkey, calEk := sess.CalendarPubkey(), sess.CalendarMlkemEk()
+	if calPubkey == nil {
 		return nil, nil, webdav.NewHTTPError(http.StatusInternalServerError,
-			errors.New("session missing MLS pubkey"))
+			errors.New("session missing calendar seal key"))
 	}
-	indexKey := sess.IndexKey()
-	if indexKey == nil {
-		indexKey = mlsPubkey
-	}
-	body, err = mailfauna.EncryptToRecipientHybrid(raw, mlsPubkey, sess.MlkemEk())
+	body, err = mailfauna.SealRecordHybrid(mailfauna.RecordKindCalendar, raw, calPubkey, calEk)
 	if err != nil {
 		return nil, nil, fmt.Errorf("seal event body: %w", err)
 	}
 	tokens := mailfauna.Tokenize(string(raw))
-	hint, err = mailfauna.EncryptToRecipientHybrid(
-		tokens.CanonicalBytes, indexKey, mailfauna.IndexHintMlkemEk(indexKey, mlsPubkey, sess.MlkemEk()))
+	hint, err = mailfauna.SealRecordIndexHint(
+		mailfauna.RecordKindCalendar, tokens.CanonicalBytes, sess.IndexKey(), calPubkey, calEk)
 	if err != nil {
 		return nil, nil, fmt.Errorf("seal event index hint: %w", err)
 	}

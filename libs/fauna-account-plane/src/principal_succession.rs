@@ -163,8 +163,8 @@ pub enum CeremonyProbe {
 /// rotation runs with no nest leg at all.
 // Eleven distinct identity/credential inputs, each read exactly once by a
 // different leg of the gate (transport, credential store, actor, section,
-// backend opener, seed, held writer, slot, enrollment target, rotation
-// policy, the pump's finding). Bundling them would name a struct whose only member function is
+// backend opener, seed, held writer, slot, enrollment target and its label,
+// rotation policy, the pump's finding). Bundling them would name a struct whose only member function is
 // this one — the same call the engine's over-limit plumbing makes
 // (`peer_leg.rs`, `custody_leg.rs`).
 #[allow(clippy::too_many_arguments)]
@@ -178,6 +178,7 @@ pub async fn ceremony_probe<R, S, X, B, F, Fut>(
     held_writer: &SigningKey,
     slot: &PrincipalBundle<S, X>,
     enrollment_target: &str,
+    enrollment_label: Option<&str>,
     allow_rotation: bool,
     own_row_removed: Option<[u8; 32]>,
 ) -> Result<CeremonyProbe>
@@ -250,8 +251,12 @@ where
             .await
         {
             Err(e) if fauna_client_sync::is_device_grant_no_device(&e) => {
-                sync.register(target.clone(), fauna_client_sync::SELF_REGISTER_LABEL, None)
-                    .await?;
+                // The host app's default, exactly as the enrollment
+                // ceremony's register-create (`devices.md` § Device names:
+                // EVERY register leg of a machine passes it); the placeholder
+                // only where no app is present.
+                let label = enrollment_label.unwrap_or(fauna_client_sync::SELF_REGISTER_LABEL);
+                sync.register(target.clone(), label, None).await?;
                 sync.device_grant_register(target.clone(), loaded.wire.clone())
                     .await
                     .map(|_| ())

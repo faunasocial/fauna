@@ -54,7 +54,7 @@ public sealed partial class FeedComposeBar : UserControl
 #if PAYMENTS
     /// <summary>The sell composer's fields, dropped into <c>SellFieldsHost</c> — same
     /// removable-item reasoning as <c>ProfilePage._tierMoneyFields</c>.</summary>
-    private readonly Views.Payments.SellComposeFields _sellFields;
+    private readonly Views.Payments.SellControls _sellFields;
 #endif
 
     /// <summary>
@@ -180,7 +180,7 @@ public sealed partial class FeedComposeBar : UserControl
         GatePreviewBox.PlaceholderText = S.Get("feed/post/gate_preview_placeholder");
         ToolTipService.SetToolTip(GateTierSelect, S.Get("feed/post/gate_audience"));
 #if PAYMENTS
-        _sellFields = new Views.Payments.SellComposeFields();
+        _sellFields = new Views.Payments.SellControls();
         SellFieldsHost.Content = _sellFields;
         _sellFields.Changed += ForwardSaleField;
 #endif

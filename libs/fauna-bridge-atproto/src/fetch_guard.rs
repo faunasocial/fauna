@@ -134,7 +134,8 @@ pub fn check_fetch_target(target: FetchTarget) -> FetchTargetVerdict {
     // (`intranet`) is a public DNS name by that classifier's axis, but a
     // resolver search domain can expand it into an internal target. These
     // fetches are attacker-*directed*, so the posture here is deliberately
-    // tighter than the accepted consume-side ones.
+    // tighter than the consume-side client's (`crate::dial_guard`, which
+    // judges addresses only — `network-exposure.md` § Rulings F9).
     if !target.host.contains('.') {
         return FetchTargetVerdict::deny(DENY_SINGLE_LABEL);
     }

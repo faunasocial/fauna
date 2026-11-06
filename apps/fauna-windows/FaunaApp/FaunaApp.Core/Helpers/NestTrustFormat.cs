@@ -66,6 +66,23 @@ internal static class NestTrustFormat
     }
 
     /// <summary>
+    /// <c>nest-trust-empty</c>'s predicate (Now lens already assumed): no grants,
+    /// no backups, AND a readable holder roster. An unreadable roster
+    /// (<c>LinkedNestRow.trust_holders_unreachable</c>) replaces the empty state
+    /// with <see cref="HoldersStatusText"/> (nests.md § Trust facet — grants).
+    /// </summary>
+    internal static bool TrustEmptyVisible(int grantCount, int backupCount, bool holdersUnreachable) =>
+        grantCount == 0 && backupCount == 0 && !holdersUnreachable;
+
+    /// <summary>
+    /// <c>nest-trust-holders-status</c> text: the "could not ask this nest" copy
+    /// when the roster read failed, EMPTY otherwise (the element stays registered
+    /// so the leaf set does not vary).
+    /// </summary>
+    internal static string HoldersStatusText(bool holdersUnreachable) =>
+        holdersUnreachable ? Strings.Get("nests/holders_status_unreachable") : string.Empty;
+
+    /// <summary>
     /// Map a shared mint-picker option (<c>LinkedNestRow.mint_options</c>) to its
     /// localized use-case label (<c>nests/mint_option_*</c>; the paywalled option
     /// carries its tier via the <c>{tier}</c> named placeholder) via the shared

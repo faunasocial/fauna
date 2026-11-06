@@ -78,6 +78,7 @@
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex, RwLock, Weak};
 
+use anyhow::Context as _;
 use fauna_client_capabilities::group_ceremony_node::{
     CeremonyNode, GroupShareInitiator, ceremony_bind_verdict,
 };
@@ -544,6 +545,21 @@ impl SetMembership for SessionRoster {
         let lent = self.0.read().unwrap().as_ref().and_then(Weak::upgrade);
         lent.is_some_and(|roster| roster.is_member(channel_id, actor))
     }
+
+    /// Forwarded, never defaulted: a wrapper answering the trait's default
+    /// would silently disable the stale-endpoint sweep behind it. No lend is
+    /// no reading.
+    fn roster_reading(
+        &self,
+        channel_id: &[u8; 32],
+        actor: &ActorId,
+    ) -> fauna_peer_share::admission::RosterReading {
+        let lent = self.0.read().unwrap().as_ref().and_then(Weak::upgrade);
+        lent.map_or(
+            fauna_peer_share::admission::RosterReading::Unreadable,
+            |roster| roster.roster_reading(channel_id, actor),
+        )
+    }
 }
 
 /// The session seat's peer witness door evaluator, lent late — the
@@ -809,11 +825,29 @@ pub async fn initiate(
             Box::pin(async move { seat.node.dial_code(&code).await })
         })
     };
+    let candidates = peer.lan_endpoints.clone();
     let peer = peer.actor;
 
     let now = Timestamp(now_secs());
-    let mut initiator =
-        GroupShareInitiator::new(channel, Arc::clone(&seat.config), peer).with_redial(redial);
+    let mut initiator = GroupShareInitiator::new(channel, Arc::clone(&seat.config), peer)
+        .with_redial(redial)
+        // The code's candidates are also the initiator's first group-pump dial
+        // of the recipient, until the recipient's own cell has reached it.
+        .with_recipient_candidates(candidates)
+        .with_bootstrap_endpoints(fauna_core::device_endpoints::DeviceEndpointsEntry::new(
+            fauna_core::device_endpoints::DeviceEndpoints {
+                node_id: seat.node.own_actor().0,
+                lan_addrs: seat
+                    .node
+                    .local_endpoints()
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect(),
+                public_addrs: Vec::new(),
+                relay_url: seat.node.relay_url().map(str::to_owned),
+            },
+            None,
+        ));
     let own_reception = GroupReceptionKeyRecord::mint(now.0 as i64 * 1_000);
 
     // The initiator is a member too, so its own reception keypair rests
@@ -1104,28 +1138,80 @@ pub async fn load_group_shares(
             scopes: Vec::new(),
         };
     };
-    let mut scopes = Vec::new();
-    for scope_id in fauna_client_capabilities::group_ceremony_view::known_group_scopes(&cfg) {
-        match account.group_scope_states(scope_id).await {
-            Ok(rows) => {
-                if let Some(summary) =
-                    crate::group_scope_view::summarize_group_scope(&scope_id, &rows)
-                {
-                    scopes.push(GroupScopeView {
-                        short_id: summary.short_id.clone(),
-                        member_count: summary.members.len(),
-                        shared_by: (!summary.is_authority(own))
-                            .then(|| fauna_core::format::short_id(&summary.authority.to_hex())),
-                    });
-                }
-            }
-            Err(e) => tracing::warn!("[offline-share] group scope rows unreadable: {e}"),
+    // The page's read is fail-safe: a scope whose rows will not read is
+    // left off the page this pass and logged. The presence doors and the
+    // mirror take the strict reader instead ([`held_group_scope_views`]).
+    let scopes = match group_scope_views(&account, &cfg, own).await {
+        Ok(scopes) => scopes,
+        Err(e) => {
+            tracing::warn!("[offline-share] group scope rows unreadable: {e:#}");
+            Vec::new()
         }
-    }
+    };
     GroupShareViews {
         invitations,
         scopes,
     }
+}
+
+/// The group sets this device holds the machinery for, as the folders page
+/// lists them — every scope the ceremony record `cfg` knows whose rows this
+/// replica holds a readable scope line for, named by the folded
+/// `fauna.group.name` under the name's writer check (a name a member sealed
+/// itself, or one whose authority device has since been revoked, never
+/// labels a set), else its short id. **Strict**: a scope's rows failing to
+/// read is an error, never a shorter list — the presence doors and the
+/// app-dead mirror read through here (`group-set.md` § Build design — the
+/// group set, decisions 11 (a) and 12), and a set that drops off the list on
+/// a store hiccup would have its presence torn down.
+///
+/// # Errors
+/// A scope's rows failing to read.
+pub async fn group_scope_views(
+    account: &AccountStoreHandle,
+    cfg: &fauna_core::group_ceremony::GroupShareConfig,
+    own: &ActorId,
+) -> anyhow::Result<Vec<GroupScopeView>> {
+    let mut scopes = Vec::new();
+    for scope_id in fauna_client_capabilities::group_ceremony_view::known_group_scopes(cfg) {
+        let rows = account
+            .group_scope_states(scope_id)
+            .await
+            .with_context(|| format!("group scope {} rows", hex::encode(&scope_id[..8])))?;
+        let Some(summary) = crate::group_scope_view::summarize_group_scope(&scope_id, &rows) else {
+            continue;
+        };
+        let name = crate::group_set::fold_group_name(&scope_id, &rows)
+            .and_then(|fold| fold.name)
+            .map(|honoured| honoured.name().to_string());
+        scopes.push(GroupScopeView {
+            scope_id,
+            name,
+            short_id: summary.short_id.clone(),
+            member_count: summary.members.len(),
+            shared_by: (!summary.is_authority(own))
+                .then(|| fauna_core::format::short_id(&summary.authority.to_hex())),
+        });
+    }
+    Ok(scopes)
+}
+
+/// [`group_scope_views`] over the durable ceremony record the runtime holds
+/// (`AccountStoreHandle::group_shares`) — the strict read both presence doors
+/// and the app-dead mirror share, so the sets the app process lists and the
+/// sets the mirror carries come from one reader.
+///
+/// # Errors
+/// The record or a scope's rows failing to read.
+pub async fn held_group_scope_views(
+    account: &AccountStoreHandle,
+    own: &ActorId,
+) -> anyhow::Result<Vec<GroupScopeView>> {
+    let cfg = account
+        .group_shares()
+        .await
+        .context("the ceremony record")?;
+    group_scope_views(account, &cfg, own).await
 }
 
 /// Both halves of the folders page's group surface, read in one pass because
@@ -1153,10 +1239,10 @@ pub struct PendingGroupShareView {
 
 /// One shared set this device holds the machinery for.
 ///
-/// No `scope_id` field: nothing on this row is addressable yet — a group set
-/// has no per-row gesture in v1 — and a carried-but-unread id is exactly the
-/// kind of field that later gets addressed by the wrong reader. It comes back
-/// with the first gesture that needs it.
+/// The row's one gesture is binding a device-local folder under the set
+/// (`group-set.md` § Build design — the group set, decision 7), which is why
+/// it carries the full scope id: the binding's identity is
+/// [`Self::folder_id`], never the short id two scopes could share.
 /// `PartialEq` is load-bearing on a real render loop, not decoration:
 /// linux's GTK pass skips a `folder_list_box` rebuild when a poll's answer
 /// is unchanged, and a real rebuild collapses any expanded row (tui's cheap
@@ -1165,13 +1251,32 @@ pub struct PendingGroupShareView {
 /// module retires.
 #[derive(Debug, Clone, PartialEq)]
 pub struct GroupScopeView {
-    /// The short scope id — the set's only name in v1.
+    /// The scope's full 32-byte content-derived id.
+    pub scope_id: [u8; 32],
+    /// The set's recorded `fauna.group.name`, folded under the name's writer
+    /// check (`group_set::fold_group_name`); `None` for a nameless set, which
+    /// is labelled by its [`Self::short_id`].
+    pub name: Option<String>,
+    /// The short scope id — the label of a set with no recorded name.
     pub short_id: String,
     /// How many verified members the roster carries.
     pub member_count: usize,
     /// `Some(who)` when someone else minted the scope — the recipient's
     /// "Shared by ‹them›" reading. `None` on the initiator's own set.
     pub shared_by: Option<String>,
+}
+
+impl GroupScopeView {
+    /// The set's `FolderRef::Group` wire form (`group:<64-hex>`, the scope
+    /// string) — what a location binds under through the agent's
+    /// `AddLocation`. Apps also use it as the binding's set label: it is
+    /// stable across a rename and cannot collide with a folder set's name, so
+    /// filtering and removing a group row's bindings by it reaches this set's
+    /// folders and no other's.
+    #[must_use]
+    pub fn folder_id(&self) -> String {
+        fauna_core::folder_keys::FolderRef::Group(self.scope_id).to_wire()
+    }
 }
 
 #[cfg(test)]
@@ -1227,6 +1332,26 @@ mod tests {
             .iter()
             .map(|b| format!("{b:02x}"))
             .collect()
+    }
+
+    /// A group row binds under the agent's `FolderRef::Group` — the full
+    /// scope string, which parses back to the same scope and so can never be
+    /// mistaken for another set's ref.
+    #[test]
+    fn a_group_scope_binds_under_its_full_scope_ref() {
+        let view = GroupScopeView {
+            scope_id: [0xAB; 32],
+            name: None,
+            short_id: "abababab".into(),
+            member_count: 2,
+            shared_by: None,
+        };
+        let wire = view.folder_id();
+        assert_eq!(wire, format!("group:{}", "ab".repeat(32)));
+        assert_eq!(
+            fauna_core::folder_keys::FolderRef::parse(&wire),
+            Some(fauna_core::folder_keys::FolderRef::Group([0xAB; 32]))
+        );
     }
 
     #[test]

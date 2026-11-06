@@ -22,7 +22,7 @@ use std::path::PathBuf;
 use adw::prelude::*;
 use fauna_client_region::{
     DeclaredRegion, PolicyState, RegionPlaceholder, RegionPlane, RegionSource, RegionVerb,
-    RegionView, declared_from_posix_locale, effective_registry,
+    RegionView, effective_registry,
 };
 use fauna_core::content_category::ContentLabelEntry;
 use fauna_core::obligation::ComposedVerdict;
@@ -60,11 +60,7 @@ thread_local! {
 /// territory — or, in a test-capable build, the e2e override
 /// (`fauna_client_region::source::E2E_DECLARED_ENV`).
 pub fn declared_region() -> Option<DeclaredRegion> {
-    let leaf = declared_from_posix_locale(
-        std::env::var("LC_ALL").ok().as_deref(),
-        std::env::var("LANG").ok().as_deref(),
-    );
-    fauna_client_region::source::with_e2e_override(leaf, RegionSource::SystemLocale)
+    fauna_client_region::source::declared_from_process_locale()
 }
 
 fn now_secs() -> u64 {
@@ -241,6 +237,16 @@ pub fn notice_text(p: &RegionPlaceholder) -> String {
     }
 }
 
+/// The notice's text: the frame, then — on a sealed bubble — the sealed-item sentence on
+/// its own line.
+fn notice_with_sealed_note(p: &RegionPlaceholder, sealed_note: bool) -> String {
+    if sealed_note {
+        format!("{}\n{}", notice_text(p), r::SEALED_NOTE)
+    } else {
+        notice_text(p)
+    }
+}
+
 fn dim_label(text: &str) -> gtk::Label {
     let label = gtk::Label::new(Some(text));
     label.add_css_class("dim-label");
@@ -253,14 +259,23 @@ fn dim_label(text: &str) -> gtk::Label {
 /// The placeholder painted **in place of** a region-withheld item: the app's
 /// frame naming the region and its authority, the authority's name, and its
 /// reason verbatim; a `collapse` adds the reveal, which runs `on_reveal`.
-pub fn placeholder_box(p: &RegionPlaceholder, on_reveal: impl Fn() + 'static) -> gtk::Box {
+///
+/// `sealed_note` adds the sealed-item sentence (`region.sealed_note`) on its
+/// own line after the frame, inside `region-blocked-notice` — pass the shared
+/// decision (`crate::content_policy::region_sealed_note`), which is `false`
+/// for everything but an end-to-end conversation's bubble.
+pub fn placeholder_box(
+    p: &RegionPlaceholder,
+    sealed_note: bool,
+    on_reveal: impl Fn() + 'static,
+) -> gtk::Box {
     let vbox = gtk::Box::new(gtk::Orientation::Vertical, 4);
     vbox.set_margin_top(12);
     vbox.set_margin_bottom(12);
     vbox.set_margin_start(12);
     vbox.set_margin_end(12);
 
-    let notice = dim_label(&notice_text(p));
+    let notice = dim_label(&notice_with_sealed_note(p, sealed_note));
     crate::testid::set_test_id(&notice, ids::REGION_BLOCKED_NOTICE);
     crate::testid::set_test_attr(&notice, VERDICT_ATTR, p.verb.as_str());
     vbox.append(&notice);
@@ -462,6 +477,26 @@ mod tests {
             category: "nsfw".into(),
             confidence_per_mille: 900,
         }]
+    }
+
+    #[test]
+    fn a_sealed_placeholder_carries_the_sealed_note_after_the_frame() {
+        // region-blocking.md § Implementation status today: the sentence sits
+        // inside `region-blocked-notice`, after the frame, on a sealed bubble
+        // only (the shared decision says where).
+        for verb in [RegionVerb::Block, RegionVerb::Collapse] {
+            let p = RegionPlaceholder {
+                verb,
+                region: RegionCode::parse("XZ").expect("well-formed test code"),
+                authority_name: "Synthetic Test Authority".into(),
+                reason: "Withheld under the Synthetic Act.".into(),
+            };
+            assert_eq!(
+                notice_with_sealed_note(&p, true),
+                format!("{}\n{}", notice_text(&p), r::SEALED_NOTE)
+            );
+            assert_eq!(notice_with_sealed_note(&p, false), notice_text(&p));
+        }
     }
 
     #[test]

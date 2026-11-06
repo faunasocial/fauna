@@ -52,7 +52,11 @@ private final class AskAPI: APIClient {
         if let knockError { throw knockError }
     }
 
-    override func knockRoute(actorId: String, profileBody: Data) -> String? { routes[actorId] }
+    /// The slot: the opener's carried home until a profile body is read, then the
+    /// body's route (`routes`) — the shared `actor_home` rule's two inputs.
+    override func actorHomeSlot(carried: String?, actorId: String, profileBody: Data?) -> String? {
+        profileBody == nil ? carried : (routes[actorId] ?? carried)
+    }
 
     override func requestContact(peerId: String) async throws { contactAsks.append(peerId) }
 
@@ -329,6 +333,24 @@ struct ProfileKnockVMTests {
         vm.noteProfile(body: Data([1]), peer: peerA)
         await vm.knock(peer: peerA)
         #expect(api.knocks.count == 1 && api.knocks[0].route == nil)
+    }
+
+    @Test("the actor-home slot is seeded with the opener's carried home before any read")
+    func theSlotIsSeededWithTheCarriedHome() async {
+        let api = AskAPI()
+        let vm = configured(api)
+        vm.beginOpen(peer: peerA, carried: "https://carried.example")
+        #expect(vm.home(peer: peerA) == "https://carried.example")
+        await vm.knock(peer: peerA)
+        #expect(api.knocks.map { $0.route } == ["https://carried.example"])
+    }
+
+    @Test("a carried home is dropped by the next open of the same peer")
+    func aCarriedHomeDoesNotOutliveItsOpen() {
+        let vm = configured(AskAPI())
+        vm.beginOpen(peer: peerA, carried: "https://carried.example")
+        vm.beginOpen(peer: peerA)
+        #expect(vm.home(peer: peerA) == nil)
     }
 
     @Test("a route belongs to the peer whose profile produced it")

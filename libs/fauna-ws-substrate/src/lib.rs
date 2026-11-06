@@ -37,6 +37,7 @@
 pub mod adapter;
 pub mod dial_budget;
 pub mod handshake;
+pub mod reach_hint;
 pub mod supervisor;
 pub mod tls_verify;
 

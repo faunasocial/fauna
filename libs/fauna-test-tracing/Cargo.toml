@@ -1,0 +1,10 @@
+[package]
+name = "fauna-test-tracing"
+description = "Test-only process-global tracing capture (lines tagged by emitting thread, filtered at info like fauna-log's ring). Dev-dependency only."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }

@@ -52,10 +52,9 @@ import pytest
 from clients.ws_rpc_admin_client import RpcCallError
 from clients.ws_rpc_federation_client import FederationChannelClient
 from common import build_email_inbox_payload
-from helpers.admin_wire import admin_client
+from helpers.admin_wire import admin_client, admit_adult
 from helpers.family_wire import (
     actor_ws,
-    admit_adult_directly,
     admit_ward,
     family_status,
     reset_ward_policy,
@@ -86,7 +85,7 @@ def _handle(stem: str) -> str:
 def _shared_family(nest_instance):
     """One guardian + one ward for the tests that only set policy and read —
     one anonymous submit for all of them."""
-    guardian = admit_adult_directly(nest_instance, _handle("guardian"))
+    guardian = admit_adult(nest_instance, _handle("guardian"))
     ward = admit_ward(nest_instance, guardian, _handle("ward"))
     return guardian, ward
 
@@ -273,7 +272,7 @@ def test_contact_approval_keeps_an_unapproved_persons_conversation_invitation_fr
     set_ward_policy(nest_instance, guardian, ward, contact_approval=True)
     before = len(_inbox_items(nest_instance, ward))
 
-    stranger = admit_adult_directly(nest_instance, _handle("stranger"))
+    stranger = admit_adult(nest_instance, _handle("stranger"))
     channel_hex = secrets.token_bytes(32).hex()
 
     with pytest.raises(RpcCallError) as same_nest:
@@ -338,7 +337,7 @@ def test_a_supervised_child_cannot_delete_their_own_account(nest_instance, famil
         f"{ACCOUNT_GUARDIAN_APPROVAL}: {refusal.value!r}"
     )
 
-    adult = admit_adult_directly(nest_instance, _handle("adult"))
+    adult = admit_adult(nest_instance, _handle("adult"))
     with actor_ws(nest_instance, adult) as ws:
         ws.call("fauna.account.delete", {})
 
@@ -358,7 +357,7 @@ def test_a_supervising_account_cannot_be_removed_until_its_child_is_graduated(
     child; the graduated account may now delete itself, and the admin's delete
     of the former guardian goes through.
     """
-    guardian = admit_adult_directly(nest_instance, _handle("lifeguard"))
+    guardian = admit_adult(nest_instance, _handle("lifeguard"))
     ward = admit_ward(nest_instance, guardian, _handle("lifeward"))
     guardian_id = bytes.fromhex(guardian["actor_id_hex"])
 
@@ -432,7 +431,10 @@ def test_a_child_admitted_at_an_age_band_starts_on_that_bands_settings(
     assert policy["feed_sources"] == "block", policy
     assert policy["unknown_peer_dm"] == "hold", policy
     assert policy["content_notify"] is True, policy
-    assert policy["content_policy"]["nsfw"] == "block", policy
+    nsfw_rules = [
+        r for r in policy["content_policy"]["document"]["rules"] if r["factor"] == "nsfw"
+    ]
+    assert [r["verdict"] for r in nsfw_rules] == ["block"], policy
 
     guardian_view = ward_row(family_status(nest_instance, guardian), ward)
     assert guardian_view is not None, "the banded ward is missing from its guardian's status"
@@ -474,7 +476,7 @@ def test_a_guardians_no_to_a_contact_ask_blocks_nobody_and_the_child_can_ask_aga
     """
     guardian, ward = family_pair
     set_ward_policy(nest_instance, guardian, ward, contact_approval=True)
-    peer = admit_adult_directly(nest_instance, _handle("asked"))
+    peer = admit_adult(nest_instance, _handle("asked"))
     peer_id = bytes.fromhex(peer["actor_id_hex"])
 
     def ask() -> None:

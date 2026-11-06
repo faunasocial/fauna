@@ -314,6 +314,11 @@ pub struct PostListHandles {
     compose_file_remove: gtk::Button,
     /// Page-level error (`error-message`) ← `snapshot.error`.
     pub error_message_label: gtk::Label,
+    /// The imported-posts selection's notice and clear (`feed-imported-notice`
+    /// / `feed-imported-clear`, in one row) ← `snapshot.imported_selected`;
+    /// hidden unless it names a platform.
+    imported_row: gtk::Box,
+    imported_notice: gtk::Label,
     /// `feed-empty-state` / `feed-no-results` — the post list's placeholder,
     /// at most one shown, ← `snapshot.empty_state()` (`feed.md` § Errors &
     /// edge cases).
@@ -450,6 +455,33 @@ pub fn build_post_list_wired(
     search_bar.append(&clear_btn);
     list_page.append(&search_bar);
 
+    // The imported-posts selection's notice + clear, under the search bar
+    // (`feed.md` § State & data shape → *The imported-posts selection*):
+    // shown only while the shared snapshot names a platform.
+    let imported_row = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+    imported_row.set_margin_start(8);
+    imported_row.set_margin_end(8);
+    imported_row.set_visible(false);
+    let imported_notice = gtk::Label::new(None);
+    imported_notice.set_xalign(0.0);
+    imported_notice.set_hexpand(true);
+    imported_notice.set_wrap(true);
+    crate::testid::set_test_id(&imported_notice, ids::FEED_IMPORTED_NOTICE);
+    imported_row.append(&imported_notice);
+    let imported_clear = gtk::Button::with_label(feed::IMPORTED_CLEAR);
+    imported_clear.add_css_class("flat");
+    crate::testid::set_test_id(&imported_clear, ids::FEED_IMPORTED_CLEAR);
+    {
+        let m = Arc::clone(manager);
+        let rt = rt.clone();
+        imported_clear.connect_clicked(move |_| {
+            let m = Arc::clone(&m);
+            rt.spawn(async move { m.clear_imported().await });
+        });
+    }
+    imported_row.append(&imported_clear);
+    list_page.append(&imported_row);
+
     // Scrollable post list.
     let post_list_box = gtk::ListBox::new();
     post_list_box.set_selection_mode(gtk::SelectionMode::Single);
@@ -573,7 +605,7 @@ pub fn build_post_list_wired(
                 // Result navigation) — so an original outside the loaded
                 // window still opens with real content instead of degrading
                 // to a no-op the way a raw `.posts.iter().find()` scan would.
-                let target_id = post.reposted_post_id.clone().unwrap_or(post.post_id);
+                let target_id = post.detail_target_id().to_string();
                 open_post_detail_by_id(&stack, &open_id, &open_sig, &m, &c, &rt, target_id, None);
             }
         });
@@ -613,6 +645,8 @@ pub fn build_post_list_wired(
         compose_file_ready,
         compose_file_remove,
         error_message_label,
+        imported_row,
+        imported_notice,
         empty_state,
         no_results,
         prev_status: Cell::new(FeedStatus::default()),
@@ -667,6 +701,24 @@ pub fn render_posts(
             handles.error_message_label.set_visible(true);
         }
         None => handles.error_message_label.set_visible(false),
+    }
+
+    // The imported-posts selection's notice + clear
+    // (`feed-imported-notice` / `feed-imported-clear`) ← `imported_selected`.
+    match &snap.imported_selected {
+        Some(token) => {
+            let platform = fauna_feed::SourceKind::classify(token).label();
+            handles.imported_notice.set_text(
+                &fauna_core::localized::LocalizedText::key_arg(
+                    "feed.imported_notice",
+                    "platform",
+                    platform,
+                )
+                .resolve(crate::i18n::strings::lookup),
+            );
+            handles.imported_row.set_visible(true);
+        }
+        None => handles.imported_row.set_visible(false),
     }
 
     // Empty state (`feed-empty-state` / `feed-no-results`) ← the shared
@@ -812,6 +864,62 @@ pub fn render_posts(
     render_thread(handles, snap, manager, keep_detail);
 }
 
+/// The `gtk::Popover` showing under `root`, if any — a card's ⋯ flyout is
+/// parented to its button, so it is a descendant of the card's row.
+fn open_popover_under(root: &gtk::Widget) -> Option<gtk::Popover> {
+    let mut child = root.first_child();
+    while let Some(c) = child {
+        if let Some(pop) = c.downcast_ref::<gtk::Popover>()
+            && pop.is_visible()
+        {
+            return Some(pop.clone());
+        }
+        if let Some(hit) = open_popover_under(&c) {
+            return Some(hit);
+        }
+        child = c.next_sibling();
+    }
+    None
+}
+
+/// The one paint a list owes once its open flyout closes — the newest one
+/// asked for, every earlier one superseded.
+type DeferredPaint = Rc<RefCell<Option<Box<dyn FnOnce()>>>>;
+const DEFERRED_PAINT_KEY: &str = "fauna-feed-deferred-paint";
+
+/// Hold `paint` until `popover` closes. A later deferral while the same flyout
+/// is still open replaces the held paint rather than queueing a second one. The
+/// paint runs on the next main-loop turn, never inside the hide: a flyout closes from its own
+/// item's click handler (the delete confirm pops down before it dispatches), and
+/// a rebuild there would drop the widget whose handler is still running.
+fn defer_paint_until_closed(list: &gtk::ListBox, popover: &gtk::Popover, paint: Box<dyn FnOnce()>) {
+    // SAFETY: this function is the only reader and writer of the key, and it
+    // always stores a `DeferredPaint`.
+    let held = unsafe {
+        list.data::<DeferredPaint>(DEFERRED_PAINT_KEY)
+            .map(|p| p.as_ref().clone())
+    };
+    if let Some(slot) = held
+        && slot.borrow().is_some()
+    {
+        *slot.borrow_mut() = Some(paint);
+        return;
+    }
+    let slot: DeferredPaint = Rc::new(RefCell::new(Some(paint)));
+    // SAFETY: as above.
+    unsafe { list.set_data::<DeferredPaint>(DEFERRED_PAINT_KEY, Rc::clone(&slot)) };
+    // On the visibility edge rather than `closed`, which GTK emits only for a
+    // flyout that was mapped — the hide is the fact the deferral waits on.
+    popover.connect_visible_notify(move |pop| {
+        if pop.is_visible() {
+            return;
+        }
+        if let Some(paint) = slot.borrow_mut().take() {
+            glib::MainContext::ref_thread_default().spawn_local(async move { paint() });
+        }
+    });
+}
+
 /// Rebuild `list`'s rows from `snap.posts` — one [`build_post_card`] per post,
 /// in order — and fire each card's lazy resolves (media, the quoted/reposted
 /// post, link previews, the unlock price, the tips) on `manager`. Shared by the
@@ -828,6 +936,27 @@ pub(crate) fn paint_post_cards(
     rt: &Handle,
     error_label: &gtk::Label,
 ) {
+    // Every manager notify rebuilds every card — a burst of lazy resolves (the
+    // embeds and previews a cold feed fires below) is a burst of rebuilds — so a
+    // rebuild under an open ⋯ flyout destroyed it in the user's hand, and with
+    // it a delete they had just armed. The cards wait for the flyout to close
+    // and then paint the newest snapshot.
+    if let Some(open) = open_popover_under(list.upcast_ref()) {
+        let (list2, snap, manager, client, rt, error_label) = (
+            list.clone(),
+            snap.clone(),
+            Arc::clone(manager),
+            Rc::clone(client),
+            rt.clone(),
+            error_label.clone(),
+        );
+        defer_paint_until_closed(
+            list,
+            &open,
+            Box::new(move || paint_post_cards(&list2, &snap, &manager, &client, &rt, &error_label)),
+        );
+        return;
+    }
     crate::views::layout::clear_list_box_rows(list);
     for post in &snap.posts {
         list.append(&build_post_card(
@@ -1267,7 +1396,7 @@ fn show_post_detail(
             show_post_detail(&s, &open, &sig, &p, &m, &c, &r);
         };
         match withheld {
-            Some(withheld) => outer.append(&withheld.placeholder_box(on_reveal)),
+            Some(withheld) => outer.append(&withheld.placeholder_box(false, on_reveal)),
             None => outer.append(&content_placeholder_box(&composed, on_reveal)),
         }
         outer.upcast::<gtk::Widget>()
@@ -2190,6 +2319,71 @@ fn interaction_button(icon_name: &str, tooltip: &str, count: i64, test_id: &str)
     btn
 }
 
+/// One `post-reaction-pill` to paint: its text (emoji, a space, the count),
+/// whether it is the viewer's own, and the emoji a tap toggles.
+#[derive(Debug, PartialEq, Eq)]
+struct ReactionPillSpec {
+    text: String,
+    mine: bool,
+    emoji: String,
+}
+
+/// The pills a post paints, in the shared tally's order (`feed.md` § Layout &
+/// flow → *Reaction posts count and paint*, ruling 4): one per
+/// [`fauna_feed::PostSummary::reactions`] group with a live count, the
+/// viewer's own (`viewer_react_id` present) marked; the filter is the shared
+/// [`PostSummary::paintable_reactions`].
+fn reaction_pill_specs(post: &PostSummary) -> Vec<ReactionPillSpec> {
+    post.paintable_reactions()
+        .into_iter()
+        .map(|g| ReactionPillSpec {
+            text: format!("{} {}", g.emoji, g.count),
+            mine: g.viewer_react_id.is_some(),
+            emoji: g.emoji.clone(),
+        })
+        .collect()
+}
+
+/// The `post-reaction-pill` row under a post's interaction bar (and in the
+/// post detail): one tap-to-toggle button per tally group — the feed twin of
+/// the DM bubble's `dm-reaction-pill`. The viewer's own pill carries the
+/// `dm-reaction-pill-mine` highlight and the `state` test-attr `on`/`off`;
+/// a tap is the shared `FeedManager::react` toggle through
+/// [`FaunaClient::interact_with_post`]. `None` when the post paints no pill.
+/// The card is rebuilt on every manager notify, so a pill is never stale.
+pub(super) fn build_reaction_pills(
+    post: &PostSummary,
+    manager: &Arc<LinuxFeedManager>,
+    client: &Rc<FaunaClient>,
+) -> Option<gtk::Box> {
+    let specs = reaction_pill_specs(post);
+    if specs.is_empty() {
+        return None;
+    }
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+    row.set_halign(gtk::Align::Start);
+    row.set_margin_top(2);
+    for spec in specs {
+        let pill = gtk::Button::with_label(&spec.text);
+        pill.add_css_class("dm-reaction-pill");
+        if spec.mine {
+            pill.add_css_class("dm-reaction-pill-mine");
+        }
+        crate::testid::set_test_id(&pill, ids::POST_REACTION_PILL);
+        crate::testid::set_test_attr(&pill, "state", if spec.mine { "on" } else { "off" });
+        crate::offline_gate::declare_wire_kind(&pill, "fauna.posts.create");
+        let c = Rc::clone(client);
+        let m = Arc::clone(manager);
+        let pid = post.post_id.clone();
+        let emoji = spec.emoji;
+        pill.connect_clicked(move |_| {
+            c.interact_with_post(&m, &pid, "react", Some(&emoji));
+        });
+        row.append(&pill);
+    }
+    Some(row)
+}
+
 /// Build a post card row from a snapshot [`PostSummary`]. A post whose text
 /// matches the user's muted words renders the collapse-to-placeholder arm
 /// (topic-factors.md § Scoring — a mute collapses everywhere, chronological
@@ -2337,6 +2531,11 @@ fn build_post_card(
     // The scope test-id rides `widget_name` so the in-process automation agent
     // resolves `post-card` / `post-card[i]`; detail-view lookup + actions use
     // the row's *index* into `snapshot.posts` (rows are appended 1:1).
+    // It rides `widget_name` ALONE — deliberately no matching tooltip. This row
+    // used to set one, which cost a synchronous X round trip per card at render
+    // time and popped up the word `post-card` at a hovering user; the
+    // accessible Description below carries the id for AT-SPI. `walk.rs`'s I8
+    // holds the line.
     row.set_widget_name("post-card");
     // The row carries its own post identity for the engagement-cue viewport
     // observer (`feed::viewport`): rows are destroyed + rebuilt on every
@@ -2374,7 +2573,7 @@ fn build_post_card(
         let error_label_c = error_label.clone();
         // Weak: the row owns this closure through its child.
         let row_weak = glib::object::ObjectExt::downgrade(&row);
-        row.set_child(Some(&withheld.placeholder_box(move || {
+        row.set_child(Some(&withheld.placeholder_box(false, move || {
             REVEALED_CONTENT_POSTS.with(|s| s.borrow_mut().insert(post_c.post_id.clone()));
             if let Some(row) = row_weak.upgrade() {
                 row.update_property(&[
@@ -2688,6 +2887,31 @@ pub(crate) fn wire_author_door(label: &gtk::Label, client: &Rc<FaunaClient>, pos
     label.set_cursor_from_name(Some("pointer"));
 }
 
+/// The folded archive comments under an imported post — owner-only context
+/// from the owner's own archive, never published (`archive-import.md` § What
+/// each category becomes → *Placement under the owner's own post*). The shared
+/// [`PostSummary::archive_comments`] is filled only on the owner's own
+/// archive-origin posts; anything else paints nothing. tui's
+/// `archive_comment_elements` is the same shape.
+fn append_archive_comments(vbox: &gtk::Box, post: &PostSummary) {
+    if post.archive_comments.is_empty() {
+        return;
+    }
+    let list = gtk::Box::new(gtk::Orientation::Vertical, 2);
+    list.set_margin_start(12);
+    crate::testid::set_test_id(&list, ids::POST_ARCHIVE_COMMENTS);
+    for c in &post.archive_comments {
+        let item = gtk::Label::new(Some(&format!("{}: {}", c.author_name, c.text)));
+        item.set_halign(gtk::Align::Start);
+        item.set_wrap(true);
+        item.set_xalign(0.0);
+        item.add_css_class("caption");
+        crate::testid::set_test_id(&item, ids::POST_ARCHIVE_COMMENT_ITEM);
+        list.append(&item);
+    }
+    vbox.append(&list);
+}
+
 /// Build the full post-card body: author + badges + metadata + body (markdown
 /// blockquotes) + tag chips + the embedded quoted-post + media image + link
 /// preview, the ⋯ overflow (training verbs), and Reply / Repost / Quote / Like
@@ -2710,7 +2934,7 @@ fn build_post_card_body(
     // A REPOST ROW (feed.md § Interaction bar → Repost, ratified 2026-08-10):
     // attribution + the embedded original, no interaction bar of its own — the
     // repost post is empty by construction, so its own bar would be all zeros.
-    let is_repost_row = post.reposted_post_id.is_some();
+    let is_repost_row = post.is_repost_row();
 
     // Top line: author + source badge + metadata badges + timestamp.
     let top_line = gtk::Box::new(gtk::Orientation::Horizontal, 8);
@@ -2939,6 +3163,7 @@ fn build_post_card_body(
         });
     }
     append_tag_chips(&vbox, &post.tags);
+    append_archive_comments(&vbox, post);
 
     // Embedded quoted post (`quoted-post`) + media image (`post-image`) paint
     // from the post `document` (render-model.md § D6): the walker above already
@@ -3062,6 +3287,12 @@ fn build_post_card_body(
         bottom_line.append(&quote_btn);
 
         vbox.append(&bottom_line);
+
+        // The per-emoji reaction pills under the bar (none on a repost row —
+        // this arm — or a bluesky row; `build_reaction_pills`).
+        if let Some(pills) = build_reaction_pills(post, manager, client) {
+            vbox.append(&pills);
+        }
 
         // Reply → compose dialog.
         {
@@ -3203,20 +3434,13 @@ fn build_post_actions_button(
             let pid = post.post_id.clone();
             let target = target.clone();
             let pop = popover.clone();
-            let error_label = error_label.clone();
             item.connect_clicked(move |it| {
                 pop.popdown();
                 match &target {
-                    Some(factor) => dispatch_train(
-                        &m,
-                        &rt,
-                        pid.clone(),
-                        factor.clone(),
-                        verb,
-                        marked,
-                        &error_label,
-                    ),
-                    None => open_train_target_sheet(it, &m, &rt, pid.clone(), verb, &error_label),
+                    Some(factor) => {
+                        dispatch_train(&m, &rt, pid.clone(), factor.clone(), verb, marked)
+                    }
+                    None => open_train_target_sheet(it, &m, &rt, pid.clone(), verb),
                 }
             });
         }
@@ -3596,9 +3820,10 @@ fn dispatch_web_paywall_mint(
 
 /// Run a training gesture on the tokio runtime: the marked verb again ⇒
 /// un-train (the inverse delta), anything else ⇒ train (the manager applies
-/// forward / flip semantics). An `Err` resolves through `feed::error_train`
-/// into the page `error-message` (the manager's snapshot error only carries
-/// its own load-path failures).
+/// forward / flip semantics). A refusal needs no bridge here: the manager
+/// reports it as its own page error (`feed.error_train` on `snapshot.error`)
+/// and notifies, so `render_posts` paints it on `error-message` — the one slot,
+/// which a paint from this callback would only race.
 fn dispatch_train(
     manager: &Arc<LinuxFeedManager>,
     rt: &Handle,
@@ -3606,10 +3831,8 @@ fn dispatch_train(
     factor: String,
     verb: TrainVerb,
     already_marked: bool,
-    error_label: &gtk::Label,
 ) {
     let m = Arc::clone(manager);
-    let error_label = error_label.clone();
     crate::async_helper::spawn_with_snapshot(
         rt,
         move || async move {
@@ -3619,11 +3842,7 @@ fn dispatch_train(
                 m.train_post(post_id, factor, verb).await.map(|_| ())
             }
         },
-        move |result: Result<(), String>| {
-            if let Err(msg) = result {
-                crate::settings::render_error_label(&error_label, Some(&feed::error_train(&msg)));
-            }
-        },
+        move |_result: Result<(), String>| {},
     );
 }
 
@@ -3643,7 +3862,6 @@ fn open_train_target_sheet(
     rt: &Handle,
     post_id: String,
     verb: TrainVerb,
-    error_label: &gtk::Label,
 ) {
     let toplevel = anchor
         .as_ref()
@@ -3667,7 +3885,6 @@ fn open_train_target_sheet(
     let m = Arc::clone(manager);
     let rt_for_rows = rt.clone();
     let anchor: gtk::Widget = anchor.as_ref().clone();
-    let error_label = error_label.clone();
     crate::async_helper::spawn_with_snapshot(
         rt,
         move || async move {
@@ -3698,18 +3915,9 @@ fn open_train_target_sheet(
                 let m = Arc::clone(&m);
                 let rt = rt_for_rows.clone();
                 let post_id = post_id.clone();
-                let error_label = error_label.clone();
                 let dialog = dialog.clone();
                 item.connect_clicked(move |_| {
-                    dispatch_train(
-                        &m,
-                        &rt,
-                        post_id.clone(),
-                        key.clone(),
-                        verb,
-                        marked,
-                        &error_label,
-                    );
+                    dispatch_train(&m, &rt, post_id.clone(), key.clone(), verb, marked);
                     dialog.close();
                 });
                 sheet.append(&item);
@@ -4158,6 +4366,36 @@ mod tests {
         assert_eq!(gone.index_of(&before.answer(1)), 0);
     }
 
+    /// The reaction pills follow the shared tally in order — emoji + count, the
+    /// viewer's own marked — and a bluesky row paints none (`feed.md` § Reaction
+    /// posts count and paint, rulings 4–5).
+    #[test]
+    fn reaction_pill_specs_follow_the_tally_and_skip_bluesky() {
+        let group = |emoji: &str, count: i64, mine: bool| fauna_feed::PostReactionGroup {
+            emoji: emoji.to_string(),
+            count,
+            viewer_react_id: mine.then(|| "ab".repeat(32)),
+        };
+        let mut post = fauna_feed::PostSummary {
+            source: "fauna".to_string(),
+            reactions: vec![
+                group("\u{2764}\u{fe0f}", 2, false),
+                group("\u{1f525}", 1, true),
+            ],
+            ..Default::default()
+        };
+        let specs = reaction_pill_specs(&post);
+        let texts: Vec<&str> = specs.iter().map(|s| s.text.as_str()).collect();
+        assert_eq!(texts, ["\u{2764}\u{fe0f} 2", "\u{1f525} 1"]);
+        assert_eq!(
+            specs.iter().map(|s| s.mine).collect::<Vec<_>>(),
+            [false, true]
+        );
+        assert_eq!(specs[1].emoji, "\u{1f525}");
+        post.source = "bluesky".to_string();
+        assert!(reaction_pill_specs(&post).is_empty());
+    }
+
     /// An interaction button shows its count and carries its ui.yaml test-id when
     /// the count is non-zero (feed.md § Interaction bar — icon + count).
     #[test]
@@ -4437,6 +4675,73 @@ mod tests {
                 compose.error.map(|e| e.key).as_deref(),
                 Some("feed.compose_gate_no_key"),
                 "an unresolvable tier fails the submit closed"
+            );
+        });
+    }
+
+    /// An open ⋯ flyout survives a repaint: the cards wait for it to close, then
+    /// paint the newest snapshot. Every manager notify used to rebuild every
+    /// card at once, so a resolve landing while the user had a post's menu open
+    /// destroyed the menu, and a delete they had just armed with it — the store
+    /// reviewer journey's own-post delete on a cold feed.
+    #[test]
+    fn an_open_post_menu_outlives_a_repaint() {
+        on_private_context(|ctx| {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("a runtime for the cards' lazy resolves");
+            let manager = offline_manager();
+            let (client, _rx) = offline_client();
+            let list = gtk::ListBox::new();
+            let window = gtk::Window::new();
+            window.set_child(Some(&list));
+            window.set_visible(true);
+            let error_label = gtk::Label::new(None);
+            let post = |id: &str| fauna_feed::PostSummary {
+                post_id: id.to_string(),
+                ..Default::default()
+            };
+            let rows = |list: &gtk::ListBox| {
+                let mut n = 0;
+                while list.row_at_index(n).is_some() {
+                    n += 1;
+                }
+                n
+            };
+            let one = FeedSnapshot {
+                posts: vec![post("aa")],
+                ..Default::default()
+            };
+            paint_post_cards(&list, &one, &manager, &client, rt.handle(), &error_label);
+            assert_eq!(rows(&list), 1);
+
+            let button =
+                crate::automation::find::find_in(list.upcast_ref(), ids::FEED_POST_ACTIONS_BUTTON)
+                    .expect("the card has its ⋯ button");
+            let menu = std::iter::successors(button.first_child(), |w| w.next_sibling())
+                .find_map(|w| w.downcast::<gtk::Popover>().ok())
+                .expect("the ⋯ button carries its flyout");
+            menu.popup();
+            assert!(menu.is_visible(), "the flyout opened");
+
+            let two = FeedSnapshot {
+                posts: vec![post("aa"), post("bb")],
+                ..Default::default()
+            };
+            paint_post_cards(&list, &two, &manager, &client, rt.handle(), &error_label);
+            assert!(
+                menu.is_visible() && button.is_ancestor(&list),
+                "a repaint under an open ⋯ flyout tore it down"
+            );
+            assert_eq!(rows(&list), 1, "the cards wait for the flyout to close");
+
+            menu.popdown();
+            while ctx.iteration(false) {}
+            assert_eq!(
+                rows(&list),
+                2,
+                "once the flyout closed, the newest snapshot painted"
             );
         });
     }

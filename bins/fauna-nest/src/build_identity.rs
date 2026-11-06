@@ -10,9 +10,16 @@
 //! **The two fields are stamped by deliberately different mechanisms, and the
 //! asymmetry is the point:**
 //!
-//! - [`commit`] is a **source** fact, baked at **compile time** (`option_env!`,
-//!   `Dockerfile`'s `rust-native` stage sets `FAUNA_BUILD_COMMIT` before
-//!   `cargo build`). It cannot be changed by how the container is run.
+//! - [`commit`] is a **source** fact, fixed at **compile time** — of the
+//!   BINARY, never of this library: each binary that embeds the nest expands
+//!   `fauna_build_commit::commit!()` in its own crate and hands the value here
+//!   through [`stamp`] first thing in `main` (`Dockerfile`'s `rust-native`
+//!   stage sets `FAUNA_BUILD_COMMIT` before `cargo build`). It is handed over,
+//!   never read at runtime, so it cannot be changed by how the container is
+//!   run. Why the binary and not here: a library that reads the stamp has the
+//!   checkout's `HEAD` among its inputs, so it recompiles at every commit, a
+//!   docs-only one included, and misses every compile cache between two
+//!   checkouts (`docs/goal/ui/status.md` § State & data shape, the build leg).
 //! - [`build_id`] is an **artifact** fact, read at **runtime** from the image
 //!   config's `FAUNA_BUILD_ID` env (`Dockerfile`'s final stage). Runtime is the
 //!   correct seam for three reasons: the value changes on *every* build, so a
@@ -32,12 +39,24 @@
 //! less than the `commit` beside it: a CI run number reveals nothing about the
 //! source that `commit` does not already reveal.
 
-/// The commit this binary was compiled from, or `"dev"` for a local build.
+/// The commit this binary was compiled from, or `"dev"` when it carries none —
+/// an unstamped build (a source tarball), or a process whose `main` never
+/// called [`stamp`] (a test harness embedding the library).
 ///
 /// Prefix-tolerant on the consuming side: workflow builds stamp the full
 /// 40-char sha, `just docker-push-dev` the short 8.
 pub fn commit() -> &'static str {
-    option_env!("FAUNA_BUILD_COMMIT").unwrap_or("dev")
+    COMMIT.get().copied().flatten().unwrap_or("dev")
+}
+
+static COMMIT: std::sync::OnceLock<Option<&'static str>> = std::sync::OnceLock::new();
+
+/// Hand the library the commit the running binary was compiled from — the
+/// binary's own `fauna_build_commit::commit!()` — before anything can serve
+/// health. Every binary that embeds the nest calls it first thing in `main`;
+/// a second call is ignored, so the value cannot change under a running box.
+pub fn stamp(commit: Option<&'static str>) {
+    let _ = COMMIT.set(commit);
 }
 
 /// The individual build that produced this artifact, or `"dev"` when nothing
@@ -194,6 +213,19 @@ mod tests {
             identity_json("ok", None)["binaries"]["fauna-nest"],
             own.as_str()
         );
+    }
+
+    /// The only test in this binary that stamps: every other one reads
+    /// `commit()` without asserting it, so the process-wide value is this
+    /// test's alone.
+    #[test]
+    fn the_commit_is_dev_until_the_binary_stamps_it_and_then_fixed() {
+        assert_eq!(commit(), "dev");
+        stamp(Some("4c1b9f5262"));
+        assert_eq!(commit(), "4c1b9f5262");
+        assert_eq!(identity_json("ok", None)["commit"], "4c1b9f5262");
+        stamp(Some("a later stamp is ignored"));
+        assert_eq!(commit(), "4c1b9f5262");
     }
 
     #[test]

@@ -1,7 +1,10 @@
 using System;
+using System.IO;
+using System.Linq;
 using System.Runtime.InteropServices;
 using System.Text;
 using FaunaApp.Core.Services;
+using uniffi.fauna_ffi;
 using Xunit;
 
 namespace FaunaApp.Tests;
@@ -19,19 +22,64 @@ namespace FaunaApp.Tests;
 /// shares no code with the writer — rather than through the backend's own
 /// <c>Get</c>.</para>
 ///
+/// <para>A red names the step that went wrong (convention 6): each step is
+/// checked against the row Windows holds, and the message carries the shared
+/// store's own warn lines for that row — the errors the backend swallows by
+/// contract.</para>
+///
 /// <para>Safe on any windows session, like the crate's own
 /// <c>win_credman::tests::round_trip_and_namespace_sweep</c>: every row lives
-/// under a per-run probe namespace and is removed in a <c>finally</c>, so the
-/// real <c>fauna-*</c> namespaces are never touched.</para>
+/// under a per-run probe namespace, so the real <c>fauna-*</c> namespaces are
+/// never touched, and is removed in a <c>finally</c> that checks it is gone —
+/// a probe row left behind is the developer's to carry, and enough of them
+/// fill the per-user store.</para>
 /// </summary>
 public class SharedSecretBackendTests
 {
-    private const string User = "fauna";
     private const uint CredTypeGeneric = 1;
     private const uint CredPersistLocalMachine = 2;
 
     private static string ProbeNamespace() =>
         $"fauna-credman-cs-probe-{Environment.ProcessId}-{Guid.NewGuid():N}";
+
+    /// <summary>Make sure the shared log ring is installed, so the store's warn
+    /// lines reach <see cref="FaunaFfiMethods.LogSnapshot"/>. Idempotent at the
+    /// Rust layer, as <c>ShellLogTests</c> relies on.</summary>
+    private static void EnsureRingInstalled()
+    {
+        try { FaunaFfiMethods.InstallLogging(Path.Combine(Path.GetTempPath(), "fauna-shelllog-test")); }
+        catch { /* already installed this run — the global subscriber persists */ }
+    }
+
+    /// <summary>
+    /// Fail with <paramref name="step"/> unless Windows holds a row of exactly
+    /// <paramref name="expectedBytes"/> at <paramref name="target"/> (<c>null</c>:
+    /// no row).
+    /// </summary>
+    private static void AssertRow(string target, int? expectedBytes, string step)
+    {
+        var actual = NativeCredential.Read(target)?.Blob.Length;
+        if (actual == expectedBytes) return;
+        var logged = FaunaFfiMethods.LogSnapshot()
+            .Where(e => e.message.Contains(target))
+            .Select(e => $"  [{e.level}] {e.message}")
+            .ToList();
+        Assert.Fail(
+            $"{step}: Credential Manager holds {Describe(actual)} at {target}, expected {Describe(expectedBytes)}. "
+            + (logged.Count == 0
+                ? "The shared store logged nothing for it."
+                : "The shared store logged:" + Environment.NewLine + string.Join(Environment.NewLine, logged)));
+    }
+
+    private static string Describe(int? bytes) => bytes is { } n ? $"a {n}-byte row" : "no row";
+
+    /// <summary>Delete the probe row, and make sure it is gone even when the
+    /// backend's own delete did not take.</summary>
+    private static void RemoveProbeRow(SharedSecretBackend backend, string key, string target)
+    {
+        backend.Delete(key);
+        if (NativeCredential.Read(target) is not null) NativeCredential.Delete(target);
+    }
 
     /// <summary>
     /// A row is one generic credential named <c>"{namespace}/{key}"</c>, its
@@ -42,40 +90,43 @@ public class SharedSecretBackendTests
     [Fact]
     public void ARowIsAGenericCredentialThatDoesNotRoam()
     {
+        EnsureRingInstalled();
         var ns = ProbeNamespace();
         var backend = new SharedSecretBackend(ns);
         const string key = "fauna/index";
+        var target = $"{ns}/{key}";
         const string value = "värde-ä-1";
         try
         {
-            Assert.Null(backend.Get(key, User));
-            Assert.Null(NativeCredential.Read($"{ns}/{key}"));
+            Assert.Null(backend.Get(key));
+            AssertRow(target, null, "a fresh probe namespace already holds the row");
 
-            backend.Set(key, User, value);
+            backend.Set(key, value);
 
-            Assert.Equal(value, backend.Get(key, User));
-            var row = NativeCredential.Read($"{ns}/{key}");
+            AssertRow(target, Encoding.UTF8.GetByteCount(value), "the write did not land");
+            Assert.Equal(value, backend.Get(key));
+            var row = NativeCredential.Read(target);
             Assert.NotNull(row);
-            Assert.Equal($"{ns}/{key}", row!.TargetName);
+            Assert.Equal(target, row!.TargetName);
             Assert.Equal(CredTypeGeneric, row.Type);
             Assert.Equal(CredPersistLocalMachine, row.Persist);
             Assert.Equal(Encoding.UTF8.GetBytes(value), row.Blob);
 
             // Replace, not append; and an empty value is a real, empty row.
-            backend.Set(key, User, "value-2");
-            Assert.Equal("value-2", backend.Get(key, User));
-            backend.Set(key, User, "");
-            Assert.Equal("", backend.Get(key, User));
+            backend.Set(key, "value-2");
+            Assert.Equal("value-2", backend.Get(key));
+            backend.Set(key, "");
+            Assert.Equal("", backend.Get(key));
 
-            backend.Delete(key, User);
-            Assert.Null(backend.Get(key, User));
-            Assert.Null(NativeCredential.Read($"{ns}/{key}"));
+            backend.Delete(key);
+            AssertRow(target, null, "the row survived its Delete");
+            Assert.Null(backend.Get(key));
             // Deleting an absent row is a quiet no-op.
-            backend.Delete(key, User);
+            backend.Delete(key);
         }
         finally
         {
-            backend.Delete(key, User);
+            RemoveProbeRow(backend, key, target);
         }
     }
 
@@ -86,23 +137,31 @@ public class SharedSecretBackendTests
     [Fact]
     public void AValueOverTheCapDoesNotLand()
     {
+        EnsureRingInstalled();
         var ns = ProbeNamespace();
         var backend = new SharedSecretBackend(ns);
         const string key = "fauna/index";
+        var target = $"{ns}/{key}";
         var atCap = new string('x', 2560);
         var overCap = new string('x', 2561);
         try
         {
-            backend.Set(key, User, atCap);
-            Assert.Equal(atCap, backend.Get(key, User));
-            backend.Delete(key, User);
+            backend.Set(key, atCap);
+            AssertRow(target, 2560, "the at-cap write did not land");
+            Assert.Equal(atCap, backend.Get(key));
 
-            backend.Set(key, User, overCap);
-            Assert.Null(backend.Get(key, User));
+            // The over-cap step must start from no row: a Delete that did not
+            // take would otherwise read back as an over-cap write that did.
+            backend.Delete(key);
+            AssertRow(target, null, "the at-cap row survived its Delete");
+
+            backend.Set(key, overCap);
+            AssertRow(target, null, "the over-cap write landed");
+            Assert.Null(backend.Get(key));
         }
         finally
         {
-            backend.Delete(key, User);
+            RemoveProbeRow(backend, key, target);
         }
     }
 
@@ -131,6 +190,12 @@ public class SharedSecretBackendTests
 
         [DllImport("advapi32.dll")]
         private static extern void CredFree(IntPtr buffer);
+
+        [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern bool CredDeleteW(string target, uint type, uint flags);
+
+        /// <summary>Delete the generic credential named <paramref name="target"/> — cleanup only.</summary>
+        internal static void Delete(string target) => CredDeleteW(target, CredTypeGeneric, 0);
 
         /// <summary>The generic credential named <paramref name="target"/>, or <c>null</c> when there is none.</summary>
         internal static NativeCredential? Read(string target)

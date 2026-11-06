@@ -46,12 +46,16 @@ struct AdminDashboardView: View {
         // The cards are the shared fold's (admin.md § 1. Dashboard → *The card
         // set*); macOS keeps only its own card-grid layout shell (a phone-wrong
         // 4-col grid).
-        LazyVGrid(columns: [
-            GridItem(.flexible()),
-            GridItem(.flexible()),
-            GridItem(.flexible()),
-            GridItem(.flexible()),
-        ], spacing: 16) {
+        //
+        // Every card in a row is top-aligned and reserves the same lines for its
+        // value and label, so a long value (the Mail card's "Mail: mail service
+        // not connected") wraps inside its reserved lines instead of making its
+        // card taller. A taller card re-centred its row-mates, so the values'
+        // and the labels' on-screen order (what the indexed
+        // `admin-stat-card-value[i]`/`-label[i]` reads follow) stopped agreeing.
+        LazyVGrid(columns: Array(
+            repeating: GridItem(.flexible(), alignment: .top), count: 4
+        ), spacing: 16) {
             ForEach(dashboardStatItems(snapshot)) { item in
                 StatCard(item: item)
             }
@@ -66,11 +70,15 @@ private struct StatCard: View {
         VStack(spacing: 8) {
             automationText(Ids.adminStatCardValue, item.value)
                 .font(.title3.bold())
+                .multilineTextAlignment(.center)
+                .lineLimit(3, reservesSpace: true)
             automationText(Ids.adminStatCardLabel, item.label)
                 .font(.caption)
                 .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .lineLimit(2, reservesSpace: true)
         }
-        .frame(maxWidth: .infinity)
+        .frame(maxWidth: .infinity, alignment: .top)
         .padding(16)
         .background(.background.secondary)
         .clipShape(RoundedRectangle(cornerRadius: 12))

@@ -87,54 +87,54 @@ Stamped 2026-09-23 at 039e9619ca.
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ⚠ partial | 0.1.2-dev+74e26248 standalone |
-| linux | ⚠ partial | 0.1.2-dev+74e26248 standalone |
-| windows | ⚠ partial | 0.1.2-dev+74e26248 standalone |
-| macos | ⚠ partial | 0.1.2-dev+74e26248 standalone |
-| ios | ⚠ partial | 0.1.2-dev+74e26248 standalone |
+| web | ✅ full | 0.1.5-dev+c9e7fe5d standalone |
+| linux | ✅ full | 0.1.5-dev+c9e7fe5d standalone |
+| windows | ⚠ partial | 0.1.5-dev+c9e7fe5d standalone |
+| macos | ✅ full | 0.1.5-dev+3f9f2b95 standalone |
+| ios | ✅ full | 0.1.5-dev+c9e7fe5d standalone |
 | android |  no run recorded | |
-| tui | ✅ full | 0.1.2-dev+74e26248 standalone |
+| tui | ✅ full | 0.1.5-dev+390d61b5 standalone |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
 | 1 | app | `tests/e2e-unified/tests/test_settings.py::test_email_filter_crud` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 1 | app | `tests/e2e-unified/tests/test_settings.py::test_email_filter_edit` | web (linux): failed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 1 | app | `tests/e2e-unified/tests/platform/bridge/test_email_filter_crud.py::test_email_filter_create_and_delete` | — |
+| 1 | app | `tests/e2e-unified/tests/test_settings.py::test_email_filter_edit` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 1 | app | `tests/e2e-unified/tests/platform/bridge/test_email_filter_crud.py::test_email_filter_create_and_delete` | web (linux): passed |
 | 1 | app | `tests/e2e-unified/tests/test_email_filter_nav_readiness.py::test_filter_edit_visible_correct_under_slow_load` | windows (windows): failed |
-| 2 | nest | `tests/e2e-unified/tests/test_mail_bridge_filter_delivery.py::test_delivery_time_filters_route_to_folders` | nest (linux): passed |
-| 2 | nest | `tests/e2e-unified/tests/test_mail_bridge_filter_delivery.py::test_reject_single_recipient_refuses_at_data` | nest (linux): passed |
-| 2 | nest | `tests/e2e-unified/tests/test_mail_bridge_filter_delivery.py::test_reject_multi_recipient_drops_without_dsn` | nest (linux): passed |
-| 2 | nest | `tests/e2e-unified/tests/test_mail_bridge_filter_delivery.py::test_autoreply_sends_once_then_rate_limited` | nest (linux): passed |
-| 2 | nest | `tests/e2e-unified/tests/test_mail_bridge_filter_delivery.py::test_autoreply_suppressed_by_loop_guard` | nest (linux): passed |
-| 2 | nest | `tests/e2e-unified/tests/api/test_contacts_api.py::test_email_filter_api` | nest (linux): passed |
-| 3 | nest | `tests/e2e-unified/tests/test_mail_bridge_mta.py::test_inbound_forward_all_enqueues_forwarded_outbound_row` | nest (linux): passed |
-| 3 | nest | `tests/e2e-unified/tests/test_mail_bridge_mta.py::test_inbound_forward_all_dispatches_under_srs` | nest (linux): passed |
-| 3 | nest | `tests/e2e-unified/tests/test_mail_bridge_mta.py::test_inbound_srs_bounce_routes_to_forwarder` | nest (linux): passed |
-| 3 | nest | `tests/e2e-unified/tests/test_mail_bridge_mta.py::test_forward_rate_cap_suppresses_over_cap_forward_and_notifies` | nest (linux): passed |
-| 4 | app | `tests/e2e-unified/tests/test_settings.py::test_email_filter_files_labels_and_replies_from_the_form` | web (linux): passed, linux (linux): passed, tui (linux): passed |
-| 4 | app | `tests/e2e-unified/tests/test_settings.py::test_email_filter_forward_keeps_its_copy_mode_through_an_edit` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
-| 5 | app | `tests/e2e-unified/tests/test_settings.py::test_email_filter_matches_a_header_value_or_the_spam_score` | web (linux): passed, linux (linux): passed, tui (linux): passed |
-| 5 | app | `tests/e2e-unified/tests/test_settings.py::test_email_filter_edit` | web (linux): failed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 6 | app | `tests/e2e-unified/tests/test_settings.py::test_email_filter_order_and_continue_are_set_from_the_form` | web (linux): passed, linux (linux): passed, tui (linux): passed |
-| 7 | app | `tests/e2e-unified/tests/test_settings.py::test_email_filter_the_form_cannot_show_is_listed_but_never_opens` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
-| 7 | app | `tests/e2e-unified/tests/test_settings.py::test_email_filter_forward_keeps_its_copy_mode_through_an_edit` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
-| 8 | app | `tests/e2e-unified/tests/test_settings.py::test_email_filter_forward_keeps_its_copy_mode_through_an_edit` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
-| 9 | app | `tests/e2e-unified/tests/test_mail_forwarding_settings.py::test_forward_all_mail_is_set_and_stopped_from_settings` | web (linux): passed, linux (linux): failed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 10 | app | `tests/e2e-unified/tests/test_mail_forwarding_settings.py::test_your_own_hourly_forwarding_limit_is_set_from_settings` | web (linux): passed, linux (linux): failed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 11 | app | `tests/e2e-unified/tests/test_mail_account_settings.py::test_an_automatic_reply_is_turned_on_with_its_message_and_off_again` | web (linux): passed, linux (linux): passed, tui (linux): passed |
-| 12 | nest | `tests/e2e-unified/tests/test_mail_bridge_filter_delivery.py::test_delivery_time_filters_route_to_folders` | nest (linux): passed |
-| 13 | nest | `tests/e2e-unified/tests/test_mail_bridge_filter_delivery.py::test_delivery_time_filters_route_to_folders` | nest (linux): passed |
-| 14 | nest | `tests/e2e-unified/tests/test_mail_bridge_filter_delivery.py::test_delivery_time_filters_route_to_folders` | nest (linux): passed |
-| 15 | nest | `tests/e2e-unified/tests/test_mail_spam_threshold_override.py::test_allow_rule_keeps_a_senders_mail_in_the_inbox_past_every_scoring_pass` | nest (linux): passed |
-| 16 | nest | `tests/e2e-unified/tests/test_mail_bridge_filter_delivery.py::test_file_into_sent_drafts_or_held_refused_at_create_and_placement` | nest (linux): passed |
-| 17 | nest | `tests/e2e-unified/tests/test_mail_bridge_filter_delivery.py::test_forward_rule_loop_suppressed_keeps_local_copy` | nest (linux): passed |
-| 17 | nest | `tests/e2e-unified/tests/test_mail_bridge_filter_delivery.py::test_forward_rule_redirect_forwards_without_local_copy` | nest (linux): passed |
-| 18 | nest | `tests/e2e-unified/tests/test_mail_bridge_mta.py::test_forwarded_permfail_seals_dsn_to_forwarder_inbox_no_relay` | nest (linux): passed |
-| 19 | nest | `tests/e2e-unified/tests/test_mail_bridge_filter_delivery.py::test_forward_rule_loop_suppressed_keeps_local_copy` | nest (linux): passed |
-| 20 | nest | `tests/e2e-unified/tests/test_mail_bridge_filter_delivery.py::test_forward_rule_never_forwards_a_bounce` | nest (linux): passed |
-| 21 | nest | `tests/e2e-unified/tests/test_mail_bridge_filter_delivery.py::test_forward_all_to_a_hosted_domain_is_refused` | nest (linux): passed |
-| 22 | nest | `tests/e2e-unified/tests/test_mail_bridge_forward_floors.py::test_forward_over_the_hourly_cap_waits_and_goes_out_later` | nest (linux): passed |
-| 23 | nest | `tests/e2e-unified/tests/test_mail_bridge_mta.py::test_forward_rate_cap_suppresses_over_cap_forward_and_notifies` | nest (linux): passed |
-| 24 | nest | `tests/e2e-unified/tests/test_mail_bridge_forward_floors.py::test_a_failing_forward_bounces_to_its_owner_once_per_message_a_week` | nest (linux): passed |
-| 25 | nest | `tests/e2e-unified/tests/test_mail_bridge_forward_floors.py::test_forwarded_mail_keeps_its_sender_and_signature` | nest (linux): passed |
+| 2 | nest | `tests/e2e-unified/tests/test_mail_bridge_filter_delivery.py::test_delivery_time_filters_route_to_folders` | nest (linux): passed, nest (macos): passed |
+| 2 | nest | `tests/e2e-unified/tests/test_mail_bridge_filter_delivery.py::test_reject_single_recipient_refuses_at_data` | nest (linux): passed, nest (macos): passed |
+| 2 | nest | `tests/e2e-unified/tests/test_mail_bridge_filter_delivery.py::test_reject_multi_recipient_drops_without_dsn` | nest (linux): passed, nest (macos): passed |
+| 2 | nest | `tests/e2e-unified/tests/test_mail_bridge_filter_delivery.py::test_autoreply_sends_once_then_rate_limited` | nest (linux): passed, nest (macos): passed |
+| 2 | nest | `tests/e2e-unified/tests/test_mail_bridge_filter_delivery.py::test_autoreply_suppressed_by_loop_guard` | nest (linux): passed, nest (macos): passed |
+| 2 | nest | `tests/e2e-unified/tests/api/test_contacts_api.py::test_email_filter_api` | nest (linux): passed, nest (macos): passed |
+| 3 | nest | `tests/e2e-unified/tests/test_mail_bridge_mta.py::test_inbound_forward_all_enqueues_forwarded_outbound_row` | nest (linux): passed, nest (macos): passed |
+| 3 | nest | `tests/e2e-unified/tests/test_mail_bridge_mta.py::test_inbound_forward_all_dispatches_under_srs` | nest (linux): passed, nest (macos): passed |
+| 3 | nest | `tests/e2e-unified/tests/test_mail_bridge_mta.py::test_inbound_srs_bounce_routes_to_forwarder` | nest (linux): passed, nest (macos): passed |
+| 3 | nest | `tests/e2e-unified/tests/test_mail_bridge_mta.py::test_forward_rate_cap_suppresses_over_cap_forward_and_notifies` | nest (linux): passed, nest (macos): passed |
+| 4 | app | `tests/e2e-unified/tests/test_settings.py::test_email_filter_files_labels_and_replies_from_the_form` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 4 | app | `tests/e2e-unified/tests/test_settings.py::test_email_filter_forward_keeps_its_copy_mode_through_an_edit` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 5 | app | `tests/e2e-unified/tests/test_settings.py::test_email_filter_matches_a_header_value_or_the_spam_score` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 5 | app | `tests/e2e-unified/tests/test_settings.py::test_email_filter_edit` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 6 | app | `tests/e2e-unified/tests/test_settings.py::test_email_filter_order_and_continue_are_set_from_the_form` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 7 | app | `tests/e2e-unified/tests/test_settings.py::test_email_filter_the_form_cannot_show_is_listed_but_never_opens` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 7 | app | `tests/e2e-unified/tests/test_settings.py::test_email_filter_forward_keeps_its_copy_mode_through_an_edit` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 8 | app | `tests/e2e-unified/tests/test_settings.py::test_email_filter_forward_keeps_its_copy_mode_through_an_edit` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 9 | app | `tests/e2e-unified/tests/test_mail_forwarding_settings.py::test_forward_all_mail_is_set_and_stopped_from_settings` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 10 | app | `tests/e2e-unified/tests/test_mail_forwarding_settings.py::test_your_own_hourly_forwarding_limit_is_set_from_settings` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 11 | app | `tests/e2e-unified/tests/test_mail_account_settings.py::test_an_automatic_reply_is_turned_on_with_its_message_and_off_again` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 12 | nest | `tests/e2e-unified/tests/test_mail_bridge_filter_delivery.py::test_delivery_time_filters_route_to_folders` | nest (linux): passed, nest (macos): passed |
+| 13 | nest | `tests/e2e-unified/tests/test_mail_bridge_filter_delivery.py::test_delivery_time_filters_route_to_folders` | nest (linux): passed, nest (macos): passed |
+| 14 | nest | `tests/e2e-unified/tests/test_mail_bridge_filter_delivery.py::test_delivery_time_filters_route_to_folders` | nest (linux): passed, nest (macos): passed |
+| 15 | nest | `tests/e2e-unified/tests/test_mail_spam_threshold_override.py::test_allow_rule_keeps_a_senders_mail_in_the_inbox_past_every_scoring_pass` | nest (linux): passed, nest (macos): passed |
+| 16 | nest | `tests/e2e-unified/tests/test_mail_bridge_filter_delivery.py::test_file_into_sent_drafts_or_held_refused_at_create_and_placement` | nest (linux): passed, nest (macos): passed |
+| 17 | nest | `tests/e2e-unified/tests/test_mail_bridge_filter_delivery.py::test_forward_rule_loop_suppressed_keeps_local_copy` | nest (linux): passed, nest (macos): passed |
+| 17 | nest | `tests/e2e-unified/tests/test_mail_bridge_filter_delivery.py::test_forward_rule_redirect_forwards_without_local_copy` | nest (linux): passed, nest (macos): passed |
+| 18 | nest | `tests/e2e-unified/tests/test_mail_bridge_mta.py::test_forwarded_permfail_seals_dsn_to_forwarder_inbox_no_relay` | nest (linux): passed, nest (macos): passed |
+| 19 | nest | `tests/e2e-unified/tests/test_mail_bridge_filter_delivery.py::test_forward_rule_loop_suppressed_keeps_local_copy` | nest (linux): passed, nest (macos): passed |
+| 20 | nest | `tests/e2e-unified/tests/test_mail_bridge_filter_delivery.py::test_forward_rule_never_forwards_a_bounce` | nest (linux): passed, nest (macos): passed |
+| 21 | nest | `tests/e2e-unified/tests/test_mail_bridge_filter_delivery.py::test_forward_all_to_a_hosted_domain_is_refused` | nest (linux): passed, nest (macos): passed |
+| 22 | nest | `tests/e2e-unified/tests/test_mail_bridge_forward_floors.py::test_forward_over_the_hourly_cap_waits_and_goes_out_later` | nest (linux): passed, nest (macos): passed |
+| 23 | nest | `tests/e2e-unified/tests/test_mail_bridge_mta.py::test_forward_rate_cap_suppresses_over_cap_forward_and_notifies` | nest (linux): passed, nest (macos): passed |
+| 24 | nest | `tests/e2e-unified/tests/test_mail_bridge_forward_floors.py::test_a_failing_forward_bounces_to_its_owner_once_per_message_a_week` | nest (linux): passed, nest (macos): passed |
+| 25 | nest | `tests/e2e-unified/tests/test_mail_bridge_forward_floors.py::test_forwarded_mail_keeps_its_sender_and_signature` | nest (linux): passed, nest (macos): passed |
 <!-- features-render:end -->

@@ -67,14 +67,15 @@ import Testing
 // MARK: - The approvals queue (family-safety.md § Reach approvals)
 
 private func approval(
-    kind: String, peerAddress: String = "", summary: String = "", peerHandle: String = ""
+    kind: String, peerAddress: String = "", summary: String = "", peerHandle: String = "",
+    createdAt: Int64 = 0
 ) -> FfiFamilyApprovalEntry {
     FfiFamilyApprovalEntry(
         supervisedActorId: Data(), supervisedHandle: "ward", kind: kind,
         peerActorId: Data(), peerAddress: peerAddress, messageId: Data(),
         summary: summary, peerHandle: peerHandle,
         // A `feed_source` item's key; empty for every other kind.
-        bridgeId: "", operation: "", target: "", createdAt: 0)
+        bridgeId: "", operation: "", target: "", createdAt: createdAt)
 }
 
 // The display-text DECISION itself (mail_hold → peerAddress vs. every other
@@ -102,6 +103,30 @@ private func approval(
 @Test func aContactRowRendersItsSummary() {
     let contact = approval(kind: "contact", summary: "alice wants to connect")
     #expect((approvalDisplayText(entry: contact) ?? L.family.approvalNoSender) == "alice wants to connect")
+}
+
+// The time half is shared Rust too (`approval_timestamp_display`: a `mail_hold`
+// with a stamp gets the conversation-timestamp bucket, every other kind and an
+// unset stamp none); these pin that the row joins it as "<sender> · <time>" and
+// shows the sender alone otherwise.
+
+@Test func aStampedMailHoldRowShowsSenderAndArrivalTime() {
+    let thenSecs: Int64 = 1_760_000_000
+    let hold = approval(
+        kind: "mail_hold", peerAddress: "stranger@example.com", createdAt: thenSecs)
+    let text = ValueFormat.approvalRowText(entry: hold, nowMs: thenSecs * 1000 + 60_000)
+    #expect(text.hasPrefix("stranger@example.com · "))
+    #expect(text.count > "stranger@example.com · ".count)
+}
+
+@Test func anUnstampedMailHoldRowShowsTheSenderAlone() {
+    let hold = approval(kind: "mail_hold", peerAddress: "stranger@example.com")
+    #expect(ValueFormat.approvalRowText(entry: hold, nowMs: 1_760_000_060_000) == "stranger@example.com")
+}
+
+@Test func aContactRowNeverShowsATime() {
+    let contact = approval(kind: "contact", summary: "alice wants to connect", createdAt: 1_760_000_000)
+    #expect(ValueFormat.approvalRowText(entry: contact, nowMs: 1_760_000_060_000) == "alice wants to connect")
 }
 
 // MARK: - The supervised side's read-only summary
@@ -211,4 +236,31 @@ private func approval(
     // must not collapse to `nil`.
     #expect(try parseDailyMinutes(input: "0") == UInt16(0))
     #expect(try parseDailyMinutes(input: "") == Optional<UInt16>.none)
+}
+
+// MARK: - Screen time's whole-window pre-validation (`savePolicy` calls the
+// shared `validateScreenTime` on the three parsed values before any request —
+// family-safety.md § Where logic lives, write validation)
+
+@Test func aHalfSetWindowIsRefusedBeforeTheSave() throws {
+    let start = try parseTimeOfDay(input: "08:00")
+    let end = try parseTimeOfDay(input: "")
+    #expect(throws: (any Error).self) {
+        try validateScreenTime(policy: FfiScreenTimePolicy(windowStart: start, windowEnd: end, dailyMinutes: nil))
+    }
+}
+
+@Test func anEmptyWindowWithEqualBoundsIsRefusedBeforeTheSave() throws {
+    let bound = try parseTimeOfDay(input: "09:30")
+    #expect(throws: (any Error).self) {
+        try validateScreenTime(policy: FfiScreenTimePolicy(windowStart: bound, windowEnd: bound, dailyMinutes: nil))
+    }
+}
+
+@Test func aClearedOrWholeWindowAndAZeroBudgetPassValidation() throws {
+    try validateScreenTime(policy: FfiScreenTimePolicy(windowStart: nil, windowEnd: nil, dailyMinutes: nil))
+    try validateScreenTime(policy: FfiScreenTimePolicy(
+        windowStart: try parseTimeOfDay(input: "07:00"),
+        windowEnd: try parseTimeOfDay(input: "20:00"),
+        dailyMinutes: try parseDailyMinutes(input: "0")))
 }

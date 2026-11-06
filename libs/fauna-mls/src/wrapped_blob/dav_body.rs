@@ -3,16 +3,21 @@
 //! under at rest.
 //!
 //! A body is sealed as a single [`MailRecordEnvelope`] to the actor's *own*
-//! `credential_id="default"` recipient key derived from `msek`
-//! (the `fauna.state.mail` MSEK) — exactly what the MDA's Go side does on a DAV PUT
-//! (`internal/mda/{carddav,caldav}/put.go` → `mailfauna.EncryptToRecipient` /
-//! `EncryptToRecipientHybrid`). Same MSEK ⇒ same recipient keypair, so bytes
-//! written by a Fauna app and by the MDA are interchangeable in both directions.
-//! Classical (`DHKEM(X25519,HKDF-SHA256)`) and post-quantum X-Wing
-//! (ML-KEM-768 ∥ X25519) seals both exist; the envelope self-describes its
-//! suite, so [`unseal_dav_body`] opens either and a body rides the same
-//! post-quantum migration as a mail record (`post-quantum.md` § Capability
-//! negotiation picks the seal side).
+//! recipient key **of its DAV kind** ([`DavKind`]): a calendar body to the
+//! recipient-calendar keypair as a `calendar-record`, a card body to the
+//! recipient-card keypair as a `card-record` — each derived from `msek` (the
+//! `fauna.state.mail` MSEK) through its kind's root (`owner-key-material.md`
+//! § Path B-sibling-5, § Path B-sibling-6). The MDA's Go side seals the same
+//! way on a DAV PUT through the FFI, so bytes written by a Fauna app and by
+//! the MDA are interchangeable in both directions. Classical
+//! (`DHKEM(X25519,HKDF-SHA256)`) and post-quantum X-Wing (ML-KEM-768 ∥ X25519)
+//! seals both exist; the envelope self-describes its suite, so
+//! [`unseal_dav_body`] opens either and a body rides the same post-quantum
+//! migration as a mail record (`post-quantum.md` § Capability negotiation
+//! picks the seal side). Until 2026-10-23 every DAV body sealed to the
+//! recipient-*mail* key, so a calendar grant opened mail and cards too; the
+//! split gives each kind its own key, envelope kind and AAD, and an opener of
+//! one kind refuses a record of another before any trial.
 //!
 //! ⚠ **Why it lives here and not in a DAV crate.** Until 2026-08-23 it lived in
 //! *both*: `fauna_client_carddav::{seal_card_body, seal_card_body_xwing,
@@ -21,24 +26,22 @@
 //! plus two byte-identical `SealError` enums — six functions and two types for
 //! one scheme, in two crates that both already depended on this module for
 //! every primitive they called. Neither crate could own it without the other
-//! depending on it, and the identity is not a coincidence to be maintained by
-//! hand: the whole contract is that a card body and an event body are sealed the
-//! *same* way as a mail record, by the same key, so that the Go MDA needs one
-//! implementation rather than three. The two crates keep their domain-named
-//! aliases; the scheme has one home.
+//! depending on it: a card body and an event body are sealed the *same* way,
+//! differing only in the [`DavKind`] the caller names, so that the Go MDA
+//! needs one implementation rather than two. The two crates keep their
+//! domain-named aliases, each pinning its kind; the scheme has one home.
 //!
 //! Found by the containment arm of the dev-fleet near-duplicate-function
 //! scanner (`seal_card_body` ↔ `seal_event_body`, cont 0.413).
 
-use zeroize::Zeroizing;
-
+pub use super::mls_snapshot_plaintext::DavKind;
 use super::{
     MailRecordEnvelope,
     mls_snapshot_plaintext::{
-        StandingMailKeypair, derive_recipient_hpke_keypair, derive_recipient_xwing_keypair,
-        derive_standing_mail_keypairs, open_mail_record_standing,
+        StandingDavRing, derive_dav_root, derive_recipient_dav_hpke_keypair,
+        derive_recipient_dav_xwing_keypair,
     },
-    seal_to_recipient, seal_to_recipient_xwing,
+    seal_record_to_recipient, seal_record_to_recipient_xwing,
 };
 
 /// Seal/unseal failure for the DAV resource-body crypto layer.
@@ -72,26 +75,34 @@ impl core::fmt::Display for SealError {
 
 impl std::error::Error for SealError {}
 
-/// Seal a DAV resource body (a vCard, a VEVENT, a sidecar) with the classical
-/// suite, producing the `encrypted_body` wire bytes.
-pub fn seal_dav_body(plaintext: &[u8], msek: &[u8; 32]) -> Result<Vec<u8>, SealError> {
-    let (_secret, pubkey) = derive_recipient_hpke_keypair(msek);
-    let envelope =
-        seal_to_recipient(plaintext, &pubkey).map_err(|e| SealError::Seal(e.to_string()))?;
+/// Seal a DAV resource body (a vCard, a VEVENT, a sidecar) of `kind` with the
+/// classical suite, producing the `encrypted_body` wire bytes.
+pub fn seal_dav_body(
+    kind: DavKind,
+    plaintext: &[u8],
+    msek: &[u8; 32],
+) -> Result<Vec<u8>, SealError> {
+    let (_secret, pubkey) = derive_recipient_dav_hpke_keypair(kind, &derive_dav_root(kind, msek));
+    let envelope = seal_record_to_recipient(kind.record_kind(), plaintext, &pubkey)
+        .map_err(|e| SealError::Seal(e.to_string()))?;
     envelope
         .to_canonical_bytes()
         .map_err(|e| SealError::Seal(e.to_string()))
 }
 
 /// Post-quantum (X-Wing) sibling of [`seal_dav_body`]. Derives the actor's own
-/// X-Wing keypair from `msek` and seals to it; because the key is derived
-/// locally it is always FIPS-203 valid, so there is no untrusted-published-ek
-/// seal error to degrade from — an error here is a genuine bug and is surfaced
-/// rather than silently downgraded.
-pub fn seal_dav_body_xwing(plaintext: &[u8], msek: &[u8; 32]) -> Result<Vec<u8>, SealError> {
-    let pubkey = derive_recipient_xwing_keypair(msek).public;
-    let envelope =
-        seal_to_recipient_xwing(plaintext, &pubkey).map_err(|e| SealError::Seal(e.to_string()))?;
+/// X-Wing keypair of `kind` from `msek` and seals to it; because the key is
+/// derived locally it is always FIPS-203 valid, so there is no
+/// untrusted-published-ek seal error to degrade from — an error here is a
+/// genuine bug and is surfaced rather than silently downgraded.
+pub fn seal_dav_body_xwing(
+    kind: DavKind,
+    plaintext: &[u8],
+    msek: &[u8; 32],
+) -> Result<Vec<u8>, SealError> {
+    let pubkey = derive_recipient_dav_xwing_keypair(kind, &derive_dav_root(kind, msek)).public;
+    let envelope = seal_record_to_recipient_xwing(kind.record_kind(), plaintext, &pubkey)
+        .map_err(|e| SealError::Seal(e.to_string()))?;
     envelope
         .to_canonical_bytes()
         .map_err(|e| SealError::Seal(e.to_string()))
@@ -103,36 +114,43 @@ pub fn seal_dav_body_xwing(plaintext: &[u8], msek: &[u8; 32]) -> Result<Vec<u8>,
 /// `seal_addressbook_metadata`, `seal_fauna_ext`; found by the containment arm
 /// of the dev-fleet near-duplicate-function scanner, cont 0.448 caldav↔carddav).
 pub fn seal_dav_body_typed<T: serde::Serialize>(
+    kind: DavKind,
     val: &T,
     msek: &[u8; 32],
 ) -> Result<Vec<u8>, SealError> {
     let bytes = fauna_cbor::encode_canonical(val).map_err(|e| SealError::Seal(e.to_string()))?;
-    seal_dav_body(&bytes, msek)
+    seal_dav_body(kind, &bytes, msek)
 }
 
 /// [`seal_dav_body_typed`], but sealing with the post-quantum X-Wing suite —
 /// the write-side counterpart consumed by `seal_fauna_ext_xwing`.
 pub fn seal_dav_body_typed_xwing<T: serde::Serialize>(
+    kind: DavKind,
     val: &T,
     msek: &[u8; 32],
 ) -> Result<Vec<u8>, SealError> {
     let bytes = fauna_cbor::encode_canonical(val).map_err(|e| SealError::Seal(e.to_string()))?;
-    seal_dav_body_xwing(&bytes, msek)
+    seal_dav_body_xwing(kind, &bytes, msek)
 }
 
-/// The actor's own DAV recipient **key ring** — one standing recipient keypair
-/// per MSEK generation the custody holds (`msek`, then `prior_mseks` newest
-/// first), derived once and reused across every body opened under it.
+/// The actor's own DAV recipient **key ring** of one [`DavKind`] — one standing
+/// recipient keypair of that kind per MSEK generation the custody holds
+/// (`msek`, then `prior_mseks` newest first), derived once and reused across
+/// every body opened under it.
 ///
 /// **Why a ring** (`mail-credentials.md` § Rotation and recovery → *DAV bodies
 /// across a rotation*, ruling 1): a body is sealed to ONE generation, carries
 /// no key id, and is never re-sealed — so after "Rotate mail keys" every body
 /// written before it opens only under a prior generation. The ring is exactly
-/// the standing set the MDA reads out of the snapshot and the receive path
-/// holds (`MailKeys.standing`): built by [`derive_standing_mail_keypairs`] and
-/// trialled newest-first by [`open_mail_record_standing`], so whatever the MDA
-/// can open, the owner's apps can too. Sealing stays current-generation only
-/// (`seal_dav_body*` take one MSEK). [`Self::derive`] is the ring of one.
+/// the per-kind standing ring the MDA builds from the snapshot's grace roots
+/// ([`StandingDavRing`], `owner-key-material.md` § Path B-sibling-5 →
+/// *Snapshot carriage*), so whatever the MDA can open, the owner's apps can
+/// too. Sealing stays current-generation only (`seal_dav_body*` take one
+/// MSEK). [`Self::derive`] is the ring of one.
+///
+/// **Why per kind:** a calendar ring opens `calendar-record` envelopes and a
+/// card ring `card-record` envelopes, nothing else — [`Self::unseal`] refuses
+/// an envelope of another kind before any trial.
 ///
 /// **Why derived once** : [`unseal_dav_body`] paid a fresh
 /// ML-KEM-768 keygen (plus the classical HPKE derive) on *every call*, even
@@ -144,36 +162,36 @@ pub fn seal_dav_body_typed_xwing<T: serde::Serialize>(
 /// Threaded down from the caller rather than memoized behind a global cache —
 /// this holds secret key material, and a process-lifetime `static` would need
 /// its own zeroize-on-evict story for no benefit a short-lived, explicitly-
-/// scoped value doesn't already give for free. Every [`StandingMailKeypair`]
-/// is zeroize-on-drop.
+/// scoped value doesn't already give for free. Every keypair in the ring is
+/// zeroize-on-drop.
 pub struct DavRecipientKeys {
-    ring: Vec<StandingMailKeypair>,
+    ring: StandingDavRing,
 }
 
 impl DavRecipientKeys {
     /// The ring of one: the current generation alone — for a custody that has
     /// never rotated, and for a test sealing and opening under one MSEK. A
     /// reader holding the custody's `prior_mseks` builds [`Self::from_mseks`].
-    pub fn derive(msek: &[u8; 32]) -> Self {
-        Self::from_mseks(msek, &[])
+    pub fn derive(kind: DavKind, msek: &[u8; 32]) -> Self {
+        Self::from_mseks(kind, msek, &[])
     }
 
-    /// The ring over the custody's whole MSEK history — `msek` (the current
-    /// generation) then `prior_mseks` (newest first, as the custody holds them)
-    /// — through the ONE derivation of the standing set
-    /// ([`derive_standing_mail_keypairs`]); the ring's width is that
-    /// function's, never this type's.
-    pub fn from_mseks(msek: &[u8; 32], prior_mseks: &[[u8; 32]]) -> Self {
+    /// The ring of `kind` over the custody's whole MSEK history — `msek` (the
+    /// current generation) then `prior_mseks` (newest first, as the custody
+    /// holds them) — through the ONE derivation of the per-kind standing ring
+    /// ([`StandingDavRing::from_mseks`]); the ring's width is that function's,
+    /// never this type's.
+    pub fn from_mseks(kind: DavKind, msek: &[u8; 32], prior_mseks: &[[u8; 32]]) -> Self {
         #[cfg(test)]
         tests::DERIVE_CALLS.with(|c| c.set(c.get() + 1));
-        let mseks: Zeroizing<Vec<[u8; 32]>> = Zeroizing::new(
-            std::iter::once(*msek)
-                .chain(prior_mseks.iter().copied())
-                .collect(),
-        );
         Self {
-            ring: derive_standing_mail_keypairs(&mseks),
+            ring: StandingDavRing::from_mseks(kind, msek, prior_mseks),
         }
+    }
+
+    /// The DAV kind this ring opens.
+    pub fn kind(&self) -> DavKind {
+        self.ring.kind()
     }
 
     /// Open one `encrypted_body` with the ring derived at construction — no
@@ -181,12 +199,16 @@ impl DavRecipientKeys {
     /// dispatching, same as [`unseal_dav_body`]: the envelope names its own
     /// suite, so this serves the classical and X-Wing paths alike (the
     /// classical seal is still written live, e.g. the caldav index hint via
-    /// `seal_event_body`). A body no generation opens is a ring exhaustion
-    /// naming the width tried (the `MailcalKeyRing` wording).
+    /// `seal_event_body`). An envelope of another kind is refused before any
+    /// trial; a body no generation opens is a ring exhaustion naming the width
+    /// tried (the `MailcalKeyRing` wording).
     pub fn unseal(&self, encrypted_body: &[u8]) -> Result<Vec<u8>, SealError> {
-        let envelope = MailRecordEnvelope::from_canonical_bytes(encrypted_body)
-            .map_err(|e| SealError::Unseal(e.to_string()))?;
-        open_mail_record_standing(&envelope, &self.ring, &[], None).ok_or_else(|| {
+        let envelope = MailRecordEnvelope::from_canonical_bytes_of_kind(
+            encrypted_body,
+            self.ring.kind().record_kind(),
+        )
+        .map_err(|e| SealError::Unseal(e.to_string()))?;
+        self.ring.open(&envelope).map_err(|_| {
             SealError::Unseal(format!(
                 "no key in the ring opens it ({} tried: current + {} grace)",
                 self.ring.len(),
@@ -196,18 +218,22 @@ impl DavRecipientKeys {
     }
 }
 
-/// Open an `encrypted_body` written by either seal above **or by the MDA** —
-/// both derive the same recipient keypair from `msek`. Suite-dispatching: the
-/// envelope names its own suite, so one reader serves the classical and X-Wing
-/// paths (the classical seal is still written live, e.g. the caldav index
-/// hint via `seal_event_body`).
+/// Open an `encrypted_body` of `kind` written by either seal above **or by the
+/// MDA** — both derive the same recipient keypair from `msek`. Suite-
+/// dispatching: the envelope names its own suite, so one reader serves the
+/// classical and X-Wing paths (the classical seal is still written live, e.g.
+/// the caldav index hint via `seal_event_body`).
 ///
 /// A single-shot convenience over [`DavRecipientKeys`] — opening more than one
 /// body under the same `msek`? Derive one [`DavRecipientKeys`] and call
 /// [`DavRecipientKeys::unseal`] per item instead of calling this in a loop,
 /// or every item pays its own keygen again .
-pub fn unseal_dav_body(encrypted_body: &[u8], msek: &[u8; 32]) -> Result<Vec<u8>, SealError> {
-    DavRecipientKeys::derive(msek).unseal(encrypted_body)
+pub fn unseal_dav_body(
+    kind: DavKind,
+    encrypted_body: &[u8],
+    msek: &[u8; 32],
+) -> Result<Vec<u8>, SealError> {
+    DavRecipientKeys::derive(kind, msek).unseal(encrypted_body)
 }
 
 /// Open a `sealed` DAV body and strict-decode it as `T` in one step — the tail
@@ -272,11 +298,11 @@ mod tests {
     fn n_opens_under_one_derivation_cost_one_keygen() {
         let body = b"BEGIN:VCARD\r\nFN:Ada\r\nEND:VCARD\r\n";
         let sealed: Vec<Vec<u8>> = (0..5)
-            .map(|_| seal_dav_body(body, &MSEK).unwrap())
+            .map(|_| seal_dav_body(DavKind::Card, body, &MSEK).unwrap())
             .collect();
 
         DERIVE_CALLS.with(|c| c.set(0));
-        let keys = DavRecipientKeys::derive(&MSEK);
+        let keys = DavRecipientKeys::derive(DavKind::Card, &MSEK);
         for s in &sealed {
             assert_eq!(keys.unseal(s).expect("open"), body);
         }
@@ -288,7 +314,10 @@ mod tests {
 
         DERIVE_CALLS.with(|c| c.set(0));
         for s in &sealed {
-            assert_eq!(unseal_dav_body(s, &MSEK).expect("open"), body);
+            assert_eq!(
+                unseal_dav_body(DavKind::Card, s, &MSEK).expect("open"),
+                body
+            );
         }
         assert_eq!(
             DERIVE_CALLS.with(Cell::get),
@@ -305,10 +334,13 @@ mod tests {
     fn both_suites_round_trip_through_one_reader() {
         let body = b"BEGIN:VCARD\r\nFN:Ada\r\nEND:VCARD\r\n";
         for sealed in [
-            seal_dav_body(body, &MSEK).expect("classical seal"),
-            seal_dav_body_xwing(body, &MSEK).expect("xwing seal"),
+            seal_dav_body(DavKind::Card, body, &MSEK).expect("classical seal"),
+            seal_dav_body_xwing(DavKind::Card, body, &MSEK).expect("xwing seal"),
         ] {
-            assert_eq!(unseal_dav_body(&sealed, &MSEK).expect("open"), body);
+            assert_eq!(
+                unseal_dav_body(DavKind::Card, &sealed, &MSEK).expect("open"),
+                body
+            );
         }
     }
 
@@ -318,10 +350,10 @@ mod tests {
     /// the caller must not be able to tell them apart.
     #[test]
     fn a_wrong_msek_cannot_open_a_body() {
-        let sealed = seal_dav_body(b"secret", &MSEK).expect("seal");
+        let sealed = seal_dav_body(DavKind::Card, b"secret", &MSEK).expect("seal");
         let other = [9u8; 32];
         assert!(matches!(
-            unseal_dav_body(&sealed, &other),
+            unseal_dav_body(DavKind::Card, &sealed, &other),
             Err(SealError::Unseal(_))
         ));
     }
@@ -337,21 +369,23 @@ mod tests {
     #[test]
     fn a_body_sealed_before_a_rotation_opens_through_the_ring() {
         let body = b"BEGIN:VEVENT\r\nSUMMARY:standup\r\nEND:VEVENT\r\n";
-        let ring = DavRecipientKeys::from_mseks(&MSEK, &[PRIOR, OLDER]);
+        let ring = DavRecipientKeys::from_mseks(DavKind::Card, &MSEK, &[PRIOR, OLDER]);
         for sealed in [
-            seal_dav_body(body, &PRIOR).expect("classical seal"),
-            seal_dav_body_xwing(body, &OLDER).expect("xwing seal"),
+            seal_dav_body(DavKind::Card, body, &PRIOR).expect("classical seal"),
+            seal_dav_body_xwing(DavKind::Card, body, &OLDER).expect("xwing seal"),
         ] {
             assert_eq!(ring.unseal(&sealed).expect("ring opens a grace body"), body);
             assert!(
-                DavRecipientKeys::derive(&MSEK).unseal(&sealed).is_err(),
+                DavRecipientKeys::derive(DavKind::Card, &MSEK)
+                    .unseal(&sealed)
+                    .is_err(),
                 "the current generation alone must not open a prior-sealed body"
             );
         }
         // The ring is derived once for the whole history — one construction,
         // whatever its width (the batch-derivation pin, ).
         DERIVE_CALLS.with(|c| c.set(0));
-        let _ = DavRecipientKeys::from_mseks(&MSEK, &[PRIOR, OLDER]);
+        let _ = DavRecipientKeys::from_mseks(DavKind::Card, &MSEK, &[PRIOR, OLDER]);
         assert_eq!(DERIVE_CALLS.with(Cell::get), 1);
     }
 
@@ -360,8 +394,8 @@ mod tests {
     /// rotation miss reads as one and not as corruption.
     #[test]
     fn a_body_outside_the_ring_is_a_named_ring_exhaustion() {
-        let sealed = seal_dav_body(b"foreign", &[9u8; 32]).expect("seal");
-        let err = DavRecipientKeys::from_mseks(&MSEK, &[PRIOR])
+        let sealed = seal_dav_body(DavKind::Card, b"foreign", &[9u8; 32]).expect("seal");
+        let err = DavRecipientKeys::from_mseks(DavKind::Card, &MSEK, &[PRIOR])
             .unseal(&sealed)
             .expect_err("no generation in the ring sealed it");
         let SealError::Unseal(msg) = err else {
@@ -378,13 +412,80 @@ mod tests {
     /// holds prior generations opens under the current generation by itself.
     #[test]
     fn a_write_under_a_rotated_custody_seals_to_the_current_generation() {
-        let sealed = seal_dav_body_xwing(b"new event", &MSEK).expect("seal");
+        let sealed = seal_dav_body_xwing(DavKind::Card, b"new event", &MSEK).expect("seal");
         assert_eq!(
-            DavRecipientKeys::derive(&MSEK)
+            DavRecipientKeys::derive(DavKind::Card, &MSEK)
                 .unseal(&sealed)
                 .expect("current opens"),
             b"new event"
         );
-        assert!(DavRecipientKeys::derive(&PRIOR).unseal(&sealed).is_err());
+        assert!(
+            DavRecipientKeys::derive(DavKind::Card, &PRIOR)
+                .unseal(&sealed)
+                .is_err()
+        );
+    }
+
+    /// **The split's pin at the DAV layer** (`owner-key-material.md` § Path
+    /// B-sibling-5 / -6): each kind seals under its own key and envelope kind,
+    /// and a ring of one kind refuses a record of the other — by kind, before
+    /// any trial — even under the same MSEK. Neither DAV kind is a mail record.
+    #[test]
+    fn a_ring_opens_its_own_kind_only() {
+        use crate::wrapped_blob::{MailRecordEnvelope, unseal_mail_record_hybrid};
+        let body = b"BEGIN:VEVENT\r\nSUMMARY:standup\r\nEND:VEVENT\r\n";
+        for (kind, other, tag) in [
+            (DavKind::Calendar, DavKind::Card, "calendar-record"),
+            (DavKind::Card, DavKind::Calendar, "card-record"),
+        ] {
+            for sealed in [
+                seal_dav_body(kind, body, &MSEK).expect("classical seal"),
+                seal_dav_body_xwing(kind, body, &MSEK).expect("xwing seal"),
+            ] {
+                let envelope = MailRecordEnvelope::from_canonical_bytes(&sealed).expect("decode");
+                assert_eq!(envelope.kind, tag);
+                assert_eq!(
+                    DavRecipientKeys::derive(kind, &MSEK)
+                        .unseal(&sealed)
+                        .expect("own kind"),
+                    body
+                );
+                let err = DavRecipientKeys::derive(other, &MSEK)
+                    .unseal(&sealed)
+                    .expect_err("the other kind's ring must refuse");
+                let SealError::Unseal(msg) = err else {
+                    panic!("expected an unseal error, got {err:?}");
+                };
+                assert!(
+                    msg.contains(&format!("got {tag}")),
+                    "refused by kind: {msg}"
+                );
+                // The recipient-mail secret of the same MSEK opens no DAV body.
+                let mail = crate::wrapped_blob::derive_recipient_xwing_keypair(&MSEK);
+                assert!(
+                    unseal_mail_record_hybrid(
+                        &envelope,
+                        mail.secret.x25519_secret(),
+                        mail.secret.mlkem_decaps_key()
+                    )
+                    .is_err()
+                );
+            }
+        }
+    }
+
+    /// A DAV ring refuses a mail record by kind, whatever key sealed it.
+    #[test]
+    fn a_dav_ring_refuses_a_mail_record() {
+        let (_, pk) = crate::wrapped_blob::derive_recipient_hpke_keypair(&MSEK);
+        let mail = crate::wrapped_blob::seal_to_recipient(b"inbound", &pk)
+            .and_then(|e| e.to_canonical_bytes())
+            .expect("seal mail");
+        for kind in [DavKind::Calendar, DavKind::Card] {
+            let err = DavRecipientKeys::derive(kind, &MSEK)
+                .unseal(&mail)
+                .expect_err("a DAV ring must refuse a mail record");
+            assert!(matches!(&err, SealError::Unseal(m) if m.contains("got mail-record")));
+        }
     }
 }

@@ -66,7 +66,7 @@ pub fn list_active_message_kind_snapshot_manifests(
 }
 
 /// Default cap for `list_message_kind_snapshots` when `limit == 0`.
-const SNAPSHOT_LIST_DEFAULT_LIMIT: u32 = 100;
+pub const SNAPSHOT_LIST_DEFAULT_LIMIT: u32 = 100;
 
 /// List the actor's message-kind snapshots, newest first, optionally
 /// filtered to one `kind`. Excludes soft-deleted and pending-delete

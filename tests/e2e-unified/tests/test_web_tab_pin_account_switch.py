@@ -37,7 +37,7 @@ import time
 
 import pytest
 
-from common.auth import register_handled_actor
+from helpers.admin_wire import admit_adult
 from conftest import MAIL_PRIMARY_DOMAIN
 from common.accounts import single_account_seed
 from drivers import create_driver
@@ -73,12 +73,14 @@ def test_web_set_state_switch_clears_tab_pin(handled_nest, handled_spa_url):
     port = handled_nest["port"]
     spa = handled_spa_url
 
-    actor_a = register_handled_actor(
-        port, handle="tabpin-a" + secrets.token_hex(3), domain=MAIL_PRIMARY_DOMAIN
+    actor_a = admit_adult(
+        handled_nest, "tabpin-a" + secrets.token_hex(3),
+        domain=MAIL_PRIMARY_DOMAIN, token=True,
     )
     secret_a = bytes(actor_a["signing_key"]).hex()
-    actor_b = register_handled_actor(
-        port, handle="tabpin-b" + secrets.token_hex(3), domain=MAIL_PRIMARY_DOMAIN
+    actor_b = admit_adult(
+        handled_nest, "tabpin-b" + secrets.token_hex(3),
+        domain=MAIL_PRIMARY_DOMAIN, token=True,
     )
     secret_b = bytes(actor_b["signing_key"]).hex()
 

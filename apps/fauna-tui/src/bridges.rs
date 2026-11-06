@@ -2354,14 +2354,9 @@ mod tests {
     fn with_machine(app: &mut App) {
         app.settings.connected_apps.machine =
             Some(fauna_client_connected_apps::ConnectedAppsMachine::new(
-                Arc::new(NullConnectedAppsObserver),
+                Arc::new(fauna_client_connected_apps::observer::NullObserver),
                 Arc::new(fauna_client_connected_apps::FakeConnectedAppsNestApi::new()),
             ));
-    }
-
-    struct NullConnectedAppsObserver;
-    impl fauna_client_connected_apps::ConnectedAppsObserver for NullConnectedAppsObserver {
-        fn on_changed(&self) {}
     }
 
     /// The button scoped within `bridge-card[i]`.

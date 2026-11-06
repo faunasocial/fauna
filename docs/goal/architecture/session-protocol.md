@@ -10,7 +10,7 @@
 ## What the protocol is
 
 Development on this project runs as many parallel sessions, each working one
-track at a time from a shared queue (see [`next-files.md`](next-files.md)).
+track at a time from a shared queue (see [`task-files.md`](task-files.md)).
 Two moments in a session's life are fully specified so that no two sessions
 collide and no work is silently lost:
 

@@ -122,6 +122,10 @@ public sealed partial class AdminFilesPage : Page
 
         _syncing = true;
         EnabledToggle.IsOn = _vm.WebdavEnabled;
+        // The toggle's `state` answer is the persisted flag (HelpText is what the
+        // bridge's attribute read returns).
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetHelpText(
+            EnabledToggle, _vm.WebdavEnabled ? "on" : "off");
         _syncing = false;
     }
 

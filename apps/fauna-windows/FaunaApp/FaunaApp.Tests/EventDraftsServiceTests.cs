@@ -52,7 +52,6 @@ public class EventDraftsServiceTests
         public FfiEventDrafts CurrentSnapshot = Drafts();
         public FfiEventDrafts? Restored;
         public bool RestoreCalled;
-        public bool AuthoredText;
 
         public FfiEventDrafts Snapshot() => CurrentSnapshot;
 
@@ -61,8 +60,6 @@ public class EventDraftsServiceTests
             RestoreCalled = true;
             Restored = draft;
         }
-
-        public bool HasAuthoredText() => AuthoredText;
     }
 
     [Fact]
@@ -98,7 +95,7 @@ public class EventDraftsServiceTests
         // fourth rule): a late-arriving restore must never clobber text the user
         // has already started typing.
         var sync = new FakeEventDraftsSync { RestoreResult = Drafts("Restored") };
-        var store = new FakeEventDraftStore { AuthoredText = true };
+        var store = new FakeEventDraftStore { CurrentSnapshot = Drafts("Typed meanwhile") };
         using var svc = new EventDraftsService(sync, store);
 
         await svc.RestoreOnLaunchAsync();

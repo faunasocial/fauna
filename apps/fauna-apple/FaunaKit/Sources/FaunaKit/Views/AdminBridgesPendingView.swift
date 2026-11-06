@@ -36,8 +36,6 @@ import SwiftUI
 public struct AdminBridgesPendingView: View {
     @Environment(FaunaClient.self) private var client: FaunaClient?
     @State private var vm = BridgeApprovalVM()
-    /// The approved-bridge card whose rotate confirmation is open (`nil` = none).
-    @State private var rotateTarget: ApprovedBridgeView?
     /// Reload trigger — macOS passes the shell's `navGeneration` so each
     /// (re)navigation re-reads the feed; iOS leaves it 0 (the NavigationLink
     /// re-mounts the view, re-running the load).
@@ -58,7 +56,7 @@ public struct AdminBridgesPendingView: View {
                     .font(.callout)
                     .foregroundStyle(.secondary)
 
-                sectionHeader(L.admin.bridgesPending.pendingSection)
+                sectionHeader(L.admin.bridgesPending.pendingSection, id: Ids.adminBridgesPendingSection)
                 if vm.pending.isEmpty {
                     emptyState
                 } else {
@@ -67,7 +65,7 @@ public struct AdminBridgesPendingView: View {
                     }
                 }
 
-                sectionHeader(L.admin.bridgesPending.approvedSection)
+                sectionHeader(L.admin.bridgesPending.approvedSection, id: Ids.adminBridgesApprovedSection)
                 if vm.approved.isEmpty {
                     Text(L.admin.bridgesPending.approvedEmpty)
                         .font(.headline)
@@ -79,6 +77,7 @@ public struct AdminBridgesPendingView: View {
                     }
                 }
 
+                rejectConfirmSection
                 rotateConfirmSection
 
                 if let error = vm.errorMessage {
@@ -97,11 +96,12 @@ public struct AdminBridgesPendingView: View {
     // MARK: - Section headers
 
     /// One subheading separating the pending-approval cards from the approved
-    /// roster ("Pending approval" / "Approved bridges"). No test id — a plain
-    /// visual label, matching linux's `bridges_section_label` (not part of the
-    /// spec's element set).
-    private func sectionHeader(_ text: String) -> some View {
-        Text(text)
+    /// roster ("Pending approval" / "Approved bridges"). The always-present section
+    /// heading labels (`admin-bridges-pending-section` / `admin-bridges-approved-section`,
+    /// ui.yaml `admin-bridges-pending`), unconditional unlike the empty-state chrome
+    /// and the per-bridge cards below them — the canary a rail-click test waits on.
+    private func sectionHeader(_ text: String, id: String) -> some View {
+        automationText(id, text)
             .font(.headline)
             .padding(.top, 4)
     }
@@ -156,13 +156,15 @@ public struct AdminBridgesPendingView: View {
                 }
                 .faunaGate("fauna.bridges.approve_pending_bridge")
 
+                // Opens the shared reject confirm (`admin-bridges-reject-confirm`);
+                // the write happens on its confirm button.
                 Button(L.admin.bridgesPending.reject, role: .destructive) {
-                    Task { await vm.reject(pubkeyHex: view.pubkeyHex) }
+                    vm.armReject(pubkeyHex: view.pubkeyHex)
                 }
                 .accessibilityIdentifier(Ids.adminBridgesPendingRejectButton)
                 .automationActivate(Ids.adminBridgesPendingRejectButton,
                                     isEnabled: { !vm.isBusy }) {
-                    Task { await vm.reject(pubkeyHex: view.pubkeyHex) }
+                    vm.armReject(pubkeyHex: view.pubkeyHex)
                 }
                 .faunaGate("fauna.bridges.reject_pending_bridge")
             }
@@ -201,12 +203,12 @@ public struct AdminBridgesPendingView: View {
             HStack {
                 Spacer()
                 Button(L.admin.bridgesPending.rotate, role: .destructive) {
-                    rotateTarget = view
+                    vm.armRotate(pubkeyHex: view.pubkeyHex)
                 }
                 .accessibilityIdentifier(Ids.adminBridgesApprovedRotateButton)
                 .automationActivate(Ids.adminBridgesApprovedRotateButton,
                                     isEnabled: { !vm.isBusy }) {
-                    rotateTarget = view
+                    vm.armRotate(pubkeyHex: view.pubkeyHex)
                 }
             }
             .disabled(vm.isBusy)
@@ -223,67 +225,84 @@ public struct AdminBridgesPendingView: View {
     // MARK: - Rotate-service-user-key confirm (`admin-bridges-rotate-confirm`)
 
     /// Inline destructive confirm, opened by an approved card's rotate button
-    /// (`rotateTarget` set). Option (b) — an inline overlay group rather than a
-    /// system `.confirmationDialog`/`.sheet`, so every ui.yaml id attaches to a
-    /// real, registered element (`apple-e2e-automation.md` § Registration rules
-    /// #3; same shape as `MailSettingsView.disableConfirmSection`). Confirming dispatches the
-    /// shared `BridgeApprovalAction.rotate` (`revoke_service_user`); cancel just
-    /// closes the reveal.
+    /// (`vm.armed == .rotate`, the shared machine's arm). Option (b) — an inline
+    /// overlay group rather than a system `.confirmationDialog`/`.sheet`, so every
+    /// ui.yaml id attaches to a real, registered element (`apple-e2e-automation.md`
+    /// § Registration rules #3; same shape as `MailSettingsView.disableConfirmSection`).
+    /// Confirming runs the armed act (`revoke_service_user`); cancel disarms.
     @ViewBuilder
     private var rotateConfirmSection: some View {
-        if let target = rotateTarget {
-            VStack(alignment: .leading, spacing: 8) {
-                Text(L.admin.bridgesRotate.title)
-                    .font(.headline)
-                automationText(Ids.adminBridgesRotateWarningText, L.admin.bridgesRotate.warning)
-                    .font(.callout)
-                HStack(spacing: 12) {
-                    Button(L.admin.bridgesRotate.confirm, role: .destructive) {
-                        confirmRotate(pubkeyHex: target.pubkeyHex)
-                    }
-                    .accessibilityIdentifier(Ids.adminBridgesRotateConfirmButton)
-                    .automationActivate(Ids.adminBridgesRotateConfirmButton) {
-                        confirmRotate(pubkeyHex: target.pubkeyHex)
-                    }
-                    // Rotating a service-user key IS a revoke — the bridge exits
-                    // and re-enrolls with the fresh key. Opening this confirm is
-                    // local, so `admin-bridges-approved-rotate-button` stays live.
-                    .faunaGate("fauna.bridges.revoke_service_user")
-                    Button(L.admin.bridgesRotate.cancel, role: .cancel) { rotateTarget = nil }
-                        .accessibilityIdentifier(Ids.adminBridgesRotateCancelButton)
-                        .automationActivate(Ids.adminBridgesRotateCancelButton) { rotateTarget = nil }
-                }
-            }
-            .padding(12)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 8))
-            // `.contain` keeps BOTH this container id AND the child warning/button
-            // ids queryable — a bare container id on a VStack otherwise clobbers
-            // every child id (same clobber guard as `disableConfirmSection`).
-            .accessibilityElement(children: .contain)
-            .accessibilityIdentifier(Ids.adminBridgesRotateConfirm)
+        if case .rotate = vm.armed {
+            confirmBox(title: L.admin.bridgesRotate.title, warning: L.admin.bridgesRotate.warning,
+                       confirmLabel: L.admin.bridgesRotate.confirm, cancelLabel: L.admin.bridgesRotate.cancel,
+                       boxId: Ids.adminBridgesRotateConfirm, warningId: Ids.adminBridgesRotateWarningText,
+                       confirmId: Ids.adminBridgesRotateConfirmButton, cancelId: Ids.adminBridgesRotateCancelButton,
+                       // Rotating a service-user key IS a revoke — the bridge exits
+                       // and re-enrolls with the fresh key. Opening this confirm is
+                       // local, so `admin-bridges-approved-rotate-button` stays live.
+                       gate: "fauna.bridges.revoke_service_user")
         }
     }
 
-    /// Dispatch the rotate action, then close the reveal. Shared by the confirm
-    /// `Button` and its `.automationActivate` so the two never diverge (mirrors
-    /// `MailSettingsView.confirmDisableMail`).
-    private func confirmRotate(pubkeyHex: String) {
-        Task {
-            await vm.rotate(pubkeyHex: pubkeyHex)
-            rotateTarget = nil
+    // MARK: - Reject-pending-bridge confirm (`admin-bridges-reject-confirm`)
+
+    /// Inline confirm opened by a pending card's reject button (`vm.armed == .reject`)
+    /// — same shape as the rotate confirm (`mail-bridge-lifecycle.md` § Pending
+    /// approval). Confirming runs `reject_pending_bridge`; cancel disarms.
+    @ViewBuilder
+    private var rejectConfirmSection: some View {
+        if case .reject = vm.armed {
+            confirmBox(title: L.admin.bridgesReject.title, warning: L.admin.bridgesReject.warning,
+                       confirmLabel: L.admin.bridgesReject.confirm, cancelLabel: L.admin.bridgesReject.cancel,
+                       boxId: Ids.adminBridgesRejectConfirm, warningId: Ids.adminBridgesRejectWarningText,
+                       confirmId: Ids.adminBridgesRejectConfirmButton, cancelId: Ids.adminBridgesRejectCancelButton,
+                       gate: "fauna.bridges.reject_pending_bridge")
         }
+    }
+
+    /// One inline confirm box over the shared arm: confirm dispatches
+    /// `BridgeApprovalAction.confirm`, cancel disarms (no write).
+    private func confirmBox(title: String, warning: String, confirmLabel: String, cancelLabel: String,
+                            boxId: String, warningId: String, confirmId: String, cancelId: String,
+                            gate: String) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(title)
+                .font(.headline)
+            automationText(warningId, warning)
+                .font(.callout)
+            HStack(spacing: 12) {
+                Button(confirmLabel, role: .destructive) { Task { await vm.confirm() } }
+                    .accessibilityIdentifier(confirmId)
+                    .automationActivate(confirmId) { Task { await vm.confirm() } }
+                    .faunaGate(gate)
+                Button(cancelLabel, role: .cancel) { vm.cancelConfirm() }
+                    .accessibilityIdentifier(cancelId)
+                    .automationActivate(cancelId) { vm.cancelConfirm() }
+            }
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 8))
+        // `.contain` keeps BOTH this container id AND the child warning/button
+        // ids queryable — a bare container id on a VStack otherwise clobbers
+        // every child id (same clobber guard as `disableConfirmSection`).
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier(boxId)
+        // The in-process driver reads presence from the automation registry, not
+        // the accessibility tree: without this the open confirm reads as absent and
+        // its close is unobservable.
+        .automationValue(boxId, text: { "" })
     }
 
     // MARK: - Helpers
 
-    /// Format an epoch-millis timestamp for `first-seen-at` (mirrors linux's
-    /// `%Y-%m-%d %H:%M` / windows' `yyyy-MM-dd HH:mm` — a locale date+time).
-    /// Routes through `ValueFormat.absoluteDate` — the same medium-date/short-time
-    /// door every other apple absolute-timestamp surface uses, rather than a
-    /// second hand-rolled `DateFormatter.localizedString` call.
+    /// Format an epoch-millis timestamp for `first-seen-at` in the fixed local
+    /// audit form `YYYY-MM-DD HH:MM` — a bridge's first-seen and approved-at are
+    /// audit-class times (value-formatting.md § Absolute local timestamp display),
+    /// so they route through the shared `formatUnixLocalMs` door like every other
+    /// app, never a locale-native render.
     static func formatFirstSeen(_ unixMillis: UInt64) -> String {
-        ValueFormat.absoluteDate(epochMs: Int64(unixMillis), withTime: true)
+        formatUnixLocalMs(ms: Int64(clamping: unixMillis))
     }
 
     /// Format an optional epoch-millis `approved_at` — a dash for an absent value

@@ -17,14 +17,12 @@ use std::sync::{Arc, Mutex};
 
 use fauna_client_media::media::MediaItem;
 use fauna_client_media::{FolderFilter, MediaSnapshot, MediaSortKey};
-use fauna_core::crypto::{BackupKey, decrypt_backup_chunk};
+use fauna_core::crypto::BackupKey;
 use fauna_core::file_download::{FileDownloadKeys, PredecessorSealKey, RecordSigner};
 use fauna_core::followed_media::{FollowedFetchError, FollowedMediaScope, FollowedMediaSource};
 use fauna_core::localized::LocalizedText;
 use fauna_core::path_crypto;
-use fauna_media::audience::Audience;
 
-use crate::blob_fetcher::MediaBlobFetcher;
 use crate::blob_uploader::MediaBlobUploader;
 use crate::nest_api::{MediaApiError, MediaNestApi};
 use crate::observer::MediaObserver;
@@ -55,6 +53,47 @@ const SHARE_REVOKE_ERROR_KEY: &str = "share_link.error_revoke";
 /// target and never lands here — every own folder is an upload target
 /// (`media.md` § Layout & flow).
 const NO_SET_ERROR_KEY: &str = "media.error_no_set";
+/// The `{message}` an upload reports through [`REFRESH_ERROR_KEY`] when it
+/// found no target and the page's reads never completed (rows or own sets
+/// still held back for want of custody, or the folder list unread): the
+/// caller may well have a folder, so "create one first" would be false.
+const FOLDERS_NOT_LOADED_DETAIL: &str =
+    "your folders have not finished loading yet — try again in a moment";
+
+/// How long a page that has never loaded keeps re-reading a read that is not
+/// complete ([`MediaSnapshot::held`] non-zero, or the folder list lost) —
+/// `ui/README.md` § List pages: loading is not empty, rule 2: only a complete
+/// read licenses "nothing here". Right after sign-in the account runtime and
+/// its custody arrive within about the bound a write already waits for them
+/// (`fauna_account_seams::blessed_nests`, 120 × 250 ms); the re-reads back off
+/// from `first`, doubling up to `cap`, until `budget` is spent, and then the
+/// page loads with what it found — a row held for ever is absent, never a page
+/// that spins for ever.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SettlePolicy {
+    pub first: std::time::Duration,
+    pub cap: std::time::Duration,
+    pub budget: std::time::Duration,
+}
+
+impl Default for SettlePolicy {
+    fn default() -> Self {
+        Self {
+            first: std::time::Duration::from_millis(250),
+            cap: std::time::Duration::from_secs(4),
+            budget: std::time::Duration::from_secs(30),
+        }
+    }
+}
+
+/// Which settle budgets a read found spent when it landed (`commit_read`).
+#[derive(Debug, Clone, Copy)]
+struct SettleBudget {
+    /// The page's first-load budget ([`State::first_load_spent`]).
+    first_load_spent: bool,
+    /// The running settle's own — what a forced settle on a loaded page spends.
+    this_settle_spent: bool,
+}
 /// i18n key for a `restore_version()` failure ("Failed to restore version:
 /// {message}").
 const RESTORE_ERROR_KEY: &str = "media.error_restore";
@@ -90,6 +129,34 @@ const FOLLOWED_UNAVAILABLE_ERROR_KEY: &str = "media.error_followed_unavailable";
 /// revoke (`folders.md` § Publicly-synced follow).
 const FOLLOWED_FETCH_ERROR_KEY: &str = "media.error_followed_fetch";
 
+/// One page read's custody view ([`fauna_core::folder_keys::read_scope`]):
+/// opened at the first set the read's label render needs custody for, then
+/// shared by every other set of that read and dropped with it — so a read
+/// costs one roster + custody read, not one per set (`docs/goal/ui/README.md`
+/// § List pages: loading is not empty). Reads only: a gesture's seal resolves
+/// through the machine's own resolver, fresh.
+#[derive(Default)]
+struct ReadScope {
+    opened: Option<Option<Arc<dyn crate::folder_keys::FolderKeyResolver>>>,
+}
+
+impl ReadScope {
+    /// The scope over `base`, opened on the first call.
+    async fn resolver(
+        &mut self,
+        base: Option<&Arc<dyn crate::folder_keys::FolderKeyResolver>>,
+    ) -> Option<Arc<dyn crate::folder_keys::FolderKeyResolver>> {
+        if self.opened.is_none() {
+            let scope = match base {
+                Some(base) => Some(fauna_core::folder_keys::read_scope(base).await),
+                None => None,
+            };
+            self.opened = Some(scope);
+        }
+        self.opened.clone().flatten()
+    }
+}
+
 /// Internal page state. In-memory only; clients read snapshots via the getter.
 struct State {
     /// The full cross-set aggregate from the last successful `refresh()` (all
@@ -113,7 +180,26 @@ struct State {
     /// Whether a refresh has ever returned successfully — surfaced as
     /// [`MediaPageSnapshot::loaded`], which owns the full rationale. Set in the
     /// `Ok` arm of [`MediaMachine::refresh_with_owner`] and never cleared.
+    ///
+    /// A read that held rows or own sets back for want of custody
+    /// ([`MediaSnapshot::held`]) or lost the folder list is **not** a
+    /// complete read and does not set it — until the first-load settle
+    /// ([`SettlePolicy`]) has spent its budget, after which the page loads
+    /// with what the reads found rather than spin for ever.
     loaded: bool,
+    /// Whether the last committed read was **complete** — nothing held back
+    /// for want of custody, and the folder list read. `false` before any read.
+    /// The upload gestures read it: no target on an incomplete read is "your
+    /// folders have not loaded yet", never `media.error_no_set`.
+    complete: bool,
+    /// The generation of the newest read that has committed (0 = none) — the
+    /// newest-landed rule `MediaMachine::refresh_gen` documents.
+    committed_gen: u64,
+    /// How much of the first-load settle budget ([`SettlePolicy::budget`]) the
+    /// page has spent — counted per PAGE, never per refresh: a page that never
+    /// loaded and keeps being asked to refresh while its rows stay held must
+    /// still spend the budget and load (`ui/README.md` § List pages, rule 2).
+    first_load_spent: std::time::Duration,
     /// Followed public folders as browse-scope options, refreshed with the
     /// aggregate from the injected [`FollowedMediaSource`]; empty while the
     /// source is unwired.
@@ -212,7 +298,10 @@ impl SetKey {
             Self::Ref(fauna_core::folder_keys::FolderRef::Local(id)) => {
                 rows.iter().find(|f| f.id == *id)
             }
-            Self::Ref(fauna_core::folder_keys::FolderRef::Foreign(_)) => None,
+            Self::Ref(
+                fauna_core::folder_keys::FolderRef::Foreign(_)
+                | fauna_core::folder_keys::FolderRef::Group(_),
+            ) => None,
             Self::Name(hash) => rows
                 .iter()
                 .find(|f| path_crypto::set_name_hash(&f.name) == *hash),
@@ -240,10 +329,6 @@ struct SignedAsLedger {
     /// `(set, manifest hash)` → who signed the row naming it. The set is the
     /// row's [`SetKey`], so a same-named pair's rows never share an entry.
     manifests: std::collections::HashMap<(SetKey, String), RecordSigner>,
-    /// Thumbnail hashes, the same way. Keyed by hash alone: the thumbnail
-    /// gesture names nothing else, and a thumbnail is only ever painted for
-    /// the account that holds its key.
-    thumbnails: std::collections::HashMap<String, RecordSigner>,
 }
 
 impl SignedAsLedger {
@@ -262,32 +347,52 @@ impl SignedAsLedger {
         self.manifests.insert(key, kept);
     }
 
-    fn note_thumbnail(
-        &mut self,
-        thumbnail_hex: &str,
-        signer: RecordSigner,
-        chain: &[PredecessorSealKey],
-    ) {
-        let key = thumbnail_hex.to_ascii_lowercase();
-        let kept = self
-            .thumbnails
-            .get(&key)
-            .map_or(signer, |held| held.wider(signer, chain));
-        self.thumbnails.insert(key, kept);
-    }
-
     /// Who signed the row naming `manifest_hex` in `set`.
     fn signer(&self, set: SetKey, manifest_hex: &str) -> RecordSigner {
         let key = (set, manifest_hex.to_ascii_lowercase());
         self.manifests.get(&key).copied().unwrap_or_default()
     }
+}
 
-    fn thumbnail_signer(&self, thumbnail_hex: &str) -> RecordSigner {
-        self.thumbnails
-            .get(&thumbnail_hex.to_ascii_lowercase())
-            .copied()
-            .unwrap_or_default()
+/// Parse a recorded hex manifest hash (a version's `manifest_hash`, an item's
+/// `thumbnail_hash`) into its digest — a malformed one is a caller bug,
+/// `BadRequest`, before any fetch. `what` names it in the detail.
+fn manifest_digest(hex_hash: &str, what: &str) -> Result<[u8; 32], MediaApiError> {
+    hex::decode(hex_hash)
+        .map_err(|e| MediaApiError::BadRequest {
+            detail: format!("{what} is not hex: {e}"),
+        })?
+        .try_into()
+        .map_err(|v: Vec<u8>| MediaApiError::BadRequest {
+            detail: format!("{what} must be 32 bytes, got {}", v.len()),
+        })
+}
+
+/// Seal a rendered thumbnail through the one whole-file pipeline under
+/// `seal_root` — the root its file just sealed under — and post it chunks
+/// first, manifest last (a manifest never rests pointing at chunks the nest
+/// does not hold). Answers the manifest's hex hash, the `thumbnail_hash` the
+/// record carries (`media.md` § Encryption at rest → *A thumbnail rests as
+/// its file rests*).
+async fn seal_and_post_thumbnail(
+    uploader: &dyn MediaBlobUploader,
+    thumbnail_bytes: &[u8],
+    seal_root: Option<([u8; 32], Option<u64>)>,
+) -> Result<String, MediaApiError> {
+    let sealed = fauna_core::blob_seal::seal_blob(
+        thumbnail_bytes,
+        seal_root.map(|(k, v)| (k, v.map(fauna_core::blob_seal::SealStamp::Version))),
+    )
+    .map_err(|e| MediaApiError::Transient {
+        detail: format!("sealing the thumbnail failed: {e:#}"),
+    })?;
+    for (store_key, body) in sealed.chunks {
+        uploader.post_chunk(store_key.digest(), body).await?;
     }
+    uploader
+        .post_manifest(sealed.manifest_hash.digest(), sealed.manifest_bytes)
+        .await?;
+    Ok(hex::encode(sealed.manifest_hash.digest()))
 }
 
 /// The facts [`fauna_client_share::share_link_eligible`] decides over for the
@@ -358,6 +463,9 @@ impl State {
             view_grid: false,
             error: None,
             loaded: false,
+            complete: false,
+            committed_gen: 0,
+            first_load_spent: std::time::Duration::ZERO,
             followed_options: Vec::new(),
             followed_active: None,
             share_create: None,
@@ -369,6 +477,27 @@ impl State {
 #[cfg_attr(feature = "uniffi", derive(uniffi::Object))]
 pub struct MediaMachine {
     state: Mutex<State>,
+    /// Refresh generation — claimed at the start of every aggregate re-read
+    /// (`refresh_with_owner`, the tail of every gesture that re-reads) and
+    /// checked under the state lock before the commit: a read lands only if no
+    /// NEWER read has landed already (`State::committed_gen`) — newest-landed
+    /// wins. Without it, overlapping re-reads race last-write-wins on the page:
+    /// a slow nav-to-tab read issued before an upload landed can commit after
+    /// the upload's own re-read and hide the new file, with nothing reading
+    /// again. A read is never dropped merely because a newer one STARTED: the
+    /// nest fires one `SyncChanged` per recorded file and the apps re-read the
+    /// visible page on each, so on a large account reads can keep starting
+    /// faster than one lands, and dropping on start meant the page never loaded.
+    /// Since the read gate (`reads`) no two of the machine's reads overlap at
+    /// all; the generation stays as the commit's backstop.
+    refresh_gen: std::sync::atomic::AtomicU64,
+    /// One aggregate read in flight, at most one trailing re-read
+    /// ([`crate::read_gate`]).
+    reads: crate::read_gate::ReadGate,
+    /// The newest owner key a refresh was asked with — what the gate's runner
+    /// reads under, so a read one caller runs for another's ask renders with
+    /// the key the newest ask brought, never a keyless caller's `None`.
+    read_owner: Mutex<Option<BackupKey>>,
     observer: Arc<dyn MediaObserver>,
     nest_api: Arc<dyn MediaNestApi>,
     /// The blob-upload seam for `upload()` (the bulk-binary `POST /api/v1/blob`
@@ -376,20 +505,15 @@ pub struct MediaMachine {
     /// coordinator — LEG B; native LEG A is a follow-on) → `upload()` returns a
     /// `Transient` "not supported" error. `delete()` never needs it.
     blob_uploader: Option<Arc<dyn MediaBlobUploader>>,
-    /// The blob-download seam for `fetch_thumbnail()` (the bulk-binary `GET
-    /// /api/v1/blob/<hash>` direct-by-hash leg). `None` on a platform whose blob
-    /// fetcher isn't wired yet (web, until its wasm fetch coordinator) →
-    /// `fetch_thumbnail()` returns a `Transient` "not supported" error. The
-    /// download twin of `blob_uploader`.
-    blob_fetcher: Option<Arc<dyn MediaBlobFetcher>>,
-    /// The full-file download seam for `download_file()` — the shared
+    /// The full-file download seam for `download_file()` and
+    /// `fetch_thumbnail()` (a thumbnail rests as its file rests, a manifest) — the shared
     /// client-side walk's per-target fetch leg (native
     /// `fauna_client::NestPublicChunkFetcher`, wasm
     /// `fauna_core::file_download::WasmPublicChunkFetcher`, injected by
     /// `nest_api::ws_rpc::build_media_machine`; `/api/v1/manifests/{hash}` +
     /// `/api/v1/chunks/{hash}`). `None` on a platform with no wired leg →
-    /// `download_file()` returns a `Transient` "not supported" error, like the
-    /// two seams above.
+    /// `download_file()` / `fetch_thumbnail()` return a `Transient` "not
+    /// supported" error, like the upload seam above.
     download_fetcher: Option<Arc<dyn fauna_core::file_download::BlobFetcher>>,
     /// The shared-folder content-key resolver for `download_file()` (Phase 0 —
     /// the read leg). `Some` on a platform that ingests folder custody (native
@@ -473,6 +597,8 @@ pub struct MediaMachine {
     /// platform wires it: the share gestures then report an error rather
     /// than mint under nothing.
     share_author: Mutex<Option<Arc<fauna_client_share::ShareAuthor>>>,
+    /// The first-load settle schedule ([`SettlePolicy`]); a test shortens it.
+    settle: Mutex<SettlePolicy>,
 }
 
 impl MediaMachine {
@@ -480,29 +606,30 @@ impl MediaMachine {
     /// optional [`MediaBlobUploader`]. State starts empty (all-media view, name
     /// sort ascending, list mode); the client calls `refresh()` to populate it.
     ///
-    /// `blob_uploader` / `blob_fetcher` are `Some` on a platform with a wired
-    /// blob-upload / -download path and `None` otherwise (then `upload()` /
-    /// `fetch_thumbnail()` report unsupported; `delete()` and the reads work
-    /// regardless).
+    /// `blob_uploader` / `download_fetcher` are `Some` on a platform with a
+    /// wired byte-upload / -download path and `None` otherwise (then `upload()`
+    /// / `download_file()` / `fetch_thumbnail()` report unsupported; `delete()`
+    /// and the reads work regardless).
     ///
     /// Not a `#[uniffi::constructor]` — the seams (`Arc<dyn …>`) have no FFI ABI.
     /// Clients construct via `nest_api::build_media_machine` (native `fauna-ffi` /
     /// linux, wasm web), which binds the session's connected requester; tests pass
-    /// a `FakeMediaNestApi` (+ `FakeMediaBlobUploader` / `FakeMediaBlobFetcher`).
+    /// a `FakeMediaNestApi` (+ `FakeMediaBlobUploader` and a download fetcher).
     pub fn new(
         observer: Arc<dyn MediaObserver>,
         nest_api: Arc<dyn MediaNestApi>,
         blob_uploader: Option<Arc<dyn MediaBlobUploader>>,
-        blob_fetcher: Option<Arc<dyn MediaBlobFetcher>>,
         download_fetcher: Option<Arc<dyn fauna_core::file_download::BlobFetcher>>,
         folder_keys: Option<Arc<dyn crate::folder_keys::FolderKeyResolver>>,
     ) -> Arc<Self> {
         Arc::new(Self {
             state: Mutex::new(State::new()),
+            refresh_gen: std::sync::atomic::AtomicU64::new(0),
+            reads: Default::default(),
+            read_owner: Mutex::new(None),
             observer,
             nest_api,
             blob_uploader,
-            blob_fetcher,
             download_fetcher,
             folder_keys,
             foreign_fetchers: std::sync::OnceLock::new(),
@@ -513,6 +640,7 @@ impl MediaMachine {
             predecessor_ids: Mutex::new(Vec::new()),
             signed_as: Mutex::new(SignedAsLedger::default()),
             share_author: Mutex::new(None),
+            settle: Mutex::new(SettlePolicy::default()),
         })
     }
 
@@ -542,6 +670,13 @@ impl MediaMachine {
     pub fn set_mls_query(&self, mls_query: Arc<dyn MlsQuery>) {
         self.nest_api.set_mls_query(mls_query.clone());
         *self.mls_query.lock().unwrap() = Some(mls_query);
+    }
+
+    /// Shorten the first-load settle ([`SettlePolicy`]) — tests only, so a
+    /// settle that never completes spends milliseconds, not its real budget.
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub fn set_settle_policy(&self, policy: SettlePolicy) {
+        *self.settle.lock().unwrap() = policy;
     }
 
     /// `list_folders` behind the join-filter: an own row always passes, a
@@ -617,11 +752,21 @@ impl MediaMachine {
     /// (`path-sealing.md` § the set-name plane); offered unrendered it was a
     /// nameless upload target whose record carried no address. A set no
     /// custody opens is omitted, never offered nameless.
+    ///
+    /// Also returns how many **own** sets were omitted: an own set's name is
+    /// opened by the reader's own custody, which right after sign-in may not
+    /// have assembled yet — so its omission is a set held back, not a set that
+    /// does not exist, and the page must not read it as "no folder"
+    /// ([`MediaSnapshot::held`]). A member set's omission is not counted: it
+    /// never makes the caller folderless (`default_upload_target` takes own
+    /// sets only).
     async fn render_sealed_folder_names(
         &self,
         sets: Vec<fauna_client_media::MediaFolder>,
         owner: Option<BackupKey>,
-    ) -> Vec<fauna_client_media::MediaFolder> {
+        scope: &mut ReadScope,
+    ) -> (Vec<fauna_client_media::MediaFolder>, usize) {
+        let mut omitted_own = 0;
         let mut rendered = Vec::with_capacity(sets.len());
         for mut set in sets {
             if set.name_sealed.is_none() {
@@ -632,7 +777,11 @@ impl MediaMachine {
             // The row's own custody, by its identity — never by the name hash
             // a same-named set shares.
             let row = SetKey::Ref(fauna_core::folder_keys::FolderRef::Local(set.id));
-            let keys = self.folder_keys_for_key(&row, owner.clone()).await.0;
+            let resolver = scope.resolver(self.folder_keys.as_ref()).await;
+            let keys = self
+                .folder_keys_through(resolver, &row, owner.clone())
+                .await
+                .0;
             match fauna_core::label_custody::render_set_name(
                 &keys,
                 set.name_sealed.as_deref(),
@@ -644,13 +793,22 @@ impl MediaMachine {
                     set.name = name;
                     rendered.push(set);
                 }
-                path_crypto::SealedLabelRender::Omit => {}
+                path_crypto::SealedLabelRender::Omit => {
+                    if !set.member {
+                        omitted_own += 1;
+                    }
+                }
             }
         }
-        rendered
+        (rendered, omitted_own)
     }
 
-    async fn render_sealed_paths(&self, snap: &mut MediaSnapshot, owner: Option<BackupKey>) {
+    async fn render_sealed_paths(
+        &self,
+        snap: &mut MediaSnapshot,
+        owner: Option<BackupKey>,
+        scope: &mut ReadScope,
+    ) {
         // Nothing sealed on this page: a plaintext-resting plane's rows and the
         // keyless-writer rows. Skips the per-set key resolution entirely, so a
         // `None`-key caller costs exactly what it did before this slice.
@@ -691,7 +849,11 @@ impl MediaMachine {
                 ),
             );
             if let std::collections::hash_map::Entry::Vacant(slot) = per_set.entry(set_key) {
-                let keys = self.folder_keys_for_key(&set_key, owner.clone()).await.0;
+                let resolver = scope.resolver(self.folder_keys.as_ref()).await;
+                let keys = self
+                    .folder_keys_through(resolver, &set_key, owner.clone())
+                    .await
+                    .0;
                 // The set-name twin of the path render below, through the same
                 // shared seam so the two cannot disagree on root or salt. The
                 // nest ships `folder_sealed`/`folder_hash` only to this
@@ -715,15 +877,7 @@ impl MediaMachine {
             let signer = self.signer_of(item.signed_as_current, item.signed_as);
             // Noted WHATEVER the labels below do (ruling (8)(c)): a row whose
             // name does not render is still one a gesture can name by its
-            // hash, and an un-noted hash reads as the current identity's. A
-            // thumbnail is keyed by hash alone, so it is noted even before
-            // the set's name renders.
-            if let Some(thumbnail) = item.thumbnail_hash.as_deref() {
-                self.signed_as
-                    .lock()
-                    .unwrap()
-                    .note_thumbnail(thumbnail, signer, &chain);
-            }
+            // hash, and an un-noted hash reads as the current identity's.
 
             // A set whose *name* this reader cannot render is a set whose files
             // it cannot render either (same custody, same roots), so the item
@@ -819,19 +973,6 @@ impl MediaMachine {
                     signer,
                     &chain,
                 );
-            }
-            if let Some(thumbnail) = item.thumbnail_hash.as_deref() {
-                // Ruling (10)(c), the stamp binds the root: a thumbnail is a
-                // bare-key blob only an unstamped row records (a content-keyed
-                // upload records none), so a STAMPED row naming one earns it
-                // no owner root — whoever signed it. Another row's right to
-                // it still stands (the widest wins).
-                let signer = if item.content_key_version.is_some() {
-                    RecordSigner::Other
-                } else {
-                    signer
-                };
-                ledger.note_thumbnail(thumbnail, signer, &chain);
             }
         }
     }
@@ -1032,78 +1173,6 @@ impl MediaMachine {
         }
     }
 
-    /// Open a raw-AEAD **Library**-audience blob under every owner root this
-    /// account may hold for it — the gesture's `current` key first, then each
-    /// retired predecessor in registry order.
-    ///
-    /// The crate's one *bare*-`BackupKey` open site's funnel
-    /// ([`Self::fetch_thumbnail`]: a folder file rests as a chunk manifest, its
-    /// thumbnail as its own blob). It is the plane
-    /// `FileDownloadKeys::predecessor_backup_keys` does **not** reach: that
-    /// field feeds `owner_open_roots`, which offers *convergent chunk roots*,
-    /// while these blobs seal under the bare key. So a successor whose chunk
-    /// corpus already reads (leg 5's read half) still had its whole inherited
-    /// thumbnail grid read as dark — the same break, one plane over
-    /// (`succession-aftermath.md` § Re-key scope, the `BackupKey` corpus row).
-    ///
-    /// ⚠ **Callers MUST have verified the content address first**, and that
-    /// ordering is what makes the extra candidates safe rather than a widening.
-    /// The backup-chunk frame carries no AAD, so a tag proves only
-    /// *sealed-under-some-root-we-hold*, never *these bytes* — but
-    /// because the address check has already pinned the bytes to the hash the
-    /// caller asked for, an extra key can only widen *which root may open
-    /// already-proven bytes*, never *which bytes may be served*. Reversing the
-    /// order would hand a malicious nest one substitution attempt per ancestor.
-    ///
-    /// **Read-only by construction, exactly as the chunk plane is**: the retired
-    /// roots are reachable only from here, and every Library *seal* site
-    /// ([`Self::do_upload`], `seal_gesture_path`) takes the caller's current key
-    /// directly — so no gesture can land new bytes under a root the aftermath
-    /// exists to retire.
-    ///
-    /// Cost in the steady state is nil: an account that never succeeded holds no
-    /// predecessors, and the current key is always tried first.
-    ///
-    /// `signer` is who signed the row naming the blob (ruling (8)(c), the
-    /// bare-key twin of `FileDownloadKeys::record_signer`, through the same
-    /// [`RecordSigner::retired_keys`]): a row signed as a retired identity is
-    /// offered only that identity's root and its predecessors', so a
-    /// predecessor's signature never opens a blob the successor — or a later
-    /// predecessor — sealed; another writer's row, none of the owner family.
-    fn open_library_blob(
-        &self,
-        current: &BackupKey,
-        sealed: &[u8],
-        what: &str,
-        signer: RecordSigner,
-    ) -> Result<Vec<u8>, MediaApiError> {
-        // The current key's failure is the one reported: for the overwhelmingly
-        // common no-succession account it is the only attempt, so the message
-        // stays exactly what it was before the candidates existed.
-        let current_err = if signer.offers_current() {
-            match decrypt_backup_chunk(current, sealed) {
-                Ok(plaintext) => return Ok(plaintext),
-                Err(e) => e.to_string(),
-            }
-        } else {
-            "its record was signed under another identity, whose keys do not open it".to_string()
-        };
-        let chain = self.predecessor_keys();
-        for retired in signer.retired_keys(&chain) {
-            let Some(retired) = retired.client_key() else {
-                continue;
-            };
-            if let Ok(plaintext) = decrypt_backup_chunk(retired, sealed) {
-                return Ok(plaintext);
-            }
-        }
-        Err(MediaApiError::BadRequest {
-            // Non-retryable: no root this account holds opens these bytes, and
-            // that verdict cannot change on retry.
-            detail: format!("{what} decrypt failed: {current_err}"),
-        })
-    }
-
     /// [`MediaMachine::refresh`] over an already-typed owner key — the form the
     /// **gesture** refreshes take, so a write can re-render under the very
     /// custody it just sealed with ([`Self::owner_key`]) instead of having to
@@ -1121,9 +1190,115 @@ impl MediaMachine {
     /// `--features uniffi`, which a default-feature `cargo test`/`clippy` run
     /// never exercises.
     async fn refresh_with_owner(&self, owner: Option<BackupKey>) {
-        let result = match self.nest_api.media_snapshot().await {
+        self.refresh_settling(owner, false).await;
+    }
+
+    /// One aggregate re-read and its commit — and, while the page has never
+    /// loaded (or when `force_settle`, an upload that found no target), the
+    /// **settle**: a read that was not complete ([`MediaSnapshot::held`]
+    /// non-zero, or the folder list lost) is re-read on the [`SettlePolicy`]
+    /// schedule until one is complete or the budget is spent. Each incomplete
+    /// read still commits its rows (they are real) but leaves `loaded` unset,
+    /// so no app paints `media-empty-state` over rows merely held back
+    /// (`ui/README.md` § List pages: loading is not empty, rule 2).
+    ///
+    /// Through the read gate ([`crate::read_gate`]): one read in flight; a
+    /// refresh asked meanwhile waits for the one trailing read every such ask
+    /// shares, and returns once a read that started after it has committed
+    /// (`force_settle`: once a settle covering it has ended).
+    async fn refresh_settling(&self, owner: Option<BackupKey>, force_settle: bool) {
+        use crate::read_gate::{RunGuard, Turn};
+        if let Some(key) = &owner {
+            *self.read_owner.lock().unwrap() = Some(key.clone());
+        }
+        let ticket = self.reads.ask(force_settle);
+        loop {
+            match self.reads.turn(ticket, force_settle).await {
+                Turn::Done => return,
+                Turn::Run => {
+                    let _running = RunGuard(&self.reads);
+                    self.run_reads(owner.clone()).await;
+                }
+            }
+        }
+    }
+
+    /// The gate's runner: read, commit, and settle while the read is not
+    /// complete — each re-read covering every ask made before it started. The
+    /// back-off between re-reads is cut short by a new ask, so a gesture's
+    /// re-read never waits out a sleep. The first-load budget is the page's
+    /// ([`State::first_load_spent`]); a forced settle on a loaded page spends
+    /// its own.
+    async fn run_reads(&self, owner: Option<BackupKey>) {
+        use std::sync::atomic::Ordering;
+        let policy = *self.settle.lock().unwrap();
+        let mut wait = policy.first;
+        let mut waited = std::time::Duration::ZERO;
+        loop {
+            let (cover, force_settle) = self.reads.begin_read();
+            let generation = self.refresh_gen.fetch_add(1, Ordering::SeqCst) + 1;
+            let read_owner = self.read_owner.lock().unwrap().clone().or(owner.clone());
+            let (result, complete) = self.read_page(read_owner).await;
+            let budget = SettleBudget {
+                first_load_spent: self.state.lock().unwrap().first_load_spent >= policy.budget,
+                this_settle_spent: waited >= policy.budget,
+            };
+            match self
+                .commit_read(generation, result, complete, force_settle, budget)
+                .await
+            {
+                None | Some(false) => {
+                    if waited > std::time::Duration::ZERO {
+                        tracing::info!(
+                            target: "fauna_media",
+                            complete,
+                            "media page settle ended after {waited:?}",
+                        );
+                    }
+                    self.reads.end_settle(cover);
+                    return;
+                }
+                Some(true) => self.reads.finish_read(cover),
+            }
+            if waited == std::time::Duration::ZERO {
+                tracing::info!(
+                    target: "fauna_media",
+                    "media read held rows or folders back for want of custody; re-reading \
+                     (up to {:?}) before the page may read as empty",
+                    policy.budget,
+                );
+            }
+            if !self.reads.asked_since(cover) {
+                crate::read_gate::first_of(fauna_sleep::sleep(wait), self.reads.ask_after(cover))
+                    .await;
+            }
+            // Counted at the nominal back-off even when an ask cut it short:
+            // a push burst then spends the budget sooner, never later.
+            waited += wait;
+            {
+                let mut s = self.state.lock().unwrap();
+                if !s.loaded {
+                    s.first_load_spent += wait;
+                }
+            }
+            wait = (wait * 2).min(policy.cap);
+        }
+    }
+
+    /// The page's one read: the judged aggregate, its sealed paths rendered,
+    /// plus the control-plane folder list — with whether it is **complete**
+    /// (nothing held back for want of custody, and the folder list read).
+    async fn read_page(
+        &self,
+        owner: Option<BackupKey>,
+    ) -> (Result<MediaSnapshot, MediaApiError>, bool) {
+        match self.nest_api.media_snapshot().await {
             Ok(mut snap) => {
-                self.render_sealed_paths(&mut snap, owner.clone()).await;
+                // One custody view for every set this read renders, opened at
+                // the first set that needs one (`ReadScope`).
+                let mut scope = ReadScope::default();
+                self.render_sealed_paths(&mut snap, owner.clone(), &mut scope)
+                    .await;
                 self.note_signed_as(&snap.items);
                 // The control-plane set list (`fauna.folders.list`) is what
                 // makes an EMPTY set choosable — the item aggregate can only
@@ -1133,34 +1308,69 @@ impl MediaMachine {
                 // (`media.md` § Layout & flow).
                 //
                 // Deliberately NOT fatal to the page: media is the read that
-                // matters, and a failed read (a
-                // transient failure) must still render the browse rather than
-                // erroring the whole page. Losing the list degrades exactly to
-                // the pre-fix item-derived options.
-                match self.list_joined_folders().await {
+                // matters, and a failed list (a transient failure) must still
+                // render the browse rather than erroring the whole page. Losing
+                // the list degrades to the pre-fix item-derived options — but
+                // the read is then not complete: item-derived options cannot
+                // name an empty own set, so "no folder" would be a guess.
+                let folders_read = match self.list_joined_folders().await {
                     Ok(sets) => {
-                        snap.known_folders = self.render_sealed_folder_names(sets, owner).await
+                        let (rendered, omitted_own) = self
+                            .render_sealed_folder_names(sets, owner, &mut scope)
+                            .await;
+                        snap.known_folders = rendered;
+                        snap.held += omitted_own;
+                        true
                     }
-                    Err(e) => tracing::warn!(
-                        target: "fauna_media",
-                        error = %e.detail(),
-                        "listing folders failed; media options fall back to the sets that have media",
-                    ),
-                }
-                Ok(snap)
+                    Err(e) => {
+                        tracing::warn!(
+                            target: "fauna_media",
+                            error = %e.detail(),
+                            "listing folders failed; media options fall back to the sets that have media",
+                        );
+                        false
+                    }
+                };
+                let complete = folders_read && snap.held == 0;
+                (Ok(snap), complete)
             }
-            Err(e) => Err(e),
-        };
+            Err(e) => (Err(e), false),
+        }
+    }
+
+    /// Commit one read to the page and notify. `None` = superseded (dropped
+    /// untouched); `Some(true)` = the settle re-reads; `Some(false)` = done.
+    /// `budget` says which settle budgets are spent: once the one that applies
+    /// is (the page's first-load budget before it loaded, the forced settle's
+    /// own after), an incomplete read loads the page with what it found.
+    async fn commit_read(
+        &self,
+        generation: u64,
+        result: Result<MediaSnapshot, MediaApiError>,
+        complete: bool,
+        force_settle: bool,
+        budget: SettleBudget,
+    ) -> Option<bool> {
+        use std::sync::atomic::Ordering;
         // Followed browse-scope options ride the same refresh (best-effort,
-        // like the folders list above; the source's staleness budget makes a
+        // like the folders list; the source's staleness budget makes a
         // warm-cache pass cheap). Independent of the aggregate read's outcome:
         // the options render either way.
         let followed_options = match self.followed_source.get() {
             Some(source) => Some(source.followed_scopes().await),
             None => None,
         };
-        {
+        let settle_more = {
             let mut s = self.state.lock().unwrap();
+            // A newer read already LANDED → drop this stale result untouched;
+            // the page already shows something fresher. A newer read merely in
+            // flight drops nothing: this one lands, and the newer one commits
+            // over it when it lands (newest-landed wins — `refresh_gen`'s doc).
+            // Strict: a settle's own re-reads share its generation.
+            if generation < s.committed_gen {
+                return None;
+            }
+            s.committed_gen = generation;
             if let Some(options) = followed_options {
                 s.followed_options = options;
             }
@@ -1168,23 +1378,42 @@ impl MediaMachine {
                 Ok(snap) => {
                     // The read RETURNED — and what it returned is the fact that
                     // separates "the page is empty because this actor has
-                    // nothing" from "the page never got an answer". Only the
-                    // `Err` arm below is visible today, so a successful-but-empty
-                    // read leaves no trace at all and the page simply parks
-                    // loaded-and-empty. Counts only (no names, no paths).
+                    // nothing" from "the page never got an answer". Counts only
+                    // (no names, no paths).
                     tracing::debug!(
                         target: "fauna_media",
                         items = snap.items.len(),
                         folders = snap.known_folders.len(),
+                        held = snap.held,
+                        complete,
                         "media refresh returned",
                     );
+                    let settling = (!s.loaded || force_settle) && !complete;
+                    let exhausted = if s.loaded {
+                        budget.this_settle_spent
+                    } else {
+                        budget.first_load_spent
+                    };
                     s.raw = snap;
                     s.error = None;
-                    // The one place the page becomes loaded. Only a read that
-                    // RETURNED may license `media-empty-state`; the `Err` arm
+                    s.complete = complete;
+                    if settling && exhausted {
+                        tracing::warn!(
+                            target: "fauna_media",
+                            "media reads still held rows or folders back when the settle budget \
+                             ran out; the page loads with what they found",
+                        );
+                    }
+                    // The one place the page becomes loaded. Only a COMPLETE
+                    // read licenses `media-empty-state` — or the settle's last,
+                    // once its budget is spent; an incomplete read on a page
+                    // already loaded keeps it loaded (monotonic). The `Err` arm
                     // below deliberately leaves this alone (see the field's doc
                     // on `MediaPageSnapshot`).
-                    s.loaded = true;
+                    if !settling || exhausted {
+                        s.loaded = true;
+                    }
+                    settling && !exhausted
                 }
                 Err(e) => {
                     let err = error_text(REFRESH_ERROR_KEY, e.detail());
@@ -1193,10 +1422,46 @@ impl MediaMachine {
                     // the *event*, not the *paint*). `log_line` is redaction-safe.
                     tracing::warn!(target: "fauna_media", "{}", err.log_line());
                     s.error = Some(err);
+                    s.complete = false;
+                    false
                 }
             }
-        }
+        };
         self.observer.on_changed();
+        // Only the latest-started read goes on settling (the read gate keeps
+        // reads from overlapping; this is the backstop).
+        (self.refresh_gen.load(Ordering::SeqCst) == generation).then_some(settle_more)
+    }
+
+    /// An upload that resolved no target on a page whose reads never
+    /// completed: settle first (re-read until complete or the budget is
+    /// spent), so the target is resolved from a complete answer. Returns
+    /// whether the page's last read is complete.
+    async fn settle_before_refusing(&self, backup_key: &[u8]) -> bool {
+        let complete = {
+            let s = self.state.lock().unwrap();
+            s.loaded && s.complete
+        };
+        if complete {
+            return true;
+        }
+        let owner = <[u8; 32]>::try_from(backup_key)
+            .ok()
+            .map(BackupKey::from_bytes)
+            .or_else(|| self.owner_key());
+        self.refresh_settling(owner, true).await;
+        self.state.lock().unwrap().complete
+    }
+
+    /// The refusal for an upload with no target: `media.error_no_set` only
+    /// when a complete read found no own folder (`media.md` § Errors & edge
+    /// cases); otherwise the folders have not loaded yet.
+    fn refuse_no_target(&self, complete: bool) {
+        if complete {
+            self.set_error_no_upload_target();
+        } else {
+            self.set_error(REFRESH_ERROR_KEY, FOLDERS_NOT_LOADED_DETAIL);
+        }
     }
 
     /// The reader's key custody for one folder, plus the set's **home-nest
@@ -1230,7 +1495,23 @@ impl MediaMachine {
         FileDownloadKeys,
         Option<fauna_core::folder_keys::ForeignHome>,
     ) {
-        let custody = fauna_core::label_custody::LabelCustody::new(self.folder_keys.clone(), owner)
+        self.folder_keys_through(self.folder_keys.clone(), set, owner)
+            .await
+    }
+
+    /// [`Self::folder_keys_for_key`] through `resolver` — the machine's own, or
+    /// one page read's [`ReadScope`] over it. The same assembly either way;
+    /// only where the roster and custody come from differs.
+    async fn folder_keys_through(
+        &self,
+        resolver: Option<Arc<dyn crate::folder_keys::FolderKeyResolver>>,
+        set: &SetKey,
+        owner: Option<BackupKey>,
+    ) -> (
+        FileDownloadKeys,
+        Option<fauna_core::folder_keys::ForeignHome>,
+    ) {
+        let custody = fauna_core::label_custody::LabelCustody::new(resolver, owner)
             // Read candidates for a successor's predecessor-sealed media; the
             // seal-side twin below deliberately does NOT get them.
             .with_predecessor_keys(self.predecessor_keys());
@@ -1240,15 +1521,142 @@ impl MediaMachine {
         }
     }
 
+    /// Open one recorded manifest of `set` through the single-file walk under
+    /// that row's custody — the one byte read [`Self::download_file`] and
+    /// [`Self::fetch_thumbnail`] share, so a file and its thumbnail can never
+    /// open under different keys. `signer` is who signed the row naming the
+    /// manifest (ruling (8)(c)); `stamp` the row's generation (ruling (10)(c));
+    /// `what` prefixes the error detail.
+    #[allow(clippy::too_many_arguments)]
+    async fn open_manifest(
+        &self,
+        set: SetKey,
+        folder: &str,
+        digest: [u8; 32],
+        content_key_version: Option<u64>,
+        relative_path: &str,
+        key: BackupKey,
+        signer: RecordSigner,
+        what: &str,
+    ) -> Result<Vec<u8>, MediaApiError> {
+        // Shared-set path (Phase 0 — the read leg). A bound shared folder's
+        // chunks are content-keyed, never owner-keyed, so *any* reader (the owner
+        // reading their own shared set, or a member) opens under the content keys
+        // in their `fauna.state.folder-keys` custody — resolved here by the item's row — and the
+        // set's readable content lives in the chunk store (the walk).
+        // `content_open_roots` fails closed on
+        // a generation this holder lacks (a removed member, or an unsynced
+        // rotation): no plaintext, no owner-key fall-through (FS-BIND-5). An
+        // owner-only (unbound) set takes the owner-key path below — guaranteed
+        // by the resolver's three-valued contract since a fix: `Ok(None)` is
+        // a POSITIVE unbound answer (an owned roster row named this never falls
+        // through to the foreign-record lookup, so a same-named foreign set can
+        // no longer route this set's fetches to a stranger's nest), and a
+        // resolve *failure* yields no keys at all rather than masquerading as
+        // unbound.
+        let (keys, foreign_home) = self.folder_keys_for_key(&set, Some(key)).await;
+        let keys = FileDownloadKeys {
+            record_signer: signer,
+            ..keys
+        };
+        // A same-nest read is a read of `folder`: the walk carries its relay
+        // hint, so a file whose bytes rest only on a holder's seat (a
+        // metadata-only folder) is relayed instead of missing (`file-sync.md`
+        // § Relay serving, step (4)). The hint travels with this download, not
+        // with the machine's one fetcher, which serves every folder. The ref
+        // form comes from the item itself, so a reader's own same-named set
+        // never shadows the shared set the item belongs to.
+        let hint = fauna_core::file_download::FolderHint::new(folder).with_ref(set.folder_ref());
+        if keys.mls_group_id.is_some() {
+            // A FOREIGN (cross-nest) set's bytes live on its home nest — fetch
+            // through the factory-built fetcher bound to that base URL (Phase 2
+            // client read-side; the byte routes are public + CORS-open and
+            // integrity is by content address), verified against the
+            // grant-delivered home identity. A same-nest set uses the
+            // machine's own injected fetcher, hinted. The foreign read carries
+            // no hint: this session holds no bearer the home nest can name
+            // (its reader's door is § Relay serving → *A member on another
+            // nest*'s byte-plane token).
+            let fetcher: Arc<dyn fauna_core::file_download::BlobFetcher> = match foreign_home
+                .as_ref()
+            {
+                Some(home) => self
+                    .foreign_fetchers
+                    .get()
+                    .ok_or_else(|| MediaApiError::Transient {
+                        detail: "cross-nest file download is not yet supported on this \
+                                     platform"
+                            .to_string(),
+                    })?
+                    .fetcher_for(&home.nest_url, home.nest_actor_id.as_deref()),
+                None => self
+                    .download_fetcher
+                    .clone()
+                    .ok_or_else(|| MediaApiError::Transient {
+                        detail: "media file download is not yet supported on this platform"
+                            .to_string(),
+                    })?,
+            };
+            let hinted = fauna_core::file_download::FolderHinted::new(fetcher.as_ref(), hint);
+            let walk: &dyn fauna_core::file_download::BlobFetcher = if foreign_home.is_some() {
+                fetcher.as_ref()
+            } else {
+                &hinted
+            };
+            // The owner key rides in `keys` for a bound set too, but
+            // `effective_backup_key` suppresses it on every chunk site
+            // (FS-5DC) — a bound set's chunks stay content-keyed, exactly as
+            // before this factor.
+            return fauna_core::file_download::download_file_bytes_by_manifest(
+                walk,
+                &keys,
+                fauna_core::data::ContentHash::from_digest_raw(digest),
+                content_key_version.map(fauna_core::blob_seal::SealStamp::Version),
+                relative_path,
+            )
+            .await
+            .map_err(|e| MediaApiError::Transient {
+                detail: format!("{what} failed: {e:#}"),
+            });
+        }
+
+        // Owner-only path — the chunk-store walk under the owner key.
+        let fetcher = self
+            .download_fetcher
+            .as_ref()
+            .ok_or_else(|| MediaApiError::Transient {
+                detail: "media file download is not yet supported on this platform".to_string(),
+            })?;
+        // `keys` is `FileDownloadKeys::owner(key)` here when the resolver
+        // positively answered unbound. On a resolve *failure* it is keyless instead (no keys, per the
+        // three-valued contract) and the walk refuses to open — transient and
+        // retryable, preferred over guessing an audience.
+        fauna_core::file_download::download_file_bytes_by_manifest(
+            &fauna_core::file_download::FolderHinted::new(fetcher.as_ref(), hint),
+            &keys,
+            fauna_core::data::ContentHash::from_digest_raw(digest),
+            content_key_version.map(fauna_core::blob_seal::SealStamp::Version),
+            relative_path,
+        )
+        .await
+        // The walk's failures (fetch, open, hash mismatch) collapse to one
+        // detail string: the page shows it verbatim and nothing branches on the
+        // variant, and the walk's anyhow chain doesn't discriminate retryable
+        // from permanent for us.
+        .map_err(|e| MediaApiError::Transient {
+            detail: format!("{what} failed: {e:#}"),
+        })
+    }
+
     /// Open a version another signature recorded and re-seal it under the
     /// **current** owner root — the only way such a version is restored
     /// (`mls-group-key-material.md` § M2 → *Writer-signed change records*,
     /// ruling (8)(d), the restore sentence). Answers the `(manifest hash, size,
-    /// generation)` the restore records, or the detail it refuses with.
+    /// generation, thumbnail hash)` the restore records, or the detail it
+    /// refuses with.
     ///
     /// The bytes open under the signer's own retired root and its
-    /// predecessors' alone (`FileDownloadKeys::record_signer`,
-    /// [`Self::open_library_blob`]) — exactly the roots ruling (8)(c) lets a
+    /// predecessors' alone (`FileDownloadKeys::record_signer`) — exactly the roots ruling (8)(c) lets a
     /// predecessor's signature reach. A version that names bytes the successor
     /// (or a later predecessor) sealed — the planted row this rule exists for —
     /// therefore does not open,
@@ -1264,12 +1672,19 @@ impl MediaMachine {
     /// folder whose bytes rest unsealed (a re-pointed public head naming
     /// sealed bytes would hand them to the declassification, and re-sealing
     /// into a public folder would hide what it publishes).
+    ///
+    /// The version's thumbnail moves with it (`media.md` § Encryption at rest
+    /// → *A thumbnail rests as its file rests*, bound (2)): the manifest its
+    /// row names is re-sealed exactly as the file — the same windowed re-seal,
+    /// the same signer bound, the same root — and the restore records the new
+    /// hash. A tile that does not open is dropped, never a reason to refuse the
+    /// file: the download backfill re-renders it.
     async fn reseal_inherited_version(
         &self,
         set: SetKey,
         path: &str,
         version: &FileVersionSummary,
-    ) -> Result<(String, i64, Option<u64>), String> {
+    ) -> Result<(String, i64, Option<u64>, Option<String>), String> {
         let refused = || RESTORE_INHERITED_UNOPENABLE.to_string();
         // The roots the version's signer may reach — its own and its
         // predecessors' (ruling (8)(c)), never the current one.
@@ -1312,10 +1727,37 @@ impl MediaMachine {
             );
             refused()
         })?;
+        let thumbnail_hash = match version.thumbnail_hash.as_deref() {
+            Some(thumb_hex) => match manifest_digest(thumb_hex, "the version's thumbnail hash") {
+                Ok(thumb) => fauna_core::nest_reseal::reseal_nest_copy_windowed(
+                    fetcher.as_ref(),
+                    &record_keys,
+                    fauna_core::data::ContentHash::from_digest_raw(thumb),
+                    None,
+                    path,
+                    Some(seal_root),
+                    &sink,
+                )
+                .await
+                .map(|t| hex::encode(t.manifest_hash.digest()))
+                .map_err(|e| format!("{e:#}")),
+                Err(e) => Err(e.detail().to_string()),
+            }
+            .inspect_err(|e| {
+                tracing::warn!(
+                    target: "fauna_media",
+                    error = %e,
+                    "the restored version's thumbnail did not re-seal; recorded without one"
+                );
+            })
+            .ok(),
+            None => None,
+        };
         Ok((
             hex::encode(resealed.manifest_hash.digest()),
             resealed.manifest.total_size as i64,
             None,
+            thumbnail_hash,
         ))
     }
 
@@ -1571,12 +2013,21 @@ impl MediaMachine {
         raw_bytes: Vec<u8>,
         backup_key: Vec<u8>,
     ) {
-        match self.resolve_target(&FolderFilter::parse(&folder)) {
+        let filter = FolderFilter::parse(&folder);
+        let mut resolved = self.resolve_target(&filter);
+        let mut complete = true;
+        if resolved.is_none() {
+            // No such set on a page whose reads never completed: settle and
+            // look again before telling the user the folder is not there.
+            complete = self.settle_before_refusing(&backup_key).await;
+            resolved = self.resolve_target(&filter);
+        }
+        match resolved {
             Some((name, target)) => {
                 self.upload_into(name, target, device_id, path, raw_bytes, backup_key)
                     .await
             }
-            None => self.set_error_no_upload_target(),
+            None => self.refuse_no_target(complete),
         }
     }
 
@@ -1608,15 +2059,15 @@ impl MediaMachine {
         raw_bytes: Vec<u8>,
         backup_key: Vec<u8>,
     ) {
-        let (followed_active, target) = {
+        let pick = |s: &State| {
+            s.filter
+                .as_ref()
+                .map(FolderFilter::value)
+                .or_else(|| s.raw.default_upload_target())
+        };
+        let (followed_active, mut target) = {
             let s = self.state.lock().unwrap();
-            (
-                s.followed_active.is_some(),
-                s.filter
-                    .as_ref()
-                    .map(FolderFilter::value)
-                    .or_else(|| s.raw.default_upload_target()),
-            )
+            (s.followed_active.is_some(), pick(&s))
         };
         // A followed browse scope is structurally read-only, and while one is
         // active `filter` still holds whatever set the user browsed BEFORE
@@ -1629,12 +2080,21 @@ impl MediaMachine {
             self.observer.on_changed();
             return;
         }
+        let mut complete = true;
+        if target.is_none() {
+            // No own folder on a page whose reads never completed — right
+            // after sign-in every signed row and sealed own-set name is held
+            // until custody reads. Settle first; "create a folder first" is
+            // only true of a complete read (`media.md` § Errors & edge cases).
+            complete = self.settle_before_refusing(&backup_key).await;
+            target = pick(&self.state.lock().unwrap());
+        }
         match target {
             Some(folder) => {
                 self.upload(folder, device_id, path, raw_bytes, backup_key)
                     .await
             }
-            None => self.set_error_no_upload_target(),
+            None => self.refuse_no_target(complete),
         }
     }
 
@@ -2108,7 +2568,7 @@ impl MediaMachine {
         let current_vouches = self
             .signer_for(set, &version.manifest_hash)
             .offers_current();
-        let (manifest_hash, size_bytes, content_key_version) =
+        let (manifest_hash, size_bytes, content_key_version, thumbnail_hash) =
             match listed_restore_decision(version.content_key_version, current_vouches) {
                 RestoreDecision::NeedsReseal => {
                     match self.reseal_inherited_version(set, &path, &version).await {
@@ -2120,11 +2580,13 @@ impl MediaMachine {
                     }
                 }
                 // A listed version is a version (the judged listing kept it),
-                // so the listed decision never refuses.
+                // so the listed decision never refuses. Its thumbnail rests
+                // as its bytes rest, so it re-points with them verbatim.
                 RestoreDecision::Verbatim | RestoreDecision::Refuse => (
                     version.manifest_hash,
                     version.size_bytes,
                     version.content_key_version,
+                    version.thumbnail_hash,
                 ),
             };
         match self
@@ -2137,6 +2599,7 @@ impl MediaMachine {
                 manifest_hash,
                 size_bytes,
                 content_key_version,
+                thumbnail_hash,
                 path_sealed,
             )
             .await
@@ -2148,29 +2611,30 @@ impl MediaMachine {
         }
     }
 
-    /// Fetch + decrypt the thumbnail blob at `thumbnail_hash` (a
+    /// Fetch + open the thumbnail at `thumbnail_hash` (a
     /// `MediaItemSummary.thumbnail_hash`) into paint-ready image bytes, so every
     /// app just paints decoded bytes (priority #2 — the whole render fetch is
-    /// shared Rust, not hand-rolled per client). The flow:
+    /// shared Rust, not hand-rolled per client).
     ///
-    /// 1. `GET /api/v1/blob/<thumbnail_hash>` **direct-by-hash** over the
-    ///    bulk-binary seam — **not** `?thumb=1`: a Media-library / device-synced
-    ///    thumbnail has no `/api/v1/blob` primary with `blob_metadata` for
-    ///    `?thumb=1` to resolve, and the client already holds the thumbnail's own
-    ///    hash (`media.md` § Implementation status (a)).
-    /// 2. Verify the content address — `blake3(fetched sealed bytes)` must equal
-    ///    the requested `thumbnail_hash`, else reject. This is what rejects a
-    ///    substituted blob: the backup-chunk AEAD frame carries no AAD, so the tag
-    ///    proves only *sealed-under-the-owner-key*, not *this* blob (a malicious
-    ///    nest could otherwise serve any other owner-sealed blob and it would
-    ///    decrypt cleanly).
-    /// 3. Decrypt under the owner's `backup_key` — the audience its producer
-    ///    sealed under, for every thumbnail EXCEPT one belonging to a folder the
-    ///    owner declassified: those rest plaintext (`media.md` § Encryption at
-    ///    rest → *Public-audience folders*) and are returned as fetched, since
-    ///    there is no seal to open and attempting one would paint the
-    ///    placeholder instead of the image. The item is identified by the very
-    ///    hash step 2 verified, so the branch cannot widen what is rendered.
+    /// **A thumbnail rests as its file rests** (`media.md` § Encryption at rest
+    /// → *A thumbnail rests as its file rests*): the hash names a chunk
+    /// manifest sealed under the root the file's row names, so it opens exactly
+    /// as the file does — the single-file walk
+    /// (`fauna_core::file_download::download_file_bytes_by_manifest`) under the
+    /// row's own `FileDownloadKeys`: the row's custody (a shared or served
+    /// set's content keys, the owner root, or none for plaintext chunks), the
+    /// row's stamp (a stamped row opens under its generation and never an owner
+    /// root — ruling (10)(c), by construction), the row's signer bound (ruling
+    /// (8)(c)) and the predecessor roots a successor inherited. The walk is the
+    /// content-address check: the manifest is fetched by the hash asked for and
+    /// every chunk by its store key, the reassembled bytes checked against the
+    /// manifest's file hash — a nest cannot substitute another tile.
+    ///
+    /// The row is the listed item naming the hash; the gesture names nothing
+    /// else. Every item naming it is tried, first open wins — two rows only
+    /// share a thumbnail when they share its bytes and root. A hash no listed
+    /// item names is refused (`NotFound`): with no row there is no custody to
+    /// open it under, and none is guessed.
     ///
     /// `backup_key` is the client's 32-byte owner backup key (`backup_key_derive`)
     /// — injected per call, as `upload()` takes it (the machine holds no key).
@@ -2178,93 +2642,76 @@ impl MediaMachine {
     /// Unlike the page gestures, this is a **per-item query**: it returns the
     /// decoded bytes (or the error) to the caller and does **not** touch the page
     /// `error-message` banner — one unreadable thumbnail must not blank the page;
-    /// the client falls back to the placeholder. On a platform with no blob
-    /// fetcher wired (web, until its wasm coordinator) it returns a `Transient`
-    /// "not supported" error.
+    /// the client falls back to the placeholder. On a platform with no download
+    /// fetcher wired it returns a `Transient` "not supported" error.
     pub async fn fetch_thumbnail(
         &self,
         thumbnail_hash: String,
         backup_key: Vec<u8>,
     ) -> Result<Vec<u8>, MediaApiError> {
-        // Fail fast if no blob fetcher is wired on this platform — before any work.
-        let fetcher = self
-            .blob_fetcher
-            .as_ref()
-            .ok_or_else(|| MediaApiError::Transient {
+        // Fail fast if no download fetcher is wired on this platform — before any work.
+        if self.download_fetcher.is_none() {
+            return Err(MediaApiError::Transient {
                 detail: "media thumbnail fetch is not yet supported on this platform".to_string(),
-            })?;
-
-        // A wrong key length is a caller bug → BadRequest (no fetch attempted).
+            });
+        }
+        // A wrong key length / malformed hash is a caller bug → BadRequest
+        // (no fetch attempted).
         let key_bytes: [u8; 32] =
             backup_key
                 .try_into()
                 .map_err(|v: Vec<u8>| MediaApiError::BadRequest {
                     detail: format!("backup key must be 32 bytes, got {}", v.len()),
                 })?;
+        let digest = manifest_digest(&thumbnail_hash, "thumbnail hash")?;
+        let key = BackupKey::from_bytes(key_bytes);
 
-        // Fetch the stored (sealed) bytes by hash.
-        let sealed = fetcher.fetch_blob(thumbnail_hash.clone()).await?;
-
-        // Content-address check — the one thing standing between a malicious /
-        // buggy nest and a wrong-image render. The nest stores an AEAD-sealed blob
-        // verbatim, so `blake3(sealed)` MUST equal the hash we asked for. The
-        // backup-chunk frame carries **no AAD** (`fauna_core::crypto`), so its tag
-        // proves only *sealed-under-this-owner-key*, NOT *this specific blob* —
-        // without this check the nest could serve any OTHER blob sealed under the
-        // owner's own `backup_key` (a different thumbnail, or a full backup-file
-        // chunk) and it would decrypt cleanly, painting the wrong owner content.
-        // `blake3::Hash::to_hex()` is canonical lowercase hex, matching the nest's
-        // `hex::encode(blake3(..))`; compare case-insensitively for robustness.
-        //
-        if !blake3::hash(&sealed)
-            .to_hex()
-            .as_str()
-            .eq_ignore_ascii_case(&thumbnail_hash)
-        {
-            return Err(MediaApiError::BadRequest {
-                detail: "thumbnail content-hash mismatch: the nest served a different blob"
-                    .to_string(),
-            });
-        }
-
-        // Decrypt under the owner key — or, for a successor still holding a
-        // thumbnail its predecessor sealed, under a retired root. The address
-        // check above has already pinned these bytes, so the candidates widen
-        // only the key, never the content ([`Self::open_library_blob`]).
-        // A thumbnail seals under the folder's audience (`do_upload`, and the
-        // engine's twin), so one that belongs to a declassified folder is
-        // already the plaintext JPEG — there is nothing to open, and trying
-        // would fail the AEAD and paint the placeholder instead of the image.
-        // The item is found by the hash this call already verified above, so the
-        // lookup cannot widen what is rendered: it only says how to read bytes
-        // whose address is settled.
-        // The verdict is the item's own row's, so a same-named public set
-        // never passes a shared set's sealed thumbnail off as public bytes.
-        let set = {
+        // The rows naming this thumbnail, each with what its walk needs: its
+        // set (custody by the row — `media.md` § Encryption at rest → *A set
+        // is addressed by its row*), its path, its stamp and its signer.
+        let rows: Vec<(SetKey, String, String, Option<u64>, RecordSigner)> = {
             let st = self.state.lock().unwrap();
             st.raw
                 .items
                 .iter()
-                .find(|it| {
+                .filter(|it| {
                     it.thumbnail_hash
                         .as_deref()
                         .is_some_and(|h| h.eq_ignore_ascii_case(&thumbnail_hash))
                 })
-                .map(|it| SetKey::of(it.folder_id, &it.folder))
+                .map(|it| {
+                    (
+                        SetKey::of(it.folder_id, &it.folder),
+                        it.folder.clone(),
+                        it.path.clone(),
+                        it.content_key_version,
+                        self.signer_of(it.signed_as_current, it.signed_as),
+                    )
+                })
+                .collect()
         };
-        if set.is_some_and(|set| self.declassified_folder_id(set).is_some()) {
-            return Ok(sealed);
+        let mut last = MediaApiError::NotFound {
+            detail: "no listed item names this thumbnail".to_string(),
+        };
+        for (set, folder, path, stamp, signer) in rows {
+            match self
+                .open_manifest(
+                    set,
+                    &folder,
+                    digest,
+                    stamp,
+                    &path,
+                    key.clone(),
+                    signer,
+                    "thumbnail",
+                )
+                .await
+            {
+                Ok(bytes) => return Ok(bytes),
+                Err(e) => last = e,
+            }
         }
-
-        let key = BackupKey::from_bytes(key_bytes);
-        // A thumbnail only a predecessor's signature names is never offered
-        // the current root (ruling (8)(c)).
-        let signer = self
-            .signed_as
-            .lock()
-            .unwrap()
-            .thumbnail_signer(&thumbnail_hash);
-        self.open_library_blob(&key, &sealed, "thumbnail", signer)
+        Err(last)
     }
 
     /// Download + decrypt one file's **full plaintext bytes** by a version's
@@ -2312,133 +2759,27 @@ impl MediaMachine {
                 .map_err(|v: Vec<u8>| MediaApiError::BadRequest {
                     detail: format!("backup key must be 32 bytes, got {}", v.len()),
                 })?;
-        let digest: [u8; 32] = hex::decode(&manifest_hash)
-            .map_err(|e| MediaApiError::BadRequest {
-                detail: format!("manifest hash is not hex: {e}"),
-            })?
-            .try_into()
-            .map_err(|v: Vec<u8>| MediaApiError::BadRequest {
-                detail: format!("manifest hash must be 32 bytes, got {}", v.len()),
-            })?;
+        let digest = manifest_digest(&manifest_hash, "manifest hash")?;
         let key = BackupKey::from_bytes(key_bytes);
-
-        // Shared-set path (Phase 0 — the read leg). A bound shared folder's
-        // chunks are content-keyed, never owner-keyed, so *any* reader (the owner
-        // reading their own shared set, or a member) opens under the content keys
-        // in their `fauna.state.folder-keys` custody — resolved here by the item's row — and the
-        // set's readable content lives in the chunk store (the walk).
-        // `content_open_roots` fails closed on
-        // a generation this holder lacks (a removed member, or an unsynced
-        // rotation): no plaintext, no owner-key fall-through (FS-BIND-5). An
-        // owner-only (unbound) set takes the owner-key path below — guaranteed
-        // by the resolver's three-valued contract since a fix: `Ok(None)` is
-        // a POSITIVE unbound answer (an owned roster row named this never falls
-        // through to the foreign-record lookup, so a same-named foreign set can
-        // no longer route this set's fetches to a stranger's nest), and a
-        // resolve *failure* yields no keys at all rather than masquerading as
-        // unbound.
-        //
         // Custody, signer and hint all key by the downloaded item's own row
         // (`media.md` § Encryption at rest → *A set is addressed by its row*),
         // so a reader's own same-named set never answers for a shared one.
         let set = self.item_set_key(&folder, &relative_path, Some(&manifest_hash));
-        let (keys, foreign_home) = self.folder_keys_for_key(&set, Some(key.clone())).await;
         // Ruling (8)(c): the row naming this manifest in this set decides
         // whether the current owner root may open it. A row signed under a
         // retired identity gets the retired roots alone, on every arm below.
         let signer = self.signer_for(set, &manifest_hash);
-        let keys = FileDownloadKeys {
-            record_signer: signer,
-            ..keys
-        };
-        // A same-nest read is a read of `folder`: the walk carries its relay
-        // hint, so a file whose bytes rest only on a holder's seat (a
-        // metadata-only folder) is relayed instead of missing (`file-sync.md`
-        // § Relay serving, step (4)). The hint travels with this download, not
-        // with the machine's one fetcher, which serves every folder. The ref
-        // form comes from the item itself, so a reader's own same-named set
-        // never shadows the shared set the item belongs to.
-        let hint =
-            fauna_core::file_download::FolderHint::new(folder.as_str()).with_ref(set.folder_ref());
-        if keys.mls_group_id.is_some() {
-            // A FOREIGN (cross-nest) set's bytes live on its home nest — fetch
-            // through the factory-built fetcher bound to that base URL (Phase 2
-            // client read-side; the byte routes are public + CORS-open and
-            // integrity is by content address), verified against the
-            // grant-delivered home identity. A same-nest set uses the
-            // machine's own injected fetcher, hinted. The foreign read carries
-            // no hint: this session holds no bearer the home nest can name
-            // (its reader's door is § Relay serving → *A member on another
-            // nest*'s byte-plane token).
-            let fetcher: Arc<dyn fauna_core::file_download::BlobFetcher> = match foreign_home
-                .as_ref()
-            {
-                Some(home) => self
-                    .foreign_fetchers
-                    .get()
-                    .ok_or_else(|| MediaApiError::Transient {
-                        detail: "cross-nest file download is not yet supported on this \
-                                     platform"
-                            .to_string(),
-                    })?
-                    .fetcher_for(&home.nest_url, home.nest_actor_id.as_deref()),
-                None => self
-                    .download_fetcher
-                    .clone()
-                    .ok_or_else(|| MediaApiError::Transient {
-                        detail: "media file download is not yet supported on this platform"
-                            .to_string(),
-                    })?,
-            };
-            let hinted = fauna_core::file_download::FolderHinted::new(fetcher.as_ref(), hint);
-            let walk: &dyn fauna_core::file_download::BlobFetcher = if foreign_home.is_some() {
-                fetcher.as_ref()
-            } else {
-                &hinted
-            };
-            // The owner key rides in `keys` for a bound set too, but
-            // `effective_backup_key` suppresses it on every chunk site
-            // (FS-5DC) — a bound set's chunks stay content-keyed, exactly as
-            // before this factor.
-            return fauna_core::file_download::download_file_bytes_by_manifest(
-                walk,
-                &keys,
-                fauna_core::data::ContentHash::from_digest_raw(digest),
-                content_key_version,
-                &relative_path,
-            )
-            .await
-            .map_err(|e| MediaApiError::Transient {
-                detail: format!("file download failed: {e:#}"),
-            });
-        }
-
-        // Owner-only path — the chunk-store walk under the owner key.
-        let fetcher = self
-            .download_fetcher
-            .as_ref()
-            .ok_or_else(|| MediaApiError::Transient {
-                detail: "media file download is not yet supported on this platform".to_string(),
-            })?;
-        // `keys` is `FileDownloadKeys::owner(key)` here when the resolver
-        // positively answered unbound. On a resolve *failure* it is keyless instead (no keys, per the
-        // three-valued contract) and the walk refuses to open — transient and
-        // retryable, preferred over guessing an audience.
-        fauna_core::file_download::download_file_bytes_by_manifest(
-            &fauna_core::file_download::FolderHinted::new(fetcher.as_ref(), hint),
-            &keys,
-            fauna_core::data::ContentHash::from_digest_raw(digest),
+        self.open_manifest(
+            set,
+            &folder,
+            digest,
             content_key_version,
             &relative_path,
+            key,
+            signer,
+            "file download",
         )
         .await
-        // The walk's failures (fetch, open, hash mismatch) collapse to one
-        // detail string: the page shows it verbatim and nothing branches on the
-        // variant, and the walk's anyhow chain doesn't discriminate retryable
-        // from permanent for us.
-        .map_err(|e| MediaApiError::Transient {
-            detail: format!("file download failed: {e:#}"),
-        })
     }
 
     /// Set the `media-sort-select` key from its UI value (`"name"` / `"size"` /
@@ -2729,16 +3070,18 @@ impl MediaMachine {
     ///
     /// | custody | chunk root | label root | thumbnail |
     /// |---|---|---|---|
-    /// | content-keyed (served / shared) | current content key, stamped | the same generation | none |
-    /// | owner-only | `BackupKey::convergent_chunk_root`, unstamped | the owner root | sealed `Library` blob |
-    /// | `public` audience | none — plaintext chunks | none — names are URLs | plaintext blob |
+    /// | content-keyed (served / shared) | current content key, stamped | the same generation | a manifest under the same generation |
+    /// | owner-only | `BackupKey::convergent_chunk_root`, unstamped | the owner root | a manifest under the same root |
+    /// | `public` audience | none — plaintext chunks | none — names are URLs | a plaintext manifest |
     ///
     /// So every manifest reader opens what this page wrote with no second arm:
     /// the WebDAV MDA and a member (content-keyed), a synced desktop's hydrate
     /// and a private link's envelope (owner-only), the web serve's one door
     /// and a public link (public). The single sealed blob
     /// (`fauna_media::process_and_seal`) stays the attachment plane's and is
-    /// never a folder file's shape.
+    /// never a folder file's shape. The thumbnail takes the file's custody
+    /// (`media.md` § Encryption at rest → *A thumbnail rests as its file
+    /// rests*): the same seal root, so whoever opens the file opens its tile.
     async fn do_upload(
         &self,
         folder: &str,
@@ -2799,30 +3142,20 @@ impl MediaMachine {
                 root: *content_keys.current_key(),
                 version: content_keys.current_version(),
             }
-        } else if let Some(folder_id) = self.declassified_folder_id_now(target).await {
+        } else if self.declassified_folder_id_now(target).await.is_some() {
             // Media is a producer for a declassified folder exactly as the
             // sync engine is (`SyncEngine::with_public_audience`): its content,
             // names and paths rest in the clear, because they are URLs the
             // web serve reads. Unclassifiable folders never land here — the
             // fail-closed direction `judge_declassification` states.
-            UploadCustody::Public { folder_id }
+            UploadCustody::Public
         } else {
             UploadCustody::OwnerOnly
         };
 
         // 4. `process_media` first: the metadata strip (what rests is the
-        //    stripped body, whatever the custody) and the thumbnail. A
-        //    content-keyed set records no thumbnail — the engine records none
-        //    either, and a blob sealed under a per-set key would need an
-        //    `Audience` the sidecar wire does not carry.
+        //    stripped body, whatever the custody) and the thumbnail.
         let processed = fauna_media::process::process_media(raw_bytes);
-        let thumbnail_audience = match custody {
-            UploadCustody::ContentKeyed { .. } => None,
-            UploadCustody::OwnerOnly => Some(Audience::Library {
-                backup_key: owner.clone(),
-            }),
-            UploadCustody::Public { folder_id } => Some(Audience::PublicFolder { folder_id }),
-        };
 
         // 5. Seal through the engine's own whole-file pipeline. Deterministic,
         //    so a retry re-puts the same store keys and the owner-only arm
@@ -2830,12 +3163,15 @@ impl MediaMachine {
         let seal_root = match custody {
             UploadCustody::ContentKeyed { root, version } => Some((root, Some(version))),
             UploadCustody::OwnerOnly => Some((owner.convergent_chunk_root(), None)),
-            UploadCustody::Public { .. } => None,
+            UploadCustody::Public => None,
         };
-        let sealed = fauna_core::blob_seal::seal_blob(&processed.stripped_bytes, seal_root)
-            .map_err(|e| MediaApiError::Transient {
-                detail: format!("sealing the file failed: {e:#}"),
-            })?;
+        let sealed = fauna_core::blob_seal::seal_blob(
+            &processed.stripped_bytes,
+            seal_root.map(|(k, v)| (k, v.map(fauna_core::blob_seal::SealStamp::Version))),
+        )
+        .map_err(|e| MediaApiError::Transient {
+            detail: format!("sealing the file failed: {e:#}"),
+        })?;
 
         // 6. The chunks first, the manifest last: a manifest must never rest
         //    on the nest pointing at chunks it does not hold (the engine's
@@ -2847,30 +3183,26 @@ impl MediaMachine {
             .post_manifest(sealed.manifest_hash.digest(), sealed.manifest_bytes)
             .await?;
 
-        // 7. The thumbnail, after the file: it stays a blob-store blob sealed
-        //    under the folder's audience (a derived view only this page reads,
-        //    fetched by its own hash — `fetch_thumbnail`), so its failure must
-        //    NOT orphan the just-stored file: log it and record the member
-        //    without one (the item renders the placeholder).
-        let thumbnail_hash = match (thumbnail_audience, processed.thumbnail_bytes) {
-            (Some(audience), Some(thumbnail_bytes)) => {
-                let thumb =
-                    fauna_media::pipeline::seal_rendered_thumbnail(&thumbnail_bytes, &audience);
-                match uploader
-                    .post_blob(thumb.sidecar.to_dag_cbor(), thumb.bytes)
-                    .await
+        // 7. The thumbnail, after the file: it rests as its file rests — the
+        //    same pipeline under the same root and stamp, so every reader of
+        //    the file opens its tile (`fetch_thumbnail`, the same walk). Its
+        //    failure must NOT orphan the just-stored file: log it and record
+        //    the member without one (the item renders the placeholder).
+        let thumbnail_hash = match processed.thumbnail_bytes {
+            Some(thumbnail_bytes) => {
+                match seal_and_post_thumbnail(uploader.as_ref(), &thumbnail_bytes, seal_root).await
                 {
                     Ok(hash) => Some(hash),
                     Err(e) => {
                         tracing::warn!(
                             target: "fauna_media",
-                            "thumbnail blob upload failed, recording member without it: {e:?}"
+                            "thumbnail upload failed, recording member without it: {e:?}"
                         );
                         None
                     }
                 }
             }
-            _ => None,
+            None => None,
         };
 
         // 8. Seal the path under the SAME root the chunks sealed under, so the
@@ -2881,7 +3213,7 @@ impl MediaMachine {
         //    plaintext `path`. A seal failure must not orphan the just-stored
         //    bytes: record plaintext-only and let the backfill pass pick it up.
         let path_sealed = match custody {
-            UploadCustody::Public { .. } => None,
+            UploadCustody::Public => None,
             UploadCustody::ContentKeyed { .. } => {
                 fauna_core::label_custody::seal_path_from_keys(&keys, path)
                     .inspect_err(|e| {
@@ -2925,7 +3257,9 @@ impl MediaMachine {
                 path,
                 hex::encode(sealed.manifest_hash.digest()),
                 sealed.manifest.total_size as i64,
-                sealed.content_key_version,
+                sealed
+                    .content_stamp
+                    .and_then(fauna_core::blob_seal::SealStamp::version),
                 thumbnail_hash,
                 path_sealed,
             )
@@ -3153,7 +3487,7 @@ fn followed_item(
 }
 
 /// The custody a folder upload seals under — the one fact that picks the chunk
-/// root, the label root and the thumbnail's audience (`MediaMachine::do_upload`).
+/// root (the thumbnail's too) and the label root (`MediaMachine::do_upload`).
 #[derive(Clone, Copy)]
 enum UploadCustody {
     /// A WebDAV-served or shared set: its current content-key generation.
@@ -3161,5 +3495,5 @@ enum UploadCustody {
     /// An owner-only set: the owner's convergent chunk root, unstamped.
     OwnerOnly,
     /// A `public`-audience folder: plaintext, no root.
-    Public { folder_id: i64 },
+    Public,
 }

@@ -31,7 +31,7 @@ from helpers.dmarc_reports import mail_report, report_message, report_xml
 from helpers.waiting import wait_until
 from i18n.strings import S
 
-pytestmark = [pytest.mark.tier_3, pytest.mark.tui, pytest.mark.web, pytest.mark.linux]
+pytestmark = [pytest.mark.tier_3, pytest.mark.tui, pytest.mark.web, pytest.mark.linux, pytest.mark.macos, pytest.mark.ios, pytest.mark.windows, pytest.mark.android]
 
 _T = S.admin.mail_reports_page
 

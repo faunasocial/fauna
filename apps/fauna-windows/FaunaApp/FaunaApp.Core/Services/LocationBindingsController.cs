@@ -3,14 +3,15 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using uniffi.fauna_devices_machine;
 using uniffi.fauna_ffi;
 
 namespace FaunaApp.Core.Services;
 
 /// <summary>
 /// The **session-scoped folder-binding control plane**: the shared optimistic model
-/// (<see cref="FfiLocationBindingsModel"/> = <c>fauna_client_sync::agent::LocationBindingsModel</c>),
-/// the agent's last-reported per-path modes, and the reconcile that pushes the model's
+/// (<see cref="FfiLocationBindingsModel"/> = <c>fauna_client_sync::agent::LocationBindingsModel</c>,
+/// whose rows carry the agent-mirrored mode — no per-path copy is kept here), and the reconcile that pushes the model's
 /// outstanding binds/unbinds at the agent. The C# peer of linux's <c>sync_agent.rs</c>
 /// module surface (<c>add_binding</c> / <c>remove_binding</c> / <c>reconcile</c> /
 /// <c>current_locations</c>) — priority #3, the same concept in the same place on every app.
@@ -52,11 +53,6 @@ internal sealed class LocationBindingsController
     /// <c>PendingBind</c> instead of confirming a push that reached nothing.</summary>
     private ILocationControlChannel _channel = new UnreachableLocationControlChannel();
 
-    /// <summary>Per-path sync mode as last reported by the agent. Mode is <i>agent</i> truth,
-    /// orthogonal to whether a binding is confirmed — a row the agent has never seen renders
-    /// the <c>always</c> default until it does.</summary>
-    private Dictionary<string, string> _modes = new();
-
     /// <summary>The rendered union AS LAST SIGNALLED, so a pass that changes nothing raises
     /// nothing. Linux keeps the same guard (<c>AgentUi::last_rendered</c>) for the same
     /// reason: a renderer rebuilds its rows from scratch, and a no-change rebuild destroys
@@ -77,14 +73,23 @@ internal sealed class LocationBindingsController
     /// arbitrary thread.</summary>
     internal event Action? BindConfirmed;
 
+    /// <summary>A group set's review list moved (<see cref="PollSetConflictsAsync"/>). Apart
+    /// from <see cref="Changed"/>: the rows are the Folders page's conflict list, not its
+    /// bindings, so a renderer repaints that list alone. Raised on whichever thread ran the
+    /// poll or the gesture; a renderer hops to its own UI thread.</summary>
+    internal event Action? SetConflictsChanged;
+
     /// <summary>Raise <see cref="Changed"/> iff the rendered union (rows + their modes)
     /// actually differs from the last one signalled.</summary>
     private void SignalIfChanged()
     {
+        // The free-up-space verb rides the signature (a record's ToString lists its
+        // fields): a sweep moves its readings with no gesture here, and a row repainted
+        // only on a binding change would never show them.
         var signature = string.Join(
             "",
             _model.Rendered().Select(r =>
-                $"{r.@path}\u001e{r.@folder}\u001e{ModeFor(r.@path)}\u001e{r.@accessRevoked}\u001e{r.@deletesHeld}\u001e{r.@deletesSkippedUnreadable}"));
+                $"{r.@path}\u001e{r.@folder}\u001e{r.@mode}\u001e{r.@accessRevoked}\u001e{r.@deletesHeld}\u001e{r.@deletesSkippedUnreadable}|{FreeSpaceVerb(r.@path)}"));
         if (signature == _lastSignalled)
         {
             return;
@@ -107,14 +112,48 @@ internal sealed class LocationBindingsController
     /// <c>sync_agent::current_locations()</c>.</summary>
     internal IReadOnlyList<FfiBindingRow> Rendered() => _model.Rendered();
 
-    /// <summary>The agent's last-reported mode for <paramref name="path"/>, or — for a
-    /// row the agent has not reported yet (an optimistic pending bind) — the mode the
-    /// agent WILL give it: <see cref="InMemoryLocationControlChannel.FreshBindingMode"/>,
-    /// the windows fresh-binding default (on-demand). Mode is agent truth; the fallback
-    /// only has to match what the next <c>ListLocations</c> reply will say, so the row
-    /// does not flicker from one mode to the other between the bind and the reconcile.</summary>
-    internal string ModeFor(string path) =>
-        _modes.TryGetValue(path, out var mode) ? mode : InMemoryLocationControlChannel.FreshBindingMode;
+    /// <summary>The mode a fresh windows binding starts in — <c>"on-demand"</c>, the
+    /// agent's windows default (<c>LocationMode::fresh_binding_default</c> in
+    /// <c>bins/fauna-sync-agent/src/config.rs</c>; user ruling 2026-09-26,
+    /// on-demand-files.md § On-Demand Files → <em>The choice is the user's</em>). Only the
+    /// e2e in-memory channel, standing in for that agent, seeds and binds in it: the page
+    /// reads each row's mode off the shared model (<see cref="FfiBindingRow"/>'s
+    /// <c>mode</c>, the agent-mirrored <c>BindingRow::mode</c>, which starts a row the
+    /// agent has not reported yet at <c>fauna_ipc::sync::fresh_binding_mode()</c>).</summary>
+    public const string FreshBindingMode = "on-demand";
+
+    /// <summary>How the bound row at <paramref name="path"/> renders its <i>Free up space</i>
+    /// verb, or <c>null</c> to render none — the ONE shared rule
+    /// (<c>LocationBindingsModel::free_space_verb</c>; on-demand-files.md § The free-up-space
+    /// gesture where the OS offers none): present exactly while the row is on-demand and its
+    /// placeholder surface stands, every number the agent's reading, the texts resolved by
+    /// the shared string table. The readings reach the model on <see cref="ReconcileAsync"/>
+    /// and on the status tick's <see cref="PollParksAsync"/>.</summary>
+    internal FfiFreeSpaceVerb? FreeSpaceVerb(string path) => _model.FreeSpaceVerb(path);
+
+    /// <summary>
+    /// <i>Free up space</i> on the bound on-demand folder at <paramref name="path"/>
+    /// (<c>folder-location-free-space-button</c>). The agent answers once it has accepted the
+    /// sweep; the row is then rebuilt from <c>ListLocations</c> (the reconcile below), and the
+    /// status tick's <see cref="PollParksAsync"/> carries the readings as the sweep moves them.
+    /// <b>Never optimistic</b>: nothing on the row changes until the agent says what the sweep
+    /// did. Returns <c>true</c> when the agent refused or could not be reached.
+    /// </summary>
+    internal async Task<bool> FreeLocationSpaceAsync(string path)
+    {
+        var refused = false;
+        try
+        {
+            await Volatile.Read(ref _channel).FreeLocationSpaceAsync(path);
+        }
+        catch (Exception)
+        {
+            refused = true;
+        }
+
+        await ReconcileAsync();
+        return refused;
+    }
 
     /// <summary>
     /// Fold a fresh <c>list_engine_holds()</c> roster onto the model (delete-propagation.md
@@ -158,6 +197,66 @@ internal sealed class LocationBindingsController
 
         _model.FoldParks(agentRows);
         SignalIfChanged();
+    }
+
+    /// <summary>
+    /// Re-read every bound group set's review list into the model (the shared
+    /// <c>SyncAgentProvisioner::refresh_set_conflicts</c>; group-set.md § Build design — the
+    /// group set, decision 9). Called from the same ~10s status-poll tick as
+    /// <see cref="PollParksAsync"/>, for the same reason: the fold records a row inside the
+    /// agent, so no gesture of this device produces it. Signals
+    /// <see cref="SetConflictsChanged"/> only when the agent says what the page shows moved;
+    /// a read the agent cannot answer folds nothing, so the rows stay as last read. Never
+    /// throws into the tick. The twin of tui's <c>refresh_set_conflicts</c> on its status
+    /// poll and macOS's <c>LocationsModel.refreshSetConflicts</c>.
+    /// </summary>
+    internal async Task PollSetConflictsAsync()
+    {
+        bool moved;
+        try
+        {
+            moved = await Volatile.Read(ref _channel).RefreshSetConflictsAsync(_model);
+        }
+        catch (Exception)
+        {
+            return;
+        }
+
+        if (moved)
+        {
+            SetConflictsChanged?.Invoke();
+        }
+    }
+
+    /// <summary>The group set <paramref name="folderId"/>'s review rows as last read, each
+    /// mapped once by the shared <c>ConflictSummary::of_retained</c> under the set's page
+    /// label <paramref name="setLabel"/>: auto-resolved, <c>hasOtherVersion</c> true. A row's
+    /// <c>id</c> is what <see cref="RestoreRetainedVersionAsync"/> takes, keyed by this same
+    /// <paramref name="folderId"/>.</summary>
+    internal IReadOnlyList<ConflictSummary> SetReviewRows(string folderId, string setLabel) =>
+        _model.SetReviewRows(folderId, setLabel);
+
+    /// <summary>
+    /// <i>Use the other version</i> on a group set's review row
+    /// (<c>conflict-resolve-button</c>), sent to the agent's engine for the set
+    /// <paramref name="folderId"/>, never to the nest machine's <c>UseOtherVersion</c>, which
+    /// reports these rows as unknown. On success the lists are re-read at once, so the used
+    /// row leaves the page. Returns the agent's refusal (or the missing session) for the
+    /// page's <c>error-message</c>: the agent wrote nothing and the row stands.
+    /// </summary>
+    internal async Task<Exception?> RestoreRetainedVersionAsync(string folderId, long conflictId)
+    {
+        try
+        {
+            await Volatile.Read(ref _channel).RestoreRetainedVersionAsync(folderId, conflictId);
+        }
+        catch (Exception ex)
+        {
+            return ex;
+        }
+
+        await PollSetConflictsAsync();
+        return null;
     }
 
     /// <summary>
@@ -234,10 +333,6 @@ internal sealed class LocationBindingsController
                 return true;
             }
 
-            _modes = agentRows
-                .GroupBy(f => f.@path)
-                .ToDictionary(g => g.Key, g => g.Last().@mode);
-
             var actions = _model.Reconcile(agentRows);
             var pushFailed = false;
 
@@ -307,12 +402,15 @@ internal sealed class LocationBindingsController
     internal Task<(string[] Removed, bool PushFailed)> RemoveByPathAsync(string path) =>
         RemoveAsync(_model.RemoveByPath(path));
 
+#if DEBUG || FAUNA_E2E_AGENT
     /// <summary>
     /// Remove every binding of <paramref name="folder"/> — linux's set-keyed row key, kept so
-    /// the shared e2e action layer stays uniform across apps.
+    /// the shared e2e action layer stays uniform across apps. The TestAgent is its one
+    /// caller, so it compiles out of Release with it (convention 15).
     /// </summary>
     internal Task<(string[] Removed, bool PushFailed)> RemoveBySetAsync(string folder) =>
         RemoveAsync(_model.RemoveBySet(folder));
+#endif
 
     /// <summary>Shared tail of the two removes: an empty selection is nothing to push (and
     /// the caller's cue that no such binding existed), otherwise render then reconcile.</summary>
@@ -328,9 +426,10 @@ internal sealed class LocationBindingsController
     }
 
     /// <summary>
-    /// Toggle a folder's sync mode (<c>folder-location-mode-toggle</c>). Orthogonal to the
-    /// binding, so it does not touch the model; the reconcile afterwards re-reads the agent's
-    /// mode for the row. Returns <c>true</c> when the mode push failed.
+    /// Toggle a folder's sync mode (<c>folder-location-mode-toggle</c>). Never optimistic:
+    /// the push does not touch the model, and the reconcile afterwards mirrors the agent's
+    /// recorded mode onto the row (on-demand-files.md: the switch re-reads the sync host's
+    /// record). Returns <c>true</c> when the mode push failed.
     /// </summary>
     internal async Task<bool> SetModeAsync(string path, string mode)
     {

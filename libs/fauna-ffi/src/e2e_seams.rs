@@ -100,6 +100,9 @@ impl FfiNestClient {
 #[uniffi::export]
 pub fn dial_budget_clear_for_test() {
     fauna_ws_substrate::dial_budget::clear_for_test();
+    // A new device holds no launch's reach decision either
+    // (`fauna_ws_substrate::reach_hint`).
+    fauna_ws_substrate::reach_hint::clear_all_for_test();
 }
 
 /// The counter behind `fauna_e2e_agent::CONNECTION_REPORTS_KEY`. An app holds

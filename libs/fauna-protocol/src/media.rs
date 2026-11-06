@@ -102,10 +102,10 @@ pub struct MediaItem {
     pub size_bytes: i64,
     /// Last-change timestamp (unix seconds) — the file's mtime proxy.
     pub updated_at: i64,
-    /// Hex thumbnail-blob hash (the `?thumb=1` routing pointer), when the
-    /// uploader recorded one. `None` for folder-sourced items until the
-    /// uploader↔manifest thumbnail association lands; the field is in the
-    /// contract so clients render thumbnails as it populates.
+    /// Hex hash of the item's thumbnail **manifest**, when the uploader
+    /// recorded one — sealed as the file is and opened through the file's walk
+    /// (`docs/goal/ui/media.md` § Encryption at rest → *A thumbnail rests as its
+    /// file rests*; `MediaMachine::fetch_thumbnail`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thumbnail_hash: Option<String>,
     /// Whether the backing folder's content is reachable right now (the
@@ -206,6 +206,10 @@ pub struct MediaItem {
     /// The head row's resolution marker.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub is_resolution: Option<bool>,
+    /// The head row's depositor ([`crate::sync::SyncChange::deposited_by`]) —
+    /// a covered field of an adopted deposit's statement. Wire-additive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deposited_by: Option<String>,
     /// The writer's signature over the head row's `SignedChange` (64 bytes).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signature: Option<ByteBuf>,
@@ -256,6 +260,7 @@ impl MediaItem {
             path_sealed: self.path_sealed.clone(),
             derived_through: self.derived_through,
             is_resolution: self.is_resolution,
+            deposited_by: self.deposited_by.clone(),
             signature: self.signature.clone(),
             signer_key: self.signer_key.clone(),
             ..Default::default()

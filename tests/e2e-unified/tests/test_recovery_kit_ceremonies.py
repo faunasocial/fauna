@@ -123,7 +123,7 @@ def test_the_status_names_each_of_the_four_states_including_a_kit_made_elsewhere
     url = nest_instance["url"]
 
     app.settings.navigate()
-    app.settings.open_recovery_kit_or_skip()
+    app.settings.open_recovery_kit()
     _await_status(app, lambda s: s == _T.status_never_created, "never created")
 
     # Another device registers a kit — through the API, which registers no
@@ -169,7 +169,7 @@ def test_a_kit_whose_phrase_cannot_restore_is_repaired_without_retiring_it(
     chain_before = registration_chain(url, user["actor_id_hex"])
 
     app.settings.navigate()
-    app.settings.open_recovery_kit_or_skip()
+    app.settings.open_recovery_kit()
     _await_status(
         app, lambda s: s == _T.status_registered_no_escrow, "registered, no escrow"
     )
@@ -219,7 +219,7 @@ def test_a_lost_kit_is_replaced_with_the_identity_alone_and_waits_out_its_window
     account = qualified_account(app, nest_instance)
 
     app.settings.navigate()
-    app.settings.open_recovery_kit_or_skip()
+    app.settings.open_recovery_kit()
     app.settings.create_recovery_kit()
     app.wait_for("recovery-kit-secret-display", timeout=_CEREMONY_S)
     held = app.settings.recovery_kit_secret()
@@ -308,7 +308,7 @@ def test_a_replacement_you_did_not_ask_for_is_cancelled_with_the_kit_you_hold(
     url = nest_instance["url"]
 
     app.settings.navigate()
-    app.settings.open_recovery_kit_or_skip()
+    app.settings.open_recovery_kit()
     app.settings.create_recovery_kit()
     app.wait_for("recovery-kit-secret-display", timeout=_CEREMONY_S)
     held = app.settings.recovery_kit_secret()

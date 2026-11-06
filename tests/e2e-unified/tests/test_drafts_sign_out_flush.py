@@ -28,17 +28,21 @@ destroys its windows without passing through the sign-out branch that flushes,
 so only the real gesture is the door a user crosses.
 
 **Columns.** tui (its sign-out flushes in `session::sign_out`'s stop task,
-before the client disconnects; green on Linux 2026-10-10) and windows
-(`App.FlushDraftRailsAsync()` at `SignOutHandler`). linux is marked because it
-owes this door, and it is RED on Linux 2026-10-10 — its only sign-out flush sits
-in `connect_close_request`'s sign-out branch, which runs after the account
-runtime's stop (the nest has already revoked the session) and after
-`actor_scope::reset_actor_scoped_state` has cleared the feed manager, so the
-save never lands. web, android,
-macos and ios are not yet audited for this door; they are left unmarked, so
-`just features-parity drafts-survive` reads them as gaps — web additionally
-cannot take the window seam at all (`wasm32-unknown-unknown` has no process
-environment), so its leg will need a door-shaped witness of its own.
+before the client disconnects; green on Linux 2026-10-10), windows
+(`App.FlushDraftRailsAsync()` at `SignOutHandler`), linux
+(`blocking_flush::flush_leave_door`, ahead of the first clear on every
+teardown) and web (`identity.logout()` awaits `#lib/drafts-leave-flush`'s
+`flushDraftRailsNow()` before the account runtime's stop). web takes the window
+seam through its page origin's `localStorage` rather than a process
+environment (`drivers/web.py::launch`), so this one witness is its leg too.
+android: `ApiClient.clearAuth` captures the conversations, events and posts
+rails' outgoing handles and snapshots before its stops null them, and runs the
+saves, bounded, ahead of the first disconnect in its teardown coroutine. Its
+launch env carries the window seam (`MainActivity`'s setenv door), so the
+verdict is the door's own. **Not yet run on a device** — the device venue does
+not exist yet, so the android mark is a witness written and unrun, and no
+catalog cell claims it green. macos and ios: `SignOutSection.confirmSignOut` runs
+`flushDraftRails` ahead of the push-row drop and the runtime stop.
 
 tier_3: a real app + real nest binary.
 """
@@ -60,6 +64,10 @@ pytestmark = [
     pytest.mark.tui,
     pytest.mark.linux,
     pytest.mark.windows,
+    pytest.mark.web,
+    pytest.mark.android,
+    pytest.mark.macos,
+    pytest.mark.ios,
     pytest.mark.drafts_autosave_window_ms(AUTOSAVE_WINDOW_MS),
 ]
 

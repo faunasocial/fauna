@@ -83,6 +83,12 @@ public class PushManager {
     private let intent: PushIntentStore
     private let hostAvailable: Bool
 
+    /// APNs' answer under e2e, nil in production (`E2eEnv` compiles the variable
+    /// out of a Release build): a set stand-in takes the OS permission and the
+    /// token request out of the path, so the toggle, the shared machine and the
+    /// nest row below them are the real ones.
+    private let tokenStandIn: String?
+
     /// The device token now on its way answers the user's Enable, not a launch
     /// re-arm — the one thing that decides whether the token callback may set
     /// the bit (`enable`) or only re-register under a bit already set
@@ -99,12 +105,20 @@ public class PushManager {
     /// unit tests, which cannot be a provisioned `.app`.
     public init(
         api: APIClient, deviceId: String, intent: PushIntentStore = PushIntentStore(),
-        hostAvailable: Bool = NotificationHost.isAvailable
+        hostAvailable: Bool = NotificationHost.isAvailable,
+        tokenStandIn: String? = nil
     ) {
         self.api = api
         self.deviceId = deviceId
         self.intent = intent
         self.hostAvailable = hostAvailable
+        // The e2e stand-in is read only in a Debug build: the whole branch is
+        // `#if DEBUG`, so a Release build compiles no `E2eEnv` read here.
+        #if DEBUG
+        self.tokenStandIn = tokenStandIn ?? E2eEnv.apnsTokenStandIn
+        #else
+        self.tokenStandIn = tokenStandIn
+        #endif
         self.isOptedIn = intent.isOptedIn
     }
 
@@ -137,7 +151,9 @@ public class PushManager {
             await registration.announcePresence()
         }
         await checkPermission()
-        if shouldRegisterAtLaunch {
+        if let tokenStandIn {
+            if isOptedIn { await register(subscription(tokenHex: tokenStandIn)) }
+        } else if shouldRegisterAtLaunch {
             Self.registerForRemoteNotifications()
         }
     }
@@ -191,6 +207,11 @@ public class PushManager {
     }
 
     private func beginEnable() async {
+        if let tokenStandIn {
+            enablePending = true
+            await register(subscription(tokenHex: tokenStandIn))
+            return
+        }
         // A build that cannot reach the notification centre at all — the bare
         // debug binary — still renders the toggle and answers with the same
         // inline line every other failure gets ("the platform's push APIs
@@ -259,8 +280,11 @@ public class PushManager {
 
     /// Called from AppDelegate when APNs returns a device token.
     public func didRegisterForRemoteNotifications(deviceToken: Data) {
-        let tokenHex = deviceToken.hexString
+        let subscription = subscription(tokenHex: deviceToken.hexString)
+        Task { await register(subscription) }
+    }
 
+    private func subscription(tokenHex: String) -> FfiPushEndpoint {
         // Generate or load existing keys
         let (privateKey, authSecret) = loadOrCreateKeys()
         let publicKeyData = privateKey.publicKey.x963Representation
@@ -269,17 +293,16 @@ public class PushManager {
 
         // The `apns` row: the hex device token is its endpoint. The device id
         // is not named here — the registration keys the row under its own.
-        let subscription = FfiPushEndpoint(
+        return FfiPushEndpoint(
             transport: "apns", endpoint: tokenHex,
             keyP256dh: publicKeyB64, keyAuth: authSecretB64)
-        Task { await register(subscription) }
     }
 
     /// Hand the shared machine the subscription the token callback built. The
     /// user's Enable sets the bit (`enable`); a launch only re-registers under
     /// a bit already set (`rearm` — never opts a device in). A registration
-    /// that FAILS — today every one of them, no `aps-environment` entitlement
-    /// exists yet (`common.md` § Push Notifications → Implementation status) —
+    /// that FAILS — every one on a build without the `aps-environment`
+    /// entitlement: macOS and unsigned iOS (`common.md` § Push Notifications) —
     /// leaves a fresh install un-opted-in.
     func register(_ subscription: FfiPushEndpoint) async {
         let answersEnable = enablePending
@@ -328,7 +351,8 @@ public class PushManager {
 
     /// Load existing P-256 key pair and auth secret, or generate new ones.
     private func loadOrCreateKeys() -> (P256.KeyAgreement.PrivateKey, Data) {
-        if let existingKey = loadPrivateKey(), let existingAuth = loadAuthSecret() {
+        if tokenStandIn == nil, let existingKey = loadPrivateKey(),
+            let existingAuth = loadAuthSecret() {
             return (existingKey, existingAuth)
         }
 
@@ -336,6 +360,10 @@ public class PushManager {
         let privateKey = P256.KeyAgreement.PrivateKey()
         let authSecret = SymmetricKey(size: .init(bitCount: 128))
         let authData = authSecret.withUnsafeBytes { Data($0) }
+
+        // A stand-in launch stays off the box's keychain (convention 10): these
+        // calls run on the main actor, and the bare e2e binary's can block it.
+        guard tokenStandIn == nil else { return (privateKey, authData) }
 
         // Store in shared keychain
         saveToSharedKeychain(
@@ -362,6 +390,7 @@ public class PushManager {
     }
 
     private func deleteKeys() {
+        guard tokenStandIn == nil else { return }
         deleteFromSharedKeychain(account: Self.privateKeyAccount)
         deleteFromSharedKeychain(account: Self.authSecretAccount)
     }

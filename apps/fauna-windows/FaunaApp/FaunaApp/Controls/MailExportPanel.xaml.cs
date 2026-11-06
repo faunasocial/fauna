@@ -56,12 +56,54 @@ public sealed partial class MailExportPanel : UserControl
     public MailExportPanel()
     {
         this.InitializeComponent();
+        Unloaded += (_, _) => Unsubscribe();
     }
 
     /// <summary>Supplied by the host page (SettingsMailExportPage.OnNavigatedTo) before Loaded fires.</summary>
     internal void Configure(ServiceClients clients) => _clients = clients;
 
-    private async void Panel_Loaded(object sender, RoutedEventArgs e) => await LoadAsync();
+    private async void Panel_Loaded(object sender, RoutedEventArgs e)
+    {
+        Subscribe();
+        await LoadAsync();
+    }
+
+    private INestRpcClient? _subscribed;
+
+    /// <summary>Follow the account's export events — progress, error and complete, on
+    /// this device or another (mail-export.md § A failed export is a record the wizard
+    /// shows until the user moves on): the shared classifier's <c>mail_export</c> flag
+    /// re-reads the open wizard. Subscribed only while the panel is loaded, so a page
+    /// that is not open does nothing; idempotent. Mirrors the import twin
+    /// (<see cref="MailImportPanel"/>).</summary>
+    private void Subscribe()
+    {
+        var rpc = _clients?.Rpc;
+        if (rpc is null || ReferenceEquals(_subscribed, rpc)) return;
+        Unsubscribe();
+        rpc.MailExportPushChanged += OnExportStale;
+        _subscribed = rpc;
+    }
+
+    private void Unsubscribe()
+    {
+        if (_subscribed is null) return;
+        _subscribed.MailExportPushChanged -= OnExportStale;
+        _subscribed = null;
+    }
+
+    /// <summary>A re-read, not a gesture: the push dispatches the shared machine's
+    /// <c>Refresh</c> (which leaves a session alone while this device's loop holds a
+    /// run) and repaints; <c>_cancelArmed</c> and the Cancel label are left alone, so a
+    /// push never disarms a confirm the user is looking at (tui's
+    /// <c>mail_export_resync_op</c>). Skipped until the first load has built the VM —
+    /// that load reads fresh anyway.</summary>
+    private async void OnExportStale()
+    {
+        if (_vm is null) return;
+        await _vm.RefreshAsync();
+        RenderState();
+    }
 
     private async Task EnsureVmAsync()
     {
@@ -125,11 +167,19 @@ public sealed partial class MailExportPanel : UserControl
         MailboxesEmpty.Visibility = Vis(_vm.Mailboxes.Count == 0);
 
         ConfirmSummary.Text = _vm.ConfirmSummary;
+        ConfirmEstimateUnavailable.Visibility = Vis(_vm.ConfirmEstimateUnavailable);
         ProgressSummary.Text = _vm.ProgressSummary;
         ExportProgressBar.Value = _vm.ProgressFraction;
         ErrorLog.Text = _vm.ErrorLog;
         PauseButton.IsEnabled = _vm.CanPause;
         ResumeButton.IsEnabled = _vm.CanResume;
+        // A failed export offers Dismiss alone: Pause, Resume and Cancel are not painted
+        // (the shared machine refuses each on a failed session) — tui's
+        // progress_step_elements, and this app's import twin (MailImportPanel).
+        PauseButton.Visibility = Vis(!_vm.IsFailed);
+        ResumeButton.Visibility = Vis(!_vm.IsFailed);
+        CancelButton.Visibility = Vis(!_vm.IsFailed);
+        DismissFailedButton.Visibility = Vis(_vm.IsFailed);
         DoneSummary.Text = _vm.DoneSummary;
         DownloadUrl.Text = _vm.DownloadUrl;
     }

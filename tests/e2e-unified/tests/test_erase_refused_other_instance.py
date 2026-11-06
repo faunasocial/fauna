@@ -1,5 +1,5 @@
-"""tier_3 e2e: every user-facing erase on tui and linux refuses while a SIBLING
-instance serves the account, and goes through once the sibling is gone.
+"""tier_3 e2e: every user-facing erase on tui, linux and macos refuses while a
+SIBLING instance serves the account, and goes through once the sibling is gone.
 
 ``docs/goal/architecture/apps/account-scoping.md`` § Concurrent instances →
 *An erase refuses while a sibling serves the account*, the *Every erasing
@@ -38,6 +38,14 @@ launch reads a malformed index (the staging of
 ``test_account_index_unreadable_launch.py``) written into the shared store
 while the first serves.
 
+**macos** joins the remove-account and sign-out journeys: its gestures ask the
+same question through the FFI doors (``removeAccountGesture``,
+``signOutBlocked``, ``erase_guard.rs``), its raw per-account lock is the
+``own_lock`` those doors put down, and its world is the state home + credential
+store pair of ``test_account_switcher_apple._shared_instance_world``. iOS has
+no leg: the OS admits one instance per app (``account-scoping.md`` § Concurrent
+instances).
+
 tier_3: a real ``fauna-nest`` (``nest_instance``) and real app binaries.
 """
 from __future__ import annotations
@@ -50,7 +58,7 @@ import pytest
 
 from actions import ActionLayer
 from common import build_registry_seed, create_actor_and_register
-from common.scope_store import XdgScopeStore
+from common.scope_store import XdgScopeStore, attach_scope_store
 from conftest import _seeded_environment, get_available_apps
 from drivers import create_driver
 from helpers.instance_guard import is_app_alive
@@ -67,6 +75,9 @@ pytestmark = [pytest.mark.tier_3, pytest.mark.tui, pytest.mark.linux]
 
 #: The two apps whose six gesture call sites this module witnesses.
 _SUPPORTED_APPS = ("tui", "linux")
+
+#: The apps the remove-account and sign-out journeys run on.
+_GESTURE_APPS = (*_SUPPORTED_APPS, "macos")
 
 #: Each app's flat base under ``XDG_CONFIG_HOME`` (``XdgScopeStore``).
 _FLAT_BASE = {"tui": "fauna-tui", "linux": "fauna"}
@@ -95,15 +106,21 @@ LAUNCH_BUDGET_S = 60.0
 LOCAL_BUDGET_S = 30.0
 
 
-def _apps():
+def _apps(apps):
     available = get_available_apps()
-    return [a for a in _SUPPORTED_APPS if a in available]
+    return [a for a in apps if a in available]
 
 
-@pytest.fixture(params=_apps())
+@pytest.fixture(params=_apps(_GESTURE_APPS))
 def app(request):
-    """The app under test; its id lands in the test name (``[tui]``/``[linux]``),
+    """The app under test; its id lands in the test name (``[tui]``/``[macos]``),
     which is what conftest's ``--app`` filter reads."""
+    return request.param
+
+
+@pytest.fixture(params=_apps(_SUPPORTED_APPS))
+def floor_app(request):
+    """``app`` for the unreadable-index floor's journey, which stays tui/linux."""
     return request.param
 
 
@@ -121,6 +138,11 @@ def _shared_instance_world(app):
     Each driver otherwise gives every launch a fresh base, which would put the
     two processes in different installs contending on nothing."""
     base = tempfile.mkdtemp(prefix=f"fauna-e2e-{app}-erase-world-")
+    if app == "macos":
+        return {
+            "home": os.path.join(base, "home"),
+            "credential_dir": os.path.join(base, "credentials"),
+        }
     return {
         "xdg_base": os.path.join(base, "xdg"),
         "credential_dir": os.path.join(base, "credentials"),
@@ -178,6 +200,8 @@ def _wait_serving(driver, actor):
 
 
 def _scope_dirs(app, driver, actor):
+    if app == "macos":
+        return attach_scope_store(app, driver).scope_dirs(actor)
     return XdgScopeStore(app, driver.config_home, _FLAT_BASE[app]).scope_dirs(actor)
 
 
@@ -268,6 +292,7 @@ def _assert_sibling_serving(driver, actor, what):
 
 
 @pytest.mark.feature("multiple-accounts")
+@pytest.mark.macos
 def test_remove_account_refuses_while_another_instance_serves_it(
     app, app_path, nest_instance, request
 ):
@@ -359,6 +384,7 @@ def test_remove_account_refuses_while_another_instance_serves_it(
 
 
 @pytest.mark.feature("account")
+@pytest.mark.macos
 def test_sign_out_refuses_while_another_instance_serves_the_account(
     app, app_path, nest_instance, request
 ):
@@ -555,7 +581,7 @@ def _corrupt_index(driver):
 
 @pytest.mark.feature("upgrades-never-lose-data")
 def test_start_over_refuses_while_another_instance_serves_an_account(
-    app, app_path, nest_instance, request
+    floor_app, nest_instance, request
 ):
     """The first instance serves U; the index is then made malformed, so a
     second plain launch lands on the unreadable-index surface, whose floor is
@@ -564,6 +590,8 @@ def test_start_over_refuses_while_another_instance_serves_an_account(
     confirm still offered, U's secret and scope on disk — because the reset
     would erase what the first is running out of. With the first gone, the
     same confirm resets to a fresh install."""
+    app = floor_app
+    app_path = request.getfixturevalue(f"{app}_app_path")
     u = _account(nest_instance, "u")
     u_actor = u[0]
     world = _shared_instance_world(app)

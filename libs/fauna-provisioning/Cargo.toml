@@ -79,10 +79,16 @@ pkcs8 = { version = "0.10", features = ["pem", "alloc"] }
 spki = { version = "0.7", features = ["pem", "alloc"] }
 sha2 = { workspace = true }
 
+[target.'cfg(windows)'.dependencies]
+# The SSH door's key file owner-only on windows (`ssh_door::install_key`): the
+# twin of its unix 0600/0700, through the shared owner-only DACL helper
+# (`fauna_ipc::win_acl`) rather than a second copy of the Win32 dance.
+fauna-ipc = { workspace = true }
+
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 wiremock = "0.6"
-tracing-subscriber = { workspace = true }
+fauna-test-tracing = { path = "../fauna-test-tracing" }
 # `split_host_port`'s own unit test needs
 # `fauna_core::web::AUTHORITY_TERMINATOR_CASES`, which is `#[cfg(any(test,
 # feature = "test-helpers"))]` on fauna-core's own side — `cfg(test)` is

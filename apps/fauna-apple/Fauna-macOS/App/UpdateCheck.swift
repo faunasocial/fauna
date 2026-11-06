@@ -10,8 +10,8 @@ import FaunaKit
 /// Everything that decides the answer is shared Rust: the round trip, the
 /// feed's shape, the semver rule and the release page all come through the
 /// `fauna-ffi` face of `fauna_client::update_look` (`checkForNewerRelease`,
-/// `lookAtSignIn`, `releaseFeedOrigin`) — the same calls linux and tui make
-/// directly. This type only holds what the page paints.
+/// `releaseFeedOrigin`, and `FfiNestClient.lookForNewerReleaseAtSignIn` for the
+/// sign-in look) — the same calls linux and tui make directly. This type only holds what the page paints.
 ///
 /// One instance per process (`MacAppState.updates`), shared by both doors onto
 /// the asked check — Settings → General's About block and the app menu's
@@ -77,16 +77,25 @@ final class UpdateCheck {
     }
 
     /// The once-per-sign-in look — called from each path that builds a
-    /// signed-in session. Silent unless a newer release is out.
-    func lookOnceAtSignIn() {
+    /// signed-in session, with the client that just signed in. It reads the
+    /// newest release THAT nest reports (`installers/README.md` § The nest's
+    /// newest-release field), never the release host; a nest that says nothing
+    /// means no notice. Silent unless a newer release is out, and with several
+    /// nests a notice already showing only moves up
+    /// (`fauna_client::update_look::keep_the_newer`'s rule).
+    func lookOnceAtSignIn(client: FaunaClient) {
         Task { @MainActor in
-            if let release = await lookAtSignIn(feedOrigin: Self.feedOrigin, userAgent: Self.userAgent) {
-                show(release)
-            }
+            guard let release = await client.api.lookForNewerReleaseAtSignIn() else { return }
+            if let shown = shownVersion, !isNewer(current: shown, candidate: release.version) { return }
+            show(release)
         }
     }
 
+    /// The version the showing notice names, for the only-moves-up rule.
+    private var shownVersion: String?
+
     private func show(_ release: NewerRelease) {
+        shownVersion = release.version
         notice = L.settings.updateAvailableNotice(version: release.version, url: release.releasePageUrl)
     }
 

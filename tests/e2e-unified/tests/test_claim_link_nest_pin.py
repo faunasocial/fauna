@@ -48,17 +48,16 @@ _e2e_dir = str(Path(__file__).resolve().parent.parent)
 if _e2e_dir not in sys.path:
     sys.path.insert(0, _e2e_dir)
 
-from common.nest import CLAIM_CODE
 from helpers.authenticated_shell import wait_for_authenticated_shell
 from helpers.budgets import RPC_ROUNDTRIP_S
 from helpers.claim_banner import claim_uri, read_real_nest_actor_id_hex
-from helpers.app_surface import skip_unbuilt
+from helpers.app_surface import require_surface
 from helpers.crash_recovery import setup_status
 from i18n.strings import S
 
 # web is deliberately NOT marked: this native channel-binding pin can never run
 # there (its e2e origin is never TLS), so the module is MARKED for the six apps
-# it can drive rather than gated on web by a skip — a `skip_unbuilt` on a column
+# it can drive rather than gated on web by a skip — a `require_surface` on a column
 # that is witnessed by its own twin records a permanent red no run can clear
 # (`feature-catalog.md` § Cell semantics, the marked-not-gated rule).
 pytestmark = [
@@ -97,30 +96,15 @@ def _require_admin_claim_drive(app) -> None:
     column is witnessed instead by `test_web_claim_pin_wasm_witness.py`,
     through the wasm store's own guard.
     """
-    if not (
-        app.driver.is_linux()
-        or app.driver.is_macos()
-        or app.driver.is_ios()
-        or app.driver.is_tui()
-    ):
-        skip_unbuilt(
-            app.driver,
-            surface="the believable admin-claim onboarding UI drive",
-            detail="linux + macOS + iOS + tui have it; windows and android "
-            "are the remaining cross-app follow-on. web is witnessed for "
-            "this outcome by test_web_claim_pin_wasm_witness.py instead — its "
-            "e2e origin is never TLS, so a native channel-binding pin has "
-            "nothing to check against there",
-            tracked="onboarding.md",
-        )
+    require_surface(app.driver, "admin-claim-onboarding-drive")
 
 
 @pytest.fixture
 def unclaimed_tls_nest(app, request, nest_mode, tmp_path_factory):
     """A fresh, never-claimed nest serving REAL self-signed HTTPS on loopback.
 
-    `unclaimed=True` leaves it with no admin and the harness's `CLAIM_CODE` on
-    disk, so the UI drives a genuine `fauna.auth.claim_admin`; `serve_tls=True`
+    `unclaimed=True` leaves it with no admin and its claim code on the handle
+    (`nest["claim_code"]`), so the UI drives a genuine `fauna.auth.claim_admin`; `serve_tls=True`
     is what makes the graduation the test is about actually run (module
     docstring). Both options are honoured by every nest-mode provider.
 
@@ -278,7 +262,7 @@ def test_a_claim_link_naming_another_nest_is_refused(app, unclaimed_tls_nest):
 
     _drive_claim_with(
         app, unclaimed_tls_nest, secret_hex,
-        claim_uri(CLAIM_CODE, ROOT_OF_ANOTHER_BOX),
+        claim_uri(unclaimed_tls_nest["claim_code"], ROOT_OF_ANOTHER_BOX),
     )
 
     outcome = _wait_for_claim_to_settle(app)
@@ -333,7 +317,7 @@ def test_a_claim_link_naming_this_nest_claims_it_and_pins_that_identity(
     secret_hex = bytes(range(9, 41)).hex()
 
     _drive_claim_with(
-        app, unclaimed_tls_nest, secret_hex, claim_uri(CLAIM_CODE, real_root),
+        app, unclaimed_tls_nest, secret_hex, claim_uri(unclaimed_tls_nest["claim_code"], real_root),
     )
 
     assert _wait_for_claim_to_settle(app) == "claimed", (

@@ -69,9 +69,18 @@
                         Click="Connect_Click" />
             </StackPanel>
 
-            <!-- 3. The roster. The empty state is Collapsed (pruned from UIA) until a read has
+            <!-- 3. The roster. The account's external-apps switch sits above it at every
+                 integration level (connected-apps.md region 3; moved here from the AT Protocol
+                 page). The empty state is Collapsed (pruned from UIA) until a read has
                  returned empty: an empty roster is a claim only a read that returned may make. -->
             <StackPanel Spacing="8">
+                <ToggleSwitch x:Name="ExternalAppsToggle"
+                              AutomationProperties.AutomationId="{x:Bind ids:Ids.AtprotoExternalAppsEnable}"
+                              Toggled="ExternalApps_Toggled"
+                              Header="{loc:Localize Key=atproto_settings/external_apps_toggle}" />
+                <TextBlock Style="{StaticResource CaptionTextBlockStyle}"
+                           TextWrapping="Wrap"
+                           Text="{loc:Localize Key=atproto_settings/external_apps_hint}" />
                 <TextBlock Style="{StaticResource BodyStrongTextBlockStyle}"
                            Text="{loc:Localize Key=connected_apps/roster_heading}" />
                 <TextBlock x:Name="EmptyText" Opacity="0.7" Visibility="Collapsed"

@@ -7,8 +7,9 @@
   // is what spends the bytes. `data-state` (`idle` / `loading` / `playing` / `error`)
   // is the headless observable every player test reads; the native player's own error
   // UI is the error surface — no new element.
+  import { onDestroy } from 'svelte';
   import { IDS } from '#lib/generated/uiIds';
-  import { notePlayback } from '#lib/feed-cues';
+  import { notePlayback, notePlaying } from '#lib/feed-cues';
   interface Props {
     /** The blob URL whose first frame is the poster (`<video preload="metadata">`). Absent for a
      *  bridged `ProxiedVideo` (render-model.md § D6c → *Proxied video*): its first-frame grab
@@ -36,6 +37,7 @@
   async function activate() {
     if (!resolveSource || (playState !== 'idle' && playState !== 'error')) return;
     playState = 'loading';
+    noteEngaged(true);
     let url: string | null = null;
     try {
       url = await resolveSource();
@@ -44,10 +46,19 @@
     }
     if (!url) {
       playState = 'error';
+      noteEngaged(false);
       return;
     }
     playSrc = url;
   }
+
+  // The player's engagement, relayed on the transitions that drive `playState`
+  // (the tap, play, pause, end, error) and on teardown; no `postId` → nothing.
+  function noteEngaged(engaged: boolean) {
+    if (postId) notePlaying(postId, engaged);
+  }
+
+  onDestroy(() => noteEngaged(false));
 
   // Every progress report, the end included (an ended player reads as played to its
   // end), is noted for the cue probe.
@@ -75,10 +86,20 @@
       playsinline
       class="video-player"
       aria-label={alt}
-      onplaying={() => (playState = 'playing')}
+      onplaying={() => {
+        playState = 'playing';
+        noteEngaged(true);
+      }}
+      onpause={() => noteEngaged(false)}
       ontimeupdate={notePlayed}
-      onended={notePlayed}
-      onerror={() => (playState = 'error')}
+      onended={() => {
+        notePlayed();
+        noteEngaged(false);
+      }}
+      onerror={() => {
+        playState = 'error';
+        noteEngaged(false);
+      }}
     >
       <track kind="captions" />
     </video>

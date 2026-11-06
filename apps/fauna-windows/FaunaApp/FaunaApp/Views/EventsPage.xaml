@@ -171,11 +171,20 @@
                     <StackPanel />
                 </ItemsPanelTemplate>
             </ListView.ItemsPanel>
+            <!-- calendar-item rides the ListViewItem container (it supports
+                 SelectionItem), not the inner TextBlock: a pattern-less TextBlock
+                 forces the e2e bridge onto a physical SendInput click, which never
+                 selected the row. Name = the calendar name, as before. -->
+            <ListView.ItemContainerStyle>
+                <Style TargetType="ListViewItem">
+                    <Setter Property="AutomationProperties.AutomationId" Value="calendar-item" />
+                    <Setter Property="AutomationProperties.Name" Value="{Binding Calendar.Name}" />
+                </Style>
+            </ListView.ItemContainerStyle>
             <ListView.ItemTemplate>
                 <DataTemplate x:DataType="vm:CalendarRowVm">
                     <StackPanel Orientation="Horizontal" Spacing="4">
                         <TextBlock Text="{x:Bind Calendar.Name}"
-                                   AutomationProperties.AutomationId="{x:Bind ids:Ids.CalendarItem}"
                                    VerticalAlignment="Center"
                                    Padding="4" />
                         <CheckBox IsChecked="{x:Bind IsVisible, Mode=OneWay}"
@@ -250,6 +259,9 @@
             <Button x:Name="CreateEventButton"
                     AutomationProperties.AutomationId="{x:Bind ids:Ids.CreateEvent}"
                     Click="CreateEventInline_Click" />
+            <Button x:Name="DiscardEventButton"
+                    AutomationProperties.AutomationId="{x:Bind ids:Ids.EventFormDiscard}"
+                    Click="DiscardEvent_Click" />
         </StackPanel>
         </ScrollViewer>
 

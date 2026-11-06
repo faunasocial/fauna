@@ -42,7 +42,7 @@ pub(crate) use fauna_account_plane::principal_succession::WriterKeyProvenance;
 /// ([`generic::ceremony_probe`] owns the contract): the section is the store
 /// dir's `migration.lock`, and the rotation's backend is the store dir's
 /// `SqliteBackend`.
-// The native call's own ten inputs.
+// The native call's own eleven inputs.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn ceremony_probe<R>(
     rpc: &R,
@@ -53,6 +53,7 @@ pub(crate) async fn ceremony_probe<R>(
     held_writer: &SigningKey,
     slot: &PrincipalSlot,
     enrollment_target: &str,
+    enrollment_label: Option<&str>,
     allow_rotation: bool,
     own_row_removed: Option<[u8; 32]>,
 ) -> Result<CeremonyProbe>
@@ -77,6 +78,7 @@ where
         held_writer,
         slot,
         enrollment_target,
+        enrollment_label,
         allow_rotation,
         own_row_removed,
     )

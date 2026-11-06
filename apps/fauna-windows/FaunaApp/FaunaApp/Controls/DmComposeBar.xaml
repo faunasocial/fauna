@@ -103,10 +103,15 @@
                  It carries a custom IValueProvider automation peer so the e2e ValuePattern
                  (dm-text-field set/get) contract keeps working, and source ranges are
                  styled in code via ITextRange.CharacterFormat.
-                 conversations.md § Compose-field inline markdown styling. -->
+                 conversations.md § Compose-field inline markdown styling.
+                 MaxHeight: the field grows with its body up to a bound and scrolls past it,
+                 as on every other app (linux's 240px max_content_height, apple's six lines,
+                 android's four, web's 40vh). Unbounded, a large paste grew it — and the
+                 stretched send button beside it — to hundreds of thousands of pixels. -->
             <controls:MarkdownRichEditBox Grid.Column="3"
                      x:Name="MessageBox"
                      AutomationProperties.AutomationId="{x:Bind ids:Ids.DmTextField}"
+                     MaxHeight="240"
                      Padding="10,6,8,6"
                      BorderThickness="1" />
 

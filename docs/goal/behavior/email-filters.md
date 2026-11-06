@@ -270,14 +270,15 @@ tier_3 `test_mail_spam_threshold_override.py::test_allow_rule_keeps_a_senders_ma
 `filters_{create,update}` carry the rule's order and its `continue` flag
 (2026-10-18), and the tui, linux, web and android rule editors set both
 (`filter-priority-input`, `filter-continue-toggle`) beside every v1 condition
-and action, gated on the shared `filter_is_editable`; witnessed by
+and action, gated on the shared `filter_is_editable`; macos and ios do the same
+from one shared FaunaKit form (2026-10-24), and windows does the same
+(2026-10-27; `EmailFilterPanel`, gated on `FaunaFfiMethods.EmailFilterIsEditable`,
+order parsed by `ParseEmailFilterPriority`); witnessed by
 `test_settings.py::test_email_filter_{files_labels_and_replies_from_the_form,matches_a_header_value_or_the_spam_score,order_and_continue_are_set_from_the_form}`.
 The FFI face carries every input (`FfiFilterRuleInputs`, the grown
 `FfiFilterActionInputs`, `FfiEmailFilter.continue_on_match`, the
 `continue_on_match` argument of `filters_{create,update}`) and so does the wasm
-face. Apple and Windows still offer the single-value conditions and the
-`Allow`/`Discard`/`Reject`/`Forward` actions and save every rule
-first-match-wins at order 0, so an edit there resets both.
+face. All 7 apps now carry the full form.
 
 **`FileInto` targets are enforced** (2026-09-15). `validate_action` refuses a
 `Sent`, `Drafts`, held-mailbox or malformed target on `create` and `update`,
@@ -289,4 +290,4 @@ in-crate placement test beside the custom-folder one, and
 `validate_file_into_mailbox` before sending, so the form refuses `Sent`,
 `Drafts` and the held mailbox on the page.
 
-**The auto-respond facade is built** (2026-10-12): `fauna_client_email::autorespond` implements § The auto-respond setting, crate-tested for on, off, editing the message, read-back, a hand-built conditional `AutoReply` left alone and hand-built match-all rules adopted and collapsed to one. Since 2026-10-18 it is exposed over UniFFI as `FfiEmailClient::autorespond_{get,set,clear}` and over wasm as `emailAutorespond{Get,Set,Clear}`, beside the draft check `autorespond_message_draft_outcome` (wasm `autorespondMessageDraftOutcome`). tui renders it (2026-10-17): `mail-settings-autorespond-toggle` and `mail-settings-autorespond-message-input`, the blank-message check the shared `fauna_client_mail_settings::parse_autorespond_message_draft`; web follows (2026-10-18) over the wasm facade and `autorespondMessageDraftOutcome`; linux renders them too (2026-10-18); the other four apps follow.
+**The auto-respond facade is built** (2026-10-12): `fauna_client_email::autorespond` implements § The auto-respond setting, crate-tested for on, off, editing the message, read-back, a hand-built conditional `AutoReply` left alone and hand-built match-all rules adopted and collapsed to one. Since 2026-10-18 it is exposed over UniFFI as `FfiEmailClient::autorespond_{get,set,clear}` and over wasm as `emailAutorespond{Get,Set,Clear}`, beside the draft check `autorespond_message_draft_outcome` (wasm `autorespondMessageDraftOutcome`). tui renders it (2026-10-17): `mail-settings-autorespond-toggle` and `mail-settings-autorespond-message-input`, the blank-message check the shared `fauna_client_mail_settings::parse_autorespond_message_draft`; web follows (2026-10-18) over the wasm facade and `autorespondMessageDraftOutcome`; linux renders them too (2026-10-18); macos renders them (2026-10-27) from the shared FaunaKit `MailSettingsView`, and ios renders them from the same view (witnessed 2026-10-31 and 2026-11-01); android renders them too (2026-10-18); windows renders them too (2026-10-30), over the UniFFI facade and `autorespond_message_draft_outcome`.

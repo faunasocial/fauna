@@ -8,9 +8,7 @@ guide: docs/guides/install.md § What "alpha" means for you
 
 ## What a user gets
 
-An older app talks to a newer nest and a newer app to an older nest, in the
-same major version, and each app's own data opens under the next build and the
-previous one. A nest handed data from a newer, incompatible build stays up but
+From version 0.2.0 on, an older app talks to a newer nest and a newer app to an older nest, in the same major version, and each app's own data opens under the next build and the previous one; during the 0.1 versions an update may need a fresh install of the app or the nest. A nest handed data from a newer, incompatible build stays up but
 serves nothing from that data rather than damage it, tells every app it needs an
 update, and recovers untouched when the newer build returns. An app that cannot read the list of accounts on
 your device never offers to start you over as if you had none.
@@ -80,49 +78,49 @@ Stamped 2026-10-01 at dc4b94e0f1.
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ⚠ partial | 0.1.2-dev+29d63861 standalone |
-| linux | ⚠ partial | 0.1.2-dev+29d63861 standalone |
-| windows | ⚠ partial | 0.1.2-dev+29d63861 standalone |
-| macos | ⚠ partial | 0.1.2-dev+29d63861 standalone |
-| ios | ⚠ partial | 0.1.2-dev+29d63861 standalone |
+| web | ⚠ partial | 0.1.5-dev+88622a93 standalone |
+| linux | ✅ full | 0.1.5-dev+cbd813be standalone |
+| windows | ⚠ partial | 0.1.5-dev+7bab2ad3 standalone |
+| macos | ✅ full | 0.1.5-dev+3f9f2b95 standalone |
+| ios | ⚠ partial | 0.1.5-dev+ab838565 standalone |
 | android |  no run recorded | |
-| tui | ⚠ partial | 0.1.2-dev+29d63861 standalone |
+| tui | ✅ full | 0.1.5-dev+7186912b standalone |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
-| 1 | app | (maintainer-only) | linux (linux): xfailed, windows (windows): passed |
-| 1 | app | (maintainer-only) | linux (linux): xfailed, windows (windows): passed, macos (macos): passed |
-| 1 | app | (maintainer-only) | — |
-| 2 | app | (maintainer-only) | linux (linux): failed, windows (windows): passed |
-| 2 | app | (maintainer-only) | linux (linux): passed, windows (windows): passed |
+| 1 | app | (maintainer-only) | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 1 | app | (maintainer-only) | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): xfailed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 1 | app | (maintainer-only) | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 2 | app | (maintainer-only) | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): xfailed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 2 | app | (maintainer-only) | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): xfailed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
 | 3 | app | `tests/e2e-unified/tests/test_version_mismatch_launch.py::test_outdated_nest_launch_shows_non_retry_update_surface` | linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 3 | app | `tests/e2e-unified/tests/test_version_mismatch_launch.py::test_outdated_nest_launch_shows_non_retry_update_surface_web` | web (linux): passed |
-| 3 | app | `tests/e2e-unified/tests/test_version_mismatch_launch.py::test_a_signed_in_app_whose_nest_restarts_degraded_shows_the_update_surface` | web (linux): passed, linux (linux): passed, tui (linux): passed |
-| 4 | nest | `tests/e2e-unified/tests/api/test_wire_version_skew.py::test_old_client_minimal_payloads_accepted_by_new_nest` | nest (linux): passed |
-| 4 | nest | `tests/e2e-unified/tests/api/test_wire_version_skew.py::test_new_client_extra_fields_ignored_by_old_nest` | nest (linux): passed |
-| 4 | nest | `tests/e2e-unified/tests/api/test_wire_version_skew.py::test_new_client_unknown_kind_gets_graceful_unknown_kind` | nest (linux): passed |
-| 4 | nest | `tests/e2e-unified/tests/api/test_wire_version_skew.py::test_new_app_policy_save_with_future_field_accepted_by_old_nest` | nest (linux): passed |
-| 5 | nest | `tests/e2e-unified/tests/api/test_schema_version_compat.py::test_incompatible_schema_boots_degraded_and_serves_outdated` | nest (linux): passed |
-| 5 | nest | `tests/e2e-unified/tests/api/test_schema_version_compat.py::test_newer_but_additive_schema_still_serves` | nest (linux): passed |
-| 5 | nest | `tests/e2e-unified/tests/api/test_schema_version_compat.py::test_old_binary_serves_new_db_with_extra_table` | nest (linux): passed |
-| 6 | app | `tests/e2e-unified/tests/test_account_index_unreadable_launch.py::test_a_newer_builds_index_tells_the_user_to_update_and_offers_nothing_else` | web (linux): passed, linux (linux): passed, tui (linux): passed |
-| 7 | app | `tests/e2e-unified/tests/test_account_index_unreadable_launch.py::test_a_malformed_index_reaches_the_floor_only_through_a_confirm_that_states_the_residual` | web (linux): passed, linux (linux): passed, tui (linux): passed |
+| 3 | app | `tests/e2e-unified/tests/test_version_mismatch_launch.py::test_a_signed_in_app_whose_nest_restarts_degraded_shows_the_update_surface` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 4 | nest | `tests/e2e-unified/tests/api/test_wire_version_skew.py::test_old_client_minimal_payloads_accepted_by_new_nest` | nest (linux): passed, nest (macos): passed |
+| 4 | nest | `tests/e2e-unified/tests/api/test_wire_version_skew.py::test_new_client_extra_fields_ignored_by_old_nest` | nest (linux): passed, nest (macos): passed |
+| 4 | nest | `tests/e2e-unified/tests/api/test_wire_version_skew.py::test_new_client_unknown_kind_gets_graceful_unknown_kind` | nest (linux): passed, nest (macos): passed |
+| 4 | nest | `tests/e2e-unified/tests/api/test_wire_version_skew.py::test_new_app_policy_save_with_future_field_accepted_by_old_nest` | nest (linux): passed, nest (macos): passed |
+| 5 | nest | `tests/e2e-unified/tests/api/test_schema_version_compat.py::test_incompatible_schema_boots_degraded_and_serves_outdated` | nest (linux): passed, nest (macos): passed |
+| 5 | nest | `tests/e2e-unified/tests/api/test_schema_version_compat.py::test_newer_but_additive_schema_still_serves` | nest (linux): passed, nest (macos): passed |
+| 5 | nest | `tests/e2e-unified/tests/api/test_schema_version_compat.py::test_old_binary_serves_new_db_with_extra_table` | nest (linux): passed, nest (macos): passed |
+| 6 | app | `tests/e2e-unified/tests/test_account_index_unreadable_launch.py::test_a_newer_builds_index_tells_the_user_to_update_and_offers_nothing_else` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 7 | app | `tests/e2e-unified/tests/test_account_index_unreadable_launch.py::test_a_malformed_index_reaches_the_floor_only_through_a_confirm_that_states_the_residual` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 7 | app | `tests/e2e-unified/tests/test_erase_refused_other_instance.py::test_start_over_refuses_while_another_instance_serves_an_account` | linux (linux): passed, tui (linux): passed |
 | 7 | app | `tests/e2e-unified/tests/test_erase_refused_other_instance_windows.py::test_windows_start_over_refuses_on_error_message_while_another_instance_serves` | windows (windows): passed |
-| 8 | app | (maintainer-only) | tui (linux): passed |
+| 8 | app | (maintainer-only) | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
 | 9 | app | `tests/e2e-unified/tests/test_feature_limits.py::test_a_feature_the_nest_is_too_old_for_is_hidden_not_an_error` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 10 | app | `tests/e2e-unified/tests/test_conversations_unknown_message_kind.py::test_a_message_of_an_unknown_kind_is_missed_alone_and_the_conversation_keeps_working` | web (linux): passed, linux (linux): passed, tui (linux): passed |
-| 11 | app | `tests/e2e-unified/tests/test_send_refused_by_nest_version.py::test_a_send_refused_because_the_nest_needs_updating_says_so_and_offers_no_retry` | web (linux): passed, linux (linux): passed, tui (linux): passed |
-| 12 | nest | `tests/e2e-unified/tests/api/test_schema_version_compat.py::test_a_query_time_mismatch_is_answered_as_needing_an_update` | nest (linux): passed |
+| 10 | app | `tests/e2e-unified/tests/test_conversations_unknown_message_kind.py::test_a_message_of_an_unknown_kind_is_missed_alone_and_the_conversation_keeps_working` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 11 | app | `tests/e2e-unified/tests/test_send_refused_by_nest_version.py::test_a_send_refused_because_the_nest_needs_updating_says_so_and_offers_no_retry` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 12 | nest | `tests/e2e-unified/tests/api/test_schema_version_compat.py::test_a_query_time_mismatch_is_answered_as_needing_an_update` | nest (linux): passed, nest (macos): passed |
 | 13 | nest | `tests/e2e-unified/tests/platform/docker/test_mail_deploy_schema_upgrade.py::test_incompatible_schema_boots_degraded_then_recovers` | nest (linux): passed |
-| 14 | app | `tests/e2e-unified/tests/test_send_refused_by_nest_version.py::test_a_refusal_the_app_does_not_recognise_is_shown_as_a_refusal_and_not_retried` | web (linux): passed, linux (linux): passed, tui (linux): passed |
-| 15 | app | `tests/e2e-unified/tests/test_version_mismatch_launch.py::test_an_app_too_old_for_its_nest_says_to_update_and_offers_no_retry` | linux (linux): passed, tui (linux): passed |
+| 14 | app | `tests/e2e-unified/tests/test_send_refused_by_nest_version.py::test_a_refusal_the_app_does_not_recognise_is_shown_as_a_refusal_and_not_retried` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 15 | app | `tests/e2e-unified/tests/test_version_mismatch_launch.py::test_an_app_too_old_for_its_nest_says_to_update_and_offers_no_retry` | linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (windows): passed |
 | 15 | app | `tests/e2e-unified/tests/test_version_mismatch_launch.py::test_an_app_too_old_for_its_nest_says_to_update_and_offers_no_retry_web` | web (linux): passed |
-| 15 | app | `tests/e2e-unified/tests/test_version_mismatch_launch.py::test_a_signed_in_app_whose_nest_is_upgraded_past_it_shows_the_update_surface` | web (linux): passed, linux (linux): passed, tui (linux): passed |
-| 16 | app | `tests/e2e-unified/tests/test_mls_state_newer_build_tui.py::test_conversations_a_newer_build_saved_say_update_the_app_and_stay_untouched` | linux (linux): passed, tui (linux): passed |
-| 17 | nest | `tests/e2e-unified/tests/api/test_anonymous_version_surfaces.py::test_anonymous_version_answers_are_major_minor_and_only_health_tells_the_build` | nest (linux): passed |
-| 18 | nest | (maintainer-only) | nest (linux): passed |
-| 18 | nest | (maintainer-only) | nest (linux): passed |
-| 19 | nest | `tests/e2e-unified/tests/api/test_wire_version_skew.py::test_nest_info_advertises_capability_set` | nest (linux): passed |
-| 20 | nest | `tests/e2e-unified/tests/api/test_peer_nest_outdated_relay.py::test_send_to_a_too_old_home_nest_is_answered_peer_nest_outdated` | nest (linux): passed |
+| 15 | app | `tests/e2e-unified/tests/test_version_mismatch_launch.py::test_a_signed_in_app_whose_nest_is_upgraded_past_it_shows_the_update_surface` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 16 | app | `tests/e2e-unified/tests/test_mls_state_newer_build_tui.py::test_conversations_a_newer_build_saved_say_update_the_app_and_stay_untouched` | linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 17 | nest | `tests/e2e-unified/tests/api/test_anonymous_version_surfaces.py::test_anonymous_version_answers_are_major_minor_and_only_health_tells_the_build` | nest (linux): passed, nest (macos): passed, nest (windows): passed |
+| 18 | nest | (maintainer-only) | nest (linux): passed, nest (macos): passed |
+| 18 | nest | (maintainer-only) | nest (linux): passed, nest (macos): passed |
+| 19 | nest | `tests/e2e-unified/tests/api/test_wire_version_skew.py::test_nest_info_advertises_capability_set` | nest (linux): passed, nest (macos): passed |
+| 20 | nest | `tests/e2e-unified/tests/api/test_peer_nest_outdated_relay.py::test_send_to_a_too_old_home_nest_is_answered_peer_nest_outdated` | nest (linux): passed, nest (macos): passed |
 <!-- features-render:end -->

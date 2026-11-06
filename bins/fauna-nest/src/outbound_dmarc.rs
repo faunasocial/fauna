@@ -196,7 +196,8 @@ async fn dispatch_for_policy(
     queued
 }
 
-/// Run one full daily pass at `now`: for every From domain counted, find the
+/// Run one full daily pass at `now` — unless the admin has turned the sender
+/// off, when it only closes the window: for every From domain counted, find the
 /// governing policy; for every policy domain that publishes `rua=`, queue the
 /// report; close every bucket whatever happened, so the next window starts
 /// fresh and a failed lookup drops a day rather than carrying stale counts.
@@ -209,6 +210,20 @@ pub async fn run_one_emit_pass(
     fetcher: &dyn DmarcRecordFetcher,
     now: i64,
 ) -> usize {
+    // `mail.dmarc.outbound_aggregate_enabled` (§ Generation is on by default):
+    // off, the pass sends nothing and discards the window — the counts made
+    // while off are never mailed after the admin turns it back on.
+    match state.db.get_dmarc_policy().await {
+        Ok(p) if !p.effective().outbound_aggregate_enabled => {
+            state.email.dmarc_aggregator.lock().unwrap().clear();
+            return 0;
+        }
+        Ok(_) => {}
+        Err(e) => {
+            tracing::error!("DMARC emit: get_dmarc_policy failed: {e}");
+            return 0;
+        }
+    }
     let primary = match state.db.lookup_primary_mail_domain().await {
         Ok(Some(d)) => d.domain_name,
         Ok(None) => {

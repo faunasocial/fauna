@@ -11,10 +11,14 @@ import SwiftData
 public struct IdentityChangedInfo: Equatable, Sendable {
     public let pinnedHex: String
     public let seenHex: String?
+    /// Rotation-chain fork evidence (`LaunchSnapshot.identityFork`): the surface names
+    /// both heads and offers no re-trust (`box-recovery.md` § Client acceptance).
+    public let isFork: Bool
 
-    public init(pinnedHex: String, seenHex: String?) {
+    public init(pinnedHex: String, seenHex: String?, isFork: Bool = false) {
         self.pinnedHex = pinnedHex
         self.seenHex = seenHex
+        self.isFork = isFork
     }
 }
 
@@ -24,12 +28,31 @@ public class AppState {
     public var isOnboarding: Bool = true
     public var selectedTab: String = "conversations"
     /// For views behind the "More" tab on mobile (events, files, devices, settings, etc.)
-    public var moreSelectedView: String?
+    public var moreSelectedView: String? {
+        // Every assignment away from Settings, not a view's `onChange`: two
+        // jumps landing in one frame (out to the feed, back into Settings)
+        // never render the `nil` between them, yet the Settings root is
+        // still rebuilt.
+        didSet { if moreSelectedView != "settings" { settingsRootMounted = false } }
+    }
+    /// iOS: whether the Settings root is mounted as the More stack's content;
+    /// the More stack holds the Settings path until it is (`MoreView.settingsPath`).
+    public var settingsRootMounted = false
+    /// iOS: bumped by the More stack each time it re-seeds a refused Settings
+    /// push (`MoreView.settingsPath`) — the pop-and-re-push that remounts the
+    /// pushed page without anyone leaving it. A page that saw this change
+    /// between its `onAppear` and `onDisappear` was torn down by the stack, not
+    /// left by the user (`RecoveryKitSection`'s owed-kit hand-on reads it).
+    @ObservationIgnored public var settingsReseedGeneration = 0
     /// The hex actor_id of the profile to show when `moreSelectedView == "profile"`;
     /// `nil` ⇒ the viewer's own (SELF) profile. Set by a contact-row tap-through or
     /// the nav-stack `actor_id` (profile.md § Layout & flow → Another's profile);
     /// cleared on any other navigation.
     public var profileActorId: String?
+    /// The home nest the opener carried for `profileActorId` (a Find User result,
+    /// an author line, a contact row, or the nav patch's `home_nest_url`); `nil` =
+    /// none carried. Cleared with `profileActorId`.
+    public var profileHome: String?
     /// A `search-result-item` Contact-arm deep link's target — the CardDAV
     /// card's `uid_hash` to locate and open in the Address Book segment
     /// (`ui/search.md` § Where logic lives → Result navigation (deep link)).
@@ -108,6 +131,13 @@ public class AppState {
     /// source of truth, refreshed on the same login + reconnect triggers as
     /// `contentPolicy` above.
     public let screenTime = ScreenTimeStore()
+    /// The store-consent lock state (`account-age-band.md` § The account age
+    /// band → the store-law developer duties bullet) — the whole-app
+    /// `store-consent-lock`'s one source of truth, refreshed by the iOS shell at
+    /// launch and on every return to the foreground. Device-scoped: no sign-out
+    /// or account switch touches it. The iOS shell alone runs it; macOS declares
+    /// the absence.
+    public let storeConsent = StoreConsentStore()
     /// The shared `fauna.web.*` published-post surface cache — the `web-settings`
     /// Published-posts section and the feed ⋯-menu's web-publishing verbs both
     /// read/write through this ONE store, so they can never disagree about a
@@ -118,7 +148,8 @@ public class AppState {
     #endif
     /// The active Settings sub-page, or `nil` for the settings root (the page
     /// list itself). iOS keeps idiomatic settings nav (settings.md:28), so this
-    /// drives the `SettingsView` `NavigationStack` path rather than a sidebar
+    /// drives the More tab's `NavigationStack` path (`MoreView.settingsPath`,
+    /// whose root is `SettingsView`) rather than a sidebar
     /// swap; the e2e state protocol carries it as the second stack entry's `id`
     /// (`{"view":"settings"},{"view":"settings","id":"<navId>"}`), mirroring
     /// `selectedAdminPage`/`nav.stack[1].id`. The shared `SettingsPage` enum is
@@ -179,6 +210,25 @@ public class AppState {
     /// (touches App-owned onboarding state, so the glue lives in `FaunaApp`).
     /// Mirrors `MacAppState.onFactoryReset`.
     public var onFactoryReset: ((String) -> Void)?
+    #if !FAUNA_KIDS
+    /// `nest_retire` hosting (`nest-retirement.md` § Layout & flow): the page takes
+    /// over the shell in place while `retiring` is non-nil — opened from
+    /// `admin-nest` (`admin-nest-retire-button`) or from `launch_retry`
+    /// (`launch-retire-button`, `launchRetryError`). Compiled out of the Fauna
+    /// Kids build with the rest of nest setup.
+    /// `FaunaApp.openRetire` builds the VM's machine and sets `retiring`;
+    /// `onRetire` is the admin entry's hook and `onRetireFromLaunch` the launch
+    /// entry's, set for the same reason as `onFactoryReset`. Mirrors
+    /// `MacAppState.retiring`.
+    public var retiring: RetireEntry?
+    /// Built by `FaunaApp.openRetire` (main actor) when the page opens.
+    public var retireVM: NestRetireVM?
+    public var onRetire: (() -> Void)?
+    public var onRetireFromLaunch: (() -> Void)?
+    /// The page was left after retiring THIS session's own nest from `admin-nest`:
+    /// drop the session (keeping credentials) and re-enter launch routing.
+    public var onRetireDroppedSession: (() -> Void)?
+    #endif
     /// FP-domain re-converge hook (`FileProviderCoordinator.reconcile` with the
     /// live session's provisioning context). `FaunaApp` sets it on authenticated
     /// launch; the `folder-on-demand-toggle` calls it so a flip adds/removes
@@ -196,6 +246,10 @@ public class AppState {
     /// Add-account hook (Account settings → "Add account") — opens onboarding in **append**
     /// mode. Mirrors `MacAppState.onAddAccount`.
     public var onAddAccount: (() -> Void)?
+    /// The account-locked hook (Settings → Sessions, a landed lock) — tear down,
+    /// keep credentials, re-run launch onto the locked notice. Mirrors
+    /// `MacAppState.onAccountLocked`.
+    public var onAccountLocked: (() -> Void)?
     /// Sign-out / delete-account teardown hook (`SignOutSection`, `AccountSettingsView`'s
     /// `onAccountReset`). `FaunaApp` sets it to the same "drop everything the outgoing
     /// identity owns" checklist `switchAccount()` runs before rebuilding — client shutdown,
@@ -217,6 +271,40 @@ public class AppState {
     /// background — there is no gate to extend, unlike macOS `MacAppState`), so the
     /// outdated signal is carried as this optional message instead.
     public var needsUpdateMessage: String?
+    /// True while a launch whose optimistic entry did NOT enter (no usable stored
+    /// session, or entry withheld for a pending-factory-reset slot) still waits for
+    /// its `LaunchMachine` verdict. `ContentView` holds a spinner instead of the
+    /// wizard meanwhile: the wizard's default page is `identity_choice`, so
+    /// rendering it before the verdict paints the create screen over an identity
+    /// the store holds (`onboarding.md` § App-launch routing: "before showing UI,
+    /// read the long-term store and branch"). iOS's narrow twin of macOS's
+    /// `LaunchGate.launching`; every site that retires a launch clears it, as
+    /// macOS resets its gate to `.ready` there.
+    ///
+    /// Starts `true`, as macOS's gate starts `.launching`: the scene paints its
+    /// first frame BEFORE the `.task` that runs the launch (measured 2026-10-26
+    /// under the Xcode 27.1 SDK — the wizard mounted, then unmounted for the
+    /// spinner when `runLaunch` set this, then remounted on the verdict), so a
+    /// `false` default paints exactly the pre-verdict wizard this flag exists to
+    /// hold back. `runLaunch` sets it to `isOnboarding` after the optimistic
+    /// entry, so an entered launch drops it before the shell's first frame.
+    public var launchPending = true
+    /// The `launch_retry` surface (`onboarding.md` § App-launch routing, the
+    /// *Network failure or nest unreachable* row) for iOS's gating case: the
+    /// verdict was `Offline { transient: true }` and the launch had entered NO
+    /// session (`launchPending` was set). Holds the machine's `last_error`;
+    /// non-`nil` makes `ContentView` render the shared `LaunchRetryView` in place
+    /// of the wizard's `identity_choice` default. An optimistically entered
+    /// session stays put on the same verdict (iOS's posture), unless its nest
+    /// may be lost (`LostNestOffer`). iOS's twin of macOS's
+    /// `LaunchGate.retrying`; every new verdict clears it.
+    public var launchRetryError: String?
+    /// `launch-retry-button` on `launch_retry`: re-run the whole launch
+    /// (`FaunaApp.runLaunch`, as macOS's retry does).
+    public var onRetryLaunch: (() -> Void)?
+    /// `launch-recover-button` on `launch_retry`: seed the wizard into
+    /// `nest_recovery` with the boxes the reveal read.
+    public var onRecoverFromLaunch: (([String]) -> Void)?
     /// The `launch_sign_in_refused` surface (`onboarding.md` § App-launch routing,
     /// the previously-signed-in row): the saved nest no longer signs this identity
     /// in (`LaunchSnapshot.signInRefused`, carried on the terminal
@@ -226,6 +314,14 @@ public class AppState {
     /// Optional for the same reason `needsUpdateMessage` is: iOS has no launch-gate
     /// enum (macOS uses `MacAppState.LaunchGate.signInRefused`).
     public var signInRefusedMessage: String?
+    /// The `launch_account_locked` surface (`devices.md` § The locked state):
+    /// the account is locked (`LaunchSnapshot.lockedUntilSecs`, carried on the
+    /// terminal `Offline{transient:false}` snapshot's side channel). Non-`nil`
+    /// makes `ContentView` render the shared `LaunchAccountLockedView` ahead of
+    /// the main UI — terminal, retry-less, no fallthrough; the launch machine's
+    /// own refresh at the unlock time is the way out. The macOS peer is
+    /// `MacAppState.LaunchGate.accountLocked` + `lockedLaunch`.
+    public var accountLocked: LockedLaunchModel?
     /// Retry hook for `LaunchSignInRefusedView` (`launch-retry-button`). `FaunaApp`
     /// sets it to call `retrySilentChallenge()` on the HELD machine that produced
     /// the verdict, then re-dispatch its snapshot.
@@ -321,6 +417,24 @@ public class AppState {
     public var feedVM: FeedVM?
     #endif
 
+    /// The sign-out and switch doors' flush of all three drafts rails, bounded
+    /// (`boundedLeaveFlush`). Mirrors `MacAppState.flushDraftRails`.
+    @MainActor
+    public func flushDraftRails() async {
+        let eventsVM = eventsVM
+        let conversationsVM = conversationsVM
+        #if !FAUNA_KIDS
+        let feedVM = feedVM
+        #endif
+        await boundedLeaveFlush {
+            await eventsVM?.flushDraftsNow()
+            await conversationsVM?.flushDraftsNow()
+            #if !FAUNA_KIDS
+            await feedVM?.flushDraftsNow()
+            #endif
+        }
+    }
+
     public init() {
         // Convention 11's MOUNTED-SHELL derivation for iOS, installed once and
         // read live (`SessionState.mainShellMountedProbe`). This is exactly the
@@ -335,7 +449,8 @@ public class AppState {
         session.mainShellMountedProbe = { [weak self] in
             guard let self else { return false }
             return self.identityChanged == nil && self.needsUpdateMessage == nil
-                && self.signInRefusedMessage == nil && !self.isOnboarding
+                && self.signInRefusedMessage == nil && self.accountLocked == nil
+                && !self.isOnboarding
         }
     }
 

@@ -179,14 +179,19 @@ public static class ActorScope
         // Memoized against the outgoing secret AND the RPC client it was built
         // with — either alone is enough to make it wrong after a teardown.
         AtprotoSettingsMachineHost.Instance.Reset();
+        // Phase two's archive links ride the outgoing account's conversations
+        // session and folders (archive-import.md § Linking and merging): stop the
+        // tick and drop the views, so the incoming account's Contacts rows never
+        // paint the outgoing one's questions. The next login starts them afresh.
+        ArchiveLinksHost.Instance.Stop();
         // family-safety.md § Guardian Notify: the pending count batch AND the
         // per-item dedup set. Carrying the dedup set across an actor change makes
         // the incoming ward's first enforcement on a reused item id silently
         // UNcounted — an under-report indistinguishable from "nothing happened".
         GuardianNotifyCache.Reset();
-        // The guardian per-category floor, the viewer's own spam/phishing
+        // The guardian's rules, the viewer's own spam/phishing
         // thresholds and this session's reveal set. Its reads fail OPEN by design,
-        // which is exactly what makes re-hydrating the floor on every actor change
+        // which is exactly what makes re-hydrating the rules on every actor change
         // load-bearing (web and linux both recorded this).
         ContentPolicyCache.Reset();
         // The region plane is the DEVICE's (a region is a fact about the device, not
@@ -194,6 +199,10 @@ public static class ActorScope
         // policy): only its refresh clock and the outgoing session's nest go, so
         // the next login asks the relay at once.
         RegionPlaneHost.ClearSession();
+        // The nest-rules book is a record per nest identity and public, so it stays
+        // (nest-rules.md § Acceptance at joining, and a change of rules); only which
+        // nest this session reads through and its changed notice go.
+        NestRulesHost.ClearSession();
         // The screen-time heartbeat + lock state (family-safety.md § Screen
         // time) — without this a new account inherits the previous ward's
         // lock, naming a guardian the user does not have.

@@ -59,7 +59,8 @@ internal sealed class FakeMailExportMachine : MailExportMachineFakeBase
 
     public override MailExportSnapshot Snapshot() => NextSnapshot;
 
-    public static MailboxOption Box(string name, bool selected) => new(name, selected);
+    public static MailboxOption Box(string name, bool selected, uint messages = 0, ulong sealedBytes = 0) =>
+        new(name, selected, messages, sealedBytes);
 
     /// <summary>A Format-step snapshot with the given mailbox options.</summary>
     public static MailExportSnapshot AtFormat(
@@ -160,6 +161,71 @@ public class MailExportViewModelTests
         Assert.Contains(fake.Dispatched, a => a is MailExportAction.Start);
     }
 
+    // ── Step 3 — the confirm summary's three figures come from the shared
+    //    export_confirm_estimate (mail-export.md § Wizard steps step 3), the way tui's
+    //    confirm_step_elements folds them. No string table under unit test: Strings.Format
+    //    answers the key it resolved, which is exactly the choice under test. ──
+
+    [Fact]
+    public async Task ConfirmSummary_FoldsInTheEstimatedBytesAndTime()
+    {
+        var fake = new FakeMailExportMachine
+        {
+            NextSnapshot = FakeMailExportMachine.AtFormat(new[]
+            {
+                FakeMailExportMachine.Box("INBOX", true, messages: 10, sealedBytes: 4 << 20),
+                // Unselected: neither its messages nor its bytes count.
+                FakeMailExportMachine.Box("Trash", false, messages: 5, sealedBytes: 1 << 20),
+            }),
+        };
+        var vm = new MailExportViewModel(fake);
+
+        await vm.LoadCommand.ExecuteAsync(null);
+
+        Assert.Equal("mail_export/confirm_summary_estimated_fmt", vm.ConfirmSummary);
+        Assert.False(vm.ConfirmEstimateUnavailable);
+    }
+
+    [Fact]
+    public async Task ConfirmSummary_NestWithoutSizes_KeepsTheCountsAndSaysSo()
+    {
+        // Selected messages that rest in zero reported bytes: a nest that reports no
+        // sizes. The bare counts line plus the unavailable note — never an invented figure.
+        var fake = new FakeMailExportMachine
+        {
+            NextSnapshot = FakeMailExportMachine.AtFormat(new[]
+            {
+                FakeMailExportMachine.Box("INBOX", true, messages: 10),
+            }),
+        };
+        var vm = new MailExportViewModel(fake);
+
+        await vm.LoadCommand.ExecuteAsync(null);
+
+        Assert.Equal("mail_export/confirm_summary_count_fmt", vm.ConfirmSummary);
+        Assert.True(vm.ConfirmEstimateUnavailable);
+    }
+
+    [Fact]
+    public async Task ConfirmSummary_NothingSelected_HasNothingToEstimate()
+    {
+        // Only an unselected mailbox carries bytes: nothing is selected, so there is no
+        // estimate and nothing is unavailable either.
+        var fake = new FakeMailExportMachine
+        {
+            NextSnapshot = FakeMailExportMachine.AtFormat(new[]
+            {
+                FakeMailExportMachine.Box("INBOX", false, messages: 10, sealedBytes: 4 << 20),
+            }),
+        };
+        var vm = new MailExportViewModel(fake);
+
+        await vm.LoadCommand.ExecuteAsync(null);
+
+        Assert.Equal("mail_export/confirm_summary_count_fmt", vm.ConfirmSummary);
+        Assert.False(vm.ConfirmEstimateUnavailable);
+    }
+
     [Fact]
     public async Task Progress_ProjectsSummaryFractionAndPauseGate()
     {
@@ -179,6 +245,62 @@ public class MailExportViewModelTests
         Assert.False(vm.CanResume);
         Assert.Single(vm.MailboxProgress);
         Assert.Equal("25/100", vm.MailboxProgress[0].Progress);
+    }
+
+    [Fact]
+    public async Task FailedExport_IsARecord_OfferingDismissInPlaceOfTheThreeControls()
+    {
+        // mail-export.md § A failed export is a record the wizard shows until the user
+        // moves on: the adopted failed session paints on Progress with no Pause /
+        // Resume / Cancel and Dismiss as its one control (tui's progress_step_elements).
+        var fake = new FakeMailExportMachine
+        {
+            NextSnapshot = FakeMailExportMachine.AtProgress(ExportSessionState.Errored, 1, 3),
+        };
+        var vm = new MailExportViewModel(fake);
+
+        await vm.LoadCommand.ExecuteAsync(null);
+
+        Assert.Equal(MailExportStep.Progress, vm.Step);
+        Assert.True(vm.IsFailed);
+        Assert.False(vm.CanPause);
+        Assert.False(vm.CanResume);
+
+        // Dismiss is the shared Discard, which removes the record.
+        await vm.DiscardAsync();
+        Assert.Contains(fake.Dispatched, a => a is MailExportAction.Discard);
+    }
+
+    [Fact]
+    public async Task ALiveExport_IsNotFailed()
+    {
+        // A running or paused session keeps its three controls.
+        foreach (var state in new[] { ExportSessionState.Running, ExportSessionState.Paused })
+        {
+            var fake = new FakeMailExportMachine
+            {
+                NextSnapshot = FakeMailExportMachine.AtProgress(state, 1, 3),
+            };
+            var vm = new MailExportViewModel(fake);
+
+            await vm.LoadCommand.ExecuteAsync(null);
+
+            Assert.False(vm.IsFailed);
+        }
+    }
+
+    [Fact]
+    public async Task Refresh_DispatchesTheSharedRefresh()
+    {
+        // The export push's re-read (MailExportPanel.OnExportStale) is the shared
+        // machine's Refresh — never a payload read.
+        var fake = new FakeMailExportMachine();
+        var vm = new MailExportViewModel(fake);
+        await vm.LoadCommand.ExecuteAsync(null);
+
+        await vm.RefreshAsync();
+
+        Assert.Contains(fake.Dispatched, a => a is MailExportAction.Refresh);
     }
 
     [Fact]

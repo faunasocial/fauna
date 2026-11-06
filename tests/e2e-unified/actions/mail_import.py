@@ -43,6 +43,12 @@ class MailImportActions:
             "nav": {"stack": [{"view": "settings"}, {"view": "settings", "id": "mail-import"}]},
         })
 
+    def leave_and_return(self) -> None:
+        """Leave the wizard for the feed and come back to it (§ Wizard steps step 6,
+        "leaving the page and coming back keeps it")."""
+        self.driver.set_state({"nav": {"stack": [{"view": "feed"}]}})
+        self.navigate()
+
     def is_page_visible(self, timeout: float = 10.0) -> bool:
         """True when the mail-import wizard is reachable (source picker present)."""
         try:
@@ -257,7 +263,14 @@ class MailImportActions:
     def restart_offered(self) -> bool:
         """Whether the progress step offers to restart a mailbox the source
         rebuilt (mailbox-migration.md § Resume protocol step 4)."""
-        return self.driver.is_visible("mail-import-restart-button")
+        if self.driver.is_visible("mail-import-restart-button"):
+            return True
+        # windows reads UIA IsOffscreen: below the fold of its scrolling page the
+        # button reads as not visible. Only that driver pays for the scroll — on a
+        # genuinely absent element it can wait out a bridge timeout elsewhere.
+        return self.driver.is_windows() and self.driver.is_visible_scrolled(
+            "mail-import-restart-button"
+        )
 
     def restart(self) -> None:
         self.driver.click("mail-import-restart-button")

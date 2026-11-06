@@ -54,32 +54,32 @@ Stamped 2026-10-01 at 308c995169.
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ✅ full | 0.1.2-dev+8b423269 standalone |
-| linux | ✅ full | 0.1.2-dev+8b423269 standalone |
-| windows | ⚠ partial | 0.1.2-dev+a704dbe4.dirty standalone |
-| macos | ⚠ partial | 0.1.2-dev+8b423269 standalone |
-| ios |  no run recorded | |
+| web | ✅ full | 0.1.5 docker |
+| linux | ✅ full | 0.1.5-dev+0daa3736 docker |
+| windows | ✅ full | 0.1.2-dev+a704dbe4.dirty standalone |
+| macos | ✅ full | 0.1.5-dev+3f9f2b95 standalone |
+| ios | ✅ full | 0.1.5-dev+0daa3736 docker |
 | android |  no run recorded | |
-| tui | ✅ full | 0.1.2-dev+8b423269 standalone |
+| tui | ✅ full | 0.1.5-dev+0daa3736 docker |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
-| 1 | app | `tests/e2e-unified/tests/test_admin_aliases.py::test_admin_aliases_forwarder_create_and_delete` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, tui (linux): passed |
-| 1 | app | `tests/e2e-unified/tests/test_admin_aliases.py::test_admin_aliases_forwarder_to_hosted_domain_rejected` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, tui (linux): passed |
+| 1 | app | `tests/e2e-unified/tests/test_admin_aliases.py::test_admin_aliases_forwarder_create_and_delete` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 1 | app | `tests/e2e-unified/tests/test_admin_aliases.py::test_admin_aliases_forwarder_to_hosted_domain_rejected` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 2 | nest | `tests/e2e-unified/tests/api/test_mail_forwarder.py::test_admin_creates_lists_deletes_forwarder` | nest (linux): passed, nest (macos): passed |
 | 2 | nest | `tests/e2e-unified/tests/api/test_mail_forwarder.py::test_create_forwarder_rejects_local_domain_target` | nest (linux): passed, nest (macos): passed |
 | 2 | nest | `tests/e2e-unified/tests/test_mail_bridge_mta.py::test_inbound_admin_forwarder_redirects_to_external` | nest (linux): passed, nest (macos): passed |
 | 3 | nest | `tests/e2e-unified/tests/platform/docker/test_mail_deploy_forwarder_ndr.py::test_mail_deploy_forwarder_ndr_seals_locally_no_hairpin` | nest (linux): passed |
-| 4 | nest | `tests/e2e-unified/tests/test_mail_bridge_mta.py::test_inbound_admin_forwarder_delivers_to_external_mx_under_srs` | nest (linux): passed |
-| 5 | nest | `tests/e2e-unified/tests/test_mail_bridge_mta.py::test_inbound_admin_forwarder_loop_is_not_forwarded_again` | nest (linux): passed |
-| 6 | nest | `tests/e2e-unified/tests/test_mail_bridge_mta.py::test_admin_forwarder_over_hourly_cap_waits_and_goes_out_later` | nest (linux): passed |
-| 7 | nest | `tests/e2e-unified/tests/test_mail_bridge_mta.py::test_admin_forwarder_queue_full_answers_451_and_retry_is_kept` | nest (linux): passed |
-| 8 | nest | `tests/e2e-unified/tests/test_mail_bridge_mta.py::test_submission_to_admin_forwarder_reaches_external_mx` | nest (linux): passed |
-| 9 | app | `tests/e2e-unified/tests/test_admin_aliases.py::test_admin_aliases_forwarder_on_held_or_reserved_address_refused` | web (linux): passed, linux (linux): passed, tui (linux): passed |
-| 10 | nest | `tests/e2e-unified/tests/api/test_mail_forwarder.py::test_create_forwarder_rejects_unhosted_domain` | nest (linux): passed |
-| 10 | nest | `tests/e2e-unified/tests/api/test_mail_forwarder.py::test_create_forwarder_rejects_reserved_local_part` | nest (linux): passed |
-| 11 | nest | `tests/e2e-unified/tests/api/test_mail_forwarder.py::test_create_forwarder_rejects_an_address_already_held` | nest (linux): passed |
-| 12 | nest | `tests/e2e-unified/tests/api/test_mail_forwarder.py::test_forwarders_never_list_among_the_admins_own_addresses` | nest (linux): passed |
-| 13 | nest | `tests/e2e-unified/tests/api/test_mail_forwarder.py::test_non_admin_denied_on_create_forwarder` | nest (linux): passed |
-| 14 | nest | `tests/e2e-unified/tests/test_mail_bridge_mta.py::test_inbound_admin_forwarder_delivers_to_external_mx_under_srs` | nest (linux): passed |
+| 4 | nest | `tests/e2e-unified/tests/test_mail_bridge_mta.py::test_inbound_admin_forwarder_delivers_to_external_mx_under_srs` | nest (linux): passed, nest (macos): passed |
+| 5 | nest | `tests/e2e-unified/tests/test_mail_bridge_mta.py::test_inbound_admin_forwarder_loop_is_not_forwarded_again` | nest (linux): passed, nest (macos): passed |
+| 6 | nest | `tests/e2e-unified/tests/test_mail_bridge_mta.py::test_admin_forwarder_over_hourly_cap_waits_and_goes_out_later` | nest (linux): passed, nest (macos): passed |
+| 7 | nest | `tests/e2e-unified/tests/test_mail_bridge_mta.py::test_admin_forwarder_queue_full_answers_451_and_retry_is_kept` | nest (linux): passed, nest (macos): passed |
+| 8 | nest | `tests/e2e-unified/tests/test_mail_bridge_mta.py::test_submission_to_admin_forwarder_reaches_external_mx` | nest (linux): passed, nest (macos): passed |
+| 9 | app | `tests/e2e-unified/tests/test_admin_aliases.py::test_admin_aliases_forwarder_on_held_or_reserved_address_refused` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 10 | nest | `tests/e2e-unified/tests/api/test_mail_forwarder.py::test_create_forwarder_rejects_unhosted_domain` | nest (linux): passed, nest (macos): passed |
+| 10 | nest | `tests/e2e-unified/tests/api/test_mail_forwarder.py::test_create_forwarder_rejects_reserved_local_part` | nest (linux): passed, nest (macos): passed |
+| 11 | nest | `tests/e2e-unified/tests/api/test_mail_forwarder.py::test_create_forwarder_rejects_an_address_already_held` | nest (linux): passed, nest (macos): passed |
+| 12 | nest | `tests/e2e-unified/tests/api/test_mail_forwarder.py::test_forwarders_never_list_among_the_admins_own_addresses` | nest (linux): passed, nest (macos): passed |
+| 13 | nest | `tests/e2e-unified/tests/api/test_mail_forwarder.py::test_non_admin_denied_on_create_forwarder` | nest (linux): passed, nest (macos): passed |
+| 14 | nest | `tests/e2e-unified/tests/test_mail_bridge_mta.py::test_inbound_admin_forwarder_delivers_to_external_mx_under_srs` | nest (linux): passed, nest (macos): passed |
 <!-- features-render:end -->

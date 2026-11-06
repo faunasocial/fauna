@@ -63,11 +63,13 @@ fn rust_tree_sources() -> Vec<(String, String)> {
             if path.is_dir() {
                 stack.push(path);
             } else if path.extension().is_some_and(|e| e == "rs") {
+                // Forward slashes on every platform: the guards match on
+                // `/`-separated suffixes, which a windows path never ends with.
                 let rel = path
                     .strip_prefix(&root)
                     .expect("under the repo root")
                     .to_string_lossy()
-                    .into_owned();
+                    .replace('\\', "/");
                 out.push((rel, std::fs::read_to_string(&path).expect("read a source")));
             }
         }

@@ -186,7 +186,7 @@ func (b *Backend) lazyProvisionContacts(ctx context.Context, sess *davauth.Sessi
 	metadata := EncryptedCollectionMetadata{
 		Displayname: defaultDisplayname,
 	}
-	sealed, err := SealCollectionMetadata(metadata, sess.MLSPubkey(), sess.MlkemEk())
+	sealed, err := SealCollectionMetadata(metadata, sess.CardPubkey(), sess.CardMlkemEk())
 	if err != nil {
 		return nil, fmt.Errorf("carddav: seal contacts metadata: %w", err)
 	}
@@ -279,7 +279,7 @@ func (b *Backend) CreateAddressBook(ctx context.Context, ab *carddav.AddressBook
 		Displayname: ab.Name,
 		Description: ab.Description,
 	}
-	sealed, err := SealCollectionMetadata(metadata, sess.MLSPubkey(), sess.MlkemEk())
+	sealed, err := SealCollectionMetadata(metadata, sess.CardPubkey(), sess.CardMlkemEk())
 	if err != nil {
 		return fmt.Errorf("carddav: seal new address-book metadata: %w", err)
 	}

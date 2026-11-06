@@ -15,7 +15,7 @@ tighten or loosen the checks that have a setting in the admin area's mail policy
 
 ## Coverage contract
 
-Stamped 2026-10-01 at dc4b94e0f1.
+Stamped 2026-10-26 at 67caf70a71.
 
 1. [nest] The server is not an open relay, sending needs a password, and mail forging your own domain is refused — `docs/goal/behavior/smtp-server.md` § Inbound policy stack
    - `tests/e2e-unified/tests/platform/docker/test_mail_security_relay.py::test_no_open_relay_on_port25`
@@ -72,6 +72,8 @@ Stamped 2026-10-01 at dc4b94e0f1.
 24. [nest] Clean mail reaches you carrying the result of its scan — `docs/goal/behavior/mail-content-scanning.md` § How the result is sealed
    - `tests/e2e-unified/tests/test_mail_inbound_stamps.py::test_clean_mail_reaches_you_carrying_the_result_of_its_scan`
    - `tests/e2e-unified/tests/platform/docker/test_mail_scan_real_clamd.py::test_real_clamd_stamps_clean_and_refuses_eicar`
+25. [nest] While other connections hold as much unfinished mail as the server will keep in memory, a further message is put off so the sender retries later, instead of being read in without limit — `docs/goal/behavior/smtp-server.md` § Connection-time limits
+   - `tests/e2e-unified/tests/test_mail_abuse_refused.py::test_messages_past_the_servers_memory_budget_are_put_off_not_accepted`
 
 ## Status
 
@@ -93,8 +95,8 @@ Stamped 2026-10-01 at dc4b94e0f1.
 | 1 | nest | `tests/e2e-unified/tests/platform/docker/test_mail_security_relay.py::test_local_domain_spoofing_rejected` | nest (linux): passed |
 | 2 | nest | `tests/e2e-unified/tests/platform/docker/test_mail_security_accept.py::test_perimeter_accepts_aligned_pass_rejects_fail` | nest (linux): passed |
 | 2 | nest | `tests/e2e-unified/tests/platform/docker/test_mail_security_accept.py::test_perimeter_accepts_dkim_aligned_pass_rejects_broken` | nest (linux): passed |
-| 3 | nest | `tests/e2e-unified/tests/test_mail_bridge_mta.py::test_inbound_scan_infected_rejects` | nest (linux): passed |
-| 3 | nest | `tests/e2e-unified/tests/test_mail_bridge_mta.py::test_inbound_scan_clean_delivers` | nest (linux): passed |
+| 3 | nest | `tests/e2e-unified/tests/test_mail_bridge_mta.py::test_inbound_scan_infected_rejects` | nest (linux): passed, nest (macos): passed |
+| 3 | nest | `tests/e2e-unified/tests/test_mail_bridge_mta.py::test_inbound_scan_clean_delivers` | nest (linux): passed, nest (macos): passed |
 | 3 | nest | `tests/e2e-unified/tests/platform/docker/test_mail_scan_real_clamd.py::test_real_clamd_stamps_clean_and_refuses_eicar` | nest (linux): passed |
 | 4 | nest | `tests/e2e-unified/tests/platform/docker/test_mail_rate_limit_burst.py::test_imap_reconnect_storm_trips_rate_limit` | nest (linux): passed |
 | 4 | nest | `tests/e2e-unified/tests/platform/docker/test_mail_rate_limit_burst.py::test_caldav_burst_stays_under_rate_limit_via_cache` | nest (linux): passed |
@@ -105,18 +107,19 @@ Stamped 2026-10-01 at dc4b94e0f1.
 | 9 | nest | `tests/e2e-unified/tests/platform/docker/test_mail_abuse_perimeter.py::test_a_sender_domain_that_does_not_exist_or_is_missing_is_refused` | nest (linux): passed |
 | 10 | nest | `tests/e2e-unified/tests/platform/docker/test_mail_abuse_perimeter.py::test_a_lookup_that_cannot_be_answered_never_refuses_mail` | nest (linux): passed |
 | 11 | nest | `tests/e2e-unified/tests/platform/docker/test_mail_abuse_perimeter.py::test_the_default_blocklist_refuses_a_listed_server_at_the_door` | nest (linux): passed |
-| 12 | nest | `tests/e2e-unified/tests/test_mail_abuse_refused.py::test_default_connection_rate_tells_the_eleventh_connection_in_a_minute_to_retry` | nest (linux): passed |
+| 12 | nest | `tests/e2e-unified/tests/test_mail_abuse_refused.py::test_default_connection_rate_tells_the_eleventh_connection_in_a_minute_to_retry` | nest (linux): passed, nest (macos): passed |
 | 13 | nest | `tests/e2e-unified/tests/platform/docker/test_mail_abuse_perimeter.py::test_one_address_cannot_hold_more_than_half_the_incoming_connections` | nest (linux): passed |
 | 14 | nest | `tests/e2e-unified/tests/platform/docker/test_mail_abuse_perimeter.py::test_one_address_cannot_push_more_than_fifty_messages_an_hour` | nest (linux): passed |
-| 15 | nest | `tests/e2e-unified/tests/test_mail_abuse_refused.py::test_one_message_cannot_be_addressed_to_more_than_a_hundred_recipients` | nest (linux): passed |
-| 16 | nest | `tests/e2e-unified/tests/test_mail_abuse_refused.py::test_refused_requests_are_answered_ever_more_slowly_and_a_clean_sender_never_is` | nest (linux): passed |
-| 17 | nest | `tests/e2e-unified/tests/test_mail_abuse_refused.py::test_a_sender_silent_for_half_a_minute_mid_conversation_is_disconnected` | nest (linux): passed |
-| 18 | nest | `tests/e2e-unified/tests/test_mail_abuse_refused.py::test_a_message_with_an_absurd_number_or_size_of_header_lines_is_refused` | nest (linux): passed |
-| 19 | nest | `tests/e2e-unified/tests/test_mail_abuse_refused.py::test_a_message_without_exactly_one_from_line_is_refused_inbound_and_from_a_mail_app` | nest (linux): passed |
-| 20 | nest | `tests/e2e-unified/tests/test_mail_inbound_stamps.py::test_a_sender_cannot_plant_the_nests_delivery_marks` | nest (linux): passed |
-| 21 | nest | `tests/e2e-unified/tests/test_mail_abuse_refused.py::test_unusual_line_endings_cannot_smuggle_a_second_message` | nest (linux): passed |
-| 22 | nest | `tests/e2e-unified/tests/test_mail_abuse_refused.py::test_the_incoming_mail_port_never_accepts_a_sign_in` | nest (linux): passed |
-| 23 | nest | `tests/e2e-unified/tests/test_mail_abuse_refused.py::test_while_the_malware_scanner_is_down_mail_is_put_off_never_delivered_unscanned` | nest (linux): passed |
-| 24 | nest | `tests/e2e-unified/tests/test_mail_inbound_stamps.py::test_clean_mail_reaches_you_carrying_the_result_of_its_scan` | nest (linux): passed |
+| 15 | nest | `tests/e2e-unified/tests/test_mail_abuse_refused.py::test_one_message_cannot_be_addressed_to_more_than_a_hundred_recipients` | nest (linux): passed, nest (macos): passed |
+| 16 | nest | `tests/e2e-unified/tests/test_mail_abuse_refused.py::test_refused_requests_are_answered_ever_more_slowly_and_a_clean_sender_never_is` | nest (linux): passed, nest (macos): passed |
+| 17 | nest | `tests/e2e-unified/tests/test_mail_abuse_refused.py::test_a_sender_silent_for_half_a_minute_mid_conversation_is_disconnected` | nest (linux): passed, nest (macos): passed |
+| 18 | nest | `tests/e2e-unified/tests/test_mail_abuse_refused.py::test_a_message_with_an_absurd_number_or_size_of_header_lines_is_refused` | nest (linux): passed, nest (macos): passed |
+| 19 | nest | `tests/e2e-unified/tests/test_mail_abuse_refused.py::test_a_message_without_exactly_one_from_line_is_refused_inbound_and_from_a_mail_app` | nest (linux): passed, nest (macos): passed |
+| 20 | nest | `tests/e2e-unified/tests/test_mail_inbound_stamps.py::test_a_sender_cannot_plant_the_nests_delivery_marks` | nest (linux): passed, nest (macos): passed |
+| 21 | nest | `tests/e2e-unified/tests/test_mail_abuse_refused.py::test_unusual_line_endings_cannot_smuggle_a_second_message` | nest (linux): passed, nest (macos): passed |
+| 22 | nest | `tests/e2e-unified/tests/test_mail_abuse_refused.py::test_the_incoming_mail_port_never_accepts_a_sign_in` | nest (linux): passed, nest (macos): passed |
+| 23 | nest | `tests/e2e-unified/tests/test_mail_abuse_refused.py::test_while_the_malware_scanner_is_down_mail_is_put_off_never_delivered_unscanned` | nest (linux): passed, nest (macos): passed |
+| 24 | nest | `tests/e2e-unified/tests/test_mail_inbound_stamps.py::test_clean_mail_reaches_you_carrying_the_result_of_its_scan` | nest (linux): passed, nest (macos): passed |
 | 24 | nest | `tests/e2e-unified/tests/platform/docker/test_mail_scan_real_clamd.py::test_real_clamd_stamps_clean_and_refuses_eicar` | nest (linux): passed |
+| 25 | nest | `tests/e2e-unified/tests/test_mail_abuse_refused.py::test_messages_past_the_servers_memory_budget_are_put_off_not_accepted` | nest (linux): passed, nest (macos): passed |
 <!-- features-render:end -->

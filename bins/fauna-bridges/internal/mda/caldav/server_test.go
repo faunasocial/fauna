@@ -109,6 +109,9 @@ type mockCaller struct {
 	// that pairs with its snapshot (reportFixture.mlkemEk).
 	mlkemEk  []byte
 	indexKey []byte
+	// recipientSuccessionPending sets `succession_pending` on the keyless
+	// fetch_recipient_mls_pubkey reply.
+	recipientSuccessionPending bool
 	// mlsSnapshotBlob is the canonical-CBOR `MlsSnapshotBlob`
 	// (encrypted under MSEK) `fetch_mls_snapshot_blob` returns; nil →
 	// nest has no snapshot on file (user's primary client hasn't
@@ -226,8 +229,9 @@ func (m *mockCaller) Call(_ context.Context, method string, body, reply any) err
 
 	case wsrpc.MethodFetchRecipientMLSPubkey:
 		r := struct {
-			Key *map[string][]byte `cbor:"key"`
-		}{}
+			Key               *map[string][]byte `cbor:"key"`
+			SuccessionPending bool               `cbor:"succession_pending"`
+		}{SuccessionPending: m.recipientSuccessionPending}
 		if m.mlsPubkey != nil {
 			key := wsrpctest.RecipientSealKey(m.mlsPubkey)
 			if m.mlkemEk != nil {
@@ -1022,7 +1026,7 @@ func TestCalDAVMetadataDecryptRoundTrip(t *testing.T) {
 	sealed, err := SealCollectionMetadata(EncryptedCollectionMetadata{
 		Displayname: defaultDisplayname,
 		Color:       defaultColor,
-	}, leaf.Pubkey, nil) // nil ek = classical seal
+	}, fixtureCalendarPubkey(), nil) // nil ek = classical seal
 	if err != nil {
 		t.Fatalf("SealCollectionMetadata: %v", err)
 	}

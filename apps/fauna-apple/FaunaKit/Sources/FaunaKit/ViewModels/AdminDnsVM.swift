@@ -165,10 +165,23 @@ public final class AdminDnsVM {
     }
     public func refresh() async { await hydrate() }
 
-    /// Re-fetch the DNS record matrix → live verify → served-cert status.
-    /// Shared by `hydrate()` and the rename actions below that move records/
-    /// certs (start/complete/abort re-target or widen the SAN set; extend does
-    /// not, so it skips this — mirrors web `refreshDnsMatrix`).
+    /// One tick of the open page's background re-check (the view's timer —
+    /// `dns-management.md` § Manual + live verification, the slow cadence): the
+    /// shared `background_recheck` re-reads the matrix and verifies it,
+    /// re-publishing a managed record public DNS no longer serves. No
+    /// `isLoading` — a tick the admin did not ask for never disables the page
+    /// (android `AdminDnsVM.backgroundRecheck`).
+    public func backgroundRecheck() async {
+        guard let dnsMachine else { return }
+        await dnsMachine.backgroundRecheck()
+        let snap = dnsMachine.snapshot()
+        dns = snap
+        if let e = snap.error { errorMessage = e }
+    }
+
+    /// Re-fetch the DNS record matrix → live verify → served-cert status, for
+    /// `hydrate()`. A local-domain action re-checks through the shared
+    /// `recheck_matrix` instead (`localDispatch`).
     private func refreshDnsMatrix() async {
         await dnsDispatch(.refresh)
         await dnsDispatch(.verifyRecords(domain: nil))
@@ -248,16 +261,30 @@ public final class AdminDnsVM {
         // policy mode is not sent: the nest sets and advances it.
         await localDispatch(.addDomain(domain: domain,
                                        mtaStsCertMode: "expand_primary"))
-        await dnsDispatch(.refresh)
-        await dnsDispatch(.verifyRecords(domain: nil))
     }
-    public func removeDomain(_ domain: String) async {
-        await localDispatch(.removeDomain(domain: domain))
-        await dnsDispatch(.refresh)
+    /// The domain whose remove confirm is open, or `nil` — the shared
+    /// `LocalDomainsSnapshot.remove_confirm_domain` (`mail-multidomain.md`
+    /// § Removing a local domain); drives `admin-dns-domain-remove-confirm-modal`.
+    public var removeConfirmDomain: String? { local?.removeConfirmDomain }
+    /// `admin-dns-domain-remove-button` — arms the shared confirm. Synchronous
+    /// and reaches no nest; only `confirmRemoveDomain` removes.
+    public func armRemoveDomain(_ domain: String) {
+        guard let localMachine else { return }
+        localMachine.armRemoveDomain(domain: domain)
+        local = localMachine.snapshot()
+    }
+    /// `admin-dns-domain-remove-cancel-button`.
+    public func cancelRemoveDomain() {
+        guard let localMachine else { return }
+        localMachine.cancelRemoveDomain()
+        local = localMachine.snapshot()
+    }
+    /// `admin-dns-domain-remove-confirm-button` — removes the armed domain.
+    public func confirmRemoveDomain() async {
+        await localDispatch(.confirmRemoveDomain)
     }
     public func restoreDomain(_ domain: String) async {
         await localDispatch(.restoreDomain(domain: domain))
-        await dnsDispatch(.refresh)
     }
     public func setCatchAll(domain: String, actorId: Data?) async {
         await localDispatch(.setCatchAllActor(domain: domain, actorId: actorId))
@@ -284,17 +311,15 @@ public final class AdminDnsVM {
     /// existing active additional. `graceDays` is `nil` for the nest default (7).
     public func startPrimaryRename(newPrimaryDomainId: Data, graceDays: Int64?) async {
         await localDispatch(.startPrimaryRename(newPrimaryDomainId: newPrimaryDomainId, graceDays: graceDays))
-        await refreshDnsMatrix()
     }
     /// `admin-dns-rename-complete-confirm-button` — `force` is the caller's
     /// `canForceComplete` read (early-complete from `grace`, accepting the
     /// cache-flush risk); a plain complete from `readyToComplete` otherwise.
     public func completePrimaryRename(renameId: Data, force: Bool) async {
         await localDispatch(.completePrimaryRename(renameId: renameId, force: force))
-        await refreshDnsMatrix()
     }
     /// `admin-dns-rename-extend-button` — push the grace window out by
-    /// `additionalDays`. No DNS-matrix refresh: only the watched deadline moves.
+    /// `additionalDays`. Only the watched deadline moves, so no matrix re-check.
     public func extendPrimaryRenameGrace(renameId: Data, additionalDays: Int64) async {
         await localDispatch(.extendPrimaryRenameGrace(renameId: renameId, additionalDays: additionalDays))
     }
@@ -302,7 +327,6 @@ public final class AdminDnsVM {
     /// (the cheap pre-flip path, or the expensive post-flip inverse re-flip).
     public func abortPrimaryRename(renameId: Data, reason: String?) async {
         await localDispatch(.abortPrimaryRename(renameId: renameId, reason: reason))
-        await refreshDnsMatrix()
     }
 
     // MARK: - Plumbing
@@ -326,13 +350,24 @@ public final class AdminDnsVM {
         return ok
     }
 
+    /// A local-domain action, then — when it moved the record matrix — the
+    /// shared `recheck_matrix` (re-read, served-cert health, verify) before
+    /// either snapshot publishes, so an added domain appears with its records
+    /// and their status (`mail-multidomain.md` § Wizard steps, step 8). A thrown
+    /// dispatch skips the re-check.
     private func localDispatch(_ action: LocalDomainAction) async {
         guard let localMachine else { return }
-        do { try await localMachine.dispatch(action: action) }
-        catch { errorMessage = DisplayError.message(error) }
+        do {
+            try await localMachine.dispatch(action: action)
+            if localDomainActionMovesRecordMatrix(action: action), let dnsMachine {
+                await dnsMachine.recheckMatrix()
+                dns = dnsMachine.snapshot()
+            }
+        } catch { errorMessage = DisplayError.message(error) }
         let snap = localMachine.snapshot()
         local = snap
         if let e = snap.error { errorMessage = e }
+        else if let e = dns?.error { errorMessage = e }
     }
 
     private func localRefresh() async {

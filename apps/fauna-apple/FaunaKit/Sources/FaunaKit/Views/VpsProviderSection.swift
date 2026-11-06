@@ -3,7 +3,7 @@ import SwiftUI
 /// The provider-specific expansion of the onboarding **VPS-config** step
 /// (`docs/goal/behavior/onboarding.md` §5): signup link + open-in-browser,
 /// provider help text, the generated credentials sub-form, a verify button,
-/// the mail-mode toggle, and the conditionally-shown server-type / location
+/// the mail-mode and SSH-door toggles, and the conditionally-shown server-type / location
 /// pickers. macOS (`MacVpsConfigView`) and iOS (`VpsConfigView`) rendered this
 /// near-identically; lifted 2026-09-02 to one shared FaunaKit definition, mirroring `dnsProviderSection`'s
 /// existing lift of the same shape.
@@ -23,15 +23,7 @@ import SwiftUI
 @ViewBuilder
 public func vpsProviderSection(vm: OnboardingVM, provider: ProviderMeta) -> some View {
     VStack(alignment: .leading, spacing: 8) {
-        if let url = URL(string: provider.signupUrl) {
-            Link(provider.signupUrl, destination: url)
-                .accessibilityIdentifier(Ids.vpsProviderLink)
-                .automationValue(Ids.vpsProviderLink, text: { provider.signupUrl })
-            Button(L.onboarding.dnsConfig.openInBrowser) { OpenURL.open(url) }
-                .accessibilityIdentifier(Ids.vpsProviderOpenBrowserButton)
-                .automationActivate(Ids.vpsProviderOpenBrowserButton) { OpenURL.open(url) }
-        }
-        automationText(Ids.vpsProviderHelpText, L.lookup(provider.helpKey))
+        vpsProviderLinkAndHelp(provider: provider)
 
         CredentialsForm(
             fields: provider.visibleVpsFields,
@@ -56,12 +48,29 @@ public func vpsProviderSection(vm: OnboardingVM, provider: ProviderMeta) -> some
         let cfg = vm.machine.vpsConfig()
         if !cfg.serverTypes.isEmpty {
             vpsMailModeToggle(vm: vm)
+            vpsSshDoorToggle(vm: vm)
             vpsServerTypePicker(vm: vm, cfg: cfg)
         }
         if !cfg.locations.isEmpty {
             vpsLocationPicker(vm: vm, cfg: cfg)
         }
     }
+}
+
+/// The provider's signup link, open-in-browser button and help text — the head of
+/// the provider-specific section, shared with the `nest_retire` page's credential
+/// state (which reuses these controls by id).
+@ViewBuilder
+public func vpsProviderLinkAndHelp(provider: ProviderMeta) -> some View {
+    if let url = URL(string: provider.signupUrl) {
+        Link(provider.signupUrl, destination: url)
+            .accessibilityIdentifier(Ids.vpsProviderLink)
+            .automationValue(Ids.vpsProviderLink, text: { provider.signupUrl })
+        Button(L.onboarding.dnsConfig.openInBrowser) { OpenURL.open(url) }
+            .accessibilityIdentifier(Ids.vpsProviderOpenBrowserButton)
+            .automationActivate(Ids.vpsProviderOpenBrowserButton) { OpenURL.open(url) }
+    }
+    automationText(Ids.vpsProviderHelpText, L.lookup(provider.helpKey))
 }
 
 /// The **update-channel** rows of the VPS-config step
@@ -148,6 +157,28 @@ private func vpsMailModeToggle(vm: OnboardingVM) -> some View {
     ) { vm.machine.setProvisionMailMode(enabled: !vm.machine.provisionMailModeEnabled()) }
 }
 
+/// The SSH door (`onboarding-provisioning.md` § 5): beside the mail mode and
+/// default OFF; `vps-config-ssh-door-warning` shows only while it is on,
+/// directly under it. The machine holds the choice (`provisionSshDoorEnabled`),
+/// the toggle writes it, and the warning follows the machine's read — as on
+/// linux (`views/onboarding/vps_config.rs`) and tui.
+@ViewBuilder
+private func vpsSshDoorToggle(vm: OnboardingVM) -> some View {
+    vpsCheckboxOption(
+        id: Ids.vpsConfigSshDoorToggle,
+        checked: vm.machine.provisionSshDoorEnabled(),
+        label: L.onboarding.vpsConfig.sshDoorLabel,
+        detail: nil,
+        enabled: true
+    ) { vm.machine.setProvisionSshDoor(enabled: !vm.machine.provisionSshDoorEnabled()) }
+    if vm.machine.provisionSshDoorEnabled() {
+        automationText(Ids.vpsConfigSshDoorWarning, L.onboarding.vpsConfig.sshDoorWarning)
+            .font(.caption)
+            .foregroundStyle(.orange)
+            .fixedSize(horizontal: false, vertical: true)
+    }
+}
+
 /// A deployment-toggle checkbox row (a tappable label + caption with a
 /// leading square glyph).
 @ViewBuilder
@@ -155,7 +186,7 @@ private func vpsCheckboxOption(
     id: String,
     checked: Bool,
     label: String,
-    detail: String,
+    detail: String?,
     enabled: Bool,
     action: @escaping () -> Void
 ) -> some View {
@@ -165,10 +196,12 @@ private func vpsCheckboxOption(
                 .foregroundStyle(checked ? Color.accentColor : Color.secondary)
             VStack(alignment: .leading, spacing: 2) {
                 Text(label).foregroundStyle(.primary)
-                Text(detail)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
+                if let detail {
+                    Text(detail)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
             Spacer()
         }
@@ -195,7 +228,9 @@ private func vpsServerTypePicker(vm: OnboardingVM, cfg: VpsConfigState) -> some 
         // `vps-server-type-radio[1]` never registers in-process. Pinning
         // identity to (position, server-type) forces a teardown+rebuild
         // whenever either changes, re-registering the correct positional id
-        // and a fresh `select(st.id)` closure.
+        // and a fresh `select(st.id)` closure. The label rides the identity
+        // too: a location change re-prices the same server type in place
+        // (`cx23` in both), and only a new identity re-registers the read.
         ForEach(Array(cfg.serverTypes.filter { serverTypeAllowedForMail(st: $0, enableMail: vm.machine.provisionMailModeEnabled()) }.prefix(5).enumerated()), id: \.offset) { idx, st in
             #if os(iOS)
             HStack {
@@ -208,10 +243,15 @@ private func vpsServerTypePicker(vm: OnboardingVM, cfg: VpsConfigState) -> some 
             .accessibilityIdentifier("vps-server-type-radio[\(idx)]")
             .accessibilityAddTraits(cfg.selectedServerTypeId == st.id ? .isSelected : [])
             // A radio "click" selects this server type (single-select set).
-            .automationActivate("vps-server-type-radio[\(idx)]") {
+            // The read is the row's label (name + priced offer), which a
+            // location change re-lists, as on linux and tui — in the same
+            // registration: a second `.automationValue` on this id is a second
+            // slot, and the read lands on the first.
+            .automationActivate("vps-server-type-radio[\(idx)]",
+                                text: { serverTypeLabel(st: st) }) {
                 vm.machine.selectVpsServerType(id: st.id)
             }
-            .id("vps-server-type-radio[\(idx)]:\(st.id)")
+            .id("vps-server-type-radio[\(idx)]:\(st.id):\(serverTypeLabel(st: st))")
             #else
             Toggle(isOn: Binding(
                 get: { cfg.selectedServerTypeId == st.id },
@@ -226,10 +266,11 @@ private func vpsServerTypePicker(vm: OnboardingVM, cfg: VpsConfigState) -> some 
             .toggleStyle(.checkbox)
             .accessibilityIdentifier("vps-server-type-radio[\(idx)]")
             // A radio "click" selects this server type (single-select set).
-            .automationActivate("vps-server-type-radio[\(idx)]") {
+            .automationActivate("vps-server-type-radio[\(idx)]",
+                                text: { serverTypeLabel(st: st) }) {
                 vm.machine.selectVpsServerType(id: st.id)
             }
-            .id("vps-server-type-radio[\(idx)]:\(st.id)")
+            .id("vps-server-type-radio[\(idx)]:\(st.id):\(serverTypeLabel(st: st))")
             #endif
         }
     }

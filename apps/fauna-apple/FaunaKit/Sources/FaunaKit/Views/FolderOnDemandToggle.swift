@@ -28,6 +28,11 @@ import SwiftUI
     /// domain; the toggle re-decides only after an unbind) — the caption rendered
     /// in the bound case says exactly that. iOS has no binding surface, so there
     /// `isBound` is always false.
+    ///
+    /// **The one-time OS enable:** beneath the switch, while the OS reports the
+    /// row's registered domain not enabled, a caption with the steps and, where
+    /// the OS has a door, a button (`on-demand-files-apple.md` § Apple File
+    /// Provider binding, *The one-time OS enable*).
     struct FolderOnDemandToggle: View {
         @Environment(FaunaClient.self) private var client: FaunaClient?
         let vm: DevicesMachineVM
@@ -72,12 +77,37 @@ import SwiftUI
                     Text(L.devices.showOnDemandHint)
                         .font(.caption)
                         .foregroundStyle(.secondary)
+
+                    if let notice = osEnableNotice {
+                        Text(notice.caption)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .accessibilityIdentifier(Ids.folderOnDemandOsEnableHint)
+                            .automationValue(
+                                Ids.folderOnDemandOsEnableHint, text: { notice.caption })
+
+                        if let url = notice.settingsURL {
+                            Button(L.devices.onDemandOpenSettings) { OpenURL.open(url) }
+                                .accessibilityIdentifier(Ids.folderOnDemandOpenSettingsButton)
+                                .automationActivate(Ids.folderOnDemandOpenSettingsButton) {
+                                    OpenURL.open(url)
+                                }
+                        }
+                    }
                 }
                 .onAppear {
                     isOn = identity.map { FileProviderDomainPrefs.isEnabled(domainId: $0.domainId) }
                         ?? true
                 }
             }
+        }
+
+        /// The one-time OS enable notice for this row, while the OS holds its
+        /// registered domain disabled. The switch stays sensitive and ON.
+        private var osEnableNotice: FolderOSEnableNotice? {
+            FolderOSEnableNotice.row(
+                domainId: identity?.domainId,
+                noticed: FileProviderOSEnableNotices.shared.identifiers)
         }
 
         /// The preference is keyed by the set's actor-scoped identity — the

@@ -5,18 +5,10 @@
 
 use std::process::Command;
 
-/// Helper: build the fauna-sandbox binary path.
+/// Helper: the fauna-sandbox binary path, as Cargo builds it for this
+/// integration test (independent of where the test executable itself lands).
 fn sandbox_bin() -> String {
-    // cargo sets OUT_DIR during tests; the binary is in the same target dir
-    let mut path = std::env::current_exe()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .to_path_buf();
-    path.push("fauna-sandbox");
-    path.to_string_lossy().to_string()
+    env!("CARGO_BIN_EXE_fauna-sandbox").to_string()
 }
 
 #[test]

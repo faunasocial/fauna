@@ -764,6 +764,7 @@ async fn runtime_as(
         owed_nests: None,
         peer_transport: None,
         enrollment_target_device_id: format!("{:0<64}", hex::encode(name.as_bytes())),
+        enrollment_device_label: None,
     })
     .await
     .expect("the runtime assembles")
@@ -4701,7 +4702,7 @@ async fn every_fold(handle: &AccountStoreHandle) -> Vec<(&'static str, String)> 
 /// device's writer id.
 ///
 /// Red-verified by withholding the escrow wraps (every wrap deleted from the
-/// nest before the fresh device signs in): it then reads the four preference
+/// nest before the fresh device signs in): it then reads the three `self`-keyed preference
 /// records and none of the sixteen tip-sealed kinds.
 #[tokio::test]
 async fn a_fresh_device_holding_only_the_seed_reads_every_kind_the_config_blob_held() {
@@ -4730,7 +4731,7 @@ async fn a_fresh_device_holding_only_the_seed_reads_every_kind_the_config_blob_h
     assert_eq!(
         kinds.len(),
         cluster.len() + 16,
-        "the four preference kinds and the sixteen kinds of `config-dissolution.md`'s kinds table"
+        "the three `self`-keyed preference kinds and the sixteen kinds of `config-dissolution.md`'s kinds table"
     );
     settle(&d, "after the writes").await;
 

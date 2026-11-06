@@ -56,8 +56,7 @@ impl WasmRuleEditor {
     }
 
     /// The guardian's editor over a ward's content policy (the `familyStatus`
-    /// object, or `null`): its rule document with every floor still set shown
-    /// as a rule beside it.
+    /// object, or `null`): its rule document.
     #[wasm_bindgen(js_name = forGuardian)]
     pub fn for_guardian(content_policy: JsValue) -> Result<WasmRuleEditor, JsValue> {
         let policy: Option<ContentPolicy> =
@@ -219,5 +218,63 @@ impl WasmRuleEditor {
             return Err(JsValue::from_str("the rules cannot be saved yet"));
         }
         to_js(&editor.document())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use fauna_core::content_policy::{
+        BundledScorer, ContentPolicyDocument, ContentRule, ContentVerdict, REASON_DEFAULT_KEY,
+        ScorerKind,
+    };
+    use fauna_core::obligation::{ContentPolicy, rules_from_guardian_policy};
+
+    use crate::rpc::{from_js, to_js};
+
+    /// The web carriage of a guardian's rule document: `familyStatus()` hands
+    /// the SPA a `ContentPolicy` through `to_js`, and `forGuardian`, the
+    /// render verdicts and the region render take it back through `from_js`.
+    /// `ContentPolicy.document` decodes as a generic value re-encoded
+    /// canonically and read version first, so this pins that the JS number a
+    /// `version` (and a rule's per-mille) becomes still reads back as an
+    /// integer — else every readable document on web would read as
+    /// unreadable and its renders fail closed (`nest-rules.md` §
+    /// Implementation status today). Runs under `wasm-pack test`;
+    /// `run_in_browser` is configured once, in `critical_alerts`.
+    #[wasm_bindgen_test::wasm_bindgen_test]
+    fn a_readable_guardian_document_survives_the_js_round_trip() {
+        let mut document = ContentPolicyDocument::empty();
+        document.scorers.push(BundledScorer {
+            name: "words".into(),
+            kind: ScorerKind::Keywords,
+            bytes: b"casino\nlottery".to_vec(),
+            extra: Default::default(),
+        });
+        document.rules.push(ContentRule {
+            factor: "guardian.words".into(),
+            min_permille: 1,
+            verdict: ContentVerdict::Block,
+            reason_code: "family".into(),
+            reason: [(REASON_DEFAULT_KEY.to_string(), "Family rule".to_string())].into(),
+            extra: Default::default(),
+        });
+        let policy = ContentPolicy {
+            document: Some(document),
+            ..Default::default()
+        };
+        let back: ContentPolicy = from_js(to_js(&policy).unwrap()).unwrap();
+        assert_eq!(back, policy, "the document survives to_js → from_js");
+        let rules = rules_from_guardian_policy(&back);
+        assert_eq!(
+            rules,
+            rules_from_guardian_policy(&policy),
+            "the round-tripped document yields its own rules"
+        );
+        assert_eq!(
+            rules.len(),
+            1,
+            "the document's one rule, not the fail-closed set"
+        );
+        assert_eq!(rules[0].min_confidence_permille, 1);
     }
 }

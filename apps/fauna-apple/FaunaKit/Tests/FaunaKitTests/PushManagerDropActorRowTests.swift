@@ -121,9 +121,9 @@ private let apns = FfiPushEndpoint(
     }
 
     @Test @MainActor func theToggleOnAHostThatCannotRegisterSettlesBackOffWithTheInlineLine() async {
-        // The bare debug binary (no notification centre) and — until the
-        // `aps-environment` entitlement exists — every build: the toggle
-        // renders, the enable fails, the bit stays clear, the line says why.
+        // The bare debug binary (no notification centre) and every build
+        // without the `aps-environment` entitlement (macOS, unsigned iOS): the
+        // toggle renders, the enable fails, the bit stays clear, the line says why.
         let store = freshStore()
         let api = RecordingPushAPI(intentPath: store.path)
         let manager = PushManager(api: api, deviceId: "device-1", intent: store,

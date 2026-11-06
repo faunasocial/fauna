@@ -1,4 +1,4 @@
-"""Tier_3 tui journey: the kit-only restore at a CUSTODIAN nest — every device
+"""Tier_3 journey: the kit-only restore at a CUSTODIAN nest — every device
 and the home nest gone, the copied recovery kit and a friend's nest address
 bring the account back.
 
@@ -21,6 +21,14 @@ a nest that never held the account — with the home nest stopped.
 Topology: ``two_nest_custody_rig`` — alice home on TLS nest A, bob on TLS nest
 B, B's periodic pump held so every pass is this test's own ``run-now`` poke
 (convention 14: state, never a cadence).
+
+**The restored device is the app under test; the lost fleet is the rig's
+``fleet_app``.** On every app that drives the ceremony they are one app, reset
+at the loss. On web, whose ceremony is a declared absence
+(``ui/devices.md`` § Where logic lives), a tui seat mints the kit and runs the
+ceremony, and web is the device the kit restores: the outcome is observed on
+the app the run selected (``feature-catalog.md`` § The marker, *A helper seat
+is not an app under test*).
 
 The two honest arms ruling 3 and ruling 2 ask for, both at B with A gone:
 
@@ -86,18 +94,20 @@ def test_the_copied_kit_restores_at_a_custodian_after_the_home_nest_is_gone(
     two_nest_custody_rig,
 ):
     rig = two_nest_custody_rig
-    alice_app, alice = rig["alice_app"], rig["alice"]
+    alice = rig["alice"]
+    # The lost fleet (the kit, the ceremony) and the device the kit restores.
+    fleet_app, alice_app = rig["fleet_app"], rig["alice_app"]
     bob_app, bob = rig["bob_app"], rig["bob"]
-    home, custodian = rig["home"], rig["custodian"]
-    alice_app.custody.require_supported()
+    custodian = rig["custodian"]
+    fleet_app.custody.require_supported()
 
     # ── alice's first kit, minted and copied on her signed-in device.
-    alice_app.settings.navigate()
-    alice_app.settings.open_recovery_kit_or_skip()
-    alice_app.settings.create_recovery_kit()
-    alice_app.wait_for("recovery-kit-secret-display", timeout=30.0)
-    first_phrase = alice_app.settings.recovery_kit_secret()
-    first_kit = copy_the_shown_kit(alice_app, first_phrase)
+    fleet_app.settings.navigate()
+    fleet_app.settings.open_recovery_kit()
+    fleet_app.settings.create_recovery_kit()
+    fleet_app.wait_for("recovery-kit-secret-display", timeout=30.0)
+    first_phrase = fleet_app.settings.recovery_kit_secret()
+    first_kit = copy_the_shown_kit(fleet_app, first_phrase)
 
     # ── The custody, through both UIs: bob takes it on HIS NEST, so the
     # hosting row lands on B.
@@ -114,26 +124,26 @@ def test_the_copied_kit_restores_at_a_custodian_after_the_home_nest_is_gone(
     # ── alice replaces her kit while A still lives; the replace re-seals the
     # escrow at A in the same call, and ONE further pass carries the new head
     # to B (ruling 2: the copy follows the chain).
-    alice_app.settings.navigate()
-    alice_app.settings.open_recovery_kit()
-    alice_app.settings.replace_kit_with_held(first_phrase)
+    fleet_app.settings.navigate()
+    fleet_app.settings.open_recovery_kit()
+    fleet_app.settings.replace_kit_with_held(first_phrase)
     wait_until(
-        lambda: alice_app.settings.recovery_kit_secret() not in ("", first_phrase),
+        lambda: fleet_app.settings.recovery_kit_secret() not in ("", first_phrase),
         30.0,
         diagnose=lambda: (
             "the replace never showed its new kit; status reads "
-            f"{alice_app.settings.recovery_kit_status()!r}, error surface: "
-            f"{alice_app.error_text()!r}"
+            f"{fleet_app.settings.recovery_kit_status()!r}, error surface: "
+            f"{fleet_app.error_text()!r}"
         ),
     )
-    kit = copy_the_shown_kit(alice_app, alice_app.settings.recovery_kit_secret())
+    kit = copy_the_shown_kit(fleet_app, fleet_app.settings.recovery_kit_secret())
     report = pump_once(custodian)
     assert report.get("recovery_pulled", 0) >= 1 and report.get("escrows_custodied", 0) >= 1, (
         f"the pass after the replace must carry the new head and blob to B: {report}"
     )
 
     # ── Every device lost, and the home nest gone with them.
-    home["stop"]()
+    rig["lose_fleet"]()
     lose_every_device_and_open_restore(alice_app, custodian)
     account = f"{alice['handle']}@{custodian['authority']}"
 

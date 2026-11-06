@@ -293,6 +293,22 @@ pub fn spawn_update_overdue_watch(state: Arc<AppState>) {
     ));
 }
 
+/// The origin the daily release check polls, read once at startup: the release
+/// API (`fauna_core::version::GITHUB_API_ORIGIN`) in production. An e2e build
+/// (`test-hooks`) reads the origin its own launch environment names in
+/// `FAUNA_E2E_RELEASE_FEED_URL` and, without one, none — the check then does
+/// not run at all, so a test nest never reaches the real release host
+/// (`installers/README.md` § Knowing a newer version is out → *Where a test
+/// nest's check reads*; the registry seam below is its twin).
+pub(crate) fn release_feed_origin() -> Option<String> {
+    #[cfg(feature = "test-hooks")]
+    {
+        std::env::var("FAUNA_E2E_RELEASE_FEED_URL").ok()
+    }
+    #[cfg(not(feature = "test-hooks"))]
+    Some(fauna_core::version::GITHUB_API_ORIGIN.to_string())
+}
+
 /// The registry the head is read from: the nest image's public registry in
 /// production. An e2e build (`test-hooks`) reads the harness's registry named
 /// by `FAUNA_E2E_UPDATE_REGISTRY_ORIGIN` and, without one, none — a test nest

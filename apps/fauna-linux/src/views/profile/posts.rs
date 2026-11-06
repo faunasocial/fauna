@@ -100,7 +100,7 @@ pub(super) fn build(
             };
             let idx = row.index().max(0) as usize;
             if let Some(post) = w.snapshot().posts.get(idx).cloned() {
-                open_post(post.reposted_post_id.unwrap_or(post.post_id));
+                open_post(post.detail_target_id().to_string());
             }
         });
     }

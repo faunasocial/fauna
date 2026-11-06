@@ -39,6 +39,9 @@ env:
   # (.cargo/config.toml § feature unification) -- the recipes' own setting, so a
   # shipped binary carries only the features its own invocation asks for.
   CARGO_RESOLVER_FEATURE_UNIFICATION: selected
+  # A Windows runner's Python writes stdout in cp1252, and the recipes' Python
+  # (the staleness gate, the generators, the FFI witnesses) prints non-ASCII.
+  PYTHONUTF8: "1"
 
 jobs:
   # Gate: supply chain must be clean
@@ -47,6 +50,8 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
+        with:
+          persist-credentials: false
       - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659  # v1.17.0, toolchain from rust-toolchain.toml
         with:
           rustflags: ""
@@ -74,8 +79,10 @@ jobs:
         include:
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
+          # Native, not cross-compiled: the linux desktop app links GTK4 and
+          # libadwaita, which an x64 runner cannot supply for arm64 simply.
           - target: aarch64-unknown-linux-gnu
-            os: ubuntu-latest
+            os: ubuntu-24.04-arm
           - target: x86_64-apple-darwin
             os: macos-latest
           - target: aarch64-apple-darwin
@@ -84,6 +91,8 @@ jobs:
     timeout-minutes: 180
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
+        with:
+          persist-credentials: false
 
       - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659  # v1.17.0, toolchain from rust-toolchain.toml
         with:
@@ -91,37 +100,46 @@ jobs:
           rustflags: ""
           cache: false
 
-      - name: Install cross-compilation tools (Linux aarch64)
-        if: matrix.target == 'aarch64-unknown-linux-gnu'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu
-          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
-
       # libdbus-1-dev: the tray crate (ksni) links libdbus-sys, whose build
       # script finds dbus-1 through pkg-config (ci.yml's linux jobs install it too).
       - name: Install GTK4/libadwaita/dbus dev packages (for fauna-linux)
-        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        if: contains(matrix.target, 'linux')
         run: |
           sudo apt-get update
           sudo apt-get install -y libgtk-4-dev libadwaita-1-dev libdbus-1-dev pkg-config
+
+      - name: Install uv
+        run: bash scripts/install-uv.sh
+      - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3  # v4.0.0
+
+      - name: Install bubblewrap
+        if: runner.os == 'Linux'
+        run: |
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+          command -v bwrap || { sudo apt-get update && sudo apt-get install -y bubblewrap; }
+          bwrap --unshare-all --ro-bind / / true
+          ldconfig -p | grep -q 'libseccomp\.so\.2 ' || { echo "libseccomp.so.2 missing (libseccomp2)"; exit 1; }
+      # The cargo boundary (docs/goal/architecture/build-compile-cache.md § The
+      # boundary's scope and what OFF means, decision (6)): puts the shipped cargo
+      # shim first on PATH, so every later cargo of this job — a recipe's, a bare
+      # step's, one a tool spawns — compiles with no network; the job's last step
+      # witnesses it.
+      - name: Put every cargo behind the boundary
+        run: uv run --no-project python scripts/cargo-boundary.py runner-setup
 
       # The nest a release ships is the image's flavor: the same feature set
       # the Dockerfile's nest build line enables (pinned by the publish
       # tooling's workflow-shape tests), so a downloaded binary and the image
       # are one server.
       - name: Build the nest (the image's flavor)
-        run: cargo build --locked -p fauna-nest --features bluesky,nostr,activitypub --release --target ${{ matrix.target }}
+        run: just nest ${{ matrix.target }}
 
       - name: Build server binaries
-        run: |
-          for crate in fauna-push-relay fauna-cors-proxy fauna-front-door; do
-            cargo build --locked -p "$crate" --release --target ${{ matrix.target }}
-          done
+        run: just servers-release ${{ matrix.target }}
 
-      - name: Build fauna-linux (x86_64 Linux only)
-        if: matrix.target == 'x86_64-unknown-linux-gnu'
-        run: cargo build --locked -p fauna-linux --release --target ${{ matrix.target }}
+      - name: Build fauna-linux (Linux)
+        if: contains(matrix.target, 'linux')
+        run: just linux-release ${{ matrix.target }}
 
       # The terminal app's channel (docs/goal/architecture/installers/tui.md
       # § The ratified channel): one archive per Linux target carrying
@@ -135,7 +153,7 @@ jobs:
       # release-macos.yml, whose `sign` job holds those credentials.
       - name: Build fauna-tui + fauna-sync-agent + fauna-cli (Linux)
         if: contains(matrix.target, 'linux')
-        run: cargo build --locked -p fauna-tui -p fauna-sync-agent -p fauna-cli-device --release --target ${{ matrix.target }}
+        run: just tui-release ${{ matrix.target }}
 
       - name: Collect and rename binaries
         run: |
@@ -164,7 +182,7 @@ jobs:
           done
 
           # The linux desktop app: package fauna-linux, binary fauna-desktop.
-          if [ "$target" = x86_64-unknown-linux-gnu ]; then
+          if [[ "$target" == *linux* ]]; then
             collect fauna-desktop fauna-linux
           fi
 
@@ -180,6 +198,10 @@ jobs:
           name: rust-${{ matrix.target }}
           path: artifacts/
 
+      - name: Every cargo compiled behind the boundary
+        if: ${{ !cancelled() }}
+        run: uv run --no-project python scripts/cargo-boundary.py runner-witness
+
   # The Windows MSI installer (x64 + ARM64), built as parallel jobs per arch
   # that hand their outputs on as `part-windows-*` artifacts: the MSVC
   # fauna_ffi.dll + its C# bindings, the Windows service crates, the terminal
@@ -192,28 +214,24 @@ jobs:
   # the slowest part plus the assembly. A `part-` artifact is an intermediate:
   # the `release` job downloads by name pattern and never sees one.
   #
-  # ring (through hickory) compiles its C with clang for
-  # aarch64-pc-windows-msvc, and clang finds the MSVC and Windows SDK headers
-  # only through INCLUDE, which a bare runner shell does not set ("'assert.h'
-  # file not found"). Every Rust part's arm64 leg therefore exports INCLUDE
-  # from the runner's own Visual Studio for the x64-hosted arm64 environment;
-  # LIB is left alone, since the host-arch build scripts link with it too.
+  # Every build here is a `just` recipe the dev machines build with
+  # (release-integrity.md § What a release ships -> *Every release build runs
+  # the `just` recipe*), each taking the target the runner names. The MSVC
+  # recipes run cargo through scripts/cargo-win.cmd, which sets up the x64
+  # host's tools for the target's arch -- the INCLUDE among them that ring's
+  # clang build for aarch64-pc-windows-msvc (through hickory) needs to find the
+  # MSVC and Windows SDK headers ("'assert.h' file not found" without it).
 
   # fauna-ffi and its C# UniFFI bindings, both consumed by the .NET build:
   # FaunaApp.Core compiles Generated/uniffi/*.cs and the app packs
-  # runtimes/<rid>/native/fauna_ffi.dll (both gitignored). This is the
-  # `just windows-ffi` recipe arch-parameterized for CI: that recipe is
-  # hardcoded to a native aarch64 host, but this x64 runner builds BOTH arches
-  # via the matrix, so it invokes cargo with --target directly. The bindgen
-  # tool builds for the host (x64) and reads metadata from the target-arch dll
-  # -- uniffi metadata is arch-independent. It builds the PRODUCTION flavor --
-  # NO `--features test-helpers` -- so the shipped MSI carries no test seam
-  # (docs/goal/architecture/testing.md's automation surface rule; the app's own
-  # automation code is `#if DEBUG`-gated and this is a Release build).
-  # crt-static is applied automatically to fauna_ffi.dll via
-  # .cargo/config.toml. `--lib --crate-type cdylib` links only the .dll this
-  # job hands on, not the unused staticlib crate-type also declared in
-  # Cargo.toml.
+  # runtimes/<rid>/native/fauna_ffi.dll (both gitignored), which is where
+  # `just windows-ffi` stages them. The bindgen tool builds for the host (x64)
+  # and reads metadata from the target-arch dll -- uniffi metadata is
+  # arch-independent. It builds the PRODUCTION flavor -- NO `test-helpers` --
+  # so the shipped MSI carries no test seam (docs/goal/architecture/testing.md's
+  # automation surface rule; the app's own automation code is `#if DEBUG`-gated
+  # and this is a Release build), and the recipe's own witness refuses any seam
+  # export in the bindings it generated.
   windows-ffi:
     needs: supply-chain
     strategy:
@@ -221,13 +239,18 @@ jobs:
         include:
           - arch: x64
             rust_target: x86_64-pc-windows-msvc
+            dotnet_rid: win-x64
           - arch: arm64
             rust_target: aarch64-pc-windows-msvc
+            dotnet_rid: win-arm64
     runs-on: windows-latest
-    # Measured 58 min in the serial job (0.1.5 dry run); about 1.5x that.
-    timeout-minutes: 90
+    # Measured at most 62 min per arch over eight split runs (0.1.5 dry runs
+    # and the v0.1.5 tag run, 37-62 min); about 1.5x that.
+    timeout-minutes: 95
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
+        with:
+          persist-credentials: false
 
       - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659  # v1.17.0, toolchain from rust-toolchain.toml
         with:
@@ -235,24 +258,18 @@ jobs:
           rustflags: ""
           cache: false
 
-      - name: MSVC headers for the arm64 clang build (ring)
-        if: matrix.arch == 'arm64'
-        shell: pwsh
-        run: |
-          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.ARM64 -property installationPath
-          if (-not $vs) { throw "no Visual Studio with the ARM64 C++ tools on this runner" }
-          $include = cmd /c "`"$vs\VC\Auxiliary\Build\vcvarsall.bat`" amd64_arm64 >nul && set INCLUDE" | Select-String '^INCLUDE=' | Select-Object -First 1
-          if (-not $include) { throw "vcvarsall amd64_arm64 set no INCLUDE" }
-          "$include" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+      - name: Install uv
+        shell: bash
+        run: bash scripts/install-uv.sh
+      - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3  # v4.0.0
 
       - name: Build FFI + generate C# bindings
         shell: bash
         run: |
-          cargo rustc --locked -p fauna-ffi --lib --crate-type cdylib --release --target ${{ matrix.rust_target }}
-          cargo run -p uniffi-bindgen-cs-fauna --bin uniffi-bindgen-cs --release -- \
-            --library target/${{ matrix.rust_target }}/release/fauna_ffi.dll \
-            --out-dir part/uniffi/
-          cp target/${{ matrix.rust_target }}/release/fauna_ffi.dll part/fauna_ffi.dll
+          just windows-ffi release ${{ matrix.rust_target }}
+          mkdir -p part/uniffi
+          cp apps/fauna-windows/FaunaApp/FaunaApp.Core/Generated/uniffi/*.cs part/uniffi/
+          cp apps/fauna-windows/FaunaApp/FaunaApp/runtimes/${{ matrix.dotnet_rid }}/native/fauna_ffi.dll part/fauna_ffi.dll
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
         with:
@@ -261,14 +278,11 @@ jobs:
           if-no-files-found: error
 
   # The installer ships the sync agent + two machine-service exes (FaunaNest,
-  # FaunaBridge -- one per virtual account) plus the shell-ext cdylib.
-  # fauna-nest-service path-depends on bins/fauna-nest, so there is no separate
-  # fauna-nest build to stage. These crates are root-workspace members, so they
-  # build from the repo root against the one committed Cargo.lock and
-  # `--locked` holds for real. The sync agent is the cross-platform
-  # fauna-sync-agent package itself, and each crate is its own cargo invocation
-  # ON PURPOSE: one invocation naming several packages unifies their features,
-  # and the shipped agent must carry only the feature set it asks for.
+  # FaunaBridge -- one per virtual account) plus the shell-ext cdylib
+  # (`just windows-services-release`, each crate its own cargo invocation, so
+  # the shipped agent carries only the feature set it asks for). These crates
+  # are root-workspace members, so they build from the repo root against the
+  # one committed Cargo.lock and `--locked` holds for real.
   windows-services:
     needs: supply-chain
     strategy:
@@ -279,10 +293,13 @@ jobs:
           - arch: arm64
             rust_target: aarch64-pc-windows-msvc
     runs-on: windows-latest
-    # Measured 63 min in the serial job (0.1.5 dry run); about 1.5x that.
-    timeout-minutes: 95
+    # Measured at most 76 min per arch over eight split runs (45-76 min, the
+    # arm64 leg the slower); about 1.5x that.
+    timeout-minutes: 115
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
+        with:
+          persist-credentials: false
 
       - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659  # v1.17.0, toolchain from rust-toolchain.toml
         with:
@@ -290,26 +307,15 @@ jobs:
           rustflags: ""
           cache: false
 
-      - name: MSVC headers for the arm64 clang build (ring)
-        if: matrix.arch == 'arm64'
-        shell: pwsh
-        run: |
-          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.ARM64 -property installationPath
-          if (-not $vs) { throw "no Visual Studio with the ARM64 C++ tools on this runner" }
-          $include = cmd /c "`"$vs\VC\Auxiliary\Build\vcvarsall.bat`" amd64_arm64 >nul && set INCLUDE" | Select-String '^INCLUDE=' | Select-Object -First 1
-          if (-not $include) { throw "vcvarsall amd64_arm64 set no INCLUDE" }
-          "$include" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+      - name: Install uv
+        shell: bash
+        run: bash scripts/install-uv.sh
+      - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3  # v4.0.0
 
       - name: Build Rust binaries (Windows service crates)
         shell: bash
         run: |
-          cargo build --locked --release -p fauna-sync-agent     --target ${{ matrix.rust_target }}
-          cargo build --locked --release -p fauna-nest-service   --target ${{ matrix.rust_target }}
-          cargo build --locked --release -p fauna-bridge-service --target ${{ matrix.rust_target }}
-          cargo build --locked --release -p fauna-shell-ext      --target ${{ matrix.rust_target }}
-          # The shell-ext crate sets [lib] name = "fauna_shell", so the cdylib
-          # emits fauna_shell.dll DIRECTLY (the name the .wxs + CLSID
-          # InprocServer32 expect) -- no rename.
+          just windows-services-release ${{ matrix.rust_target }}
           rel=target/${{ matrix.rust_target }}/release
           mkdir -p part
           cp "$rel/fauna-sync-agent.exe" "$rel/fauna-nest-svc.exe" "$rel/fauna-bridge-svc.exe" "$rel/fauna_shell.dll" part/
@@ -326,7 +332,10 @@ jobs:
   # decision 4) beside fauna-sync-agent.exe (TerminalApp.wxs), and the same
   # binaries ship as the per-arch zip archive with the agent — the
   # headless-box download. The Store MSIX does NOT carry them (user ruling
-  # 2026-09-26). Full default-feature flavor.
+  # 2026-09-26). Full default-feature flavor, built by `just tui-release` as on
+  # the Linux and macOS legs; the agent that recipe builds beside them is left
+  # here -- the MSI and the zip ship the services part's, built in its own
+  # invocation.
   windows-terminal:
     needs: supply-chain
     strategy:
@@ -337,10 +346,13 @@ jobs:
           - arch: arm64
             rust_target: aarch64-pc-windows-msvc
     runs-on: windows-latest
-    # Measured 40 min in the serial job (0.1.5 dry run); about 1.5x that.
-    timeout-minutes: 60
+    # Measured at most 52 min per arch over eight split runs (32-52 min); about
+    # 1.5x that.
+    timeout-minutes: 80
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
+        with:
+          persist-credentials: false
 
       - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659  # v1.17.0, toolchain from rust-toolchain.toml
         with:
@@ -348,20 +360,15 @@ jobs:
           rustflags: ""
           cache: false
 
-      - name: MSVC headers for the arm64 clang build (ring)
-        if: matrix.arch == 'arm64'
-        shell: pwsh
-        run: |
-          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.ARM64 -property installationPath
-          if (-not $vs) { throw "no Visual Studio with the ARM64 C++ tools on this runner" }
-          $include = cmd /c "`"$vs\VC\Auxiliary\Build\vcvarsall.bat`" amd64_arm64 >nul && set INCLUDE" | Select-String '^INCLUDE=' | Select-Object -First 1
-          if (-not $include) { throw "vcvarsall amd64_arm64 set no INCLUDE" }
-          "$include" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+      - name: Install uv
+        shell: bash
+        run: bash scripts/install-uv.sh
+      - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3  # v4.0.0
 
       - name: Build fauna-tui + fauna-cli (terminal app + cli app)
         shell: bash
         run: |
-          cargo build --locked --release -p fauna-tui -p fauna-cli-device --target ${{ matrix.rust_target }}
+          just tui-release ${{ matrix.rust_target }}
           rel=target/${{ matrix.rust_target }}/release
           mkdir -p part
           cp "$rel/fauna-tui.exe" "$rel/fauna-cli.exe" part/
@@ -372,14 +379,15 @@ jobs:
           path: part/
           if-no-files-found: error
 
-  # Cross-compile the Go fauna-mail-bridge MDA (the runner has Git Bash but not
-  # `just`, so the recipe is inlined + matrix-parameterized). Builds a SEPARATE
+  # Cross-compile the Go fauna-mail-bridge MDA (`just windows-mail-bridge-build`,
+  # whose `_windows-go-cgo-env` holds the one fauna-ffi feature set the bridge
+  # links: `--no-default-features --features labeler`). It builds a SEPARATE
   # gnullvm fauna_ffi.dll -- whose toolchain IS llvm-mingw, so cgo links its
   # GNU import lib (libfauna_ffi.dll.a) natively, sidestepping the MSVC<->MinGW
   # seam; the C# app keeps its own crt-static MSVC fauna_ffi.dll (a different
   # job, never mixed). Hands on fauna-mail-bridge.exe + the gnullvm
-  # fauna_ffi.dll + libunwind.dll (the gnullvm dll's one non-OS runtime dep).
-  # --no-default-features matches the committed bindings' symbol set.
+  # fauna_ffi.dll + libunwind.dll (the gnullvm dll's one non-OS runtime dep,
+  # the target triple's own copy), all three staged by the recipe in target/.
   windows-mail-bridge:
     needs: supply-chain
     strategy:
@@ -388,26 +396,28 @@ jobs:
           - arch: x64
             rust_target_gnullvm: x86_64-pc-windows-gnullvm
             go_arch: amd64
-            mingw_cc: x86_64-w64-mingw32-clang
-            mingw_triple: x86_64-w64-mingw32
           - arch: arm64
             rust_target_gnullvm: aarch64-pc-windows-gnullvm
             go_arch: arm64
-            mingw_cc: aarch64-w64-mingw32-clang
-            mingw_triple: aarch64-w64-mingw32
     runs-on: windows-latest
-    # Not yet measured on its own: the serial job ran out of time inside this
-    # build. Its Rust half is the same fauna-ffi crate as `windows-ffi` (58 min);
-    # set back to about 1.5x the first dry run's figure.
-    timeout-minutes: 120
+    # Measured at most 38 min per arch over eight split runs (23-38 min); about
+    # 1.5x that.
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
+        with:
+          persist-credentials: false
 
       - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659  # v1.17.0, toolchain from rust-toolchain.toml
         with:
           target: ${{ matrix.rust_target_gnullvm }}
           rustflags: ""
           cache: false
+
+      - name: Install uv
+        shell: bash
+        run: bash scripts/install-uv.sh
+      - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3  # v4.0.0
 
       # Go toolchain for the cgo fauna-mail-bridge MDA (the IMAP/CalDAV server
       # the FaunaBridge service supervises). Version pinned via the module's go.mod.
@@ -451,23 +461,9 @@ jobs:
       - name: Build Go mail-bridge MDA (cgo, gnullvm)
         shell: bash
         run: |
-          # The recipe's features (`just mail-bridge-ffi`): the bridge's binding calls the labeler executor.
-          cargo build --locked -p fauna-ffi --release --no-default-features --features labeler --target ${{ matrix.rust_target_gnullvm }}
-          REL="$PWD/target/${{ matrix.rust_target_gnullvm }}/release"
-          INCLUDES=""
-          for d in libs/fauna-mail-go/*/; do INCLUDES="$INCLUDES -I$PWD/$d"; done
-          export GOOS=windows GOARCH=${{ matrix.go_arch }} CGO_ENABLED=1
-          export CC=${{ matrix.mingw_cc }}
-          export CGO_CFLAGS="$INCLUDES"
-          export CGO_LDFLAGS="-L$REL -lfauna_ffi"
+          just windows-mail-bridge-build ${{ matrix.rust_target_gnullvm }} ${{ matrix.go_arch }}
           mkdir -p part
-          go -C bins/fauna-bridges build -o "$PWD/part/fauna-mail-bridge.exe" ./cmd/fauna-mail-bridge
-          cp "$REL/fauna_ffi.dll" part/
-          # libunwind.dll is the TARGET's runtime: llvm-mingw keeps one per target
-          # triple under <root>/<triple>/bin/; <root>/bin/ holds the x64 host's copy
-          # (the `mail-bridge` recipe's staging, same rule).
-          MINGW_BIN="$(dirname "$(command -v ${{ matrix.mingw_cc }})")"
-          cp "$(dirname "$MINGW_BIN")/${{ matrix.mingw_triple }}/bin/libunwind.dll" part/
+          cp target/fauna-mail-bridge.exe target/fauna_ffi.dll target/libunwind.dll part/
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
         with:
@@ -487,15 +483,22 @@ jobs:
           - arch: arm64
             dotnet_rid: win-arm64
     runs-on: windows-latest
-    # Not yet measured on its own (the serial job never reached it within its
-    # limit); set back to about 1.5x the first dry run's figure.
-    timeout-minutes: 90
+    # Measured at most 9.4 min per arch over the five split runs that reached it
+    # (6-10 min); about 1.5x that.
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
+        with:
+          persist-credentials: false
 
       - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9  # v4.3.1
         with:
           dotnet-version: '10.0.204'  # = global.json; moves only in a bump round
+
+      - name: Install uv
+        shell: bash
+        run: bash scripts/install-uv.sh
+      - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3  # v4.0.0
 
       - name: Install WiX
         run: |
@@ -533,20 +536,23 @@ jobs:
              apps/fauna-windows/FaunaApp/FaunaApp/runtimes/${{ matrix.dotnet_rid }}/native/fauna_ffi.dll
 
       # Publish self-contained so the MSI runs on a bare VM with no .NET 10 /
-      # Windows App SDK runtime install (the works-out-of-the-box invariant).
-      # MSBuild.exe, not `dotnet publish`: only under MSBuild does the XAML
-      # compiler run in-process; `dotnet publish` shells out to the net472
-      # XamlCompiler.exe, which exited 1 with no diagnostic on both arches of
-      # the Store workflow's 0.1.5 dry run (x64 included, so not an arm64 matter).
+      # Windows App SDK runtime install (the works-out-of-the-box invariant):
+      # `just windows-app-publish`, the one publish recipe the Store package's
+      # app is built with too (MSBuild, never `dotnet publish` -- the recipe has
+      # the why).
       - name: Build .NET app
-        shell: pwsh
-        run: |
-          $msbuild = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.Component.MSBuild -find 'MSBuild\**\Bin\MSBuild.exe' | Select-Object -First 1
-          if (-not $msbuild) { throw "no MSBuild.exe on this runner" }
-          & $msbuild apps/fauna-windows/FaunaApp/FaunaApp/FaunaApp.csproj -restore -t:Publish `
-            -p:Configuration=Release -p:RuntimeIdentifier=${{ matrix.dotnet_rid }} `
-            -p:SelfContained=true -p:WindowsAppSDKSelfContained=true
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        shell: bash
+        run: just windows-app-publish ${{ matrix.arch }}
+
+      # The XAML compiler can fail with no message on the console; the binary
+      # log the recipe writes carries its diagnostics.
+      - name: Keep the publish log
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        with:
+          name: publish-binlog-${{ matrix.arch }}
+          path: build/installer/app-publish-${{ matrix.arch }}.binlog
+          if-no-files-found: warn
 
       - name: Stage binaries
         shell: bash
@@ -667,6 +673,7 @@ jobs:
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
         with:
+          persist-credentials: false
           sparse-checkout: apps/fauna-windows/installer
 
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0
@@ -706,6 +713,12 @@ jobs:
       contents: write        # upload the release assets
       id-token: write        # the Sigstore keyless identity behind the signatures
     steps:
+      # The tree, for the downloads table's check below. First: a checkout
+      # cleans its directory, so it must not run after the downloads.
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
+        with:
+          persist-credentials: false
+
       # The published artifacts only, by name: `rust-<target>` and
       # `windows-<arch>`. The Windows jobs' `part-windows-*` intermediates are
       # never published -- every file this job downloads is signed and shipped.
@@ -719,6 +732,15 @@ jobs:
           pattern: windows-*
           path: all-artifacts
           merge-multiple: true
+
+      - name: Install uv
+        run: bash scripts/install-uv.sh
+
+      # fauna.social/apps links each file in installer/downloads.json at this
+      # release. Refuse to publish a release the table disagrees with, either
+      # way: a linked file missing here, or a file here the table never named.
+      - name: The downloads table matches the release
+        run: uv run --no-project python installer/check-downloads.py installer/downloads.json release.yml all-artifacts
 
       - name: Install cosign
         uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6  # v4.1.2
@@ -748,11 +770,9 @@ jobs:
           body: |
             Fauna is free and open-source software for your feed, messages,
             mail, photos, files and calendar, served from a small server you
-            control. This release carries the server binaries (`fauna-nest`
-            and its companions), the Linux desktop app, the terminal app for
-            Linux and Windows, and the Windows installer (`Fauna-Setup-x64.msi`,
-            `Fauna-Setup-arm64.msi`), each built by this workflow from the
-            tagged source.
+            control. This release carries the server binaries (`fauna-nest` and its companions), the Linux desktop app, the terminal app for Linux and Windows (its archives also carry `fauna-cli`, the program an AI assistant runs to work in Fauna), and the Windows installer (`Fauna-Setup-x64.msi`, `Fauna-Setup-arm64.msi`), each built by this workflow from the tagged source.
+
+            Code signing policy: https://fauna.social/code-signing-policy/
 
             ## Verify Downloads
 

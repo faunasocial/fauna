@@ -38,7 +38,6 @@ Wire contracts verified 2026-07-02:
 
 import time
 
-from common import CLAIM_CODE
 from common.auth import port_base_url
 
 from clients.ws_rpc_admin_client import WsRpcAdminClient
@@ -65,7 +64,7 @@ def claim_target_nest(request, nest_mode, tmp_path_factory):
     cleanup()
 
 
-def _claim(port, *, handle, mail_domain):
+def _claim(nest, *, handle, mail_domain):
     """Drive ``fauna.auth.claim_admin`` manually so we can read the FULL reply.
 
     Mirrors ``common.auth.claim_admin`` (fresh Ed25519 keypair; signature over
@@ -84,11 +83,12 @@ def _claim(port, *, handle, mail_domain):
     msg = claim_admin_signed_message(bytes(sk.verify_key), timestamp)
     sig = sk.sign(msg).signature
 
-    with WsRpcAnonClient(port_base_url(port)) as anon:
+    with WsRpcAnonClient(port_base_url(nest["port"])) as anon:
         reply = anon.call(
             "fauna.auth.claim_admin",
             {
-                "claim_code": CLAIM_CODE,
+                # The handle's own code — the image mints one per container.
+                "claim_code": nest["claim_code"],
                 "actor_id": actor_id_hex,
                 "signature": sig.hex(),
                 "timestamp": timestamp,
@@ -111,7 +111,7 @@ def _admin_client(port, sk):
 def test_claim_real_domain_registers_primary_and_dns(claim_target_nest):
     """A real ``mail_domain`` at claim → primary domain + non-empty Admin→DNS."""
     port = claim_target_nest["port"]
-    reply, sk = _claim(port, handle="admin", mail_domain="example.com")
+    reply, sk = _claim(claim_target_nest, handle="admin", mail_domain="example.com")
 
     # (1) The identity followed the claimed handle's domain — the claim reply
     # reports `state.handle_domain()`, now the just-registered primary.
@@ -151,7 +151,7 @@ def test_claim_real_domain_registers_primary_and_dns(claim_target_nest):
 def test_claim_local_target_registers_no_mail_domain(claim_target_nest):
     """A LOCAL target at claim → no mail domain, localhost identity, empty DNS."""
     port = claim_target_nest["port"]
-    reply, sk = _claim(port, handle="admin", mail_domain="127.0.0.1")
+    reply, sk = _claim(claim_target_nest, handle="admin", mail_domain="127.0.0.1")
 
     # (1) A local target (IP literal) is an access address, not a mail domain:
     # nothing is registered and the identity stays the `localhost` fallback.

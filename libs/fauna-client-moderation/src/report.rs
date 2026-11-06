@@ -100,7 +100,10 @@ pub fn report_sheet_view(
             .collect(),
         note_label: LocalizedText::key("moderation.report.note_label"),
         show_include_text: subject_is_sealed(subject, sealed),
-        include_text_label: LocalizedText::key("moderation.report.include_text_label"),
+        include_text_label: LocalizedText::key(match subject {
+            AbuseReportSubject::Post { .. } => "moderation.report.include_text_label_post",
+            _ => "moderation.report.include_text_label",
+        }),
         block_author_label: LocalizedText::key("moderation.report.block_author_label"),
         submit_label: LocalizedText::key("moderation.report.submit"),
         cancel_label: LocalizedText::key("moderation.report.cancel"),
@@ -508,6 +511,26 @@ mod tests {
             actor_id: "ef".repeat(32),
         };
         assert!(!report_sheet_view(&actor, true, &f).show_include_text);
+    }
+
+    /// The checkbox label names the subject: *message* on a conversation
+    /// message, *post* on a gated post.
+    #[test]
+    fn the_include_text_label_follows_the_subject() {
+        let f = ReportForm::default();
+        let msg = report_sheet_view(&message(), false, &f);
+        assert!(msg.show_include_text);
+        assert_eq!(
+            msg.include_text_label.key,
+            "moderation.report.include_text_label"
+        );
+        let gated = report_sheet_view(&post(), true, &f);
+        assert!(gated.show_include_text);
+        assert_eq!(
+            gated.include_text_label.key,
+            "moderation.report.include_text_label_post"
+        );
+        assert!(!report_sheet_view(&post(), false, &f).show_include_text);
     }
 
     #[test]

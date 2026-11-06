@@ -145,7 +145,39 @@ pub async fn payment_webhook(
     // handler carries no payment logic at all, only HTTP framing.
     let mapping = fauna_payments::TierMapping {
         tier: config.tier_name.clone(),
+        product: config.product_ref.clone(),
     };
+    // A creator who narrowed the mapping to one product (monetization.md
+    // § Pillar 3 → *Configuration*): a paid checkout for anything else they
+    // sell on the same account — a tip link, another product — mints nothing.
+    // It was an authentic delivery of an event this endpoint does not act on,
+    // so it is acknowledged (2xx) like any ignored event type: answering
+    // non-2xx would send the provider into retries and, for a creator who
+    // sells several things, mark the endpoint failing. A renewal names its
+    // purchase, not the product, and is covered only when that purchase was
+    // recorded under the product the mapping names now — re-pointing the
+    // mapping never moves an older subscription onto the new product's tier.
+    let recorded_product = if mapping.covers(&event, None) {
+        None
+    } else {
+        match state
+            .db
+            .find_payment_purchase(&author_id, &provider_kind, &event.purchase_refs)
+            .await
+        {
+            Ok(found) => found.and_then(|p| p.product_ref),
+            Err(e) => {
+                tracing::error!("payment webhook: find_payment_purchase: {e}");
+                return ApiError::internal("storage error").into_response();
+            }
+        }
+    };
+    if !mapping.covers(&event, recorded_product.as_deref()) {
+        return json_ok(serde_json::json!({
+            "status": "ignored",
+            "reason": "product_not_mapped",
+        }));
+    }
     let Some(entitlement) = fauna_payments::PaymentEntitlement::from_verified_event(
         &provider_kind,
         fauna_core::identity::ActorId(author_id),
@@ -208,17 +240,22 @@ pub async fn payment_webhook(
             }
         }
         PaymentEventKind::Refund => match payment_core::apply_refund(&state, &entitlement).await {
-            Ok(acted) => {
+            Ok(payment_core::RefundApplied {
+                acted,
+                voided_buyers,
+            }) => {
                 // A refund voids the paid window, so a membership buyer may now be
                 // lapsed — reconcile them immediately rather than wait for the
                 // hourly sweep (monetization.md § Pillar 4 Rail C step 3: "at
-                // webhook ingress for that buyer"). Bound buyers only; an unbound
-                // refund names no member. A renewal *payment* re-stamps the window
-                // in `grant_membership`, so only the refund path can strand a lapse.
-                if let fauna_payments::Buyer::Actor(buyer) = &entitlement.buyer
-                    && let Err(e) = state.db.reconcile_lapsed_memberships(Some(&buyer.0)).await
-                {
-                    tracing::error!("post-refund lapse reconcile: {e}");
+                // webhook ingress for that buyer"). Every buyer whose window the
+                // refund voided — the event's own binding, the purchase's bound
+                // buyer, or its claim's redeemer. A renewal *payment* re-stamps the
+                // window in `grant_membership`, so only the refund path can strand
+                // a lapse.
+                for buyer in &voided_buyers {
+                    if let Err(e) = state.db.reconcile_lapsed_memberships(Some(buyer)).await {
+                        tracing::error!("post-refund lapse reconcile: {e}");
+                    }
                 }
                 json_ok(serde_json::json!({
                     "status": if acted { "refund_applied" } else { "no_action" },

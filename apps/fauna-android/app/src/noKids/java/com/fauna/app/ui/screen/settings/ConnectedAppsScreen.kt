@@ -376,7 +376,7 @@ private fun RequestCard(
             val install = remember(request) { connectedAppsRequestInstallText(request) }
             if (install != null) {
                 val separator = connectedAppsLineSeparator()
-                val joined = { lines: List<uniffi.fauna_client_connected_apps.ComposedText> ->
+                val joined = { lines: List<uniffi.fauna_core.ComposedText> ->
                     lines.joinToString(separator) { resolveComposed(context, it) }
                 }
                 Text(
@@ -384,6 +384,10 @@ private fun RequestCard(
                     style = MaterialTheme.typography.titleSmall,
                     modifier = Modifier.testTag(Ids.CONNECTED_APPS_REQUEST_INSTALL),
                 )
+                // The admin framing line: untagged, absent on a bind card.
+                install.framing?.let {
+                    Text(resolveComposed(context, it), style = MaterialTheme.typography.bodySmall)
+                }
                 Text(
                     resolveComposed(context, install.form),
                     style = MaterialTheme.typography.bodySmall,

@@ -47,6 +47,7 @@ def _unique(prefix: str) -> str:
 @pytest.mark.linux
 @pytest.mark.tui
 @pytest.mark.windows
+@pytest.mark.android
 @pytest.mark.feature("link-previews")
 def test_a_link_the_nest_cannot_preview_stays_a_plain_link(logged_in_app):
     app = logged_in_app

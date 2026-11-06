@@ -82,6 +82,7 @@ pytestmark = [
     pytest.mark.ios,
     pytest.mark.windows,
     pytest.mark.web,
+    pytest.mark.android,
 ]
 
 RECEIVE_CYCLE_BUDGET_S = 60.0
@@ -208,6 +209,13 @@ def test_a_room_is_born_governed_and_its_roles_govern_removal(room_seats, nest_i
     )
     assert leaver.app.conversations.room_class() == "end-to-end", (
         f"the header states the class: {leaver.app.driver.diagnose('thread-room-class')}"
+    )
+    # Room search is a community room's, whose home nest holds a read; an
+    # end-to-end room has nothing to search, so it never offers the button
+    # (`room-search.md` § The surface).
+    assert leaver.app.driver.is_absent("room-search-button"), (
+        f"an end-to-end room offers no room search: "
+        f"{leaver.app.driver.diagnose('room-search-button')}"
     )
 
     # ── the owner appoints the stayer through the policy editor ──────────

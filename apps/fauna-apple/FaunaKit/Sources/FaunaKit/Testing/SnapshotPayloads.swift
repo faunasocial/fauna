@@ -103,6 +103,7 @@ public enum HandleCheckOutcomePayload: RustTaggedEnumPayload {
     case registeredNoNest
     case alreadyOnNest(handleMatches: Bool, currentHandle: String?)
     case nestRunningUserUnregistered
+    case unregisteredUnclaimedNest
     case probeError(phase: String, transient: Bool, cause: String)
 
     public init(from decoder: Decoder) throws {
@@ -110,6 +111,7 @@ public enum HandleCheckOutcomePayload: RustTaggedEnumPayload {
             "None": .none, "FormatInvalid": .formatInvalid, "TldInvalid": .tldInvalid,
             "RegisteredNoNest": .registeredNoNest,
             "NestRunningUserUnregistered": .nestRunningUserUnregistered,
+            "UnregisteredUnclaimedNest": .unregisteredUnclaimedNest,
         ]) {
             self = bare
             return
@@ -155,6 +157,7 @@ public enum HandleCheckOutcomePayload: RustTaggedEnumPayload {
         case .alreadyOnNest(let matches, let cur):
             return .alreadyOnNest(handleMatches: matches, currentHandle: cur)
         case .nestRunningUserUnregistered: return .nestRunningUserUnregistered
+        case .unregisteredUnclaimedNest: return .unregisteredUnclaimedNest
         case .probeError(let phase, let transient, let cause):
             return .probeError(phase: parsePhase(phase), transient: transient, cause: cause)
         }
@@ -329,8 +332,9 @@ public func machineMethodResultValue(from json: String) -> Any {
 /// `call_machine_method` dispatch result, held via `@State` on `FaunaMacApp`/
 /// `FaunaApp` (mirrors `conversationsVM`/`feedVM`: a class instance mutated in
 /// place, not a plain value reassigned). **This indirection is load-bearing,
-/// not stylistic** — `startInProcessAgentIfNeeded()` wires the bridge's
-/// `commandHandler`/`stateProvider` closures from inside `init()`, capturing
+/// not stylistic** — `startTestAgentIfNeeded()` wires the bridge's
+/// `commandHandler`/`stateProvider` closures from inside `init()` (the
+/// in-process agent did too until it was bound from the scene's first `.task`), capturing
 /// `self` before SwiftUI has installed the "live" `@State` storage for the
 /// instance that actually renders (`body`) and gets read again later; per
 /// Apple's own guidance, `@State` must never be read or written from `init()`.

@@ -3,7 +3,6 @@ package com.fauna.app.ui.screen.search
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -21,6 +20,7 @@ import androidx.compose.ui.res.stringResource
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.navigation.NavController
 import com.fauna.app.R
+import com.fauna.app.ui.components.TokenSelect
 import com.fauna.app.ui.navigation.LocalAppMessages
 import com.fauna.app.ui.util.ValueFormat
 import com.fauna.app.ui.util.resolveLocalized
@@ -162,24 +162,20 @@ fun SearchResultsScreen(
         }
     ) { padding ->
         Column(modifier = Modifier.padding(padding).fillMaxSize()) {
-            // Filter chips — the shared `search-type-filter` token set
-            // (search.md § State & data shape), never a per-app literal list.
-            // Selecting one re-fires the last query under the new token
-            // through the manager (both backends), not a client-side
-            // post-filter of already-fetched rows.
-            LazyRow(
-                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                items(typeFilterOptions) { token ->
-                    FilterChip(
-                        selected = token == typeFilter,
-                        onClick = { vm.setTypeFilter(token) },
-                        label = { Text(typeFilterLabel(token)) },
-                        modifier = Modifier.testTag(Ids.SEARCH_TYPE_FILTER)
-                    )
-                }
-            }
+            // The `search-type-filter` select (ui.yaml `select`) — the shared
+            // token set (search.md § State & data shape), never a per-app
+            // literal list. A `TokenSelect`, not a row of chips, so the option
+            // VALUE (the token) round-trips to a driver while the human reads
+            // the localized label. Selecting one re-fires the last query under
+            // the new token through the manager (both backends), not a
+            // client-side post-filter of already-fetched rows.
+            TokenSelect(
+                testTagValue = Ids.SEARCH_TYPE_FILTER,
+                selected = typeFilter,
+                options = typeFilterOptions.map { it to typeFilterLabel(it) },
+                onSelect = { vm.setTypeFilter(it) },
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
+            )
 
             Box(modifier = Modifier.fillMaxSize()) {
                 val snap = snapshot

@@ -19,9 +19,7 @@ use fauna_protocol::family::{FamilyWardInfo, ReachPolicy};
 use crate::FamilyClient;
 
 /// The `fauna.family.policy.update` document that stores `document` as the
-/// ward's content rules and changes nothing else. The floors go out at
-/// `inherit`; the nest clears them anyway when it stores a document, because
-/// the editor showed every floor still set as a rule.
+/// ward's content rules and changes nothing else.
 pub fn ward_policy_with_content_document(
     ward: &FamilyWardInfo,
     document: ContentPolicyDocument,
@@ -73,7 +71,6 @@ impl<R: RpcRequester> FamilyClient<R> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fauna_core::obligation::ContentFloor;
     use fauna_core::screen_time::ScreenTimePolicy;
 
     #[test]
@@ -84,10 +81,10 @@ mod tests {
                 unknown_sender_mail: "hold".into(),
                 federation_contact: false,
                 feed_sources: "block".into(),
-                content_policy: Some(ContentPolicy {
-                    nsfw: ContentFloor::Block,
-                    ..Default::default()
-                }),
+                content_policy: Some(fauna_core::obligation::ContentPolicy::category_rules(&[(
+                    "nsfw",
+                    fauna_core::content_policy::ContentVerdict::Block,
+                )])),
                 content_notify: Some(true),
                 screen_time: Some(ScreenTimePolicy {
                     daily_minutes: Some(60),
@@ -108,11 +105,6 @@ mod tests {
             .content_policy
             .expect("the content pillar is written");
         assert_eq!(content.document, Some(document));
-        assert_eq!(
-            content.nsfw,
-            ContentFloor::Inherit,
-            "the floors are the document's now"
-        );
         assert_eq!(policy.content_notify, None);
         assert_eq!(policy.screen_time, None);
         assert_eq!(policy.unknown_peer_dm, None);

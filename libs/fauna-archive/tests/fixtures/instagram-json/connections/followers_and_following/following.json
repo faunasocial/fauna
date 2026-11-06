@@ -1,0 +1,10 @@
+{
+  "relationships_following": [
+    {
+      "title": "friend.one",
+      "string_list_data": [
+        { "href": "https://www.instagram.com/_u/friend.one", "timestamp": 1505000000 }
+      ]
+    }
+  ]
+}

@@ -58,6 +58,18 @@ pub trait RpcRequester {
         None
     }
 
+    /// [`Self::live_connection_id`], once a connection is live: a transport
+    /// whose requests wait out a gap for the connection they ride (the native
+    /// `NestClient`'s in-gap wait) waits here the same way, bounded, so a
+    /// per-connection memo read issued before the first connect — a sign-in's
+    /// pages hydrating while the socket is still dialling — is ticketed on
+    /// the connection its read then rides instead of remembering nothing.
+    /// `None` when no connection came, or for a transport with no memo. The
+    /// default waits for nothing.
+    async fn ready_connection_id(&self) -> Option<u64> {
+        self.live_connection_id()
+    }
+
     /// This transport's per-connection memo of the `fauna.nest.info` reply
     /// ([`crate::NestInfoMemo`]), read through [`crate::read_nest_info`] —
     /// `None` for a transport that remembers nothing (the default: a fake, a
@@ -274,6 +286,10 @@ impl<T: RpcRequester + ?Sized> RpcRequester for &T {
         (**self).live_connection_id()
     }
 
+    async fn ready_connection_id(&self) -> Option<u64> {
+        (**self).ready_connection_id().await
+    }
+
     fn nest_info_memo(&self) -> Option<&crate::NestInfoMemo> {
         (**self).nest_info_memo()
     }
@@ -313,6 +329,10 @@ impl<T: RpcRequester + ?Sized> RpcRequester for std::sync::Arc<T> {
 
     fn live_connection_id(&self) -> Option<u64> {
         (**self).live_connection_id()
+    }
+
+    async fn ready_connection_id(&self) -> Option<u64> {
+        (**self).ready_connection_id().await
     }
 
     fn nest_info_memo(&self) -> Option<&crate::NestInfoMemo> {
@@ -428,14 +448,26 @@ pub struct ProvenNestIdentity {
 #[derive(Debug, Default)]
 pub struct ProvenIdentityMemo {
     slot: std::sync::Mutex<Option<(u64, ProvenNestIdentity)>>,
+    /// Held across a proof by the resolver ([`Self::proving`]), so readers
+    /// that ask "which nest is this" at once on one connection — a sign-in
+    /// loading the custody leg, the Nests page and the backups page together —
+    /// wait for the first proof and are served from the memo, instead of each
+    /// missing and proving. It serializes; it decides nothing: what is
+    /// remembered, and when, is still [`Self::remember`]'s.
+    prove_gate: futures_util::lock::Mutex<()>,
 }
 
 impl ProvenIdentityMemo {
     /// An empty memo — nothing proven on any connection yet.
-    pub const fn new() -> Self {
-        Self {
-            slot: std::sync::Mutex::new(None),
-        }
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Wait for any proof in flight on this memo, then hold the gate for the
+    /// caller's own: the guard is dropped when the caller has remembered (or
+    /// refused) its proof. A caller re-reads [`Self::get`] after taking it.
+    pub async fn proving(&self) -> futures_util::lock::MutexGuard<'_, ()> {
+        self.prove_gate.lock().await
     }
 
     /// The identity remembered for connection `live`, if that very connection

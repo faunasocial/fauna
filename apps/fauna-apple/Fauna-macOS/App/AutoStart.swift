@@ -54,7 +54,8 @@ enum AutoStart {
             return nil
         case .ready:
             return isOnboarded ? .authenticated : .needsUser
-        case .retrying, .needsUpdate, .signInRefused, .identityChanged, .accountIndexUnreadable:
+        case .retrying, .needsUpdate, .signInRefused, .identityChanged, .accountIndexUnreadable,
+             .accountLocked:
             return .needsUser
         }
     }
@@ -94,7 +95,7 @@ enum AutoStart {
     // MARK: - Mechanism
 
     static var storedChoice: Bool? {
-        UserDefaults.standard.object(forKey: choiceKey) as? Bool
+        AppDefaults.store.object(forKey: choiceKey) as? Bool
     }
 
     private static var service: SMAppService {
@@ -120,7 +121,7 @@ enum AutoStart {
     /// An explicit choice from the Settings toggle: persist the tri-state, then
     /// make the registration match it.
     static func applyUserChoice(_ on: Bool) {
-        UserDefaults.standard.set(on, forKey: choiceKey)
+        AppDefaults.store.set(on, forKey: choiceKey)
         guard !FaunaE2E.isActive else { return }
         guard on else {
             unregister()
@@ -171,12 +172,18 @@ enum AutoStartWindow {
 
     private static var state: State = .unarmed
 
+    /// This launch's window decision, for the e2e state's `launch` key: nil
+    /// until the decision is taken, and set strictly after its effect, so the
+    /// key's presence is a causal barrier for "no window" (e2e convention 14).
+    private(set) static var decision: (autostart: Bool, windowShown: Bool)?
+
     /// From the main window's first `.task`, before the launch starts. Once per
     /// process: a later re-open of the window is a plain window.
     static func armIfAutostartLaunch() {
         guard case .unarmed = state else { return }
         guard AutoStart.isAutostartLaunch() else {
             state = .settled
+            decision = (autostart: false, windowShown: true)
             return
         }
         let windows = NSApp.windows.filter { $0.isVisible && $0.canBecomeMain }
@@ -195,11 +202,13 @@ enum AutoStartWindow {
             logMessage(level: .info, target: "fauna.app",
                        message: "[autostart] signed in — resident with no window")
             windows.forEach { $0.close() }
+            decision = (autostart: true, windowShown: false)
         } else {
             logMessage(level: .info, target: "fauna.app",
                        message: "[autostart] the launch needs the user — showing the window")
             windows.forEach { $0.makeKeyAndOrderFront(nil) }
             NSApp.activate(ignoringOtherApps: true)
+            decision = (autostart: true, windowShown: true)
         }
     }
 }

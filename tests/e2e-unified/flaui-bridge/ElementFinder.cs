@@ -66,7 +66,7 @@ static class ElementFinder
 
     /// <summary>
     /// Find elements by AutomationId, with Name fallback.
-    /// For *-tab IDs, opens the NavigationView pane and searches by display Name.
+    /// For *-tab IDs, falls back to the nav item's display Name.
     /// Also searches popup/dialog windows (ContentDialog hosts a separate top-level
     /// window in WinUI 3 desktop apps that is not a descendant of the main window).
     ///
@@ -159,24 +159,21 @@ static class ElementFinder
         if (popupHits.Length > 0)
             return popupHits;
 
-        // Strategy 3: For nav tabs, search by display Name (may need pane open)
+        // Strategy 3: For nav tabs, search by display Name. The pane is never
+        // opened to look: MainPage's NavigationView keeps a rail at every window
+        // width the app allows (CompactModeThresholdWidth="0" — it never drops to
+        // the Minimal mode whose closed flyout held the items out of the tree), so
+        // a nav item the rail does not hold is genuinely absent: a gated tab not
+        // revealed, or the whole pane hidden while a Settings/Admin shell's own
+        // rail stands in its slot. Toggling the pane on such a miss only opened
+        // an overlay over page content and left it there.
         if (id.EndsWith("-tab"))
         {
             var displayName = TabIdToDisplayName(id);
             if (displayName is not null)
             {
-                // Try finding by Name first (pane might already be open)
                 var byName = Step(narration, "s3-tab-by-name",
                     () => root.FindAllDescendants(cf.ByName(displayName)));
-                if (byName.Length > 0)
-                    return byName;
-
-                // Pane might be closed — toggle it open and retry
-                byName = Step(narration, "s3-toggle-pane-retry", () =>
-                {
-                    ToggleNavPane(root, cf);
-                    return root.FindAllDescendants(cf.ByName(displayName));
-                });
                 if (byName.Length > 0)
                     return byName;
             }
@@ -205,11 +202,18 @@ static class ElementFinder
     private static AutomationElement[] SearchPopups(AutomationElement mainWindow,
         ConditionFactory cf, bool byId, string term)
     {
+        // The desktop walk touches OTHER processes' windows, and a hung window of
+        // another app must never fail an op on ours, so a failure there answers "no
+        // popup hit". Only a call served by OUR app's UI thread obeys UiaSwallow and
+        // lets a held thread's timeout through.
+        var askingOurs = false;
         try
         {
             var automation = mainWindow.Automation;
             var desktop = automation.GetDesktop();
+            askingOurs = true;
             var pid = mainWindow.Properties.ProcessId.ValueOrDefault;
+            askingOurs = false;
             var siblings = desktop.FindAllChildren();
             var hits = new List<AutomationElement>();
             foreach (var sib in siblings)
@@ -218,14 +222,16 @@ static class ElementFinder
                 int sibPid = 0;
                 try { sibPid = sib.Properties.ProcessId.ValueOrDefault; } catch { continue; }
                 if (sibPid != pid) continue;
+                askingOurs = true;
                 var found = byId
                     ? sib.FindAllDescendants(cf.ByAutomationId(term))
                     : sib.FindAllDescendants(cf.ByName(term));
+                askingOurs = false;
                 if (found.Length > 0) hits.AddRange(found);
             }
             return hits.ToArray();
         }
-        catch
+        catch (Exception ex) when (!askingOurs || UiaSwallow.MayAnswerAbsent(ex))
         {
             return [];
         }
@@ -247,7 +253,7 @@ static class ElementFinder
     private static string SafeName(AutomationElement el)
     {
         try { return el.Name ?? ""; }
-        catch { return ""; }
+        catch (Exception ex) when (UiaSwallow.MayAnswerAbsent(ex)) { return ""; }
     }
 
     /// <summary>
@@ -314,32 +320,6 @@ static class ElementFinder
         return "";
     }
 
-    internal static void ToggleNavPane(AutomationElement root, ConditionFactory cf)
-    {
-        var toggle = root.FindFirstDescendant(cf.ByAutomationId("TogglePaneButton"));
-        if (toggle is null) return;
-        // Prefer InvokePattern — a COM call into the provider, foreground-independent
-        // — over the physical click FlaUI's own Click() uses, which requires an
-        // ATTACHED interactive desktop and fails Win32Exception(5) "Access is
-        // denied" without one. Found
-        // (the `Actions.cs` SendInput sweep): this site sits outside that file but
-        // hits the identical wall — measured live, `test_windows_account_switcher_
-        // lists_switches_and_reveals_admin` failing here on a Disc session.
-        // Physical click stays the fallback for a build where the toggle button
-        // somehow lacks Invoke (unwrapped, matching this call's prior behavior —
-        // best-effort element-finding scaffolding, not a gesture with a caller to
-        // diagnose for).
-        if (toggle.Patterns.Invoke.IsSupported)
-        {
-            toggle.Patterns.Invoke.Pattern.Invoke();
-        }
-        else
-        {
-            toggle.Click();
-        }
-        Thread.Sleep(500);
-    }
-
     private static readonly Dictionary<string, string> TabNameMap = new()
     {
         ["feed-tab"] = "Feed",
@@ -391,7 +371,7 @@ static class ElementFinder
     private static bool IsWindowRoot(AutomationElement el)
     {
         try { return (IntPtr)el.Properties.NativeWindowHandle.ValueOrDefault != IntPtr.Zero; }
-        catch { return false; }
+        catch (Exception ex) when (UiaSwallow.MayAnswerAbsent(ex)) { return false; }
     }
 
     /// <summary>Keep only the <paramref name="hits"/> that actually live inside
@@ -413,7 +393,7 @@ static class ElementFinder
         {
             if (SameElement(cur, ancestor)) return true;
             try { cur = cur.Parent; }
-            catch { return false; }
+            catch (Exception ex) when (UiaSwallow.MayAnswerAbsent(ex)) { return false; }
         }
         return false;
     }

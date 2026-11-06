@@ -237,7 +237,7 @@ class MailImportContentTest {
     fun signInWithMicrosoftIsInertWhereTheRegistrationIsMissing() {
         render(snap(ImportStep.SOURCE, sourceKind = ImportSourceKind.OUTLOOK))
         composeTestRule.onNodeWithTag("mail-import-source-oauth-button").assertIsNotEnabled()
-        composeTestRule.onNodeWithText("Microsoft sign-in is not available yet.").assertExists()
+        composeTestRule.onNodeWithText("Microsoft sign-in is not available in this version of Fauna.").assertExists()
     }
 
     /** While Microsoft's code is out it paints with its attributes and the button waits. */

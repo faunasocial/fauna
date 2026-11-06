@@ -48,13 +48,66 @@ pub const KIND: &str = fauna_bridge_atproto::fauna_scope::WEBDAV_ADMIT_PRINCIPAL
 const WEBDAV_PATH_PREFIX: &str = "/webdav/";
 
 /// Does `htu` name the WebDAV tree over `https`? The path is the part after
-/// the authority; the host is the MDA's own listener, which the proof binds.
+/// the authority; the authority is checked against the nest's own DAV
+/// listener by [`binds_dav_origin`].
 fn is_webdav_htu(htu: &str) -> bool {
     let Some(rest) = htu.strip_prefix("https://") else {
         return false;
     };
     let path = rest.find('/').map_or("", |i| &rest[i..]);
     path.starts_with(WEBDAV_PATH_PREFIX)
+}
+
+/// The authority (`host` or `host:port`) of an `https` `htu`.
+fn htu_authority(htu: &str) -> Option<&str> {
+    let rest = htu.strip_prefix("https://")?;
+    Some(rest.find('/').map_or(rest, |i| &rest[..i]))
+}
+
+/// Does the proof's authority name the nest's own DAV listener at `origin`
+/// ([`crate::well_known_dav::dav_origin`], the one answer to *where the DAV
+/// listener answers*)? The host is compared case-insensitively; the port is
+/// the origin's, or `443` when the origin names none (`mail.<primary>` behind
+/// the SNI router). The `Host` header the MDA builds `htu` from is the DAV
+/// client's choice, so without this a proof would carry no binding to this
+/// server — replay stays stopped by `ath`, the `jti` cache and the audience.
+fn binds_dav_origin(authority: &str, origin: &str) -> bool {
+    let parse = |s: &str| {
+        s.parse::<axum::http::uri::Authority>()
+            .ok()
+            .filter(|a| !a.as_str().contains('@') && !a.host().is_empty())
+    };
+    let (Some(got), Some(want)) = (parse(authority), parse(origin)) else {
+        return false;
+    };
+    got.host().eq_ignore_ascii_case(want.host())
+        && got.port_u16().unwrap_or(443) == want.port_u16().unwrap_or(443)
+}
+
+/// Where this nest's DAV listener answers for a request that named
+/// `authority`: `None` when the nest serves no DAV host (no primary mail
+/// domain) or knows no name for it.
+async fn dav_origin_for(state: &AppState, authority: &str) -> Result<Option<String>, RpcError> {
+    let Some(primary) = state
+        .db
+        .lookup_primary_mail_domain()
+        .await
+        .map_err(internal)?
+    else {
+        return Ok(None);
+    };
+    let port = state
+        .db
+        .get_caldav_port()
+        .await
+        .map_err(internal)?
+        .unwrap_or(fauna_protocol::bridge_routing::DEFAULT_CALDAV_PORT);
+    Ok(crate::well_known_dav::dav_origin(
+        &primary.domain_name,
+        state.dav_direct_listener,
+        Some(authority),
+        port,
+    ))
 }
 
 /// The challenge a refused admission answered with, lifted off the rendered
@@ -110,14 +163,27 @@ async fn admit(
     if !is_webdav_htu(&req.htu) {
         return Err(malformed("htu must name a path under /webdav/"));
     }
+    let authority = htu_authority(&req.htu).unwrap_or_default();
+    let bound = dav_origin_for(state, authority)
+        .await?
+        .is_some_and(|origin| binds_dav_origin(authority, &origin));
+    if !bound {
+        return Err(malformed("htu must name this nest's DAV host"));
+    }
+    // The failed-credential throttle keys on the DAV client's address as the
+    // MDA saw it, beside the claimed client, as at the nest's own doors — so
+    // forged tokens naming an app's `client_id` spend only their own source's
+    // bucket. An older MDA sends none, and its refusals key on the claim alone.
+    let source = req
+        .source_ip
+        .as_deref()
+        .and_then(|s| s.trim().parse::<std::net::IpAddr>().ok());
     let presentation = Presentation {
         token: req.token,
         proofs: req.dpop_proofs,
     };
-    // The DAV client's address never reaches the nest, so the failed-credential
-    // throttle keys on the claimed client alone here.
     let admission =
-        match admit_presentation(state, Some(&presentation), &req.htm, &req.htu, None).await {
+        match admit_presentation(state, Some(&presentation), &req.htm, &req.htu, source).await {
             Ok(admission) => admission,
             Err(response) => return Ok(refusal(&response)),
         };
@@ -239,6 +305,142 @@ mod tests {
         ] {
             assert!(!is_webdav_htu(bad), "{bad}");
         }
+    }
+
+    /// The proof's host is the nest's own DAV host: `mail.<primary>` on a
+    /// routed or undeclared box (port 443), the request's host at the admin
+    /// DAV port on a direct listener.
+    #[test]
+    fn the_htu_must_name_this_nests_dav_host() {
+        for (authority, origin) in [
+            ("mail.fauna.example", "mail.fauna.example"),
+            ("MAIL.Fauna.Example:443", "mail.fauna.example"),
+            ("192.168.1.9:9443", "192.168.1.9:9443"),
+        ] {
+            assert!(
+                binds_dav_origin(authority, origin),
+                "{authority} vs {origin}"
+            );
+        }
+        for (authority, origin) in [
+            ("evil.example", "mail.fauna.example"),
+            ("mail.fauna.example:8443", "mail.fauna.example"),
+            ("mail.fauna.example.evil.example", "mail.fauna.example"),
+            ("user@mail.fauna.example", "mail.fauna.example"),
+            ("192.168.1.9:443", "192.168.1.9:9443"),
+            ("", "mail.fauna.example"),
+        ] {
+            assert!(
+                !binds_dav_origin(authority, origin),
+                "{authority} vs {origin}"
+            );
+        }
+    }
+
+    const DOMAIN: &str = "fauna.example";
+
+    /// A nest that can run the admission: an issuer (the apex), its signing
+    /// key, and `DOMAIN` as the primary mail domain the DAV host derives from.
+    async fn admitting_state() -> Arc<AppState> {
+        let db = Arc::new(crate::db::CacheDb::open_in_memory().unwrap());
+        let seed = [0x5Au8; 32];
+        crate::test_support::seat_deployment_seed(&db, &seed).await;
+        crate::test_support::boot_mint(&db).await;
+        let state = crate::test_support::serving_generation(db, &seed);
+        state
+            .identity_domain
+            .store(Some(Arc::new(DOMAIN.to_string())));
+        state
+            .db
+            .add_mail_domain(DOMAIN, true, "enforce", "expand_primary", None, None)
+            .await
+            .unwrap();
+        Arc::new(state)
+    }
+
+    /// A token no issuer minted, claiming `client_id` in its payload.
+    fn forged_token(client_id: &str) -> String {
+        use base64::Engine as _;
+        let b64 = |v: serde_json::Value| {
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(v.to_string())
+        };
+        format!(
+            "{}.{}.c2ln",
+            b64(serde_json::json!({"alg": "ES256"})),
+            b64(serde_json::json!({ "client_id": client_id }))
+        )
+    }
+
+    fn request(htu: &str, token: String, source: Option<&str>) -> WebdavAdmitPrincipalRequest {
+        WebdavAdmitPrincipalRequest {
+            token,
+            dpop_proofs: vec!["not-a-proof".into()],
+            htm: "PROPFIND".into(),
+            htu: htu.into(),
+            source_ip: source.map(str::to_string),
+            ..Default::default()
+        }
+    }
+
+    /// A proof naming another host is refused before the admission
+    /// runs; the nest's own DAV host reaches it.
+    #[tokio::test]
+    async fn a_proof_for_another_host_is_refused_before_the_admission() {
+        let state = admitting_state().await;
+        let foreign = admit(
+            &state,
+            request("https://evil.example/webdav/u/", forged_token(CLIENT), None),
+        )
+        .await;
+        assert!(
+            foreign.is_err(),
+            "a foreign htu host is refused: {foreign:?}"
+        );
+        let own = admit(
+            &state,
+            request(
+                &format!("https://mail.{DOMAIN}/webdav/u/"),
+                forged_token(CLIENT),
+                None,
+            ),
+        )
+        .await
+        .expect("the nest's own DAV host reaches the admission");
+        assert_eq!(own.status, 401, "the forged token itself is then refused");
+    }
+
+    /// Forged tokens claiming an app's `client_id` from one source
+    /// spend that source's bucket only: an honest refusal from another source
+    /// stays a `401`, never the throttle's `429`.
+    #[tokio::test]
+    async fn forged_refusals_from_one_source_never_throttle_another() {
+        let state = admitting_state().await;
+        let htu = format!("https://mail.{DOMAIN}/webdav/u/");
+        let mut statuses = Vec::new();
+        for _ in 0..=crate::failed_credential_throttle::FAILED_CREDENTIAL_MAX {
+            let reply = admit(
+                &state,
+                request(&htu, forged_token(CLIENT), Some("198.51.100.7")),
+            )
+            .await
+            .unwrap();
+            statuses.push(reply.status);
+        }
+        assert_eq!(
+            statuses.last(),
+            Some(&429),
+            "the flooding source is throttled: {statuses:?}"
+        );
+        let honest = admit(
+            &state,
+            request(&htu, forged_token(CLIENT), Some("203.0.113.20")),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            honest.status, 401,
+            "another source's refusal is its own, not the flood's"
+        );
     }
 
     fn grant_over(tuple: fauna_mls::wrapped_blob::ScopeTuple, not_after: i64) -> Vec<u8> {
@@ -452,7 +654,7 @@ mod tests {
         // Another set, a lapsed window, a deposit tuple — none admits.
         assert!(!any_grant_admits_read([live.as_slice()], &[8u8; 32], 1_000));
         assert!(!any_grant_admits_read([live.as_slice()], &hash, 3_000));
-        let deposit = grant_over(ScopeTuple::folder_deposit(4), 2_000);
+        let deposit = grant_over(ScopeTuple::folder_deposit(4, &[5; 32]), 2_000);
         assert!(!any_grant_admits_read([deposit.as_slice()], &hash, 1_000));
         assert!(!any_grant_admits_read([b"junk".as_slice()], &hash, 1_000));
     }

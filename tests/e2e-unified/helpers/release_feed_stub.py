@@ -25,6 +25,15 @@ above any version the tree will ever carry, so it reads "newer" on every commit
 without chasing the workspace version. `newer_release_from_latest_json` strips
 the `v`.
 
+**The nest reads it too.** A `test-hooks` nest's daily release check polls
+the origin its own launch environment names in `FAUNA_E2E_RELEASE_FEED_URL`
+(`installers/README.md` § Knowing a newer version is out → *Where a test
+nest's check reads*) — the same path and the same JSON as the apps. The
+session nest and every dedicated nest name none, so their check never runs; a
+test that walks the nest's check starts its own nest with a per-test stub's
+origin. `agents` tells the readers apart: the nest asks as `fauna-update`, an
+app as `fauna-<app>/<version>`.
+
 `requests` records a path only once its answer has been written, so a walk
 that has seen the look's request knows the app holds the answer.
 """
@@ -71,6 +80,8 @@ class ReleaseFeedStub:
     def __init__(self, tag: str | None = None):
         self.tag = tag or running_tag()
         self.requests: list[str] = []
+        #: `(path, User-Agent)` per answered request, in `requests`' order.
+        self.agents: list[tuple[str, str]] = []
         stub = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -81,6 +92,7 @@ class ReleaseFeedStub:
                 if self.path != LATEST_PATH:
                     self.send_response(404)
                     self.end_headers()
+                    stub.agents.append((self.path, self.headers.get("User-Agent", "")))
                     stub.requests.append(self.path)
                     return
                 body = json.dumps(
@@ -95,6 +107,7 @@ class ReleaseFeedStub:
                 self.end_headers()
                 self.wfile.write(body)
                 self.wfile.flush()
+                stub.agents.append((self.path, self.headers.get("User-Agent", "")))
                 stub.requests.append(self.path)
 
         self._server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)

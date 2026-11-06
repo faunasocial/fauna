@@ -55,8 +55,20 @@ public partial class TrainedTopicsViewModel : ViewModelBase
     public async Task LoadAsync()
     {
         _ownReadError = null;
-        if (!await RunAsync(() => _nest.TrainedTopicsListAsync())) _ownReadError = ErrorMessage;
+        if (await RunAsync(() => _nest.TrainedTopicsListAsync()))
+        {
+            LoadRefused = false;
+            return;
+        }
+        _ownReadError = ErrorMessage;
+        LoadRefused = FirstListingRefusal.OfText(ErrorMessage) is not null;
     }
+
+    /// <summary>True while the last load was refused by the first-listing gate: the
+    /// page shows the reason on <c>error-message</c> and paints no empty state, since
+    /// an empty list would read as the account's own (<c>account-client-lifecycle.md</c>
+    /// § The first listing, clause (4)).</summary>
+    public bool LoadRefused { get; private set; }
 
     // The error text a failed LOAD put up (a gesture's message is never this):
     // the only error a store-change re-read may retire on a good read.
@@ -85,6 +97,11 @@ public partial class TrainedTopicsViewModel : ViewModelBase
         var rows = await _nest.TrainedTopicsListAsync();
         if (_opsInFlight > 0 || seq != _dispatchSeq) return false;
         var changed = false;
+        if (LoadRefused)
+        {
+            LoadRefused = false;
+            changed = true;
+        }
         if (!Topics.SequenceEqual(rows, SameRowComparer.Instance))
         {
             Repopulate(rows);
@@ -99,22 +116,35 @@ public partial class TrainedTopicsViewModel : ViewModelBase
         return changed;
     }
 
-    /// <summary>Mint a factor (trimmed; a blank name is a client-side no-op —
-    /// the shared service's <c>BlankName</c> rejection is defense in depth, never
-    /// reachable through this guard, mirroring linux's <c>submit()</c>).</summary>
-    public async Task<bool> CreateAsync(string name)
+    /// <summary>The trimmed name, or <c>null</c> once a blank (all-whitespace)
+    /// name is refused here, before the round trip, with the shared
+    /// <c>BlankName</c> sentence on <see cref="ViewModelBase.ErrorMessage"/> — the
+    /// one tui, linux, web and apple paint — never a silent no-op that leaves the
+    /// user wondering why nothing happened (topic-factors.md § Authoring surface
+    /// &amp; picker, outcome 13).</summary>
+    private string? NonBlank(string name)
     {
         var trimmed = name.Trim();
-        if (trimmed.Length == 0) return false;
+        if (trimmed.Length > 0) return trimmed;
+        SetError(Strings.Get(BlankNameKey));
+        return null;
+    }
+
+    private const string BlankNameKey = "personalization/trained_factor_blank_name";
+
+    /// <summary>Mint a factor (trimmed; a blank name is refused by
+    /// <see cref="NonBlank"/>).</summary>
+    public async Task<bool> CreateAsync(string name)
+    {
+        if (NonBlank(name) is not { } trimmed) return false;
         return await RunAsync(() => _nest.TrainedTopicsCreateAsync(trimmed));
     }
 
     /// <summary>Rename in place — the id (and so the derived composition key)
-    /// is untouched.</summary>
+    /// is untouched; a blank name is refused as <see cref="CreateAsync"/>'s is.</summary>
     public async Task<bool> RenameAsync(byte[] id, string name)
     {
-        var trimmed = name.Trim();
-        if (trimmed.Length == 0) return false;
+        if (NonBlank(name) is not { } trimmed) return false;
         return await RunAsync(() => _nest.TrainedTopicsRenameAsync(id, trimmed));
     }
 
@@ -284,9 +314,8 @@ public partial class TrainedTopicsViewModel : ViewModelBase
     {
         FfiTrainedTopicsException.Cap c => Strings.Format("personalization/trained_factor_cap", c.max.ToString()),
         FfiTrainedTopicsException.General g => g.msg,
-        // BlankName is unreachable through CreateAsync/RenameAsync's own trim-guard
-        // above (the client-side twin of linux's submit() early-return); kept only
-        // as a defensive fallback for the shared service's own validation.
-        _ => "a trained topic needs a name",
+        // BlankName is refused by NonBlank before the round trip; this arm is the
+        // shared service's own validation answering, in the same sentence.
+        _ => Strings.Get(BlankNameKey),
     };
 }

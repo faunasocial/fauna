@@ -35,7 +35,6 @@ from drivers.port_util import find_free_port
 from helpers.ap_nest import (
     AP_BRIDGE_ID,
     ap_post_map_row,
-    build_ap_nest_binary,
     content_row_exists,
     deliver_note,
     delivery_jobs_for,
@@ -162,12 +161,6 @@ def ua_demanding_follower():
         yield follower
 
 
-@pytest.fixture(scope="module")
-def ap_binary():
-    """Build fauna-nest with activitypub feature."""
-    return build_ap_nest_binary()
-
-
 @pytest.fixture()
 def ap_nests(ap_binary, tmp_path_factory):
     """Start two AP-enabled nest instances."""
@@ -216,13 +209,13 @@ class TestActivityPubFederation:
         self-registers with a handle (`fauna.account.register`) and asserts
         the natural identity, resolvable via WebFinger.
         """
-        from common.auth import register_handled_actor
+        from helpers.admin_wire import admit_adult
 
         nest_a = ap_nests["a"]
         handle = f"apuser{int(time.time()) % 1000000}"
         # Sign over the nest's identity domain (boot-seeded from `[nest]
         # domain` — see `start_ap_nest`).
-        user = register_handled_actor(nest_a["port"], handle, nest_a["domain"])
+        user = admit_adult(nest_a, handle, domain=nest_a["domain"], token=True)
 
         username, actor_url = enable_ap(nest_a, user)
         assert username == handle, (
@@ -520,9 +513,9 @@ class TestActivityPubFederation:
         nest_a = ap_nests["a"]
         old = f"apfrozen{int(time.time()) % 1000000}"
         new = f"{old}moved"
-        from common.auth import register_handled_actor
+        from helpers.admin_wire import admit_adult
 
-        user = register_handled_actor(nest_a["port"], old, nest_a["domain"])
+        user = admit_adult(nest_a, old, domain=nest_a["domain"], token=True)
         username, actor_url = enable_ap(nest_a, user)
         assert username == old
 

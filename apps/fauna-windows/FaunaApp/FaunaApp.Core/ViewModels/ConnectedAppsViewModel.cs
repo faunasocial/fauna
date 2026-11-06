@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
+using FaunaApp.Core.Helpers;
 using FaunaApp.Core.Services;
 using uniffi.fauna_atproto_settings_machine;
 using uniffi.fauna_client_connected_apps;
@@ -202,6 +203,17 @@ internal partial class ConnectedAppsViewModel : ViewModelBase
 
     public Task UnblockAsync(string clientId) => RunAsync(m => m.Unblock(clientId));
 
+    /// <summary>The account's external-apps switch (<c>atproto-external-apps-enable</c>) as the
+    /// <c>state</c> attr the e2e reads. ON is the snapshot's zero value
+    /// (<c>external_apps_off</c> false), so the switch reads <c>on</c> until a read says
+    /// otherwise.</summary>
+    public string ExternalAppsState => Snapshot?.@externalAppsOff == true ? "off" : "on";
+
+    /// <summary>Flip the switch. Non-optimistic: the machine writes it and the page paints the
+    /// re-read snapshot, never a local guess.</summary>
+    public Task SetExternalAppsEnabledAsync(bool enabled) =>
+        RunAsync(m => m.SetExternalAppsEnabled(enabled));
+
     public void ArmRevoke(string key) => RevokeArmed = key;
 
     public void CancelRevoke() => RevokeArmed = null;
@@ -262,11 +274,9 @@ internal partial class ConnectedAppsViewModel : ViewModelBase
 
     // ── Row text composition ──
     //
-    // The roster's row text is composed here (a joined description as the item's own text —
-    // ui.yaml mints no per-field leaves for the columns every row has), the same shape tui and
-    // linux paint. Lifting the composition into the shared crate is queued;
-    // until it lands this is the one windows copy, and the page's `ui-actual-windows.yaml`
-    // records it.
+    // The roster's row text is a joined description as the item's own text (ui.yaml mints no
+    // per-field leaves for the columns every row has). The lines are composed in shared Rust
+    // (`compose::roster_row_text`); this view model only resolves and joins them.
 
     /// <summary>The class badge's words — the one per-app half of the grouping key, which the
     /// machine derives. An unknown class paints no badge rather than a guess.</summary>
@@ -284,71 +294,78 @@ internal partial class ConnectedAppsViewModel : ViewModelBase
 
     private static string When(long ms) => FaunaFfiMethods.FormatUnixLocalMs(ms);
 
-    /// <summary>One roster row's joined description: the name and class badge, the burned line,
-    /// the publisher, one line per scope, then the created / last-used / lasts-until facts.</summary>
+    /// <summary>One roster row's joined description, composed once in shared Rust
+    /// (<c>connected_apps_roster_row_text</c>): the name and class badge, the burned line, the
+    /// publisher, one line per scope, the permission sets, the oracle summary, then the
+    /// created / last-used / lasts-until facts as the last line.</summary>
     public static string RowText(ConnectedAppRow row)
     {
-        var name = Strings.Resolve(row.@name);
-        var head = ClassLabel(row.@class) is { } badge ? $"{name} · {badge}" : name;
-        var lines = new List<string> { head };
-        // The burned state sits directly under the name and above everything a user might copy
-        // into a mail app: the login below it authenticates nothing any more
-        // (mail-credentials.md § Rotation and recovery → Succession).
-        if (row.@mail is { @revoked: true })
-        {
-            lines.Add(Strings.Get("settings/mail/credential_revoked"));
-        }
-        if (row.@clientId is { } clientId && row.@publisher is { } domain)
-        {
-            lines.Add($"{Strings.Get("connected_apps/publisher").Replace("{domain}", domain)} — {clientId}");
-        }
-        foreach (var scope in row.@scopeDescriptions)
-        {
-            lines.Add($"  • {Strings.Resolve(scope)}");
-        }
-        var facts = new List<string>();
-        // A paused row says why it cannot act and how to undo it; "not connected" is only
-        // for a row nothing but itself holds back.
-        if (row.@paused) facts.Add(Strings.Get("connected_apps/paused"));
-        else if (!row.@connected) facts.Add(Strings.Get("connected_apps/not_connected"));
-        facts.Add(Strings.Get("connected_apps/created").Replace("{time}", When(row.@createdAtMillis)));
-        facts.Add(row.@lastUsedAtMillis is { } used
-            ? Strings.Get("connected_apps/last_used").Replace("{time}", When(used))
-            : Strings.Get("connected_apps/never_used"));
-        facts.Add(row.@lastsUntilMillis is { } until
-            ? Strings.Get("connected_apps/lasts_until").Replace("{time}", When(until))
-            : Strings.Get("connected_apps/open_ended"));
-        lines.Add(string.Join(" · ", facts));
+        var composed = FaunaFfiMethods.ConnectedAppsRosterRowText(row);
+        var lines = composed.lines.Select(Strings.Resolve).ToList();
+        lines.Add(string.Join(
+            FaunaFfiMethods.ConnectedAppsFactsSeparator(),
+            composed.facts.Select(Strings.Resolve)));
         return string.Join("\n", lines);
     }
 
-    /// <summary>One <c>connected-apps-request-card</c>'s own text: the heading, who is asking
-    /// (the resolved name plus the <c>client_id</c> verbatim), one line per requested scope and
-    /// the permission-set provenance. The wording is the atproto page's
-    /// <c>atproto_settings.consent_*</c> unchanged — one card, a new start, never a second card
-    /// (<c>connected-apps.md</c> § Architectural rules). Nothing here derives a host or a fetch
-    /// target from the client id, and there is deliberately no logo.</summary>
-    public static string RequestText(ConsentCardRow request)
+    /// <summary>Whether the row links to its plugin's settings card on the Bridges page
+    /// (<c>connected-apps-item-settings-link</c>, connected-apps.md § Layout &amp; flow region 3)
+    /// — the shared predicate carried on the composed row (<c>opens_settings_card</c>), never
+    /// a class test of this app's own.</summary>
+    public static bool OpensSettingsCard(ConnectedAppRow row) =>
+        FaunaFfiMethods.ConnectedAppsRosterRowText(row).opensSettingsCard;
+
+    /// <summary>The attributes of a <c>connected-apps-item</c>, packed into the one HelpText UIA
+    /// gives it (<see cref="AutomationAttributePack"/>): <c>revoked</c> (an empty value is not a
+    /// burned row), <c>status</c> — <c>paused</c> (the account's external-apps switch is OFF),
+    /// <c>connected</c> or <c>not_connected</c>, as a value a reader can count beside the words —
+    /// and, on a row a custodian served, <c>oracle_ops</c>, the operations in the current window.
+    /// A row no custodian served leaves the key out, so the attribute reads as not set, never
+    /// as zero.</summary>
+    public static string RowAttributes(ConnectedAppRow row)
     {
-        var who = request.@clientName is { } clientName
-            ? Strings.Get("atproto_settings/consent_client")
-                .Replace("{name}", clientName).Replace("{client_id}", request.@clientId)
-            : Strings.Get("atproto_settings/consent_client_unnamed").Replace("{client_id}", request.@clientId);
-        var asks = string.Join("\n", request.@scopeDescriptions.Select(line => $"  • {line}"));
-        var sets = string.Concat(request.@sets.Select(set =>
+        var burned = row.@mail is { @revoked: true };
+        var attributes = new List<(string, string)>
         {
-            var heading = set.@title is { } title
-                ? Strings.Get("atproto_settings/consent_set_heading").Replace("{title}", title).Replace("{nsid}", set.@nsid)
-                : Strings.Get("atproto_settings/consent_set_heading_unnamed").Replace("{nsid}", set.@nsid);
-            var details = set.@details is { } d ? $"\n  {d}" : string.Empty;
-            var members = string.Concat(set.@memberDescriptions.Select(line => $"\n  • {line}"));
-            return $"\n{heading}{details}{members}";
-        }));
-        // A key replacement's line (`ConsentCardRow.ends`) is last, after the sets — the order
-        // `compose::request_card_lines` gives every app; absent on an ordinary card.
-        var ends = request.@ends is { } e ? $"\n{Strings.Resolve(e)}" : string.Empty;
-        return $"{Strings.Get("atproto_settings/consent_heading")}\n{who}\n"
-             + $"{Strings.Get("atproto_settings/consent_scopes_heading")}\n{asks}{sets}{ends}";
+            ("revoked", burned ? "true" : ""),
+            ("status", row.@paused ? "paused" : row.@connected ? "connected" : "not_connected"),
+        };
+        if (row.@oracle is { @opsInWindow: var ops }) attributes.Add(("oracle_ops", ops.ToString()));
+        return AutomationAttributePack.Pack(attributes.ToArray());
+    }
+
+    /// <summary>One <c>connected-apps-request-card</c>'s own text, composed once in shared Rust
+    /// (<c>connected_apps_request_card_lines</c>): the heading, who is asking (the resolved name
+    /// plus the <c>client_id</c> verbatim), one line per requested scope, the permission-set
+    /// provenance, the cli's reach line when the cli is asking, then what the approve ends. One
+    /// card, a new start, never a second card (<c>connected-apps.md</c> § Architectural rules);
+    /// nothing here derives a host or a fetch target from the client id, and there is
+    /// deliberately no logo.</summary>
+    public static string RequestText(ConsentCardRow request) =>
+        string.Join("\n", FaunaFfiMethods.ConnectedAppsRequestCardLines(request).Select(Strings.Resolve));
+
+    /// <summary>The install section of an admin's hosted-plugin install card — or a user's bind
+    /// card — (<c>third-party.md</c> § The runner contract → <i>The install-approval leg</i>),
+    /// each leaf's text resolved from the shared composition
+    /// (<c>connected_apps_request_install_text</c>); <c>null</c> on every other card. The page
+    /// paints it between the card text and the binding code, as tui's
+    /// <c>install_section_elements</c> does.</summary>
+    public static InstallSectionPaint? InstallSection(ConsentCardRow request)
+    {
+        if (FaunaFfiMethods.ConnectedAppsRequestInstallText(request) is not { } section) return null;
+        var separator = FaunaFfiMethods.ConnectedAppsLineSeparator();
+        string Many(uniffi.fauna_core.ComposedText[] lines) => string.Join(separator, lines.Select(Strings.Resolve));
+        var form = request.install?.executionForm ?? string.Empty;
+        return new InstallSectionPaint(
+            Heading: Strings.Resolve(section.heading),
+            Framing: section.framing is { } framing ? Strings.Resolve(framing) : null,
+            Form: Strings.Resolve(section.form),
+            FormValue: form,
+            Publisher: Strings.Resolve(section.publisher),
+            Digest: Strings.Resolve(section.digest),
+            Kinds: Many(section.kinds),
+            Hosts: Many(section.hosts),
+            Settings: Many(section.settings));
     }
 
     /// <summary>The binding code line (<c>connected-apps-request-code</c>'s text); the raw code is
@@ -361,6 +378,21 @@ internal partial class ConnectedAppsViewModel : ViewModelBase
     public static string BlockedText(BlockedAppRow blocked) =>
         $"{blocked.@clientId}\n{Strings.Get("connected_apps/blocked_since").Replace("{time}", When(blocked.@blockedAtMillis))}";
 }
+
+/// <summary>One request card's install section, resolved for paint: one text per
+/// <c>connected-apps-request-install*</c> leaf, plus the untagged framing line (an admin's
+/// install card only) and the raw execution form the <c>-form</c> leaf carries as its
+/// <c>form</c> attr.</summary>
+internal sealed record InstallSectionPaint(
+    string Heading,
+    string? Framing,
+    string Form,
+    string FormValue,
+    string Publisher,
+    string Digest,
+    string Kinds,
+    string Hosts,
+    string Settings);
 
 /// <summary>The staged <c>fauna://consent</c> request's home: the app's route door in
 /// production. A seam only because <c>FaunaApp.Core</c> cannot see <c>App</c>.</summary>

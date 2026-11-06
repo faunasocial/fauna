@@ -1320,10 +1320,11 @@ pub enum SuccessionRefusal {
     /// only it runs the account transaction — see
     /// [`CacheDb::record_peer_succession`].
     OldIsLocal,
-    /// A **peer-relayed** statement named a successor this nest already holds a
-    /// link into. A nest holds one predecessor per identity (ruling (8)(j)(1)):
-    /// the home leg's [`Self::NewAlreadyRegistered`] is this arm's twin, and the
-    /// first-landed link stands. Both links are the successor's own `new_sig`,
+    /// The successor is one this nest already holds a link into — learned from
+    /// a peer. A nest holds one predecessor per identity (ruling (8)(j)(1)):
+    /// both legs refuse it (the home leg's [`Self::NewAlreadyRegistered`] covers
+    /// a local account, this arm a learned link), and the first-landed link
+    /// stands. Both links are the successor's own `new_sig`,
     /// so the nest withholds one of the member's own words — the power residual
     /// (iii) already names. An honest ceremony cannot produce two, so the
     /// consumers log it at warn.
@@ -1478,6 +1479,21 @@ impl CacheDb {
             .context("read successor account")?;
         if new_exists.is_some() {
             return Ok(Err(SuccessionRefusal::NewAlreadyRegistered));
+        }
+
+        // One predecessor per identity (ruling (8)(j)(1)): a link this nest
+        // LEARNED into the successor leaves it with no account here, so the
+        // account probe above cannot see it.
+        let fan_in: Option<i64> = tx
+            .query_row(
+                "SELECT 1 FROM actor_successions WHERE new_actor_id = ?1",
+                rusqlite::params![new],
+                |row| row.get(0),
+            )
+            .optional()
+            .context("read existing link into the successor")?;
+        if fan_in.is_some() {
+            return Ok(Err(SuccessionRefusal::NewAlreadySucceeded));
         }
 
         // 1. The record every enforcement point consults.
@@ -2390,9 +2406,9 @@ impl CacheDb {
     /// the caller can only ever ask about itself.
     ///
     /// `MAX`, defensively. `new_actor_id` is indexed but not UNIQUE, yet a nest
-    /// holds one predecessor per identity (ruling (8)(j)(1)): the home leg
-    /// refuses `NewAlreadyRegistered` and [`Self::record_peer_succession`]
-    /// refuses `NewAlreadySucceeded`, so there is one row. Were a second ever
+    /// holds one predecessor per identity (ruling (8)(j)(1)): both legs refuse
+    /// `NewAlreadySucceeded` (the home leg after `NewAlreadyRegistered`,
+    /// [`Self::record_peer_succession`] in its place), so there is one row. Were a second ever
     /// found (a hand-edited table), a **later** bound over-marks (re-asks the
     /// owner about a rule they wrote themselves) and an **earlier** one
     /// under-marks (carries a thief's rule across unflagged) — the same
@@ -4192,7 +4208,7 @@ mod tests {
         )
         .await
         .unwrap();
-        db.register_backup_writer(actor.as_slice(), &[0x79u8; 32], None)
+        db.register_backup_writer(actor.as_slice(), &[0x79u8; 32], None, false)
             .await
             .unwrap();
     }
@@ -5402,7 +5418,7 @@ mod tests {
     /// events, and the `ManageSubscribers` delegation the public federation
     /// bootstrap read serves.
     async fn seed_entitlement_authority(db: &CacheDb, actor: &[u8; 32]) {
-        db.upsert_payment_provider(actor, "stripe", "whsec_the_thief_chose_this", "gold")
+        db.upsert_payment_provider(actor, "stripe", "whsec_the_thief_chose_this", "gold", None)
             .await
             .unwrap();
         db.upsert_device_authorization(actor, &[0x66u8; 32], b"the signed delegation bytes")
@@ -8344,6 +8360,33 @@ mod tests {
         assert_eq!(
             db.succession_statements_into(&q).await.unwrap(),
             vec![b"x-p".to_vec(), b"p-q".to_vec()]
+        );
+    }
+
+    /// The home leg holds the same invariant (ruling (8)(j)(1)): a link this
+    /// nest learned into X leaves X with no account here, so a later local
+    /// ceremony B → X must be refused rather than recording a second link.
+    #[tokio::test]
+    async fn the_home_leg_refuses_a_successor_that_already_holds_a_learned_link() {
+        let db = CacheDb::open_in_memory().unwrap();
+        let (a, b, x) = ([0x61u8; 32], [0x62u8; 32], [0x63u8; 32]);
+        assert!(
+            db.record_peer_succession(&a, &x, b"a-x", 1)
+                .await
+                .unwrap()
+                .is_ok()
+        );
+        seed_account(&db, &b, "bob").await;
+        assert_eq!(
+            db.record_succession(&b, &x, b"b-x", 1)
+                .await
+                .unwrap()
+                .unwrap_err(),
+            SuccessionRefusal::NewAlreadySucceeded
+        );
+        assert_eq!(
+            db.succession_statements_into(&x).await.unwrap(),
+            vec![b"a-x".to_vec()]
         );
     }
 

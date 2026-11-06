@@ -13,9 +13,12 @@ import FaunaKit
 // firing itself is pinned in Rust (`fauna_ipc::convergence` + the
 // `fauna-ffi` observer-forwarding test); here we pin what the Swift edge re-drives.
 
-/// In-memory `LocationControlChannel` fake. Driven sequentially from the model's
-/// `@MainActor` `await`s (one call at a time, awaited to completion), hence
-/// `@unchecked Sendable` — there is no concurrent access to pin against.
+/// In-memory `LocationControlChannel` fake. Driven sequentially (one call at a
+/// time, awaited to completion), hence `@unchecked Sendable` — but its `async`
+/// methods are nonisolated, so they run OFF the main actor: a test must await
+/// the background `Task` that `LocationsModel.add` returns before it drives
+/// `reconcile()` itself, or the two race on `bound`/`bindOrder` (the parallel
+/// swift-test `Array replace: subrange extends past the end` crash).
 final class FakeLocationControlChannel: LocationControlChannel, @unchecked Sendable {
     /// Whether the agent's socket answers this tick. Flip to simulate the
     /// just-spawned agent coming up (the reachable edge).
@@ -73,6 +76,53 @@ final class FakeLocationControlChannel: LocationControlChannel, @unchecked Senda
         guard let reply = heldDeletesReplies[folder] else { throw FakeError.unreachable }
         return reply
     }
+
+    /// Whether `refreshSetConflicts` reports the page moved.
+    var setConflictsMoved = false
+    private(set) var setConflictRefreshes = 0
+    /// Every restore the channel took, as `"<folderId>#<conflictId>"`.
+    private(set) var restored: [String] = []
+    /// Throw on `restoreRetainedVersion`, as a refusing agent does.
+    var refuseRestore = false
+
+    func refreshSetConflicts(model: FfiLocationBindingsModel) async -> Bool {
+        setConflictRefreshes += 1
+        return setConflictsMoved
+    }
+
+    func restoreRetainedVersion(folderId: String, conflictId: Int64) async throws {
+        if refuseRestore { throw FakeError.rejected }
+        restored.append("\(folderId)#\(conflictId)")
+    }
+}
+
+/// The review row's gesture reaches the agent keyed by (set, row), and a used
+/// row is re-read at once rather than waiting out the status tick.
+@Test @MainActor
+func useRetainedVersionRestoresByTheSetAndRowThenRereadsTheList() async throws {
+    let fake = FakeLocationControlChannel(reachable: true)
+    let model = LocationsModel(testSeed: [])
+    model.setChannelForTest(fake)
+
+    try await model.useRetainedVersion(folderId: "group:aa", conflictId: 7)
+
+    #expect(fake.restored == ["group:aa#7"])
+    #expect(fake.setConflictRefreshes == 1)
+}
+
+/// A refusal is the caller's to show, and re-reads nothing: the row stands.
+@Test @MainActor
+func aRefusedRestoreThrowsAndLeavesTheListUnread() async {
+    let fake = FakeLocationControlChannel(reachable: true)
+    fake.refuseRestore = true
+    let model = LocationsModel(testSeed: [])
+    model.setChannelForTest(fake)
+
+    await #expect(throws: (any Error).self) {
+        try await model.useRetainedVersion(folderId: "group:aa", conflictId: 7)
+    }
+    #expect(fake.restored.isEmpty)
+    #expect(fake.setConflictRefreshes == 0)
 }
 
 /// (i) The race face: on a launch that just spawned the agent it isn't up when the
@@ -126,13 +176,35 @@ func addWhileAgentDownSurvivesAndPushesOnReachableEdge() async {
     model.setChannelForTest(fake)
 
     // User binds a folder while the agent is still spawning: the row is in memory.
-    model.add(path: "/notes", folder: "notes", folderId: "local:4")
+    await model.add(path: "/notes", folder: "notes", folderId: "local:4")?.value
     #expect(model.mappings.map(\.folder) == ["notes"])
 
     // Agent comes up → edge reconcile pushes the pending binding.
     fake.reachable = true
     await model.reconcile()
     #expect(fake.bound.map(\.folder) == ["notes"])
+}
+
+/// `confirmedBinds` moves only when the agent confirms a bind — the edge an
+/// expanded row re-reads its `folder-place-row` roster on (the agent enrols the
+/// device's place before it answers, `file-sync.md` § 4). A bind against a
+/// downed agent moves nothing; the reachable-edge reconcile that lands it does.
+@Test @MainActor
+func confirmedBindsMovesOnlyWhenTheAgentConfirmsTheBind() async {
+    let model = LocationsModel(testSeed: [])
+    let fake = FakeLocationControlChannel(reachable: false)
+    model.setChannelForTest(fake)
+
+    await model.add(path: "/seat", folder: "seat", folderId: "local:9")?.value
+    #expect(model.confirmedBinds == 0)
+
+    fake.reachable = true
+    await model.reconcile()
+    #expect(model.confirmedBinds == 1)
+
+    // A reconcile with nothing pending confirms nothing.
+    await model.reconcile()
+    #expect(model.confirmedBinds == 1)
 }
 
 /// (iv) `revokedFolders` mirrors the agent's `accessRevoked` flag, derived
@@ -173,11 +245,11 @@ func addWithFolderIdPushesTheRefThroughReconcile() async {
     let fake = FakeLocationControlChannel(reachable: true)
     model.setChannelForTest(fake)
 
-    model.add(path: "/docs", folder: "docs", folderId: "local:42")
+    await model.add(path: "/docs", folder: "docs", folderId: "local:42")?.value
     await model.reconcile()
     #expect(fake.boundFolderIds["docs", default: "MISSING"] == "local:42")
 
-    model.add(path: "/shared", folder: "shared-docs", folderId: "foreign:aabbccdd")
+    await model.add(path: "/shared", folder: "shared-docs", folderId: "foreign:aabbccdd")?.value
     await model.reconcile()
     #expect(fake.boundFolderIds["shared-docs", default: "MISSING"] == "foreign:aabbccdd")
 }

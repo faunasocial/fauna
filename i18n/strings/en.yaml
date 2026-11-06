@@ -255,23 +255,16 @@ tips:
   # post-tip-list's "and N others" line, when the window is bounded (has_more).
   more: and {count} more
 onboarding:
-  welcome:
-    title: Fauna
-    # public-text: app-strings-public
-    subtitle: Your personal, private communications nest.
-    tagline: |-
-      Private messaging and file sync,
-      built on your own server.
-    # public-text-end: app-strings-public
   # The by-continuing notice (`onboarding-terms-notice`) above the bottom row of
   # invite_request, claim_code and nest_provisioning, and of handle_entry on a
   # sign-in Continue (terms-and-content-guidelines.md § The decisions, item 3).
-  # A by-continuing notice shown before sign-in, so it rides in its public-texts
-  # request to be reviewed and marked in the round (the companion rule,
-  # public-texts.md § The boundary); the wording is the terms doc's § Element
-  # IDs draft, and until the round it is the apps' own.
+  # A by-continuing notice shown before sign-in, so a public text: marked in
+  # its own app-strings-public region (public-texts.md § The boundary;
+  # terms-and-content-guidelines.md § Implementation status today).
   terms:
+    # public-text: app-strings-public
     notice: By continuing you agree to the Fauna terms and content guidelines
+    # public-text-end: app-strings-public
   # Launch-screen surface shown when the silent-challenge fast path
   # can't reach the saved nest. Per docs/goal/behavior/onboarding.md
   # §"App-launch routing" the user can wait + Retry, or fall back to
@@ -287,8 +280,13 @@ onboarding:
     # technical detail is appended by the app; the promise "your data is
     # safe" is literal (the failure is render-side, the store is untouched).
     # public-text: app-strings-public
-    launch_failed: "Startup hit a problem. Your data is safe — you can retry, or continue setup below."
+    launch_failed: "Startup hit a problem. Nothing saved on this device was deleted — restart the app to try again."
     # public-text-end: app-strings-public
+    # The locked surface's stolen-identity button with no secret key held for
+    # the locked account: not a startup failure (`launch_failed` is the launch
+    # surface's alone, onboarding.md § App-launch routing), and restarting
+    # reaches the same step. Painted by web's `succeedFromLocked`.
+    locked_secret_missing: This device doesn't hold this account's secret key, so it can't replace the identity from here. Add the account back with its secret key or recovery kit, then try again.
     # (security.md § Transport trust): shown when the nest's
     # pinned deployment identity changed, or it can no longer prove the identity
     # the client previously trusted (the SSH known_hosts model). The warning is
@@ -353,12 +351,14 @@ onboarding:
     # slots, because the store seam cannot scan a namespace.
     # public-text: app-strings-public
     index_malformed: Your saved accounts can't be read, and updating the app won't help. Nothing has been changed or deleted. You can start over on this device, or move this device's data somewhere safe first.
-    index_malformed_reset_residual: Starting over removes every account from this device and returns the app to a fresh install. Your accounts still exist on your nest, but you will need your secret key or recovery kit to sign back in — this device's copy is removed. Some saved data on this device cannot be reached to clear it.
+    index_malformed_reset_residual: Starting over clears this app's list of accounts. Your accounts still exist on your nest — you can sign in again from another device where you're signed in, from an exported copy of your key, or with your recovery kit. Some saved data on this device, which can include sign-in keys, can't be reached to clear it and stays behind.
     # public-text-end: app-strings-public
     index_newer_build_title: Update needed
     index_malformed_title: Your saved accounts can't be read
     index_malformed_reset: Start over on this device
-    index_malformed_reset_confirm: Remove everything and start over
+    # public-text: app-strings-public
+    index_malformed_reset_confirm: Clear the list and start over
+    # public-text-end: app-strings-public
     # account-scoping.md § Concurrent instances → "An erase refuses while a
     # sibling serves the account": the start-over runs the same all-accounts
     # erase a sign-out does, so it refuses under a live sibling window too.
@@ -444,7 +444,9 @@ onboarding:
     # something different: this restores a lost IDENTITY from its recovery
     # phrase, that one restores a lost NEST. onboarding.md § 1 Identity requires
     # the labels to differentiate sharply — hence "box" vs "account".
-    restore_from_recovery_kit: Restore my account from a recovery phrase
+    # public-text: app-strings-public
+    restore_from_recovery_kit: Restore my account from a recovery kit
+    # public-text-end: app-strings-public
     # The THIRD optional entry (ui/sessions.md § *The signed-out door*): locks an
     # account from a device the owner does not want to sign in on. Unlike the two
     # recovery entries it restores nothing — the label says what it does, a lock.
@@ -468,8 +470,8 @@ onboarding:
   recovery_kit:
     title: Your Recovery Kit
     # public-text: app-strings-public
-    desc: This recovery phrase outranks your secret key — it is the only way to get your account back if your secret key is ever stolen or lost. Keep it offline; it is shown exactly once and never stored on any device.
-    escrow_deferred: Your kit activates when your account comes online at the end of setup — until then, keep the phrase safe.
+    desc: Your recovery kit is a second key, kept only by you and only offline, that outranks your secret key — it can get your account back if you lose your secret key, or take it back if someone steals it. It is shown once, and no device keeps a copy.
+    escrow_deferred: Your kit activates when your account comes online at the end of setup — until then, keep it safe and offline.
     # public-text-end: app-strings-public
     confirm: I've saved it — continue
     skip: Skip for now
@@ -480,24 +482,32 @@ onboarding:
     # input paints its raw element id as the prompt on tui (apps/tui.md
     # § Rendering → Control vocabulary). The account field reuses the shared
     # `common.handle` label — it is the same field concept as handle_entry's.
-    phrase_label: Recovery phrase
     # public-text: app-strings-public
-    desc: Paste your recovery phrase (the fauna://recovery link or the 64-character code). Your identity will be restored from your nest's sealed escrow.
+    phrase_label: Recovery kit
+    # public-text-end: app-strings-public
+    # public-text: app-strings-public
+    desc: Paste your recovery kit (the fauna://recovery link or the 64-character code). Your identity will be restored from the copy of your secret key that only your kit opens.
     # public-text-end: app-strings-public
     # The second sentence is the locator of last resort (onboarding.md § 1
     # Identity → recovery_entry): the case recovery exists for is a domain that
     # is gone, and a user whose domain is gone has no other way to learn the
     # field takes their nest's address in its place.
-    account_hint: If your phrase doesn't name your account, enter your handle (user@domain) so your nest can be found. If that domain is gone, put your nest's own address after the @ instead — like alice@192.0.2.10 or alice@nest.local.
+    # public-text: app-strings-public
+    account_hint: If your kit doesn't say where your account lives, enter your handle (user@domain) so your nest can be found. If that domain is gone, put your nest's own address after the @ instead — like alice@192.0.2.10 or alice@nest.local.
+    # public-text-end: app-strings-public
     submit: Restore
     # The phrase was not a recovery kit at all — the local parse refused it
     # before anything was sent. Names the identity-secret confusion explicitly:
     # the two codecs are deliberate twins on different hosts, and pasting the
     # wrong one is the mistake worth naming.
-    invalid_kit: That isn't a recovery phrase. Paste the fauna://recovery link or the 64-character recovery code — not your secret key.
+    # public-text: app-strings-public
+    invalid_kit: That isn't a recovery kit. Paste the fauna://recovery link or the 64-character recovery code — not your secret key.
+    # public-text-end: app-strings-public
     # Nothing named the account: a bare 64-character code identifies no account,
     # and a nest can only be found through a handle's domain.
-    account_needed: Enter the handle of the account you're restoring (user@domain) — this phrase doesn't say which account it belongs to.
+    # public-text: app-strings-public
+    account_needed: Enter the handle of the account you're restoring (user@domain) — this kit doesn't say where your account lives.
+    # public-text-end: app-strings-public
     # The handle was typed but isn't `user@domain`, so there is no domain to
     # find a nest at.
     # public-text: app-strings-public
@@ -506,12 +516,16 @@ onboarding:
     # `fauna.actor.not_found` from the resolved nest.
     account_unknown: 'No account named {account} exists on that nest.'
     # `fauna.recovery.no_escrow` — the ratified honest signal, not a fault.
-    no_escrow: This account has no sealed backup to restore from. Create a new recovery kit from a device that's still signed in.
+    # public-text: app-strings-public
+    no_escrow: Your kit can't restore this account from here — no copy of your secret key that it opens is available. On a device that's still signed in, open Settings → Account → Recovery Kit. If it offers Restore Kit Recovery, enter this kit and press it; if instead Create Recovery Kit can be pressed, this kit never took effect, so create a new one.
+    # public-text-end: app-strings-public
     # `fauna.auth.superseded` — routes to the identity import. Deliberately does
     # NOT name the successor: it arrives unverified.
     superseded: This identity was replaced after it was compromised. Import the new identity to continue.
     # A retired kit still signs valid bytes that authorize nothing.
-    refused: 'That recovery phrase was refused — it may have been replaced by a newer kit, or belong to another account. ({reason})'
+    # public-text: app-strings-public
+    refused: 'That recovery kit was refused — it may have been replaced by a newer kit, or belong to another account. ({reason})'
+    # public-text-end: app-strings-public
     # The one bucket worth offering a retry on — and the exact moment the
     # locator of last resort is worth naming: a lapsed or seized domain fails
     # here, with the escrow blob, the actor and the nest all still intact.
@@ -524,7 +538,7 @@ onboarding:
     # this screen because there is none here: another device that still holds
     # the older identity is the only thing that can finish the re-encryption.
     # public-text: app-strings-public
-    restored_predecessors_lost: 'Your account was restored. But part of the sealed backup — material from a previous identity of yours — could not be opened, so content still encrypted under that older identity may be unreadable. If another of your devices still has that identity, sign in there to finish moving your content over. ({reason})'
+    restored_predecessors_lost: 'Your account was restored. But part of the copy your kit opened — material from a previous identity of yours — could not be opened, so content still encrypted under that older identity may be unreadable. If another of your devices still has that identity, sign in there to finish moving your content over. ({reason})'
     # public-text-end: app-strings-public
   # The signed-out lock door (ui/sessions.md § Layout & flow → *The signed-out
   # door*; behavior devices.md § The signed-out door). The lock warning and the
@@ -544,7 +558,9 @@ onboarding:
     # public-text-end: app-strings-public
     # A recovery phrase is not a secret key — the two are deliberate twins on
     # different hosts, and pasting the wrong one is the mistake worth naming.
-    invalid_secret: That isn't a secret key. Paste the 64-character key or the fauna://identity link — not your recovery phrase.
+    # public-text: app-strings-public
+    invalid_secret: That isn't a secret key. Paste the 64-character key or the fauna://identity link — not your recovery kit.
+    # public-text-end: app-strings-public
     account_needed: Enter the handle of the account to lock (user@domain) — a secret key alone doesn't say where the account lives.
     account_malformed: Enter the full handle including the domain, in the form user@domain.
     # `fauna.auth.superseded` — the account already moved to a new key.
@@ -574,12 +590,12 @@ onboarding:
   recovery:
     title: Recover a lost box
     # public-text: app-strings-public
-    subtitle: Choose the box you lost. Fauna re-provisions a fresh box with its saved identity, so your pinned devices reconnect automatically once it's back online.
+    subtitle: Choose the box you lost. A new server started with its saved key is the same nest, and Fauna can set one up on a cloud host for you. Your installed Fauna apps then reconnect to it automatically once it's back online, with no warning that its identity changed.
     # public-text-end: app-strings-public
     box_list_label: Your boxes
-    box_item_hint: Recovery key custodied
+    box_item_hint: Server key saved
     # public-text: app-strings-public
-    empty_message: No recovery keys are available yet. Connect to one of your other nests first — its synced configuration holds the recovery keys for every box you administer.
+    empty_message: No saved server keys were found for your boxes. If another of your nests is still running, and your devices have signed in to it or linked it since saving those keys, it holds a copy of them — choose Recover a lost box on the Set Up Your Identity screen, import your identity, and enter your handle on that nest.
     # public-text-end: app-strings-public
     method_cloud: Re-provision on a cloud host
     method_selfhosted: Install on my own server
@@ -597,11 +613,11 @@ onboarding:
   retire:
     title: Retire a server
     # public-text: app-strings-public
-    subtitle: Delete a server Fauna created in your cloud account and clean up the DNS records that pointed at it, or get your domain's transfer code. Your cloud token is used for this visit only and is never saved.
+    subtitle: Delete a server Fauna created in your cloud account since 8 July 2026 — on OVH, any server your credentials reach — and clean up the DNS records that belong to it, or, where your provider can hand it out, get your domain's transfer code. Your cloud token is used for this visit only and is never saved.
     # public-text-end: app-strings-public
-    list_label: Servers Fauna created in this account
+    list_label: Servers found in this account
     # public-text: app-strings-public
-    empty_message: No servers created by Fauna were found in this account. Servers created before 2026-07-08 predate the Fauna marker and are not listed — retire those from your provider's dashboard.
+    empty_message: No servers created by Fauna were found in this account. Except on OVH, servers created before 8 July 2026 predate the Fauna marker and are not listed — retire those from your provider's dashboard.
     # public-text-end: app-strings-public
     domain_label: Domain
     secondary_domains_label: Also serves
@@ -624,7 +640,7 @@ onboarding:
     confirm_destroyed: Everything on this server — its disk and every account's data on it — is destroyed and cannot be recovered except from a backup.
     # public-text-end: app-strings-public
     confirm_current: This is the server you're signed into. This session's nest will stop existing.
-    confirm_dns_removals: "Before the server is deleted, these DNS records pointing at it are removed: {records}"
+    confirm_dns_removals: "Before the server is deleted, these DNS records belonging to it are removed: {records}"
     confirm_dns_none: No DNS records will be removed automatically. The records to remove by hand are listed below.
     confirm_by_hand: "To remove by hand afterwards: {records}"
     confirm_name_label: Type the server's name to confirm
@@ -701,7 +717,7 @@ onboarding:
     adding_dkim_record: Adding email DNS record
     provisioning_complete: Provisioning complete
     # public-text: app-strings-public
-    time: This usually takes 2-3 minutes.
+    time: This usually takes a few minutes.
     # public-text-end: app-strings-public
     server: Provision Server
     # New entries for the snapshot-driven nest_provisioning page.
@@ -808,10 +824,10 @@ onboarding:
     update_channel_stable_desc: Released versions. Recommended.
     update_channel_test_label: Test
     update_channel_test_desc: Numbered releases being accepted by users before they become Stable.
-    update_channel_test_desc_same_version: Numbered releases being accepted before they become Stable. For now the server works only with apps of exactly the same version — pair it with the app stores' test tracks.
+    update_channel_test_desc_same_version: Numbered releases being accepted by users before they become Stable. Until version 0.2 the server works only with apps of exactly the same version.
     update_channel_dev_label: Dev
     update_channel_dev_desc: The newest development builds, before any checking, for people who build the apps from source. Expect breakage.
-    update_channel_dev_desc_same_version: The newest development builds, before any checking. For now the server works only with apps built from the same source. Expect breakage.
+    update_channel_dev_desc_same_version: The newest development builds, before any checking. Until version 0.2 the server works only with apps built from the same source. Expect breakage.
     # public-text-end: app-strings-public
     # A channel the registry has no build for — one text, one key per channel
     # because every app looks the key up per row (`UpdateChannel::description_key_for`).
@@ -820,17 +836,17 @@ onboarding:
     update_channel_dev_desc_no_build: No build has been published on this channel yet — choose another channel.
     mail_mode_label: Run mail on this box
     # public-text: app-strings-public
-    mail_mode_desc: "A mail box runs email (SMTP, IMAP) and calendar, which needs the spam and virus scanners and at least 2 GB of RAM. Turn this off for a social-only box: it runs lean and works on the cheapest 1 GB plan, but cannot add mail later without resizing the VPS."
+    mail_mode_desc: "A mail box runs email (SMTP, IMAP), which needs the spam and virus scanners and at least 2 GB of RAM. Turn this off for a social-only box, which runs everything except email and can run on the cheapest 1 GB plan, but cannot add email later: the server would have to be set up again with email, on a plan with 2 GB or more."
     # public-text-end: app-strings-public
     # The SSH door (vps-config-ssh-door-toggle, default off; the warning is
     # vps-config-ssh-door-warning, shown only while it is on —
     # onboarding-provisioning.md § 5). The warning states a property of the
-    # product before the admin has a nest, so it is a public text: this is the
-    # DRAFT its public-texts request carries, landed unmarked under the
-    # companion rule until the round reviews it and moves it inside an
-    # app-strings-public region.
+    # product before the admin has a nest, so it is a public text (reviewed in
+    # its public-texts request; marked in round 7).
+    # public-text: app-strings-public
     ssh_door_label: Keep an SSH door to this server
     ssh_door_warning: "This reduces your server's security. An SSH door is a second way into the server that Fauna never needs. The key is made on this device and Fauna keeps no copy; the door admits only the address you set the server up from. You alone are responsible for the key, that address and anything done through the door — changes made through it are not supported and may be undone by updates. The door cannot be added later."
+    # public-text-end: app-strings-public
   nest_provisioning:
     title: Setting up your nest…
     start_button: Buy and set up
@@ -863,10 +879,13 @@ onboarding:
     # § 5): the command, the one address the door admits, then where this
     # device put the key (a desktop app's ~/.ssh) — or, where the key is handed
     # over instead, no path. {address} is the address the nest echoed at the
-    # claim, or ssh_door_address_unknown when it echoed none.
+    # claim, or ssh_door_address_unknown when it echoed none. Shown before
+    # sign-in and states the one admitted address, so a public text.
+    # public-text: app-strings-public
     ssh_door_command_template: 'SSH door: {command} (admits only {address}; key {path}, fingerprint {fingerprint})'
     ssh_door_command_no_path_template: 'SSH door: {command} (admits only {address}; fingerprint {fingerprint})'
     ssh_door_address_unknown: the address you set the server up from
+    # public-text-end: app-strings-public
     # provisioning-ssh-door-save-key-button (ios, android, web — the apps with
     # no ~/.ssh): hands the door key file over once. Rides along with the
     # warning's public-texts request under the companion rule (shown before
@@ -903,6 +922,7 @@ onboarding:
       domain_available_not_buyable_via_provider: "{domain} appears to be available, but none of our supported registrars carry .{tld}. You'll need to buy it elsewhere."
       domain_available_inside_zone: "Nothing is set up at {domain} yet. It sits inside {zone}: if you hold {zone}, continue and pick the DNS provider that hosts it. If not, you can register {domain} on the next page."
       registered_no_nest: "{domain} resolves but no nest is running. To set one up, confirm you control DNS for this domain."
+      local_no_nest: "No nest is running at {domain}. Start a nest there, then check again."
       already_on_nest_handle_matches: "Welcome back, {handle}."
       already_on_nest_handle_differs: "You're already registered on {domain} as {old_handle}. Continue to log in as that handle (you can change it after)."
       user_unregistered: "There's a nest at {domain} but you're not registered. Request an invite or paste a code below."
@@ -937,6 +957,14 @@ onboarding:
       # reaches the invite page with it is in practice a suspended one who took
       # the sign-in-refused surface's "Use a different nest" route, so the copy
       # mirrors `onboarding.launch.sign_in_refused`: honest, no "try again".
+      # The redeem's register refused as `fauna.account.signature_failed`: the
+      # nest checks the signature only over the domains it hosts, so the typed
+      # address is on a domain it does not (`DOMAIN_NOT_HOSTED_CAUSE`). The
+      # remedy is a different address, so no "try again".
+      domain_not_hosted: "This nest doesn't host addresses on that domain. Go back and choose an address on one of its own domains."
+      # The redeem's register never got an answer from the nest (a transport
+      # fault, `UNREACHABLE_CAUSE`).
+      unreachable: "Couldn't reach the nest to create your account. Try again."
       already_registered: "This nest already has an account for you, so it won't take a new invite request. Its admin may have suspended your account — contact the admin; if they restore it, sign in again."
       # A refusal the nest explained in its own words (`InviteRequestError`'s
       # Closed / RateLimited / Malformed arms all reach the wizard as
@@ -1007,7 +1035,7 @@ onboarding:
   trust_prompt:
     title: "Trust this box?"
     # public-text: app-strings-public
-    summary: "This box can do more for you if you let it read the things it looks after: filtering your mail as it arrives, and serving your calendar to your other devices. Your trust renews itself while you use Fauna, you can take it back at any time in Settings → Nests, and every time you give or withdraw trust it is written down for you there."
+    summary: "This box can do more for you if you let it read your mail and calendar, and the posts of the paid tiers you already have: running its virus and spam checks on your mail again when those checks are updated, reading your calendar for itself, and showing the paid posts you publish on the web to the people who pay for them. Your trust renews itself while you use Fauna, you can take it back at any time in Settings → Nests, and every time you give or withdraw trust it is written down for you there."
     # public-text-end: app-strings-public
     grant_button: "Yes, trust this box"
     skip_button: "Not now"
@@ -1054,7 +1082,16 @@ onboarding:
   # Rare paths (a local disk write or registry call failing right as onboarding
   # finishes, or a corrupted stored secret at relaunch) but still user-visible.
   session_error:
+    # public-text: app-strings-public
+    # Shown before sign-in, so in the apps' public subset (public-texts.md
+    # § The boundary). persist_identity is the confirm-identity write failing
+    # (long-term-store.md § Save-failure handling), shown on the created,
+    # import or recovery screen, whichever the confirm was made on, so it names
+    # no button and does not say "new"; the clause after the dash is
+    # sign_out_residue_credentials's.
     persist_account: "Couldn't save your new account: {message}"
+    persist_identity: "Couldn't save your identity on this device — its secure storage may be locked or unavailable. Try again when it is."
+    # public-text-end: app-strings-public
     persist_successor: "Couldn't save your new identity: {message}"
     switch_successor: "Couldn't switch to your new identity: {message}"
     switch_appended: "Couldn't switch to the new account: {message}"
@@ -1106,15 +1143,17 @@ credential_store:
   error_failed: 'Could not change the passphrase: {message}'
   # web only: the passkey wrap (apps/web.md § Identity store at rest → A
   # passkey wrap). The bare labels; the status line and explainer beside them
-  # are public texts and land through their round.
+  # are public texts, in the region below.
   passkey_add_button: Add a passkey
   passkey_remove_button: Remove the passkey
   passkey_error: 'Could not change the passkey: {message}'
   # web only: the status line beside the remove button and the explainer
-  # beside the add button. Both sit outside the app-strings-public region
-  # until their public-texts round marks them (the wording is a public text).
+  # beside the add button — product claims, so public texts (marked in
+  # public-texts round 7).
+  # public-text: app-strings-public
   passkey_status: A passkey also unlocks your encrypted sign-in keys in this browser. Your passphrase still works.
   passkey_explainer: Add a passkey to unlock this browser's encrypted sign-in keys with your device's screen lock or a security key instead of typing your passphrase. Your passphrase keeps working, and your nest isn't involved.
+  # public-text-end: app-strings-public
 unlock:
   # The unlock page (ui.yaml `unlock`, shared by tui and web): an identity
   # store sealed under a passphrase, unlocked at launch. tui: the headless
@@ -1129,6 +1168,7 @@ unlock:
   unlock_prompt: Your credentials are protected by a passphrase on this machine. Enter it to sign in.
   create_title: Protect your credentials
   create_prompt: There is no secure key store here that Fauna can use, so your sign-in keys will be kept on this device, encrypted with a passphrase you choose. Choose one to continue — you'll need it to unlock them from now on, and a forgotten passphrase cannot be recovered.
+  keyring_locked_notice: Your system keyring is locked or not set up, so Fauna can't keep your sign-in keys in it and will encrypt them with a passphrase you choose instead. To use the keyring, unlock it or set it up, then restart Fauna before you choose a passphrase.
   # public-text-end: app-strings-public
   passphrase_label: Passphrase
   confirm_label: Confirm passphrase
@@ -1156,10 +1196,11 @@ unlock:
   passkey_button: Unlock with a passkey
   passkey_error: 'Could not open with the passkey: {message}'
   # web only: what the `passkey_unavailable` code paints, on this page and in
-  # the credential-store section (one string, two surfaces). Sits outside the
-  # app-strings-public region until its public-texts round marks it (the
-  # wording is a public text).
+  # the credential-store section (one string, two surfaces). A product claim,
+  # so a public text (marked in public-texts round 7).
+  # public-text: app-strings-public
   passkey_unavailable: This browser or authenticator can't use a passkey to unlock your sign-in keys. Your passphrase still works.
+  # public-text-end: app-strings-public
 tui_nav_hints:
   # tui's persistent key-hint footer — the `nav-key-hints` element (ui.yaml
   # `global.platform_elements`, `tui: [nav-key-hints]`; architecture/apps/tui.md
@@ -1196,6 +1237,11 @@ feed:
   # snapshot's LocalizedText (feed.md § Errors & edge cases). Named {message}
   # placeholders carry the underlying transport error.
   compose_empty: Post cannot be empty
+  # The imported-posts selection (feed.md § State & data shape → The
+  # imported-posts selection): feed-imported-notice names the archive's
+  # platform ({platform}, its display label); feed-imported-clear leaves it.
+  imported_notice: 'Showing the posts you imported from {platform}'
+  imported_clear: Show all posts
   # tui's feed-video external handoff (apps/tui.md § External media handoff →
   # Feed video): the reused media-external-open confirm's title, for a clip
   # that has no file name of its own. Body + buttons are media.external_open_*.
@@ -1313,11 +1359,6 @@ feed:
   # reporting; IDs user-approved 2026-09-25). Opens the shared report sheet
   # (moderation.report.*); gated !is_own.
   report_post: Report post
-  # Collapse-to-placeholder treatment for a feed post whose text matches the
-  # user's muted words (topic-factors.md § Scoring — a mute collapses
-  # everywhere; wording mirrors the conversation bubble's collapse strings).
-  post_muted_placeholder: Muted word
-  post_muted_reveal: Show anyway
   # The muted-word list could not be read, so it is NOT being applied to this
   # feed. Surfaced rather than swallowed: silently dropping the filters would
   # show the user exactly the content they asked never to see, with no hint why.
@@ -1370,6 +1411,7 @@ feed:
   list:
     title: Feeds
     trending: Trending
+    local: Local
     no_posts: No posts yet.
     no_matching_posts: No matching posts.
     end_of_feed: End of feed
@@ -1533,7 +1575,7 @@ conversations:
     # or a mailbox turned off and back on). Later mail keeps arriving; the
     # count is per app run. Ranked below every other page error.
     # public-text: app-strings-public
-    mail_unopenable: '{count} received messages could not be opened on this device. They were sealed to mail keys this account no longer holds, and were skipped.'
+    mail_unopenable: '{count} received messages could not be opened on this device, so they were skipped. Newer mail keeps arriving.'
     # public-text-end: app-strings-public
   list:
     title: Conversations
@@ -1599,11 +1641,6 @@ conversations:
       Was in this group before you recovered your account. Keep them, or remove
       them if you don't recognise them.
     member_keep: Keep                        # thread-member-keep-button
-    # Muted-keyword collapse (content-moderation-and-ranking.md § Q3). Placeholder
-    # shown in place of a message whose decrypted body matches a muted word; the
-    # reveal button un-collapses it for this session (the mute stays).
-    muted_word: Muted word
-    muted_reveal: Show anyway
     # Per-message "mark as spam" action in the dm-message-actions-menu overflow
     # (mail-spam.md § Encrypted-mode interaction). Trains the per-user spam model
     # over the received message + writes a sealed training-history row.
@@ -1803,6 +1840,7 @@ conversations:
     # itself failed and retrying is reasonable (§ Copy comprehensibility Q4).
     recipient_resolve_error: Lookup failed — try again
     recipient_resolve_not_found: Not found — check the address
+    recipient_resolve_not_reachable: Not reachable yet — they need to open Fauna first
     recipient_resolve_resolved: Resolved
     recipient_resolve_resolving: Resolving…
     reply_all: Reply all
@@ -2095,13 +2133,6 @@ groups:
   mute_group: Mute Group
   react: React
   message_placeholder: Type a message...
-  message:
-    # public-text: app-strings-public
-    encrypted: Encrypted
-    encrypted_title: End-to-end encrypted via MLS
-    signed: Signed
-    signed_title: Sender signature verified — content is plaintext in the nest
-    # public-text-end: app-strings-public
 # The AT Protocol settings page (ui.yaml page `atproto`, ui/atproto.md): the
 # integration-depth selector, the hosted-identity panel, the recovery-fork
 # contest, the delete ceremony, and the login-plane surface (app credentials,
@@ -2160,7 +2191,7 @@ atproto_settings:
   # detail, the kill-switch bullet — the switch binds the account's
   # third-party principals too), and that nothing is lost.
   # public-text: app-strings-public
-  external_apps_hint: When this is off, every connected app is paused — apps that use Fauna directly too — until you turn it back on. Nothing is disconnected.
+  external_apps_hint: When this is off, every app it affects is paused — apps that use Fauna directly too — until you turn it back on. Nothing is disconnected.
   # public-text-end: app-strings-public
   # ── Integration-depth selector (ui/atproto.md § Layout & flow). Shared
   #    across all apps. The per-effect transition-card lines + the greyed
@@ -2173,7 +2204,7 @@ atproto_settings:
   depth_linked_title: Linked account
   depth_linked_desc: Read, interact, and cross-post through an existing Bluesky account.
   depth_hosted_visible_title: 'Hosted here — visible'
-  depth_hosted_visible_desc: This nest holds your identity and publishes your public posts to the Bluesky network.
+  depth_hosted_visible_desc: This nest holds your identity and publishes your public posts, apart from posts you imported from another service, to the Bluesky network.
   depth_hosted_full_title: 'Hosted here — full access'
   depth_hosted_full_desc: Additionally, other Bluesky apps can log in as you through this nest.
   # public-text-end: app-strings-public
@@ -2200,7 +2231,6 @@ atproto_settings:
   did_method_web_desc: Ties your identity to this nest's domain.
   handle_either_way: 'Your Bluesky handle will be @{handle} either way.'
   # public-text-end: app-strings-public
-  history_backfill_label: Also publish my existing public posts.
   # The history opt-in's label, composed in shared Rust with the nest's count of
   # posts a backfill would publish (the count is part of the consent).
   history_backfill_count_label: 'Also publish my {count} existing public posts.'
@@ -2343,7 +2373,7 @@ atproto_settings:
   card_unlink: 'The link to {account} is removed. The external account itself is untouched — it keeps existing on its own server and is not migrated.'
   card_mint: 'A new public identity {handle} is created on the Bluesky network.'
   card_reactivate: 'Your identity {handle} is restored — the same identity you had before, nothing new is created.'
-  card_publish_consent: 'Your public posts become visible to everyone on the Bluesky network.'
+  card_publish_consent: 'Your public posts, apart from posts you imported from another service, become visible to everyone on the Bluesky network.'
   card_deactivate: 'Publishing stops and the network no longer serves your profile or posts. Your identity is kept — re-enabling restores it exactly.'
   card_no_recall: 'Copies of already-published posts held by other servers cannot be recalled.'
   card_delete_pointer: '"Delete my Bluesky presence" below is the separate, stronger action.'
@@ -2361,7 +2391,7 @@ atproto_settings:
   # public-text: app-strings-public
   delete_confirm_sweep: 'Every post published to Bluesky is deleted, and the network is told to remove them.'
   delete_confirm_identity_kept: 'Your AT Protocol identity @{handle} is kept. This removes what you published, not who you are — turning AT Protocol hosting back on later restores the same identity.'
-  delete_confirm_apps_disconnected: 'Bluesky apps you are signed in to are disconnected, and other apps can no longer post as you.'
+  delete_confirm_apps_disconnected: 'Bluesky apps you are signed in to are disconnected. If you have let other apps post as you, that permission is kept — stop it under Posting from other apps.'
   delete_confirm_level_off: 'Your Bluesky setting returns to Off.'
   # public-text-end: app-strings-public
   # REPLACES delete_confirm_identity_kept while the atproto-delete-tombstone
@@ -2406,7 +2436,7 @@ atproto_settings:
   # there would believe a compromised nest had been fully evicted. It has not:
   # it can still author posts. Never shorten this line past that sentence.
   # public-text: app-strings-public
-  contest_detail_contestable: 'A change to your AT Protocol identity {handle} was made with a key this device does not hold. You can undo it: the change and everything built on it are reversed, and afterwards only your own keys can change who controls this identity. Your posts and profile keep working through this nest — which also means it keeps the key it uses to publish them, so it could still post as you. Undoing the change does not take that key away; replacing it is a separate step.'
+  contest_detail_contestable: 'A change to your AT Protocol identity {handle} was made with a key this device does not hold. You can undo it: the change and everything built on it are reversed, and afterwards only your own keys can change who controls this identity. Your posts and profile keep working through this nest — which also means it keeps the key it uses to publish them, so it could still post as you. Undoing the change does not take that key away, and Fauna has no way to replace that key today.'
   contest_detail_window_closed: 'A change to your AT Protocol identity {handle} was made with a key this device does not hold, and the time limit for undoing it has passed. The change now stands permanently. Contact whoever runs your nest.'
   contest_detail_genesis: 'Your AT Protocol identity {handle} was created with a key this device does not hold, so there is no earlier state to return it to. This identity cannot be recovered — create a new one, and contact whoever runs your nest.'
   # public-text-end: app-strings-public
@@ -2444,7 +2474,7 @@ atproto_settings:
   # the key the nest retains. Never shorten it past that sentence.
   # public-text: app-strings-public
   contest_confirm_undo: 'You are about to undo the change to {handle}, and everything published on top of it, by signing an earlier state of your identity back into place.'
-  contest_confirm_signs: 'This device signs with the recovery key it holds, which puts your own keys back in charge of who can change this identity. Your nest keeps the separate key it publishes your posts with, so this does not stop it posting as you; replacing that key is a separate step.'
+  contest_confirm_signs: 'This device signs with the recovery key it holds, which puts your own keys back in charge of who can change this identity. Your nest keeps the separate key it publishes your posts with, so this does not stop it posting as you, and Fauna has no way to replace that key today.'
   contest_confirm_directory_rules: 'The public directory decides whether to accept the undo. If it refuses, nothing about your identity changes and trying again is safe.'
   # public-text-end: app-strings-public
 
@@ -2484,7 +2514,7 @@ critical_alerts:
   # someone else holds that secret. Two lines: the headline stands alone, the
   # detail carries the comparison aid.
   # public-text: app-strings-public
-  recovery_replacement_pending: 'Security alert: someone used your identity secret to request a replacement of your account recovery key. If that was not you, someone else has your identity secret. Cancel it in Settings, under Recovery kit.'
+  recovery_replacement_pending: 'Security alert: someone used your secret key to request a replacement of your recovery kit. If that was not you, someone else has your secret key. Cancel it in Settings → Account → Recovery Kit.'
   recovery_replacement_pending_detail: 'The replacement takes effect in {days} days unless cancelled. The pending recovery key begins {fingerprint} — if you hold a recovery kit and it does not begin with those characters, the request was not made with your kit.'
   # public-text-end: app-strings-public
   # The domain-expiry watch (domains-and-tls-bootstrap.md § Domain loss →
@@ -2502,12 +2532,12 @@ critical_alerts:
   #
   # Each pair is {admin, resident} for one finding: expiring, expired, lapse status.
   # public-text: app-strings-public
-  domain_expiring_admin: 'Urgent: {domain} — the name this deployment runs on — expires in {days} days. If it lapses, whoever registers it next receives your mail (including password resets for accounts tied to those addresses), and anyone recovering an account from their recovery phrase alone will no longer be able to find this nest. Renew it at your registrar now.'
-  domain_expiring_resident: 'Urgent: {domain} — the name this deployment runs on — expires in {days} days. If it lapses, mail sent to your address there will go to whoever registers the name next, and recovering your account from your recovery phrase alone will stop working. Contact whoever runs this nest, and make sure you know its direct address.'
+  domain_expiring_admin: 'Urgent: {domain} — the name this deployment runs on — expires in {days} days. If it lapses, whoever registers it next receives your mail (including password resets for accounts tied to those addresses), and  anyone recovering an account from their recovery kit alone will no longer be able to find this nest. Renew it at your registrar now.'
+  domain_expiring_resident: 'Urgent: {domain} — the name this deployment runs on — expires in {days} days. If it lapses, mail sent to your address there  will go to whoever registers the name next, and recovering your account from your recovery kit alone will stop working. Contact whoever runs this nest, and make sure you know its direct address.'
   domain_expired_admin: 'Urgent: {domain} — the name this deployment runs on — has expired. Whoever registers it next receives your mail, including password resets for accounts tied to those addresses. Renew or redeem it at your registrar immediately; if it is gone, move the deployment to a new domain.'
-  domain_expired_resident: 'Urgent: {domain} — the name this deployment runs on — has expired. Mail sent to your address there may now reach someone else, and recovering your account from your recovery phrase alone will not work. Contact whoever runs this nest, and make sure you know its direct address.'
+  domain_expired_resident: 'Urgent: {domain} — the name this deployment runs on — has expired. Mail sent to your address there  may now reach someone else, and recovering your account from your recovery kit alone will not work. Contact whoever runs this nest, and make sure you know its direct address.'
   domain_lapsing_admin: 'Urgent: the registration for {domain} — the name this deployment runs on — is in a hold or deletion state ({status}) and is being withdrawn from DNS. Whoever registers it next receives your mail. Contact your registrar now; renewal is usually still possible at this stage.'
-  domain_lapsing_resident: 'Urgent: the registration for {domain} — the name this deployment runs on — is being withdrawn ({status}). Mail to your address there will stop arriving, and recovering your account from your recovery phrase alone will stop working. Contact whoever runs this nest, and make sure you know its direct address.'
+  domain_lapsing_resident: 'Urgent: the registration for {domain} — the name this deployment runs on — is being withdrawn ({status}). Mail to your address there  will stop arriving, and recovering your account from your recovery kit alone will stop working. Contact whoever runs this nest, and make sure you know its direct address.'
   # public-text-end: app-strings-public
   # The eviction warning (admin.md § Cutting a user off → The member is told).
   # The member's account is in the two-week warning phase of an admin's
@@ -2710,6 +2740,11 @@ media:
   versions_loading: Loading versions…
   versions_error: 'Failed to load versions: {message}'
   version_author: 'Edited by {author}'
+  # folder-deposit.md ruling 3: a version a connected app deposited and the
+  # owner's device adopted — the app's name from the owner's connected-apps
+  # list, else the generic wording (a member holds no list of the owner's).
+  version_author_deposited: 'Edited by {app} via {author}'
+  version_author_deposited_unknown: 'Edited by a connected app via {author}'
   version_restore: Restore
   # Recovery browse (file-versions.md § Retention (3)): soft-pruned versions
   # stay recoverable until their purge date; the toggle re-lists with them
@@ -2859,14 +2894,17 @@ backups:
   restore_history_row: '{kinds} from {source} — {when}'
   restore_kinds_mail: mail
   restore_kinds_calendar: calendar
+  restore_kinds_contacts: contacts
+  restore_kinds_posts: posts
+  restore_kinds_conversations: conversations
   restore_confirm_placeholder: Re-type the snapshot id to confirm
   restore_confirm_button: Restore
   restore_progress_idle: Select a snapshot and re-type its id to restore.
   restore_progress_running: Restoring…
-  restore_progress_done: 'Done — restart the bridge.'
-  # restore-warning: the restore completed, but the bridge's sign-in keys (the wrapped MLS blobs) were
-  # not part of it (the reply's config_present == false).
-  restore_warning_config_absent: "Restored, but the bridge's sign-in keys were not part of the restore — the bridge can't sign in after it restarts until they are restored too."
+  restore_progress_done: 'Done — restart the mail and calendar service.'
+  # restore-warning: the restore completed, but the mail and calendar service's sign-in keys (the
+  # wrapped MLS blobs) were not part of it (the reply's config_present == false).
+  restore_warning_config_absent: "Restored, but this mail and calendar service's sign-in keys were not part of the restore — it can't sign in after it restarts until they are restored too."
   restore_no_snapshots: No local snapshots available to restore.
   # Prompt labels for the two restore pickers. A picker with no prompt and no
   # value paints as bare cycle arrows on a terminal, which say nothing at all
@@ -2878,7 +2916,7 @@ backups:
   # rule 5 — a disabled control the user can see states why, and names the
   # control that fixes it by its visible label).
   restore_no_destinations: No backup destinations yet — add one under "Backup destinations" above.
-  restore_divergence_banner: '{count} MUAs reconnected with newer state'
+  restore_divergence_banner: '{count} mail or calendar apps reconnected with newer state'
   restore_divergence_modal_title: Restore divergence (forensic)
   restore_divergence_detail_row: '{collection} · {mua} · client modseq {client} / server modseq {server} · ~{lost} writes lost'
   restore_divergence_unknown_mua: (unknown)
@@ -2896,7 +2934,7 @@ backups:
   immediate_delete_cancel_button: Cancel
   backup_destinations_title: Backup destinations
   # public-text: app-strings-public
-  backup_destinations_desc: Replicate your data to another nest you control. Chunks are sealed under your backup key — the destination never reads them.
+  backup_destinations_desc: Replicate your data to another place — a second nest you control, a friend's nest or one of your own devices. Everything that travels there is encrypted, apart from a folder you have made public — the destination cannot read the rest.
   # public-text-end: app-strings-public
   backup_destinations_empty: No backup destinations configured.
   backup_destination_add_button: Add destination
@@ -2952,7 +2990,7 @@ backups:
   backup_destination_usage_unknown: 'Nothing held yet'
   backup_sole_client_destination_warning: Every backup destination you have is one of your own devices. Devices get lost, wiped and replaced — add a nest destination so a copy lives somewhere else.
   # public-text: app-strings-public
-  backup_destination_custodian_exposure: This device will keep a complete offline copy of your data. Anyone who can unlock it can read all of it, not just what is on screen.
+  backup_destination_custodian_exposure: This device will keep an offline copy of everything a backup destination keeps. Anyone who can unlock it can read all of it, not just what is on screen.
   # public-text-end: app-strings-public
   # Reclaim this device's copy (`docs/goal/ui/backups.md` § Manage backup
   # destinations). Removing a client-device destination deliberately KEEPS the
@@ -3008,6 +3046,18 @@ backups:
   reseed_refused_other: The nest refused it.
   reseed_gap_sidecarless_segments: '{count} parts of your mail arrived without their index, so some mail is still missing. Run the restore again after this device''s next backup.'
   reseed_gap_unnamed_files: '{count} files arrived without their names, so some files are still missing.'
+  reseed_refused_not_accepted: You did not confirm this part of the copy, so it was left where it is. Run the restore again to see it and decide.
+  reseed_refused_preflight_stale: The copy changed after you confirmed the restore, so this part was left where it is. Run the restore again to see the copy as it is now.
+  reseed_note_unanchored_rows: '{count} files the other nest offered are not in your own record of the backup, so they were left out.'
+  # The pull-back's confirm lines (client-device-custodian.md § What the
+  # pull-back trusts the holder for): one per reserved set from the shared
+  # fauna_client_backup::reseed::preflight_lines, then one for the folders.
+  reseed_preflight_vouched: '{set}: the copy is as new as or newer than what this device last checked on {date} (version {generation}).'
+  reseed_preflight_vouched_undated: '{set}: the copy is as new as or newer than what this device last checked (version {generation}).'
+  reseed_preflight_rolled_back: '{set}: the copy is OLDER than what this device last checked (version {generation}, this device saw version {pinned}). Restoring it brings back that older state.'
+  reseed_preflight_unvouched: '{set}: this device has never checked this copy, so it cannot tell whether it is the newest (version {generation}).'
+  reseed_preflight_withheld: '{set}: part of the copy is MISSING — this device last checked version {pinned} of it, and the other nest no longer offers it. Restoring brings the rest back without it.'
+  reseed_preflight_folders: '{count} folders come back as the other nest holds them. This device cannot check that they are complete or the newest.'
   # ── The recovery gesture on the fifth audit-alert reason (ui/backups.md
   # § Audit-alert surface; segment-backup-protocol.md § Recovery into the
   # lived-in nest that regressed). The result lines are composed by the shared
@@ -3102,11 +3152,13 @@ backups:
     stored_size: Stored Size
     dedup_ratio: Dedup Ratio
     storage_backend: Storage Backend
+    compression_label: Compression
+    chunk_sizes_label: Chunk Sizes
     # public-text: app-strings-public
     encryption: 'Encryption & Compression'
     encryption_algo: ChaCha20-Poly1305
-    compression: zstd level 3
-    chunk_sizes: 512 KB - 16 MB avg 4 MB
+    compression: zstd
+    chunk_sizes: up to 8 MB; larger files split into chunks of 2 MB on average, 8 MB at most
     # public-text-end: app-strings-public
     loading_stats: Loading statistics...
   # Snapshot info inspector (macOS MacSnapshotDetailView Info tab).
@@ -3242,6 +3294,11 @@ folders:
   share_transfer_state_pulling: Receiving
   share_transfer_state_up_to_date: Up to date
   share_transfer_state_limited: 'Limited by {source}'
+  # A pull that failed keeps its row (p2p.md § Cross-user shared-set transfer →
+  # The transfer row of a pull that failed): before admission, unreachable;
+  # after it, interrupted. User-approved 2026-11-01.
+  share_transfer_state_unreachable: Could not reach their device
+  share_transfer_state_interrupted: Connection lost; retrying
   share_transfer_source_free_space: free space on this device
 devices:
   title: Devices
@@ -3291,6 +3348,13 @@ devices:
   member_note: "Removing a device here is permanent: there is no undo, and it must sign in again from scratch. A listed device is not necessarily a problem — one that has signed in but not yet registered with the server appears here until it does. Before removing one, compare its fingerprint with the devices you still have: each shows its own on its Devices page, and the one to remove matches none of them. If two appear where you expected one, one of them is a device you hold."
   # public-text-end: app-strings-public
   member_remove_confirm: "Yes, remove it permanently"
+  # The rename affordance on every device-card (device-rename-* — ui/devices.md
+  # § Device names; IDs user-approved 2026-11-01): the row's button, the open
+  # editor's label (prefilled with the device's current name) and its save
+  # button; cancel is common.cancel.
+  rename: Rename
+  rename_label: Device name
+  rename_confirm: Save name
   folders: Folders
   add_folder: Add Folder
   retention: Retention
@@ -3340,8 +3404,8 @@ devices:
   # at the current tip. Never stored or asked; no toggle.
   # public-text: app-strings-public
   keyless_posture_badge: "Relay only — holds no keys"
-  custody_holder_section: "Custodians — who holds sealed copies of your data"
-  custody_holder_scope: "Trusted to hold sealed copies — cannot read them, apart from what you published to everyone"
+  custody_holder_section: "Custodians — who holds encrypted copies of your data"
+  custody_holder_scope: "Trusted to hold encrypted copies — cannot read them, apart from what you published to everyone"
   # public-text-end: app-strings-public
   custody_receipt_fresh: "Last confirmed {when}"
   custody_receipt_stale: "Stale — last confirmed {when}. Treat this copy as degraded."
@@ -3351,12 +3415,14 @@ devices:
   # REQUIRED honest-bound copy (nests.md § Trust facet — custody rows): never
   # over-promise past this sentence.
   # public-text: app-strings-public
-  custody_revoke_bound_note: "Stops future copies and serving on honest devices. Copies already held stay where they are, no more readable to the holder than before."
+  custody_revoke_bound_note: "Stops future copies and serving on honest holders. Copies already held stay where they are, no more readable to the holder than before."
   # public-text-end: app-strings-public
-  custody_held_section: "Held for others — sealed copies this device keeps"
+  # public-text: app-strings-public
+  custody_held_section: "Held for others — encrypted copies you keep for them"
+  # public-text-end: app-strings-public
   custody_held_owner: "Holding for {owner}"
   # public-text: app-strings-public
-  custody_held_scope_account: "Their account's sealed data — unreadable on this device, apart from what they published to everyone"
+  custody_held_scope_account: "Their account's encrypted data — unreadable where you hold it, apart from what they published to everyone"
   # public-text-end: app-strings-public
   # custody-held-restore-address (devices.md § Custody facet): a NEST-form hold
   # only — the accept's URL verbatim, which the owner types on a new device
@@ -3374,11 +3440,13 @@ devices:
   # for that owner the stored copy falls too.
   custody_remove: "Remove and free the space"
   custody_remove_done: "Removed — the space is free."
-  custody_offer_title: "{owner} asks this device to hold sealed copies"
+  # public-text: app-strings-public
+  custody_offer_title: "{owner} asks you to hold encrypted copies"
+  # public-text-end: app-strings-public
   # REQUIRED custody-floor copy (devices.md § Custody facet piece 3): states
   # what this device would SEE — the shape, never the content — before accept.
   # public-text: app-strings-public
-  custody_offer_floor: "This device would store sealed data it cannot read, apart from what they have published to everyone. Of the rest it would see only the shape: which scopes exist, how much is stored, and when it changes — never the content."
+  custody_offer_floor: "Their copies would be stored encrypted wherever you hold them, and could not be read there, apart from what they have published to everyone. Of the rest you would see only the shape: what kinds of their data you hold, how much is stored, and when it changes — never the content."
   # public-text-end: app-strings-public
   custody_offer_accept: "Hold for them"
   custody_offer_decline: "Decline"
@@ -3392,13 +3460,15 @@ devices:
   custody_degraded_badge: "Degraded — some copies were dropped under the budget"
   # The offer-initiation (mint) flow — v1 offers the whole account's sealed
   # planes with the default window; the request rides an existing conversation.
-  custody_mint_button: "Ask a friend to hold sealed copies"
+  # public-text: app-strings-public
+  custody_mint_button: "Ask a friend to hold encrypted copies"
+  # public-text-end: app-strings-public
   custody_mint_host_label: "Who to ask"
   custody_mint_host_placeholder: "Choose a contact"
   # REQUIRED floor copy at mint (nests.md § Trust facet — custody rows):
   # choosing custodians is choosing who sees that shape.
   # public-text: app-strings-public
-  custody_mint_floor: "Their device will store sealed copies it cannot read, apart from what you have published to everyone. Of the rest they will see only the shape — which scopes exist, how much is stored, and when it changes — never the content. Choosing custodians is choosing who sees that shape."
+  custody_mint_floor: "They will store encrypted copies, on one of their devices or on their nest, that they cannot read, apart from what you have published to everyone. Of the rest they will see only the shape — what kinds of your data they hold, how much is stored, and when it changes — never the content. Choosing custodians is choosing who sees that shape."
   # public-text-end: app-strings-public
   custody_mint_confirm: "Send the request"
   custody_mint_no_contacts: "Start a conversation with them first — the request travels over it."
@@ -3458,17 +3528,18 @@ devices:
   # Shown in place of folder_audience_shared_hint while a shared folder is
   # currently public: its picker offers Shared as the one way back.
   # public-text: app-strings-public
-  folder_audience_public_bound_hint: This folder is shared with other people and currently public. Pick Shared to re-seal it so only those people can read it. Anything published while it was public should still be treated as public.
+  folder_audience_public_bound_hint: This folder is shared with other people and currently public. Pick Shared to encrypt it again so only those people can read it. Anything published while it was public should still be treated as public.
   # public-text-end: app-strings-public
   # The declassify dialog (folder-audience-public-confirm) — the explicit owner
   # confirm the public audience is gated on (principles.md § The user always
   # controls their data). Both consequences are stated, because both surprised
   # people in review: names and paths go public too (they become URLs), and the
-  # flip back does NOT retroactively re-seal what was already readable.
+  # flip back re-encrypts the folder's files, its public-window back-catalogue
+  # included, but cannot take back what was read or copied while it was public.
   declassify_title: Make this folder public?
   # public-text: app-strings-public
   declassify_body: Anyone on the web will be able to read this folder's files, and its file and folder names too — they become part of the address of each file.
-  declassify_irreversible: Making it private again protects only files you add afterwards. Anything published while the folder is public should be treated as public for good.
+  declassify_irreversible: Turning it back later encrypts its files again, but anything published while the folder is public may already have been read or copied, so treat it as public for good.
   # public-text-end: app-strings-public
   declassify_confirm: Make public
   # folder-audience-unattested + folder-audience-reconfirm-button — a public
@@ -3557,7 +3628,7 @@ devices:
   # Per-set "serve over WebDAV" opt-in (every owner row) — webdav-server.md §
   # Independent enablement point 2. Flipping it drives FoldersAuthor::serve_set.
   serve_webdav: Serve over WebDAV
-  serve_webdav_hint: Browse and edit this set from any WebDAV client (Finder, GNOME Files, rclone).
+  serve_webdav_hint: Browse and edit this folder from any WebDAV client (Finder, GNOME Files, rclone).
   # Shown in place of serve_webdav_hint, with the toggle disabled, when the actor
   # holds no MSEK — serving seals the WebdavKeysBlob under the mail encryption key,
   # which is minted when mail is first enabled (webdav-server.md § Independent
@@ -3571,6 +3642,11 @@ devices:
   show_on_demand_finder: Show in Finder
   show_on_demand_files: Show in Files
   show_on_demand_hint: Browse this set on demand — files download when opened and can be freed again.
+  # Beneath that switch while the OS holds the set's File Provider disabled
+  # (folder-on-demand-os-enable-hint); the pane path is the one measured.
+  on_demand_needs_files_enable: Not shown in Files yet — in the Files app open Browse, choose Edit from the ⋯ menu and turn on Fauna.
+  on_demand_needs_extension_enable: Not shown in Finder yet — turn on Fauna under System Settings → General → Login Items & Extensions → Extensions.
+  on_demand_open_settings: Open System Settings
   # Shown in place of the toggle while the set has a bound location — the
   # binding is the set's one local presence (bound location outranks on-demand).
   on_demand_bound_hint: This set syncs to its bound location; remove the binding to show it on demand instead.
@@ -3607,6 +3683,15 @@ devices:
   # device's own act — nothing is sent).
   error_set_p2p_participation: "Couldn't change peer transfers: {message}"
   error_p2p_remote_enable: "Peer transfers can only be turned on from that device itself. From here you can only turn them off."
+  # `DevicesMachine::rename_device` (devices.md § Device names, rule (1)): the
+  # nest's failure, and the refusal made before any call — a device name rests
+  # sealed under the owner's key, so a reader holding none sends nothing.
+  error_rename_device: "Couldn't rename the device: {message}"
+  error_rename_needs_key: "This app can't rename devices until it holds your account key."
+  # The typed name is one of the names the apps give an unrenamed device
+  # (fauna-tui, fauna-ios, …) — reserved, so a renamed device never reads as
+  # an unrenamed one; nothing is sent.
+  error_rename_reserved_name: "That name is the one an app gives a device you haven't named. Choose another."
   # `DevicesMachine::remove_device`'s best-effort fleet-scope leg
   # (`AccountStoreHandle::remove_fleet_device`, devices.md § Removing a Device):
   # the nest deletion above already succeeded when this fires.
@@ -3885,7 +3970,7 @@ sessions:
   revoke_others_cancel: Cancel
   # public-text: app-strings-public
   revoke_note: Revoking ends a sign-in and makes whoever held it prove themselves again. It does not sign a device out — a device that holds your secret key or a device grant signs itself straight back in. To end a device for good, remove it under Settings → Devices. If someone else holds your secret key, only your recovery kit ends them (Settings → Account → Recovery Kit → My Identity Was Stolen).
-  lockout_warning: 'Lock this account for 24 hours. Every device is signed out, this one too. Nobody can sign in for 24 hours, you included, and there is no unlock. It does not remove somebody who holds your secret key — they come back when the lock ends. They can do the same to you: anyone with your secret key can sign you out and lock the account, again every 24 hours. Your recovery kit still works while the account is locked and moves it to a new key the thief cannot use (Settings → Account → Recovery Kit → My Identity Was Stolen) — a lock you did not set is itself the sign to use it.'
+  lockout_warning: 'Lock this account for 24 hours. Every device is signed out, this one too. Nobody can sign in for 24 hours, you included, and there is no unlock. (On an account that is an admin of its nest, the lock signs every device out but does not stop anyone signing in again.) It does not remove somebody who holds your secret key — they come back when the lock ends, or at once on an account that is an admin of its nest. They can do the same to you: anyone with your secret key can sign you out and lock the account, again every 24 hours. Your recovery kit still works while the account is locked and moves it to a new key the thief cannot use — on a device that holds your secret key, choose My Identity Was Stolen on the Account locked screen (on an account that is an admin of its nest, which is not locked out, under Settings → Account → Recovery Kit). A lock you did not set is itself the sign to use it.'
   # public-text-end: app-strings-public
   lockout_confirm_placeholder: Type LOCK to confirm
   lockout_button: Lock for 24 Hours
@@ -3915,12 +4000,12 @@ settings:
   recovery_kit:
     title: Recovery Kit
     # public-text: app-strings-public
-    desc: An offline key that can recover your account if you lose your identity secret — or take it back if someone steals it. It is shown once and never stored on this device.
+    desc: A second key, kept only by you and only offline, that outranks your secret key — it can get your account back if you lose your secret key, or take it back if someone steals it. It is shown once, and no device keeps a copy.
     # public-text-end: app-strings-public
     # The four states of recovery-kit-status.
     # public-text: app-strings-public
-    status_never_created: 'No recovery kit. If you lose your identity secret, your account cannot be recovered, and if someone steals it, you cannot take it back.'
-    status_registered: Your recovery kit is active, and a sealed copy of your identity secret is stored for it.
+    status_never_created: 'No recovery kit. If every copy of your secret key is lost, your account cannot be recovered, and if someone steals it, you cannot take it back.'
+    status_registered: Your recovery kit is active, and the copy of your secret key that only your kit opens is stored.
     # public-text-end: app-strings-public
     # ⚠ The no-escrow arm must say BOTH halves plainly (identity-succession.md
     # § Seed escrow → Lifecycle on the nest, the landed-re-put ruling,
@@ -3929,8 +4014,8 @@ settings:
     # a new kit and retires the one the user may have just spent 30 days
     # landing.
     # public-text: app-strings-public
-    status_registered_no_escrow: 'Your recovery kit is active, but no sealed copy of your identity secret is stored — your recovery phrase cannot recover this account right now. Enter your kit below and press Restore Phrase Recovery to fix this.'
-    status_replacement_pending: 'A replacement of your recovery kit was requested with your identity secret alone, and takes effect in {days} days. Cancel it below if it was not you.'
+    status_registered_no_escrow: 'Your recovery kit is active, but the copy of your secret key that only your kit opens is not stored, so the kit cannot recover this account right now. Enter your kit below and press Restore Kit Recovery to fix this.'
+    status_replacement_pending: 'A replacement of your recovery kit was requested with your secret key alone, and takes effect in {days} days. Cancel it below if it was not you.'
     # public-text-end: app-strings-public
     # The fifth: before the status resolves, every one of the four actions below
     # is dead (each gates on the status the page has not read yet), so the line
@@ -3942,7 +4027,9 @@ settings:
     lost: I Lost My Kit
     # The RegisteredNoEscrow repair: re-puts the sealed copy under the kit the
     # user holds, without retiring it. Renders only in that state.
-    escrow_reseal: Restore Phrase Recovery
+    # public-text: app-strings-public
+    escrow_reseal: Restore Kit Recovery
+    # public-text-end: app-strings-public
     # The group-sweep retry (identity-succession.md § Propagation → MLS groups;
     # the mechanism is fauna_client_recovery::retry_group_sweep). Renders only
     # while the sweep report shows unfinished work — the escrow_reseal shape: an
@@ -4048,10 +4135,14 @@ settings:
     # Kit-in-hand entry (settings.md § Recovery kit → Kit-in-hand entry,
     # user-approved 2026-08-01): the onboarding recovery_entry screen's OWN
     # input, reused inline here because a pasted phrase is the same artifact.
-    kit_phrase_placeholder: Paste your recovery phrase (fauna://recovery link or 64-character code)
+    # public-text: app-strings-public
+    kit_phrase_placeholder: Paste your recovery kit (fauna://recovery link or 64-character code)
+    # public-text-end: app-strings-public
     # The phrase field is empty when a kit-in-hand ceremony is clicked. An
     # honest refusal on error-message, never a silently dropped gesture.
-    kit_phrase_required: Paste the recovery phrase for this account first.
+    # public-text: app-strings-public
+    kit_phrase_required: Paste the recovery kit for this account first.
+    # public-text-end: app-strings-public
     # The post-succession group sweep's outcome — the ceremony's own result,
     # shown in the flow that ran it (identity-succession.md § Propagation →
     # MLS groups). Deliberately TWO facts, never one "you are safe" verdict:
@@ -4135,7 +4226,7 @@ settings:
     # describe groups that do not exist.
     review_remove_done_here: 'Removed {who} from {removed} of your group conversations.'
     review_remove_none_here: '{who} is not in any of your group conversations on this device.'
-    review_remove_folder_seats: 'They are also in {seats} shared folder(s). Remove them in each folder''s sharing settings — or leave the set, if it is not yours — then choose Remove again.'
+    review_remove_folder_seats: 'They are also in {seats} shared folder(s). Remove them in each folder''s sharing settings — or leave the folder, if it is not yours — then choose Remove again.'
     review_remove_unsynced_seats: 'They are also in {seats} group chat(s) not yet synced to this device. Choose Remove again after syncing completes, or from a device that has those chats.'
     # The eviction completed but the verdict could not be written, so the row
     # stays even though the removal worked. Naming that is the honest rendering:
@@ -4282,7 +4373,7 @@ settings:
     title: iCloud Backup
     toggle: Back up identity to iCloud Keychain
     # public-text: app-strings-public
-    footer: When off (the default), your identity stays on this device and never syncs to iCloud. Turn it on to let iCloud Keychain restore your identity on a new device. Fauna's own device-add and recovery flows are the primary way to use multiple devices.
+    footer: When off (the default), your identity stays out of iCloud. Turn it on to let iCloud Keychain restore your identity on a new device. Adding a device and your recovery kit remain the main ways to have your identity in more than one place.
     # public-text-end: app-strings-public
   check_for_updates: Check for Updates
   up_to_date: Up to date
@@ -4296,11 +4387,12 @@ settings:
   # `settings-terms-link` in the About row, and the onboarding notice's
   # `onboarding-terms-link` — both open (or, on a terminal, show and copy)
   # `fauna_core::TERMS_URL` (terms-and-content-guidelines.md § The decisions,
-  # item 4 (b)). Names a public page, so it rides in its public-texts request to
-  # be reviewed and marked in the round (the companion rule, public-texts.md
-  # § The boundary); the wording is the terms doc's § Element IDs draft, and
-  # until the round it is the apps' own.
+  # item 4 (b)). Names a public page, so a public text: marked in its own
+  # app-strings-public region (public-texts.md § The boundary;
+  # terms-and-content-guidelines.md § Implementation status today).
+  # public-text: app-strings-public
   terms_link: Terms and content guidelines
+  # public-text-end: app-strings-public
   mls_available: 'MLS encryption: Available'
   mls_not_available: 'MLS encryption: Not available'
   push_notifications:
@@ -4335,7 +4427,9 @@ settings:
     enable_title: Enable mail
     enable_subtitle: Allow a third-party mail app to connect over IMAP and SMTP
     disable_title: Disable mail?
-    disable_warning: This revokes all your mail credentials and clears your mail encryption key. Third-party mail apps (IMAP/CalDAV) will stop working until you re-enable mail.
+    # public-text: app-strings-public
+    disable_warning: Mail apps you connected can no longer send or read mail until you turn mail back on. Calendar, contacts and file apps that sign in with the same password keep working. Your mail keys stay, so your earlier mail stays readable, and turning mail back on needs no new set-up.
+    # public-text-end: app-strings-public
     disable_confirm: Disable mail
     status_disabled: Mail is disabled
     status_enabled: All up to date
@@ -4427,7 +4521,7 @@ settings:
     export_my_data: Export My Data
     delete_account: Delete Account
     # public-text: app-strings-public
-    delete_confirm_text: 'This permanently removes your handle and data from this node. Your key is not affected. Take your data first: use Export My Data in Settings → Account and, if you have mail, Export in Settings → Mail.'
+    delete_confirm_text: 'This permanently removes your handle and data from this nest. Your key is not affected. Take your data first: Export My Data, in Settings → Account, downloads what your nest holds for you, your mail included; to move your mailbox to another mail service, use Export mailbox, among the mail pages in Settings.'
     # public-text-end: app-strings-public
     connected_services: Connected Services
     usage: Usage
@@ -4691,7 +4785,7 @@ settings:
   about: About
   # public-text: app-strings-public
   about_name: Fauna for Windows
-  about_desc: Encrypted messaging, contacts, and file sync.
+  about_desc: Your feed, messages, mail, calendar and files, on a server you control.
   danger_zone_desc: Permanently delete your account and all associated data. This action cannot be undone.
   # public-text-end: app-strings-public
   delete_confirm_placeholder: Type DELETE to confirm
@@ -4708,6 +4802,7 @@ settings:
     update_inbox: Failed to update inbox mode
     change_handle: Failed to change handle
     delete_account: Deletion failed
+    icloud_backup: The copy to iCloud Keychain could not be made, so the backup stays off
     export: Export failed
     export_status: 'Export failed: {status}'
     create_filter: Failed to create filter
@@ -4738,13 +4833,17 @@ nests:
   # public-text-end: app-strings-public
   # participant-escrow-holder-badge (T16; participants.md § Roles) — trust
   # vocabulary, derived from recorded escrow receipts.
-  escrow_holder_badge: Holds your recovery escrow
+  # public-text: app-strings-public
+  escrow_holder_badge: Holds the copy your recovery kit opens
+  # public-text-end: app-strings-public
   # ── T16 custody rows (nests.md § Trust facet — custody rows): one row per
   # custodian NEST holding sealed copies under a keyless custody grant (the
   # nest-custodian identity fact, ruled 2026-08-17). The shared custody copy
   # (receipt states, held-bytes, revoke + honest bound, scope line) reuses the
   # devices.custody_* strings — stated once, rendered on both pages.
-  custody_nest_label: "{host}'s nest — trusted to hold sealed copies"
+  # public-text: app-strings-public
+  custody_nest_label: "{host}'s nest — trusted to hold encrypted copies"
+  # public-text-end: app-strings-public
   # ── Restore from a custodian nest (nests.md § Trust facet — restore from a
   # custodian nest): the page-level form (nests-custody-restore-*), the per-row
   # warm gesture (nest-trust-custody-restore-button), and one notice state per
@@ -4761,9 +4860,12 @@ nests:
   custody_restore_revoked: you revoked this nest's custody
   custody_restore_not_admitted: "That nest didn't let this device in. The address may be wrong, the nest may be down, or it may hold nothing for this account — this device can't tell which."
   custody_restore_restored: "Restored {count} of your account's records."
-  custody_restore_sealed: "{count} came back sealed and stay unreadable until this device has their key."
+  # public-text: app-strings-public
+  custody_restore_sealed: "{count} came back still encrypted and stay unreadable until this device has their key."
+  # public-text-end: app-strings-public
   custody_restore_nothing_new: Nothing new — this device already has everything that nest holds for you.
   custody_restore_mismatch: "Restored — but the nest that answered is not the one your records name for this address. Your records stand; check the address with whoever runs that nest."
+  custody_restore_unchecked: "Restored — but this device couldn't confirm that the nest that answered is the one your records name for this address. Your records stand; check the address with whoever runs that nest."
   # A current grant (nest-trust-grant-*)
   trusted_to_read: 'Trusted to read:'          # nest-trust-grant-scope prefix
   # Content-kind labels for a grant's scope line — the per-app shell maps the
@@ -4841,9 +4943,7 @@ nests:
   bound_note_bounded_mail: >-
     This trust is cryptographically time-boxed: once its window ends (accurate
     to within about a week), this nest can no longer read new mail at all — not
-    even by re-acquiring a key. Within the window it can only open mail sealed
-    under that period's rotating keys, so content sealed before the schedule
-    caught up may still be unreadable to it.
+    even by re-acquiring a key. Within the window it can only open mail encrypted under that period's rotating keys, so content encrypted before the schedule caught up may still be unreadable to it.
   # public-text-end: app-strings-public
   # Grant-event history rows (nest-trust-history-item), most-recent-first
   history_minted: 'Trusted to read {scope} · {when}'
@@ -4854,7 +4954,9 @@ nests:
   # nest's row: the seal grant (this nest may seal and upload your backups)
   # and one row per destination (this nest may write your backups there).
   # Vocabulary: trust, never capability/grant.
-  backup_scope_seal: Backs up your messages for you
+  # public-text: app-strings-public
+  backup_scope_seal: Encrypts and uploads the backups of your mail, calendar, contacts and posts
+  # public-text-end: app-strings-public
   backup_scope_writer: 'Writes your backups to {destination}'
   backup_since: 'Trusted since:'               # nest-trust-backup-since prefix
   # Row state (nest-trust-backup-status). "Unreachable" means we could not ask
@@ -4955,14 +5057,18 @@ nests:
   # the account plane, which is what lets it serve recovery of a lost box.
   # One item of a comma-joined list, so lower-case. The other capabilities
   # still show their wire names.
-  capability_account_replica: sealed copy of your account settings
+  # public-text: app-strings-public
+  capability_account_replica: encrypted copy of your account settings
+  # public-text-end: app-strings-public
   expiry_label: 'Expires:'
   expiry_never: Never expires
   # Linking by address is refused because the two nests hold recovery-key
   # histories of which neither continues the other (identity-succession.md
   # § Enforcement on the home nest → Every nest the identity is linked to).
   # Shown in the page's error-message; nothing was written at either nest.
-  link_recovery_keys_differ: These two nests hold different recovery keys for this account, so they can't be linked.
+  # public-text: app-strings-public
+  link_recovery_keys_differ: These two nests know different recovery kits for this account, so they can't be linked.
+  # public-text-end: app-strings-public
   # ── Forward queue (nests-forward-*, ruled 2026-09-23; private-mode.md § Post
   # Forwarding → the queue is the user's to see; ui/nests.md § Forward queue).
   # Page-level, rendered only while this nest holds posts of yours it could
@@ -4986,8 +5092,7 @@ logs:
   title: Logs
   # public-text: app-strings-public
   description: >-
-    Recent activity recorded on this device, newest first. No message contents
-    or secrets are ever logged — only what happened, when, and where.
+    Recent activity recorded on this device, newest first — what happened, when, and where. Fauna is written never to record message contents or secrets here.
   # public-text-end: app-strings-public
   filter_label: Severity
   filter_all: All
@@ -5438,7 +5543,7 @@ mail_import:
   microsoft_sign_in_again: Sign in with Microsoft again
   # Until the project's Microsoft app registration exists the button is inert
   # with this sentence — never a failing request.
-  microsoft_unavailable: Microsoft sign-in is not available yet.
+  microsoft_unavailable: Microsoft sign-in is not available in this version of Fauna.
   # A refused token refresh at a reconnect ends the import (§ Failure handling).
   microsoft_session_sign_in_again: >-
     The import stopped: Microsoft no longer accepts this sign-in. Sign in with
@@ -5584,9 +5689,7 @@ archive_import:
   title: Import from other services
   # public-text: app-strings-public
   description: >-
-    Bring your posts, photos and events from a Facebook or Instagram export
-    archive into Fauna, at their original dates and audiences. The archive
-    itself stays in a sealed folder on your nest.
+    Bring your posts, photos and events from a Facebook export archive into Fauna, at their original dates. Unless you choose Only me, a public post can be seen on Fauna but is never shared to other networks, and a Friends-only post is visible to the people who follow you; every other post, and your events, are visible only to you. The archive itself is stored encrypted in a folder on your nest.
   # public-text-end: app-strings-public
   unavailable: >-
     Importing needs a session that holds your identity key; this one does not.
@@ -5616,8 +5719,7 @@ archive_import:
   audience_only_me: Only me
   # public-text: app-strings-public
   scope_audience_summary_fmt: >-
-    {known} posts and albums have a recorded audience and import to it; {unknown}
-    have none recorded and will be visible only to you.
+    {known} posts and albums have a recorded audience: a public one can be seen on Fauna, a Friends-only one by the people who follow you, and any other only by you; {unknown} have none recorded and will be visible only to you.
   scope_audience_summary_only_me: Everything will be visible only to you.
   # public-text-end: app-strings-public
   scope_hidden_tiers_unavailable: >-
@@ -5630,8 +5732,9 @@ archive_import:
   start_button: Start import
   progress_title: "Step 5 — Importing"
   progress_summary_fmt: "{state} · {imported} of {total} · {skipped} skipped"
-  progress_timing_fmt: "{elapsed} elapsed · about {eta} left"
   progress_timing_estimating_fmt: "{elapsed} elapsed · estimating the time left"
+  progress_line_fmt: "{state} · {imported} of {total} · {skipped} skipped · {elapsed} elapsed · about {eta} left"
+  progress_line_estimating_fmt: "{state} · {imported} of {total} · {skipped} skipped · {elapsed} elapsed · estimating the time left"
   progress_row_fmt: "{imported} of {count} · {skipped} skipped"
   state_running: Importing
   state_paused: Paused
@@ -5644,9 +5747,24 @@ archive_import:
   error_log_title: Skipped records
   done_title: "Step 6 — Done"
   done_summary_fmt: "{imported} imported · {skipped} skipped"
+  done_unplaced_comments_fmt: "{count} comments could not be placed under a post"
+  done_summary_unplaced_fmt: "{imported} imported · {skipped} skipped · {count} comments could not be placed under a post"
+  # Ruling 11 (archive-import.md § Linking and merging): once links exist,
+  # how many comments and reactions came back from linked contacts.
+  done_summary_links_fmt: "{imported} imported · {skipped} skipped · {claimed} comments and reactions came back from linked contacts · {unmatched} could not be matched to a post"
+  done_summary_unplaced_links_fmt: "{imported} imported · {skipped} skipped · {count} comments could not be placed under a post · {claimed} comments and reactions came back from linked contacts · {unmatched} could not be matched to a post"
+  # The Contacts row's link prompt (ruling 8): `contact-archive-link-prompt`,
+  # `contact-archive-linked`.
+  link_prompt_fmt: "Is {contact} the “{archived_name}” from your {platform} friends?"
+  link_prompt_unnamed_fmt: "Is {contact} one of your {platform} friends?"
+  link_yes: "Yes, link"
+  link_no: "No"
+  linked_fmt: "Linked: {platform}"
+  linked_unmatched_fmt: "Linked: {platform} · {unmatched} could not be matched to a post"
+  unlink: Unlink
   view_imported_button: View imported posts
   review_skipped_button: Review skipped
-  profile_prefill_button: Use the archive's profile name and bio
+  profile_prefill_button: Use the archive's profile name, bio, links and picture
   folder_link_fmt: "Archive folder: {folder}"
   category_posts: Posts
   category_albums: Albums
@@ -5754,7 +5872,9 @@ nostr:
     inbound_title: Inbound to feed
     inbound_subtitle: Show events from followed Nostr users in your feed
     expose_title: Expose content
-    expose_subtitle: Allow Nostr users to see your Fauna content
+    # public-text: app-strings-public
+    expose_subtitle: Serve your public posts, apart from posts you imported from another service, to Nostr users from your nest's relay
+    # public-text-end: app-strings-public
   relays:
     title: Relays
     none: No relays configured. Default relays will be used.
@@ -5852,16 +5972,15 @@ status:
     # public-text: app-strings-public
     open_desc: Anyone can message you directly.
     allow_knock: Allow Knocks
-    allow_knock_desc: New contacts must send a knock request first.
+    allow_knock_desc: New contacts must send a knock request first. This isn't applied yet to someone on another nest who starts a conversation with you, unless they do it by inviting you to a room.
     contacts_only: Contacts Only
-    contacts_only_desc: Only confirmed contacts can message you.
+    contacts_only_desc: Only confirmed contacts can message you. This isn't applied yet to someone on another nest who starts a conversation with you, unless they do it by inviting you to a room.
     closed: Closed
     closed_desc: No new messages accepted.
     # public-text-end: app-strings-public
   encryption:
     key_packages: Key Packages
     available: '{count} available'
-    low_keys: Low key packages. Publishing more...
     checking: Checking encryption status...
     publishing: Publishing...
     mls_engine: MLS Engine
@@ -5876,7 +5995,7 @@ status:
     permission_denied: Notification permission was denied.
     title: Push Notifications
     # public-text: app-strings-public
-    content_encrypted: Notification content is encrypted end-to-end.
+    content_encrypted: Notification content is encrypted end-to-end, apart from a generic alert and the number of unread items, which Apple's notification service carries in the clear.
     # public-text-end: app-strings-public
     registered: Registered with server
     denied_title: Notifications Disabled
@@ -5914,10 +6033,6 @@ status:
   change_handle:
     placeholder: new-handle
     changing: Changing...
-  danger_zone:
-    # public-text: app-strings-public
-    delete_hint: Permanently removes your handle and data from this node. Your key is not affected.
-    # public-text-end: app-strings-public
   admin_section:
     title: Nest Administration
     description: You are an admin of this nest.
@@ -5927,9 +6042,6 @@ status:
   build:
     title: Build
     commit: Commit
-    # public-text: app-strings-public
-    verify_hint: 'Verify this build: clone the repo at this commit, build locally, and compare file hashes.'
-    # public-text-end: app-strings-public
 admin:
   aliases: Aliases
   # Tooltip on the admin-nav-back button — leaves the admin shell for the
@@ -6236,7 +6348,9 @@ admin:
     # nest-retirement.md § Layout & flow — beside Factory reset, and labelled
     # sharply apart from it: reset wipes a box you keep, retire destroys it.
     retire_title: Retire this server
-    retire_desc: Delete this server at your cloud provider and remove the DNS records that point at it. Unlike a factory reset, which wipes a server you keep, this destroys the server itself. You'll need your cloud provider's token.
+    # public-text: app-strings-public
+    retire_desc: If Fauna created this server in your cloud account since 8 July 2026, when it began marking the servers it creates, or it is on OVH, delete it there and clean up the DNS records that belong to it. Unlike a factory reset, which wipes a server you keep, this destroys the server itself. You'll need your cloud provider's token.
+    # public-text-end: app-strings-public
     retire_button: Retire this server…
     load_settings_error: 'Failed to load nest settings: {message}'
     update_setting_error: 'Failed to update nest setting: {message}'
@@ -6474,8 +6588,8 @@ admin:
       statutory demand — and, on the nest its publisher runs, an app store's or
       an authority's request to remove an item); the other is an admin's block
       of a reported item. Every takedown serves a visible tombstone in place of
-      the content, can be appealed by the author of a post, and writes a
-      permanent audit record. It is never a policy or opinion lever.
+      the content, can be appealed by the author, and writes a permanent audit
+      record. It is never a policy or opinion lever.
     # public-text-end: app-strings-public
     takedown_content_id_label: Content id
     takedown_type_post: Post
@@ -6486,10 +6600,12 @@ admin:
     takedown_arm_restore: Restore…
     takedown_blocked_no_content: Enter the content id of the item named by the legal obligation.
     takedown_blocked_no_reference: A legal reference is required — a takedown without one is refused.
+    # public-text: app-strings-public
     takedown_confirm_takedown: >-
       Take down {content_type} {content_id}, citing "{reference}"? A visible
-      tombstone will be served in its place, the author of a post can appeal,
-      and a permanent audit row records this action.
+      tombstone will be served in its place, the author can appeal, and a
+      permanent audit record keeps this action.
+    # public-text-end: app-strings-public
     takedown_confirm_restore: >-
       Overturn the takedown of {content_type} {content_id}? The content serves
       again; the takedown record remains as history.
@@ -6497,7 +6613,9 @@ admin:
     takedown_confirm_button_restore: Confirm restore
     takedown_cancel_button: Cancel
     takedown_working: Submitting…
-    takedown_done: Taken down. A tombstone is served in its place and the author of a post can appeal.
+    # public-text: app-strings-public
+    takedown_done: Taken down. A tombstone is served in its place and the author can appeal.
+    # public-text-end: app-strings-public
     takedown_restored: Restored. The content is served again; the takedown stays on record.
     takedown_failed: 'The nest refused the request: {error}'
     # Reports queue (admin-nest-reports-*; moderation.md § User-initiated
@@ -6536,17 +6654,23 @@ admin:
       levers — suspension on the users page.
     block_item_post: post
     block_item_message: message
+    # public-text: app-strings-public
     block_confirm_block: >-
       Block {item} {content_id} for everyone this nest serves? Reason:
-      {reason}. A notice is shown in its place, the author of a post keeps their
-      view of it and can appeal, and a permanent audit row records this action.
-      Nothing is deleted.
+      {reason}. A notice is shown in its place, the author keeps their view of
+      it — its photos and files are withheld from the author too, and an author
+      on another nest keeps a message only on the devices that already had it —
+      and can appeal, and a permanent audit record keeps this action. Nothing is
+      deleted.
+    # public-text-end: app-strings-public
     block_confirm_unblock: >-
       Unblock {item} {content_id} (blocked for: {reason})? It is served again
       exactly as it was; the block stays on record.
     block_confirm_button_block: Confirm block
     block_confirm_button_unblock: Confirm unblock
-    block_done: Blocked. A notice is shown in its place, the author of a post can appeal, and the report is recorded as acted on.
+    # public-text: app-strings-public
+    block_done: Blocked. A notice is shown in its place, the author can appeal, and the report is recorded as acted on.
+    # public-text-end: app-strings-public
     block_restored: Unblocked. The item is served again; the block stays on record.
     block_failed: 'The nest refused the request: {error}'
     block_cancel_button: Cancel
@@ -6555,8 +6679,10 @@ admin:
     # public-text: app-strings-public
     blocked_desc: >-
       Posts and messages this nest's admins blocked after a report. Each is
-      withheld from everyone this nest serves — a post except from its author —
-      with a notice in its place. Unblock serves it again exactly as it was.
+      withheld from everyone this nest serves except its author — its photos and
+      files from the author too, and an author on another nest keeps a message
+      only on the devices that already had it — with a notice in its place.
+      Unblock serves it again exactly as it was.
     # public-text-end: app-strings-public
     blocked_loading: Loading blocked items…
     blocked_empty: Nothing is blocked.
@@ -6644,16 +6770,13 @@ admin:
     title: Calendar
     description: Calendar (CalDAV) sync for this deployment.
     enabled_label: Enable calendar (CalDAV) on this nest
-    enabled_subtitle: >-
-      Serve calendar sync (CalDAV) for all users. Needs only a real domain with a
-      public certificate — no email infrastructure — so calendar can run with or
-      without email. The shared mail-and-calendar bridge runs whenever this or
-      Enable mail is on.
+    # public-text: app-strings-public
+    enabled_subtitle: Serve calendar sync (CalDAV) for all users. It needs no email infrastructure, so calendar can run with or without email. Calendar, contacts, files and mail share one service, which runs whenever any of them is turned on.
+    # public-text-end: app-strings-public
     caldav_port_label: CalDAV port
-    caldav_port_desc: >-
-      The port the calendar (CalDAV) server listens on for desktop or IP-only nests
-      that have no domain — reach it at https://this-host:port/. Default 8443. On a
-      domain nest this is ignored: CalDAV is served at mail.your-domain on port 443.
+    # public-text: app-strings-public
+    caldav_port_desc: The port calendar, contacts and file apps use when they reach this nest directly at its own address — a nest at home or on a desktop computer. Default 8443. On a server in the cloud with a domain, they are served at your domain's mail server name (mail. followed by your domain) on the standard port, 443, and this setting does not apply.
+    # public-text-end: app-strings-public
     caldav_port_save: Save port
     caldav_port_invalid: "Enter a port number between 1 and 65535."
   contacts_page:
@@ -6661,21 +6784,19 @@ admin:
     description: Contact (CardDAV) sync for this deployment.
     enabled_label: Enable contacts (CardDAV) on this nest
     enabled_subtitle: >-
-      Serve contact sync (CardDAV) for all users. Rides the same server and
-      certificate as calendar — no email infrastructure — so contacts can run
-      with or without email or calendar. The shared bridge runs whenever this,
-      Enable calendar, or Enable mail is on.
+      Serve contact sync (CardDAV) for all users. It needs no email
+      infrastructure, so contacts can run with or without email. Calendar,
+      contacts, files and mail share one service, which runs whenever any of
+      them is turned on.
   files_page:
     title: Files
     description: File (WebDAV) sync for this deployment.
     enabled_label: Enable files (WebDAV) on this nest
     enabled_subtitle: >-
-      Serve file access (WebDAV) for all users. Rides the same server and
-      certificate as calendar and contacts — no email infrastructure — so
-      files can run with or without email, calendar, or contacts. Nothing
-      is served until a user flags a folder for WebDAV. The shared bridge
-      runs whenever this, Enable contacts, Enable calendar, or Enable mail
-      is on.
+      Serve file access (WebDAV) for all users. It needs no email
+      infrastructure, so files can run with or without email. Nothing is
+      served until a user flags a folder for WebDAV. Calendar, contacts, files
+      and mail share one service, which runs whenever any of them is turned on.
   invite_requests_page:
     title: Invite Requests
     description: Review and approve or deny invite requests submitted by users.
@@ -6706,8 +6827,7 @@ admin:
     title: Nest Logs
     # public-text: app-strings-public
     description: >-
-      Recent activity recorded on the nest, newest first. No message contents
-      or secrets are logged — only what happened, when, and where.
+      Recent activity recorded on the nest, newest first — what happened, when, and where. Fauna is written never to record message contents or secrets here.
     # public-text-end: app-strings-public
     empty: No nest log entries yet.
     audit_title: Admin actions
@@ -6800,7 +6920,7 @@ admin:
     title: Mail
     description: Box-wide mail policy — enable mail and tune the inbound perimeter and authentication enforcement. DKIM, TLS, and DNS records are managed automatically.
     enabled_label: Enable mail
-    enabled_subtitle: Run the mail subsystem (SMTP / IMAP / CalDAV) for this nest.
+    enabled_subtitle: Run mail (SMTP and IMAP) for this nest.
     health_title: Mail health
     health_state_off: 'Mail: off'
     health_state_bridge_down: 'Mail: mail service not connected'
@@ -6828,7 +6948,9 @@ admin:
     health_delist: Request removal from the blocklist
     # admin-mail-health-sender-dashboards-note and its two links
     # (mail-deliverability.md § The admin-pane surface): static help, no integration.
-    health_sender_dashboards_note: Gmail Postmaster Tools and Outlook SNDS are externally managed dashboards on the receiver's website. Sign up at postmaster.google.com and sendersms.outlook.com if you want their per-receiver-side view; Fauna doesn't integrate with these APIs (none exist).
+    # public-text: app-strings-public
+    health_sender_dashboards_note: Gmail Postmaster Tools and Outlook SNDS are dashboards that Google and Microsoft run themselves. If you want their view of how your mail is received, sign up with each through its link. Fauna doesn't connect to them.
+    # public-text-end: app-strings-public
     health_sender_dashboard_gmail: Gmail Postmaster Tools
     health_sender_dashboard_outlook: Outlook SNDS
     health_recheck: Check again
@@ -6846,15 +6968,19 @@ admin:
     forward_srs_secret_rotate_confirm: Rotate the forwarding secret? Bounces to mail forwarded before still come back while the old secret is kept.
     forward_srs_secret_rotated: Forwarding secret rotated. The previous one is still honoured for bounces to mail already forwarded.
     auto_enable_new_users_label: Auto-enable mail for new users
-    auto_enable_new_users_subtitle: New users automatically get a mailbox at their handle on first sign-in. Each user can still turn their own mail off.
+    auto_enable_new_users_subtitle: New users automatically get a mailbox at their handle on first sign-in — or, while mail is off and calendars or contacts are served, a password for their calendar and contacts apps. Each user can still turn their own mail off.
     microsoft_group_title: Microsoft sign-in for the Outlook import
-    microsoft_group_desc: The Outlook import signs in to Microsoft through the default app registration. To use your organisation's own registration instead, enter its application (client) ID and, if you like, its directory. Leave both empty to go back to the default.
+    # public-text: app-strings-public
+    microsoft_group_desc: "The Outlook import signs in to Microsoft with your organisation's own app registration: enter its application (client) ID and, if you like, its directory. Until one is entered, the import's Sign in with Microsoft does nothing. Clear both fields and save to remove it."
+    # public-text-end: app-strings-public
     microsoft_requirements: "The registration needs: public client flows turned on; the delegated permissions IMAP.AccessAsUser.All (Office 365 Exchange Online) and offline_access; and supported account types that match the directory."
     microsoft_client_id_label: Application (client) ID
     microsoft_tenant_label: Directory (tenant)
     microsoft_tenant_subtitle: A tenant ID, a verified domain name, or common, organizations or consumers. Empty means common.
     microsoft_save: Save Microsoft registration
-    microsoft_using_default: Using the default registration.
+    # public-text: app-strings-public
+    microsoft_using_default: No registration entered — the Outlook import's Sign in with Microsoft does nothing until one is.
+    # public-text-end: app-strings-public
     microsoft_using_own: Using your organisation's registration.
     microsoft_client_id_invalid: The application (client) ID must be a GUID, such as 00000000-0000-0000-0000-000000000000.
     microsoft_tenant_invalid: The directory must be a tenant ID, a domain name, or common, organizations or consumers.
@@ -6974,7 +7100,7 @@ admin:
     alias_wildcard_prefix_subtitle: Allow name-prefixed aliases that route to the same user.
     alias_save: Save alias policy
     dmarc_group_title: DMARC reports
-    dmarc_group_desc: The reports peer mail servers send about mail claiming to be from your domains, and how long they are kept.
+    dmarc_group_desc: The reports peer mail servers send about mail claiming to be from your domains, how long they are kept, and whether your nest sends reports of its own.
     dmarc_ruf_publish_label: Ask for forensic reports
     # public-text: app-strings-public
     dmarc_ruf_warning: Forensic reports carry recipient email addresses from third-party senders. Enable only if your security team needs forensic-level signal.
@@ -6985,6 +7111,7 @@ admin:
     # public-text: app-strings-public
     dmarc_forensic_retention_warning: Forensic reports hold third-party addresses — keeping them longer than 30 days keeps that personal data longer.
     # public-text-end: app-strings-public
+    dmarc_outbound_aggregate_label: Send daily DMARC reports to other domains
     dmarc_save: Save DMARC policy
   dns:
     title: DNS
@@ -7006,7 +7133,9 @@ admin:
     add_domain: Add domain
     add_domain_placeholder: example.com
     add_domain_submit: Add
-    add_domain_primary_warning: This becomes your nest's primary domain and can never be removed — undoing it later requires renaming onto a different domain.
+    # public-text: app-strings-public
+    add_domain_primary_warning: This becomes your nest's primary domain, which can never be removed, only renamed onto a different domain.
+    # public-text-end: app-strings-public
     primary_badge: Primary
     remove: Remove
     remove_confirm_title: "Remove {domain}?"
@@ -7189,9 +7318,11 @@ moderation:
     note_label: Anything the admins should know? (optional)
     # The consequence line on report-include-text-checkbox — rendered only for
     # a sealed subject, and it names what changes: attaching the text is the
-    # reporter's own act on content they already hold.
+    # reporter's own act on content they already hold — the label follows the
+    # subject: `include_text_label_post` on a gated post.
     # public-text: app-strings-public
     include_text_label: Include the text of this message — the admins will be able to read it
+    include_text_label_post: Include the text of this post — the admins will be able to read it
     # public-text-end: app-strings-public
     block_author_label: Also block this person
     submit: Send report
@@ -7267,12 +7398,12 @@ moderation:
     notice: 'Blocked by this nest''s admin after a report: {reason}'
 # The tier-1 muted-keywords Settings sub-page (content-moderation-and-ranking.md
 # § Resolved design decisions Q3; moderation.md § Muted keywords). The
-# user-global word-list is sealed client-side (the account plane's moderation record)
-# and never leaves the user's devices — the copy says so.
+# user-global word-list is sealed client-side (the account plane's moderation record):
+# the nest stores it encrypted and only the user's devices can read it — the copy says so.
 muted_words:
   title: Muted words
   # public-text: app-strings-public
-  description: A new word is set to “Hide”, so posts and messages containing it collapse behind “Show anyway” and matching posts sink in ranked feeds. A word set to “Show less” only sinks matching posts in ranked feeds — messages show as usual. This list is stored encrypted on your nest, and only your devices can read it.
+  description: A new word is set to “Hide”, so posts, messages and notifications containing it collapse behind “Show anyway” and matching posts sink in ranked feeds. A word set to “Show less” only sinks matching posts in ranked feeds — messages and notifications show as usual. A security notice always shows in full. This list is stored encrypted on your nest, and only your devices can read it.
   # public-text-end: app-strings-public
   input_placeholder: Add a word to mute
   add: Mute word
@@ -7284,9 +7415,9 @@ muted_words:
   # The collapse a muted word causes, on every surface it applies to
   # (content-moderation-and-ranking.md § Composition: feed, conversations,
   # notifications): the placeholder painted in place of the content, and the
-  # session-local reveal. One pair for the one concept — the notifications
-  # collapse uses it first (notification-muted / -reveal-button); the feed's
-  # post_muted_* and the conversation's detail.muted_* copies move onto it.
+  # session-local reveal. One pair for the one concept, read by the feed
+  # (feed-post-muted), the conversation (dm-message-muted) and the
+  # notifications page (notification-muted) alike.
   collapsed: Muted word
   reveal: Show anyway
 # The personalization home (content-moderation-and-ranking.md § Composition,
@@ -7338,10 +7469,7 @@ personalization:
   publish_name_placeholder: e.g. Small orange cats
   # public-text: app-strings-public
   publish_limitation_note: >-
-    You’re sharing the posts below — not the topic itself or anything it learned
-    about you. Only posts this device has already loaded and seen can be
-    included, so the list won’t cover posts you never saw. It’s published
-    anonymously: nothing links the list back to you or your account.
+    You’re sharing the posts below — not the topic itself or anything it learned about you. Only posts this device has already loaded and seen can be included, so the list won’t cover posts you never saw. It’s published without your name or account on it: it is signed by a key made for this topic alone, so the public name you choose is the only name anyone will know it by — though the posts you choose can still say something about you.
   # public-text-end: app-strings-public
   publish_exemplars_title: Posts to include
   publish_exemplars_empty: >-
@@ -7382,13 +7510,7 @@ personalization:
   # examples you marked by hand, never from what you read or watched.
   # public-text: app-strings-public
   publish_limitation_note_model: >-
-    You’re sharing the word patterns this topic learned — not the topic itself,
-    and none of the posts. Unlike a list, a model also matches posts nobody here
-    has seen yet. Only patterns that appear in at least 3 of your marked public
-    posts are included, and that covers both what you marked as more like this
-    and what you marked as less like this — the direction column below shows
-    which is which. It’s published anonymously, and it’s built only from posts
-    you marked by hand: nothing you merely read or watched goes into it.
+    You’re sharing the word patterns this topic learned — not the topic itself, and none of the posts. Unlike a list, a model also matches posts nobody here has seen yet. Only patterns that appear in at least 3 of your marked public posts are included, and that covers both what you marked as more like this and what you marked as less like this — the direction column below shows which is which. It’s published without your name or account on it: it is signed by a key made for this topic alone, so the public name you choose is the only name anyone will know it by — though someone who compares its word patterns with public posts may be able to guess which of them you marked. It’s built only from posts you marked by hand: nothing you merely read or watched goes into it.
   # public-text-end: app-strings-public
   # The corpus-size line § Publishing mandates beside the note. Both numbers
   # show, because M - N is what the rebuild DROPPED as private, deleted, or
@@ -7994,12 +8116,16 @@ notifications:
   row_security_admin_action_expired: 'Security: the pending admin action {action_type} (#{action_id}) on {target} expired without the approvals it needed. Nothing changed.'
   row_security_new_token: 'Security: new sign-in from a different IP address ({ip}). If this was not you, change your keys and contact your nest administrator.'
   row_security_admin_change: 'Security: an administrative change ({change_type}) was made to {target}. If you did not request it, contact your nest administrator.'
-  row_security_recovery_replacement_pending: 'Security: a recovery key replacement was requested (new key {new_key}) and lands at {lands_at}. If this was not you, veto it within 30 days.'
-  row_security_recovery_replacement_landed: 'Security: your recovery key was replaced (new key {new_key}). Your recovery phrase cannot recover this account until you restore phrase recovery under Settings → Account → Recovery Kit. If you did not request this replacement, your account may be compromised — contact your nest administrator.'
+  # public-text: app-strings-public
+  row_security_recovery_replacement_pending: 'Security: a recovery kit replacement was requested (new key {new_key}) and lands at {lands_at}. If this was not you, veto it within 30 days.'
+  # public-text-end: app-strings-public
+  # public-text: app-strings-public
+  row_security_recovery_replacement_landed: 'Security: your recovery kit was replaced (new key {new_key}). Your new recovery kit cannot recover this account until you enter it and press Restore Kit Recovery under Settings → Account → Recovery Kit. If you did not request this replacement, your account may be compromised — contact your nest administrator.'
+  # public-text-end: app-strings-public
   row_security_recovery_replacement_cancelled: 'Security: the pending recovery key replacement was cancelled by {cancelled_by}.'
   row_security_identity_succeeded: 'Security: this identity was succeeded. Your account moved to a new key ({new_actor_id}). If you did NOT perform this recovery, whoever holds your recovery kit now controls the account — contact your nest administrator immediately.'
-  row_security_archive_exported: 'Security: your full account archive was downloaded from {ip}. If this was not you, revoke your sessions under Settings → Security (or use the emergency lockout) and contact your nest administrator.'
-  row_security_mailbox_export_downloaded: 'Security: a mailbox export ({format}) was downloaded from {ip}. If this was not you, revoke your sessions under Settings → Security (or use the emergency lockout), discard the export from the mail export page, and contact your nest administrator.'
+  row_security_archive_exported: 'Security: your full account archive was downloaded from {ip}. If this was not you, revoke your sessions under Settings → Sessions (or use the emergency lockout there) and contact your nest administrator.'
+  row_security_mailbox_export_downloaded: 'Security: a mailbox export ({format}) was downloaded from {ip}. If this was not you, revoke your sessions under Settings → Sessions (or use the emergency lockout there), discard the export from the mail export page, and contact your nest administrator.'
 # Home-screen widget picker metadata (android AppWidgetProviderInfo `android:description`)
 # + the widget's own rendered content (android Glance `FaunaWidget`).
 widget:
@@ -8472,7 +8598,9 @@ error:
     # `RpcError::localized`'s exact arm AND by the Devices page's standing
     # enrollment notice (`fauna_sync_engine::account_runtime::EnrollmentRefusal`),
     # one string for both so the two cannot drift.
-    device_limit_exceeded: This account already has as many devices as its plan allows, so this device could not be added. Remove a device you no longer use under Settings → Devices, or ask your admin for a bigger tier.
+    # public-text: app-strings-public
+    device_limit_exceeded: This account already has as many devices as its tier allows, so this device could not be added. Remove a device you no longer use under Settings → Devices, or ask your admin for a bigger tier.
+    # public-text-end: app-strings-public
   send:
     # The conversations send-failure slot (`conversations.unified.error_send`'s
     # {message}) renders ONLY product statements — conversations.md § Errors &
@@ -8526,7 +8654,9 @@ errors:
   secret_key_invalid: Secret key must be exactly 64 hexadecimal characters
   nest_unreachable: Cannot connect to nest at the specified URL
   nest_timeout: Nest did not come online within the expected time
-  snapshot_device_unknown: This snapshot's owning device is unknown, so its files cannot be downloaded.
+  # A snapshot file is downloaded as this device; refused when this device
+  # has no sync identity yet (the wording follows tasks.error_device_id).
+  snapshot_download_no_device_id: This device could not load its own identity, so snapshot files cannot be downloaded here. Restart the app; if that does not help, sign in again.
   no_identity: No identity configured
   not_connected_to_nest: Not connected to your nest — no active session
   nostr_nsec_required: Enter your nsec
@@ -8567,7 +8697,9 @@ errors:
   # WsRpcError/ApiError). `Rejected` reuses `RpcError::localized()` directly,
   # like every other client error type — no dedicated key.
   recovery_superseded: This identity has already been succeeded by another one. Import your new identity to continue.
-  recovery_no_escrow: No sealed copy of your identity secret is stored for this recovery kit, so it cannot recover this account right now.
+  # public-text: app-strings-public
+  recovery_no_escrow: The copy of your secret key that only this recovery kit opens is not stored, so the kit cannot recover this account right now.
+  # public-text-end: app-strings-public
   recovery_not_registered: No recovery key is registered for this identity, so there is nothing to recover from.
   recovery_already_succeeded: This identity has already been succeeded and cannot be recovered again.
   recovery_invalid_nonce: That recovery request has expired or was already used. Please try again.
@@ -8677,10 +8809,6 @@ provisioning:
     help: "Create a Personal Access Token at cloud.linode.com → Profile → API Tokens."
     api_token: "API token"
     location: "Region"
-  managed:
-    # public-text: app-strings-public
-    disabled: "Managed subdomains on fauna.social are coming soon. For now, pick another option."
-    # public-text-end: app-strings-public
 
 # The region content plane's frame (region-blocking.md § The blocked render):
 # the words around an authority's verdict, shared by every app and the nest's
@@ -8690,6 +8818,7 @@ region:
   # public-text: app-strings-public
   blocked_notice: 'Not shown in {region} — blocked under the policy of {authority}'
   collapsed_notice: 'Hidden in {region} under the policy of {authority} — select to show'
+  sealed_note: 'Hidden from you on this device — nothing was removed, detected or reported'
   # public-text-end: app-strings-public
   reveal_button: 'Show'
   section_title: 'Region'
@@ -8716,6 +8845,16 @@ nest_rules:
   # public-text: app-strings-public
   blocked_notice: 'Not shown on {nest} — blocked under this nest’s rules'
   collapsed_notice: 'Hidden on {nest} under this nest’s rules — select to show'
+  # The joining surface (onboarding-nest-rules, nest-rules.md § Acceptance at
+  # joining): on invite_request, and on handle_entry while Continue signs in,
+  # above the nest's rules, which sit above the by-continuing terms notice.
+  joining_heading: 'Rules of {nest}. By continuing you accept them.'
+  # Why none of a nest's rules apply on this device
+  # (fauna_client_policy::NestRulesNotApplied), painted under the heading on
+  # the joining surface and on the settings rules surface — whether or not
+  # any rule is listed (a newer version's rules decode to none here).
+  not_applied_newer_version: 'These rules were written by a newer version of Fauna, so none of them apply on this device. Update the app to see and apply them.'
+  not_applied_malformed: 'These rules contain an error, so none of them apply on this device.'
   # public-text-end: app-strings-public
   changed_notice: '{nest} changed its rules — see what is in force'
   reveal_button: 'Show'
@@ -8805,13 +8944,24 @@ connected_apps:
   scope_nostr_sign: Sign Nostr events with your key
   # A mail app password's reach: the one credential signs a mail app in to
   # mail, calendar, contacts and files alike.
-  scope_mail: 'Read and send your mail, and sync your calendar, contacts and files'
+  # public-text: app-strings-public
+  scope_mail: 'Read and send your mail while mail is on, and sync your calendar, contacts and files'
+  # public-text-end: app-strings-public
   requests_heading: Requests
   # A consent card's line when the app now presents a different key than the
   # one it connected with before: approving ends what the old key was given
   # (holder) or what the old key could write (writer).
   consent_ends_holder: 'This app now uses a new key. Approving ends the access its earlier key was given.'
   consent_ends_writer: 'This app now signs with a new key. Approving ends its earlier key''s permission to write.'
+  # The cli's consent card line (compose::request_card_lines, shown only when
+  # the card's client_id is fauna_protocol::principals::CLI_CLIENT_ID): what
+  # the card grants reaches whichever assistant drives the cli, and its
+  # provider when it is hosted (apps/cli.md § Hosting cases). It states a
+  # property of the product, so it is a public text (public-texts.md
+  # § The boundary).
+  # public-text: app-strings-public
+  consent_assistant_reach: 'Whatever you allow here, the AI assistant you connect can read or do — and if that assistant runs on a company''s servers, that company''s service can too. You can disconnect it here at any time.'
+  # public-text-end: app-strings-public
   connect_heading: Connect an app
   connect_hint: 'If an app on another device shows you a code, type it here.'
   connect_placeholder: Code from the app
@@ -8869,13 +9019,14 @@ connected_apps:
   error_secret: 'Could not read the secret: {message}'
   error_record: 'Could not read what your nest did for this app: {message}'
   error_external_apps: 'Failed to change the external-apps switch: {message}'
-  # The oracle summary on a principal's row — what the nest did with the
-  # user's keys for this app, the key itself never leaving it
+  # The oracle summary on a principal's row — what the nest signed with the
+  # user's keys for this app (the key itself never leaving it) and the
+  # conversations a Fauna app served for it
   # (connected-apps.md § Layout & flow, region 3). {operation} is the consent
   # card's own words for the permission the app used; {detail} is the
   # operation's detail verbatim (an event kind, a method, a host).
-  oracle_ops: 'Your nest used your keys for this app {count} times in the current window'
-  oracle_ops_one: Your nest used your keys for this app once in the current window
+  oracle_ops: 'Fauna acted for this app {count} times in the current window'
+  oracle_ops_one: Fauna acted for this app once in the current window
   oracle_requests: '{count} requests answered in all'
   oracle_requests_one: 1 request answered in all
   oracle_latest: 'Most recent, {time}: {operation} — {detail}'

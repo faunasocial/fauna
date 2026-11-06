@@ -21,13 +21,6 @@ internal interface IEventDraftStore
 
     /// <summary>Write a restored draft into the compose surface.</summary>
     void Restore(FfiEventDrafts draft);
-
-    /// <summary>True if the user has already typed into any of the five fields.
-    /// The non-destructive-resume guard (reserved-folders.md § Drafts Sync's
-    /// fourth rule) reads this before calling <see cref="Restore"/> — declining
-    /// whenever the compose already holds authored text, exactly the caller-side
-    /// decision the rule assigns, never the accessor's own.</summary>
-    bool HasAuthoredText();
 }
 
 /// <summary>
@@ -117,8 +110,15 @@ internal sealed class EventDraftsService : IDisposable
         }
         FaunaApp.Core.Logs.E2eTrace.Write($"[event-drafts] RestoreOnLaunchAsync: RestoreDrafts() returned {(draft is null ? "null" : $"summary={draft.summary.Length} chars")}");
         if (token.IsCancellationRequested) return;
-        if (draft is { } d && !_store.HasAuthoredText())
-            _store.Restore(d);
+        if (draft is not { } d) return;
+        // The shared FILL rule (events.md § Persistence, *A restore FILLS*): the
+        // load retries a read lost to the transport for minutes, so it can land
+        // after the user has started an event — a compose holding user input
+        // keeps it, whole. The rule lives once in Rust (EventDrafts::fill).
+        var live = _store.Snapshot();
+        var filled = FaunaFfiMethods.FillEventDraft(live, d);
+        if (!filled.Equals(live))
+            _store.Restore(filled);
     }
 
     /// <summary>

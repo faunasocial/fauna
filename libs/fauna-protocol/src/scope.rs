@@ -611,6 +611,29 @@ mod tests {
         assert_eq!(text.parse::<Scope>().unwrap(), Scope::Group(scope));
     }
 
+    /// A group set's folder ref IS its scope string (`p2p-shared-set-build.md`
+    /// § Build design — the group set, decision 7): the two grammars accept
+    /// exactly the same spellings, so a registry keyed by either never holds
+    /// one scope twice.
+    #[test]
+    fn a_group_sets_folder_ref_is_its_scope_string() {
+        use fauna_core::folder_keys::FolderRef;
+        for b in [0x00, 0x7A, 0xFF] {
+            let text = Scope::Group(GroupScope::new(id(b))).to_string();
+            assert_eq!(FolderRef::Group(id(b)).to_wire(), text);
+            assert_eq!(FolderRef::parse(&text), Some(FolderRef::Group(id(b))));
+        }
+        for bad in [
+            format!("group:{}", "7A".repeat(32)),
+            format!("group:{}", "7a".repeat(31)),
+            format!("group:{}:extra", "7a".repeat(32)),
+            "group:".to_string(),
+        ] {
+            assert!(bad.parse::<Scope>().is_err(), "{bad:?}");
+            assert_eq!(FolderRef::parse(&bad), None, "{bad:?}");
+        }
+    }
+
     #[test]
     fn group_parse_refuses_rather_than_normalizes() {
         let cases: &[(String, &str)] = &[

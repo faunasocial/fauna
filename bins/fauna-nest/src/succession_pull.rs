@@ -86,10 +86,18 @@ const PULL_INTERVAL: Duration = Duration::from_secs(60 * 60);
 /// Most remote identities reconciled per pass.
 ///
 /// Each one costs a dial to a peer that may be slow or hostile, so the pass is
-/// bounded rather than proportional to residue. Un-visited identities are simply
-/// picked up next hour — the work list is re-read every pass and skips whatever
-/// is already known, so a large residue set drains across passes instead of
-/// making one pass unbounded.
+/// bounded rather than proportional to residue. A large residue set drains
+/// across passes instead of making one pass unbounded — and it drains in
+/// **queue order** ([`crate::db::CacheDb::succession_pull_worklist`]): a pass
+/// resumes behind the identities the previous one visited, and an identity
+/// first seen joins behind every one already queued. So an identity with `Q`
+/// identities ahead of it is visited within `ceil((Q + 1) / k)` passes, where
+/// `k` is the identities a pass completes — [`MAX_PULLS_PER_PASS`] when each
+/// anchor answers on its first address, never fewer than
+/// `MAX_PULLS_PER_PASS / MAX_ANCHOR_CANDIDATES` — however many identities a
+/// caller adds after it. (Until the pass re-walked the work list from
+/// the start, so 64 cheap residue rows — remote follows any local user can add —
+/// starved every later identity of the pull for ever.)
 const MAX_PULLS_PER_PASS: usize = 64;
 
 /// Most candidate anchor URLs tried for one identity before giving up on it
@@ -196,7 +204,7 @@ pub fn spawn_succession_pull(state: Arc<AppState>) {
 /// `pub` so a test can drive a single deterministic pass instead of waiting on
 /// the interval — the cadence is not what any assertion is about.
 pub async fn pull_successions_once(state: &Arc<AppState>) -> anyhow::Result<usize> {
-    let actors = state.db.succession_residue_actors().await?;
+    let actors = state.db.succession_pull_worklist().await?;
     if actors.is_empty() {
         return Ok(0);
     }
@@ -225,6 +233,10 @@ pub async fn pull_successions_once(state: &Arc<AppState>) -> anyhow::Result<usiz
         // otherwise deny this identity's succession on every future
         // pass. Each attempt spends the pass budget, so the walk
         // is bounded twice over.
+        //
+        // A walk the budget cuts short leaves the identity where it is in the
+        // queue, so the next pass starts with it; a finished walk — whatever it
+        // learned — sends it to the back.
         for home_url in candidates {
             if visited >= MAX_PULLS_PER_PASS {
                 tracing::debug!(
@@ -253,6 +265,7 @@ pub async fn pull_successions_once(state: &Arc<AppState>) -> anyhow::Result<usiz
                 ),
             }
         }
+        state.db.mark_succession_pulled(&actor).await?;
     }
     Ok(learned)
 }
@@ -326,6 +339,23 @@ pub async fn verify_and_record_from_home(
     expected_nest_id: &[u8; 32],
     home_url: &str,
 ) -> anyhow::Result<usize> {
+    // The home is read off the address directory, which a stranger peer's
+    // declaration can reach, and this dial is unattended: it passes the peer
+    // URL guard every federation dial passes (https, a global target), and on
+    // a production nest never the loopback carve-out that guard keeps for
+    // authenticated callers and test state.
+    let host_is_loopback = url::Url::parse(home_url)
+        .ok()
+        .and_then(|u| u.host().map(|h| crate::ssrf::is_loopback_host(&h)))
+        .unwrap_or(false);
+    if host_is_loopback && state.peer_fetch_loopback.is_none() {
+        anyhow::bail!("succession home is loopback; not dialled on a production nest");
+    }
+    crate::federation_channel::validate_peer_url(
+        home_url,
+        crate::federation_channel::PeerUrlOrigin::Supplied,
+    )
+    .await?;
     let client = fauna_anon_client::AnonymousNestClient::connect(home_url)
         .await
         .map_err(|e| anyhow::anyhow!("anon connect: {e}"))?;
@@ -538,6 +568,85 @@ pub async fn verify_from_hint(state: &Arc<AppState>, actor: &[u8; 32]) -> bool {
         Err(_) => {
             tracing::debug!(target: "recovery", "hint-triggered verify timed out");
             false
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::CacheDb;
+
+    /// A succession home is read off the address directory, which a stranger
+    /// peer's declaration once reached: a production nest never dials a
+    /// loopback or plaintext one, and the dial passes `validate_peer_url`
+    /// like every other peer dial. Remove the guard and the
+    /// listener counts the connections.
+    #[tokio::test]
+    async fn a_production_nest_never_dials_a_loopback_succession_home() {
+        let base = AppState::for_test(Arc::new(CacheDb::open_in_memory().unwrap()));
+        let state = Arc::new(AppState {
+            peer_fetch_loopback: None,
+            ..base
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let accepted = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let count = Arc::clone(&accepted);
+        // spawn-ok(test): a test's loopback listener, holding no `AppState`.
+        tokio::spawn(async move {
+            while let Ok((socket, _)) = listener.accept().await {
+                count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                drop(socket);
+            }
+        });
+        for home in [
+            format!("http://127.0.0.1:{port}"),
+            format!("https://127.0.0.1:{port}"),
+            format!("http://localhost:{port}"),
+            "http://succession-home.invalid".to_string(),
+        ] {
+            assert!(
+                verify_and_record_from_home(&state, &[1u8; 32], &[2u8; 32], &home)
+                    .await
+                    .is_err(),
+                "{home} must be refused before any dial"
+            );
+        }
+        assert_eq!(
+            accepted.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "a loopback succession home is never dialled"
+        );
+    }
+
+    /// The loopback bail is not the whole guard: a non-loopback, non-global
+    /// literal (or a plaintext host) is refused by `validate_peer_url` before
+    /// any socket opens, with the guard's own error, not a connect failure
+    /// or a DNS failure.
+    #[tokio::test]
+    async fn a_production_nest_refuses_a_non_global_succession_home_before_dialling() {
+        let base = AppState::for_test(Arc::new(CacheDb::open_in_memory().unwrap()));
+        let state = Arc::new(AppState {
+            peer_fetch_loopback: None,
+            ..base
+        });
+        for home in [
+            "https://10.255.255.1:1",
+            "https://169.254.169.254",
+            "http://succession-home.example",
+        ] {
+            let err = tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                verify_and_record_from_home(&state, &[1u8; 32], &[2u8; 32], home),
+            )
+            .await
+            .unwrap_or_else(|_| panic!("{home} must be refused promptly, not dialled"))
+            .expect_err("refused");
+            assert!(
+                !err.to_string().contains("anon connect"),
+                "{home} must fail the peer URL guard, got: {err}"
+            );
         }
     }
 }

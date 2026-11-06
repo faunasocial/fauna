@@ -19,6 +19,7 @@ import FaunaKit
 /// Every other `Admin*View` (shared FaunaKit) already uses this eager shape.
 struct AdminDashboardView: View {
     @Bindable var vm: AdminVM
+    @Environment(AppState.self) private var appState
     var reloadToken: Int = 0
 
     var body: some View {
@@ -34,14 +35,15 @@ struct AdminDashboardView: View {
 
                 // Page switcher — pushes the shared FaunaKit page (admin.md § Navigation
                 // model step 2; the mobile peer of the macOS `AdminNavRail`). `.dashboard`
-                // is the root, so it is excluded. IDs match the macOS rail rows + linux
-                // Stack child names (`admin-nav-<navId>`).
+                // is the root, so it is excluded. IDs match the macOS rail rows: the
+                // keyed `admin-nav-row[<page key>]` (ui.yaml `navigation.sub_page_nav_rows`).
                 VStack(alignment: .leading, spacing: 4) {
                     ForEach(AdminPage.built.filter { $0 != .dashboard }) { page in
                         NavigationLink(value: page) {
                             Label(page.label, systemImage: page.systemImage)
                         }
-                        .accessibilityIdentifier("admin-nav-\(page.navId)")
+                        .accessibilityIdentifier(page.navRowId)
+                        .automationActivate(page.navRowId) { appState.selectedAdminPage = page }
                     }
                 }
 

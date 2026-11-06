@@ -15,15 +15,44 @@
 //! provider's verification URL wedges the e2e `fake_cloud` fixture (it stops
 //! answering past ~6 idle connections), stalling the app's own next request
 //! for 60-90+ seconds. The handoff stays observable rather than silent: the
-//! URL is logged at this seam instead of being silently dropped.
+//! URL is logged at this seam instead of being silently dropped — and, when
+//! the harness names a record file (`FAUNA_E2E_OPENED_URLS`), appended to it,
+//! so a journey that activates a link witnesses exactly which address was
+//! handed over (tui's fake-opener record, the same file).
 
 /// Hand `url` to the OS default handler, or — under e2e automation — log it
 /// instead of launching.
 pub fn open(url: &str) {
-    open_with(url, crate::e2e_mode_enabled(), |u| {
+    let e2e = crate::e2e_mode_enabled();
+    if e2e {
+        record_for_harness(url);
+    }
+    open_with(url, e2e, |u| {
         gtk::gio::AppInfo::launch_default_for_uri(u, None::<&gtk::gio::AppLaunchContext>)
     });
 }
+
+/// Append `url` to the harness's opener record, if it named one — one line
+/// per open, in order. Compiled out of a release build with no `e2e-agent`
+/// feature (convention 15), where `e2e_mode_enabled` is constant `false`.
+#[cfg(any(debug_assertions, feature = "e2e-agent"))]
+fn record_for_harness(url: &str) {
+    use std::io::Write as _;
+    let Some(path) = std::env::var_os("FAUNA_E2E_OPENED_URLS") else {
+        return;
+    };
+    let appended = std::fs::OpenOptions::new()
+        .append(true)
+        .create(true)
+        .open(&path)
+        .and_then(|mut f| writeln!(f, "{url}"));
+    if let Err(e) = appended {
+        tracing::warn!("open-url: could not append to the harness record: {e}");
+    }
+}
+
+#[cfg(not(any(debug_assertions, feature = "e2e-agent")))]
+fn record_for_harness(_url: &str) {}
 
 /// The gate plus the launch, with both the e2e state and the OS call
 /// injected — the unit test drives this directly, so it never reads the real

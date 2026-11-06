@@ -67,6 +67,7 @@ pytestmark = [
     pytest.mark.ios,
     pytest.mark.windows,
     pytest.mark.web,
+    pytest.mark.android,
 ]
 
 TRANSFER_BUDGET_S = MESSAGE_BUDGET_S + MEMBERSHIP_BUDGET_S

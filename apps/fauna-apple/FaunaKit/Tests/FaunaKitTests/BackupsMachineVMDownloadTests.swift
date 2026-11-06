@@ -11,21 +11,23 @@ import Testing
 // and it is why that regression was chased through the harness save path
 // instead of the app. These pin that a refusal is always SAID.
 //
+// The walk runs as this seat's device id (`configure`'s `deviceIdHex`), never
+// the open snapshot's owning device — so an unattributed snapshot downloads.
 // Both arms are assertable with no API configured because the device-id check
 // deliberately precedes the `api` guard (same ordering as
 // `NostrVM.addRelay`'s scheme validation).
 
 @Test @MainActor func downloadSnapshotFileRefusesMissingDeviceIdLoudly() async {
     let vm = BackupsMachineVM()
-    let data = await vm.downloadSnapshotFile(deviceId: nil, snapshotId: 1, path: "docs/a.bin")
+    let data = await vm.downloadSnapshotFile(snapshotId: 1, path: "docs/a.bin")
     #expect(data == nil)
-    #expect(vm.errorMessage == L.errors.snapshotDeviceUnknown)
+    #expect(vm.errorMessage == L.errors.snapshotDownloadNoDeviceId)
 }
 
 @Test @MainActor func downloadSnapshotFileRefusesUnconfiguredApiLoudly() async {
     let vm = BackupsMachineVM()
-    let data = await vm.downloadSnapshotFile(
-        deviceId: "device-abc", snapshotId: 1, path: "docs/a.bin")
+    vm.seedDeviceIdForTest("device-abc")
+    let data = await vm.downloadSnapshotFile(snapshotId: 1, path: "docs/a.bin")
     #expect(data == nil)
     #expect(vm.errorMessage == L.errors.notConnectedToNest)
 }
@@ -35,7 +37,18 @@ import Testing
 // above testable at all.
 @Test @MainActor func downloadSnapshotFileNamesTheDeviceIdWhenBothAreMissing() async {
     let vm = BackupsMachineVM()
-    _ = await vm.downloadSnapshotFile(deviceId: nil, snapshotId: 1, path: "docs/a.bin")
-    #expect(vm.errorMessage == L.errors.snapshotDeviceUnknown)
+    _ = await vm.downloadSnapshotFile(snapshotId: 1, path: "docs/a.bin")
+    #expect(vm.errorMessage == L.errors.snapshotDownloadNoDeviceId)
     #expect(vm.errorMessage != L.errors.notConnectedToNest)
+}
+
+// The seat's device id is account state: `reset()` (an account switch or
+// sign-out) drops it with the rest, so the next account never downloads as
+// the previous one's device.
+@Test @MainActor func resetDropsTheSeatDeviceId() async {
+    let vm = BackupsMachineVM()
+    vm.seedDeviceIdForTest("device-abc")
+    vm.reset()
+    _ = await vm.downloadSnapshotFile(snapshotId: 1, path: "docs/a.bin")
+    #expect(vm.errorMessage == L.errors.snapshotDownloadNoDeviceId)
 }

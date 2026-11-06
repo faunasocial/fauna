@@ -40,7 +40,6 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use fauna_client_capabilities::group_ceremony_node::CeremonyNode;
 use fauna_core::data::ContentHash;
-use fauna_core::folder_keys::FolderContentKeys;
 use fauna_core::identity::ActorId;
 use fauna_peer_share::client::{PeerShareBlobFetcher, admit_share_over, fetch_share_changes};
 use fauna_peer_share::server::ShareStore;
@@ -84,12 +83,17 @@ pub trait ShareStoreDoors {
     /// never a network call. `own_relay_url` is the relay this seat was bound
     /// with: a target's relay is attached only when the member advertises the
     /// same one (`fauna_peer_sync::discovery::share_relay_attaches`).
+    /// `is_member` is the set's roster consult: a row whose actor it does not
+    /// vouch for is no target, and comes back in
+    /// [`fauna_peer_sync::discovery::ShareDialRead::unvouched`] (`p2p.md`
+    /// § *A departed member's cached endpoint*, ruling 1).
     fn share_dial_targets(
         &self,
         channel_id: [u8; 32],
         lan_ips: Vec<std::net::Ipv4Addr>,
         own_relay_url: Option<String>,
-    ) -> impl std::future::Future<Output = anyhow::Result<Vec<fauna_peer_sync::discovery::PeerDialTarget>>>;
+        is_member: impl Fn(&[u8; 32]) -> bool,
+    ) -> impl std::future::Future<Output = anyhow::Result<fauna_peer_sync::discovery::ShareDialRead>>;
 }
 
 impl ShareStoreDoors for AccountStoreHandle {
@@ -112,7 +116,8 @@ impl ShareStoreDoors for AccountStoreHandle {
         channel_id: [u8; 32],
         lan_ips: Vec<std::net::Ipv4Addr>,
         own_relay_url: Option<String>,
-    ) -> anyhow::Result<Vec<fauna_peer_sync::discovery::PeerDialTarget>> {
+        is_member: impl Fn(&[u8; 32]) -> bool,
+    ) -> anyhow::Result<fauna_peer_sync::discovery::ShareDialRead> {
         let rows = self
             .states_of_kind(fauna_protocol::merge_policy::KIND_SHARE_ENDPOINTS)
             .await?;
@@ -121,6 +126,7 @@ impl ShareStoreDoors for AccountStoreHandle {
             &channel_id,
             &lan_ips,
             own_relay_url.as_deref(),
+            is_member,
         )
     }
 }
@@ -158,8 +164,10 @@ pub struct SharedSetSpec {
     /// How this replica lands pulled bodies — the pump plans its fetches by
     /// it, so a body the state writer would not land is never pulled.
     pub landing: Landing,
-    /// The set's M2 content-key generations — app custody.
-    pub content_keys: FolderContentKeys,
+    /// The set's content keys, by family — a folder set's M2 generations or a
+    /// group set's generation ring (`p2p-shared-set-build.md` § Build design —
+    /// the group set, decision 4) — app custody.
+    pub content_keys: fauna_core::folder_keys::SetContentKeys,
 }
 
 /// What one ingest hand-off did — the door's reply, mirroring the engine's
@@ -310,11 +318,23 @@ pub struct SetPullOutcome {
     /// § Wormability walk, rule 8 — the per-operation rule). The first such
     /// verdict, for the surface's "limited by …" reading.
     pub capped: Option<fauna_core::feature_gate::FeatureVerdict>,
+    /// The pass's pull from this peer ended in an error. The row is kept, with
+    /// the counts this pass moved before the error (`p2p.md` § Cross-user
+    /// shared-set transfer → *The transfer row of a pull that failed*): one
+    /// row per attempted target, success or failure. Whether admission had
+    /// completed ([`Self::admitted`]) splits the reading — *unreachable*
+    /// (the dial or the admission handshake failed) or *interrupted* (the
+    /// peer admitted this device, then a page fetch, the door or the set's
+    /// state DB failed).
+    pub failed: bool,
 }
 
-/// One full pull pass: every spec × every cached dial target. Per-target
-/// failures are warned and skipped — an unreachable member is the offline
-/// scenario's ordinary weather, and the next pass retries. `nest` is whether
+/// One full pull pass: every spec × every cached dial target, one outcome
+/// per target attempted. A per-target failure is logged at debug — an
+/// unreachable member is the offline scenario's ordinary weather, and the
+/// next pass retries — and its outcome is kept with
+/// [`SetPullOutcome::failed`] set ([`pull_target`]), so the member's row
+/// reads the failure instead of vanishing. `nest` is whether
 /// the nest answered this pass — the byte gate's one input beside the
 /// connection's path ([`pull_set_from_peer`]).
 #[allow(clippy::too_many_arguments)] // the pass takes every seam once; a builder would only rename them
@@ -342,19 +362,16 @@ pub async fn pull_pass(
         .unwrap_or_default();
     let mut out = Vec::new();
     for spec in specs {
-        let targets = match account
-            .share_dial_targets(
-                spec.set_id,
-                lan_ips.to_vec(),
-                node.relay_url().map(str::to_owned),
-            )
-            .await
-        {
-            Ok(t) => t,
-            Err(e) => {
-                tracing::warn!(folder = %fauna_core::log_redact::log_folder_name(&spec.folder), error = %e, "share pump: dial-target read failed");
-                continue;
-            }
+        let Some(targets) = set_dial_targets(
+            account,
+            membership.as_ref(),
+            spec,
+            lan_ips,
+            node.relay_url().map(str::to_owned),
+        )
+        .await
+        else {
+            continue;
         };
         if targets.is_empty() {
             // The FIRST link of the pull chain, and until now the quietest:
@@ -372,37 +389,96 @@ pub async fn pull_pass(
             continue;
         }
         for target in &targets {
-            match pull_set_from_peer(
-                node,
-                membership,
-                door,
-                &own_claimed,
-                spec,
-                target,
-                spool_root,
-                policy,
-                &mut ledger,
-                today,
-                nest,
-            )
-            .await
-            {
-                Ok(outcome) => out.push(outcome),
-                Err(e) => {
-                    tracing::debug!(
-                        folder = %fauna_core::log_redact::log_folder_name(&spec.folder),
-                        peer = %hex::encode(target.node_id),
-                        error = %e,
-                        "share pump: pull from peer failed; next pass retries"
-                    );
-                }
-            }
+            out.push(
+                pull_target(
+                    node,
+                    membership,
+                    door,
+                    &own_claimed,
+                    spec,
+                    target,
+                    spool_root,
+                    policy,
+                    &mut ledger,
+                    today,
+                    nest,
+                )
+                .await,
+            );
         }
     }
     if let Err(e) = account.put_share_transfer_ledger(ledger).await {
         tracing::warn!(error = %e, "share pump: transfer ledger persist failed; this pass's spend is in-memory only");
     }
     out
+}
+
+/// One held set's dial targets for this pass — the roster-gated read plus
+/// the stale-endpoint sweep (`p2p.md` § Cross-user shared-set transfer → *A
+/// departed member's cached endpoint*, rulings 1 and 2). The consult is the
+/// SAME one admission runs on, so a member who left or was removed is not
+/// dialed from the pass after this replica's roster learns it — and, the
+/// target not dialed, mints no outcome: the transfer surface drops their row
+/// by construction. `None` when the cache read itself failed (logged; the
+/// pass skips the set).
+pub(crate) async fn set_dial_targets(
+    account: &AccountStoreHandle,
+    membership: &(dyn fauna_peer_share::admission::SetMembership + Send + Sync),
+    spec: &SharedSetSpec,
+    lan_ips: &[std::net::Ipv4Addr],
+    own_relay_url: Option<String>,
+) -> Option<Vec<PeerDialTarget>> {
+    let read = match account
+        .share_dial_targets(spec.set_id, lan_ips.to_vec(), own_relay_url, |actor| {
+            membership.is_member(&spec.set_id, &ActorId(*actor))
+        })
+        .await
+    {
+        Ok(read) => read,
+        Err(e) => {
+            tracing::warn!(folder = %fauna_core::log_redact::log_folder_name(&spec.folder), error = %e, "share pump: dial-target read failed");
+            return None;
+        }
+    };
+    sweep_departed_endpoints(account, membership, spec.set_id, &read.unvouched).await;
+    Some(read.targets)
+}
+
+/// The stale-endpoint sweep (`p2p.md` § *A departed member's cached
+/// endpoint*, ruling 2): of the rows the roster gate skipped for a set this
+/// pass HOLDS (it is in the pass's specs), tombstone each one whose roster
+/// reading is positively [`RosterReading::NotListed`] — never on
+/// `Unreadable`, which is the fail-closed consult's other `false`, and never
+/// on `Listed` (a roster that changed between the two reads: the next pass
+/// dials it). A failed tombstone is logged and retried by the next pass,
+/// which skips the row again either way.
+///
+/// [`RosterReading::NotListed`]: fauna_peer_share::admission::RosterReading::NotListed
+async fn sweep_departed_endpoints(
+    account: &AccountStoreHandle,
+    membership: &(dyn fauna_peer_share::admission::SetMembership + Send + Sync),
+    set_id: [u8; 32],
+    unvouched: &[[u8; 32]],
+) {
+    use fauna_peer_share::admission::RosterReading;
+    for member in unvouched {
+        if membership.roster_reading(&set_id, &ActorId(*member)) != RosterReading::NotListed {
+            continue;
+        }
+        match account.tombstone_share_endpoints(set_id, *member).await {
+            Ok(true) => tracing::debug!(
+                set = %&hex::encode(set_id)[..16],
+                member = %&hex::encode(member)[..16],
+                "share pump: tombstoned the cached endpoint of an actor the set's roster no longer lists"
+            ),
+            Ok(false) => {}
+            Err(e) => tracing::debug!(
+                set = %&hex::encode(set_id)[..16],
+                error = %e,
+                "share pump: departed member's endpoint tombstone failed; next pass retries"
+            ),
+        }
+    }
 }
 
 /// Pull one set from one admitted member: dial → mutual admission → page
@@ -418,6 +494,9 @@ pub async fn pull_pass(
 /// handed through the door as ever, and the state writer holds the cursor
 /// below a sequenced row whose body did not arrive, so the file-granularity
 /// resume is untouched.
+///
+/// An error drops the outcome built so far; [`pull_target`] is the form the
+/// pass uses, which keeps it.
 #[allow(clippy::too_many_arguments)] // the per-peer leg of the pass above; same seams
 pub async fn pull_set_from_peer(
     node: &CeremonyNode,
@@ -432,14 +511,112 @@ pub async fn pull_set_from_peer(
     today: i64,
     nest: NestPath,
 ) -> Result<SetPullOutcome> {
-    let peer = ActorId(target.node_id);
-    let peer_hex = hex::encode(target.node_id);
-    let mut outcome = SetPullOutcome {
-        folder: spec.folder.clone(),
-        peer_hex: peer_hex.clone(),
-        ..Default::default()
-    };
+    let mut outcome = SetPullOutcome::for_target(spec, target);
+    pull_into(
+        &mut outcome,
+        node,
+        membership,
+        door,
+        own_claimed,
+        spec,
+        target,
+        spool_root,
+        policy,
+        ledger,
+        today,
+        nest,
+    )
+    .await?;
+    Ok(outcome)
+}
 
+/// [`pull_set_from_peer`] for the pass: always one outcome. A pull that
+/// errors keeps the row with what it moved before the error and
+/// [`SetPullOutcome::failed`] set (`p2p.md` § Cross-user shared-set transfer →
+/// *The transfer row of a pull that failed*); the error itself is logged at
+/// debug — an unreachable member is ordinary weather, and the next pass
+/// retries.
+#[allow(clippy::too_many_arguments)] // the per-peer leg of the pass above; same seams
+pub async fn pull_target(
+    node: &CeremonyNode,
+    membership: &Arc<dyn fauna_peer_share::admission::SetMembership + Send + Sync>,
+    door: &dyn ShareIngestDoor,
+    own_claimed: &[[u8; 32]],
+    spec: &SharedSetSpec,
+    target: &PeerDialTarget,
+    spool_root: &Path,
+    policy: &fauna_core::feature_gate::EffectivePolicy,
+    ledger: &mut TransferUsageLedger,
+    today: i64,
+    nest: NestPath,
+) -> SetPullOutcome {
+    let mut outcome = SetPullOutcome::for_target(spec, target);
+    if let Err(e) = pull_into(
+        &mut outcome,
+        node,
+        membership,
+        door,
+        own_claimed,
+        spec,
+        target,
+        spool_root,
+        policy,
+        ledger,
+        today,
+        nest,
+    )
+    .await
+    {
+        tracing::debug!(
+            folder = %fauna_core::log_redact::log_folder_name(&spec.folder),
+            peer = %hex::encode(target.node_id),
+            admitted = outcome.admitted,
+            error = %format!("{e:#}"),
+            "share pump: pull from peer failed; the row reads it and the next pass retries"
+        );
+        outcome.failed = true;
+    }
+    outcome
+}
+
+impl SetPullOutcome {
+    /// The empty row for one `(set, peer)` pull — folder and peer named,
+    /// nothing moved yet.
+    fn for_target(spec: &SharedSetSpec, target: &PeerDialTarget) -> Self {
+        Self {
+            folder: spec.folder.clone(),
+            peer_hex: hex::encode(target.node_id),
+            ..Default::default()
+        }
+    }
+}
+
+/// The body of one `(set, peer)` pull, filling `outcome` as it goes so an
+/// error leaves what this pass moved in place.
+#[allow(clippy::too_many_arguments)] // the per-peer leg of the pass above; same seams
+async fn pull_into(
+    outcome: &mut SetPullOutcome,
+    node: &CeremonyNode,
+    membership: &Arc<dyn fauna_peer_share::admission::SetMembership + Send + Sync>,
+    door: &dyn ShareIngestDoor,
+    own_claimed: &[[u8; 32]],
+    spec: &SharedSetSpec,
+    target: &PeerDialTarget,
+    spool_root: &Path,
+    policy: &fauna_core::feature_gate::EffectivePolicy,
+    ledger: &mut TransferUsageLedger,
+    today: i64,
+    nest: NestPath,
+) -> Result<()> {
+    let peer = ActorId(target.node_id);
+    let peer_hex = outcome.peer_hex.clone();
+
+    tracing::debug!(
+        peer = %&peer_hex[..16],
+        lan_candidates = target.candidates.lan_endpoints.len(),
+        relay = target.candidates.relay_available,
+        "share pump: dialing an admitted member"
+    );
     let channel = node
         .dial_with_candidates(peer, target.candidates.clone())
         .await
@@ -463,7 +640,7 @@ pub async fn pull_set_from_peer(
             peer = %&peer_hex[..16],
             "share pump: the peer does not admit us for this set yet; next pass retries"
         );
-        return Ok(outcome);
+        return Ok(());
     }
     outcome.admitted = true;
 
@@ -604,7 +781,11 @@ pub async fn pull_set_from_peer(
             &hex::encode(spec.set_id)[..16],
             &peer_hex[..16]
         ));
-        let spent = spool_planned(&fetcher, &plan, &spool, policy.per_operation_max).await?;
+        let spent = spool_planned(&fetcher, &plan, &spool, policy.per_operation_max, &|| {
+            bytes_may_ride(channel.path(), nest)
+        })
+        .await?;
+        outcome.relay_deferred += spent.deferred;
         // A file the plan's cap dropped is a PERMANENT miss for the ingest,
         // or it would hold the cursor below the row and every later pass
         // would re-list the page the cap refuses again (`spool_capped_path`).
@@ -680,7 +861,7 @@ pub async fn pull_set_from_peer(
             break;
         }
     }
-    Ok(outcome)
+    Ok(())
 }
 
 /// One planned body fetch: the manifest a page row names, with the size the
@@ -808,6 +989,12 @@ pub struct SpoolSpend {
     /// verdict naming the cap and the bytes seen when it tripped. Its bytes
     /// are in [`Self::bytes`]; it is not in [`Self::files`] (no body landed).
     pub capped: Option<fauna_core::feature_gate::FeatureVerdict>,
+    /// Planned bodies left unfetched because the byte gate read "the nest
+    /// answers and the connection is relayed" just before their pull (`p2p.md`
+    /// § The relay, ruling 4). Counted into
+    /// [`SetPullOutcome::relay_deferred`]; their rows land without the body,
+    /// exactly as a relayed page's do.
+    pub deferred: u32,
 }
 
 /// Pre-fetch the planned manifest + chunk bodies into `spool`, returning what
@@ -826,12 +1013,21 @@ pub struct SpoolSpend {
 /// the concrete peer fetcher is what lets the accounting be pinned without a
 /// live channel.
 ///
+/// `may_ride` is the byte gate (`bytes_may_ride` over the channel's current
+/// path), read before EACH body, not once per page: a direct path that dies
+/// mid-page must not carry the page's remaining bodies over the relay
+/// (`p2p.md` § The relay, ruling 4: "re-read before each pull"). A body it
+/// refuses is counted in [`SpoolSpend::deferred`] and left to the nest path.
+///
 /// [`BlobFetcher`]: fauna_core::file_download::BlobFetcher
-async fn spool_planned(
+pub(crate) async fn spool_planned(
     fetcher: &dyn fauna_core::file_download::BlobFetcher,
     plan: &[PlannedFetch],
     spool: &Path,
     cap: Option<fauna_core::feature_gate::BoundSource>,
+    // `Sync`, so the borrowed gate held across the fetches leaves this future
+    // `Send`: the share plane runs it on a multi-threaded runtime.
+    may_ride: &(dyn Fn() -> bool + Sync),
 ) -> Result<SpoolSpend> {
     tokio::fs::create_dir_all(spool.join("manifests")).await?;
     tokio::fs::create_dir_all(spool.join("chunks")).await?;
@@ -841,6 +1037,10 @@ async fn spool_planned(
         let manifest_path = spool_manifest_path(spool, &entry.manifest_hash);
         if manifest_path.exists() {
             continue; // spooled by an earlier pass against the same scratch
+        }
+        if !may_ride() {
+            spent.deferred = spent.deferred.saturating_add(1);
+            continue;
         }
         let manifest_bytes = match fetcher.fetch_manifest(&entry.manifest_hash).await {
             Ok(b) => b,
@@ -929,7 +1129,7 @@ async fn spool_planned(
 /// [`crate::peer_share_store::SpoolFetcher`] then answers it with a permanent
 /// miss, so its row lands without the body and the cursor passes it
 /// (`p2p.md` § Cross-user shared-set transfer, the metering paragraph).
-async fn mark_spool_capped(spool: &Path, manifest_hash: &ContentHash) -> Result<()> {
+pub(crate) async fn mark_spool_capped(spool: &Path, manifest_hash: &ContentHash) -> Result<()> {
     let marker = spool_capped_path(spool, manifest_hash);
     if let Some(dir) = marker.parent() {
         tokio::fs::create_dir_all(dir).await?;
@@ -1647,7 +1847,7 @@ mod spool_spend_tests {
             context: "some/file".to_string(),
         }];
 
-        let spent = spool_planned(&peer, &plan, dir.path(), None)
+        let spent = spool_planned(&peer, &plan, dir.path(), None, &|| true)
             .await
             .expect("spool the plan");
 
@@ -1661,6 +1861,86 @@ mod spool_spend_tests {
         assert!(
             spent.bytes > 0,
             "a peer that prices its own transfers at zero must not transfer for free"
+        );
+    }
+
+    /// Serves several one-file peers by manifest hash and drops the "direct"
+    /// flag the moment its first chunk pull is served — a direct path dying
+    /// while the page is mid-flight.
+    struct FlipAfterFirstBody {
+        files: Vec<LyingPeer>,
+        direct: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+    impl fauna_core::file_download::BlobFetcher for FlipAfterFirstBody {
+        async fn fetch_manifest(&self, hash: &ContentHash) -> Result<Vec<u8>> {
+            let f = self
+                .files
+                .iter()
+                .find(|f| &f.manifest_hash == hash)
+                .expect("the pump asked for a planned manifest");
+            Ok(f.manifest.clone())
+        }
+
+        async fn fetch_chunks(
+            &self,
+            store_keys: &[ContentHash],
+            _relative_path: &str,
+        ) -> Result<Vec<Vec<u8>>> {
+            let f = self
+                .files
+                .iter()
+                .find(|f| store_keys.contains(&ContentHash::of_raw(&f.body)))
+                .expect("the pump asked for a planned chunk");
+            self.direct
+                .store(false, std::sync::atomic::Ordering::SeqCst);
+            Ok(store_keys.iter().map(|_| f.body.clone()).collect())
+        }
+    }
+
+    /// — `p2p.md` § The relay, ruling 4: the byte gate is re-read
+    /// before EACH body. A direct path that flips to relayed after the first
+    /// body of a multi-body page must leave the rest deferred (counted, not
+    /// fetched); reading the gate once per page would fetch all three.
+    #[tokio::test]
+    async fn a_path_flip_mid_page_defers_the_remaining_bodies() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let direct = std::sync::Arc::new(AtomicBool::new(true));
+        let files = vec![
+            LyingPeer::one_file(1024),
+            LyingPeer::one_file(2048),
+            LyingPeer::one_file(3072),
+        ];
+        let plan: Vec<PlannedFetch> = files
+            .iter()
+            .enumerate()
+            .map(|(i, f)| PlannedFetch {
+                manifest_hash: f.manifest_hash,
+                size: 0,
+                context: format!("file-{i}"),
+            })
+            .collect();
+        let peer = FlipAfterFirstBody {
+            files,
+            direct: direct.clone(),
+        };
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        let gate_flag = direct.clone();
+        let spent = spool_planned(&peer, &plan, dir.path(), None, &move || {
+            gate_flag.load(Ordering::SeqCst)
+        })
+        .await
+        .expect("spool the page");
+
+        assert_eq!(spent.files, 1, "only the body before the flip rode");
+        assert_eq!(spent.deferred, 2, "the rest are deferred to the nest path");
+        assert!(
+            !spool_manifest_path(dir.path(), &plan[1].manifest_hash).exists()
+                && !spool_manifest_path(dir.path(), &plan[2].manifest_hash).exists(),
+            "a deferred body is not spooled"
         );
     }
 
@@ -1682,7 +1962,7 @@ mod spool_spend_tests {
             context: "some/file".to_string(),
         }];
 
-        spool_planned(&peer, &plan, dir.path(), None)
+        spool_planned(&peer, &plan, dir.path(), None, &|| true)
             .await
             .expect_err("the body write fails");
 
@@ -1736,7 +2016,7 @@ mod spool_spend_tests {
             context: "some/file".to_string(),
         }];
 
-        let spent = spool_planned(&peer, &plan, dir.path(), None)
+        let spent = spool_planned(&peer, &plan, dir.path(), None, &|| true)
             .await
             .expect("a failed entry skips, never fails the page");
 
@@ -1827,7 +2107,7 @@ mod spool_spend_tests {
             tier: fauna_core::feature_gate::RuleTier::Admin,
         };
 
-        let spent = spool_planned(&peer, &plan, dir.path(), Some(cap))
+        let spent = spool_planned(&peer, &plan, dir.path(), Some(cap), &|| true)
             .await
             .expect("a capped entry skips, never fails the page");
 
@@ -1881,7 +2161,7 @@ mod spool_spend_tests {
             size: 0,
             context: "big/file".to_string(),
         }];
-        let spent = spool_planned(&open, &plan, dir.path(), None)
+        let spent = spool_planned(&open, &plan, dir.path(), None, &|| true)
             .await
             .expect("spool");
         assert_eq!(spent.files, 1);
@@ -2022,7 +2302,7 @@ mod spool_spend_tests {
             0,
             4096,
             1,
-            Some(1),
+            Some(fauna_core::blob_seal::SealStamp::Version(1)),
         )
         .unwrap();
 
@@ -2050,7 +2330,7 @@ mod advertise_tests {
             db_path: PathBuf::from("/nonexistent"),
             body: crate::share_body::TreeBodySource::shared("/nonexistent"),
             landing: Landing::Resident,
-            content_keys: FolderContentKeys::genesis([9; 32], 1),
+            content_keys: fauna_core::folder_keys::FolderContentKeys::genesis([9; 32], 1).into(),
         }
     }
 

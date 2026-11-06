@@ -40,12 +40,34 @@ fn row_from(r: &rusqlite::Row<'_>) -> rusqlite::Result<TlsrptInboundReportRow> {
     })
 }
 
+/// At most this many TLSRPT reports rest at once: the dedupe key is the
+/// sender's own `report-id`, so a stranger varying it would otherwise grow the
+/// table without bound (the processor address bypasses the mail quota).
+pub const TLSRPT_INBOUND_ROW_CAP: i64 = 10_000;
+
+/// At most this many archive bytes (`payload_json_gz`) rest in the table.
+pub const TLSRPT_INBOUND_BYTE_CAP: i64 = 512 << 20;
+
 impl CacheDb {
-    /// Store one report. `false` when `(submitter, policy_published_domain,
+    /// Store one report, unless `(submitter, policy_published_domain,
     /// report_id)` is already stored — a peer re-sent it, and the first copy
-    /// stands.
-    pub async fn insert_tlsrpt_inbound_report(&self, row: &TlsrptInboundReportRow) -> Result<bool> {
+    /// stands — or the table is at [`TLSRPT_INBOUND_ROW_CAP`] /
+    /// [`TLSRPT_INBOUND_BYTE_CAP`].
+    pub async fn insert_tlsrpt_inbound_report(
+        &self,
+        row: &TlsrptInboundReportRow,
+    ) -> Result<super::dmarc_reports::ReportInsert> {
+        use super::dmarc_reports::{ReportInsert, report_table_full};
         let conn = self.conn.lock().await;
+        if report_table_full(
+            &conn,
+            "tlsrpt_inbound_reports",
+            "payload_json_gz",
+            TLSRPT_INBOUND_ROW_CAP,
+            TLSRPT_INBOUND_BYTE_CAP,
+        )? {
+            return Ok(ReportInsert::Full);
+        }
         let n = conn
             .execute(
                 &format!(
@@ -65,7 +87,11 @@ impl CacheDb {
                 ],
             )
             .context("insert tlsrpt inbound report")?;
-        Ok(n == 1)
+        Ok(if n == 1 {
+            ReportInsert::Stored
+        } else {
+            ReportInsert::Duplicate
+        })
     }
 
     /// Reports received at or after `since`, optionally for one of our domains,

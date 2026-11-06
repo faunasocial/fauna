@@ -1,3 +1,4 @@
+#if !FAUNA_KIDS
 import SwiftUI
 import Photos
 
@@ -30,7 +31,7 @@ public struct PhotoBackupControlsView: View {
     /// decide whether to `startObserving()` (FaunaMacApp / FaunaClient).
     public static let enabledKey = "fauna.photoBackupEnabled"
 
-    @State private var photoBackupEnabled = UserDefaults.standard.bool(forKey: PhotoBackupControlsView.enabledKey)
+    @State private var photoBackupEnabled = AppDefaults.store.bool(forKey: PhotoBackupControlsView.enabledKey)
     @State private var photoAuthStatus: PHAuthorizationStatus = PHPhotoLibrary.authorizationStatus(for: .readWrite)
     @State private var isSyncing = false
 
@@ -75,7 +76,7 @@ public struct PhotoBackupControlsView: View {
                     if enabled {
                         requestPhotoAccess()
                     } else {
-                        UserDefaults.standard.set(false, forKey: Self.enabledKey)
+                        AppDefaults.store.set(false, forKey: Self.enabledKey)
                     }
                 }
 
@@ -236,12 +237,12 @@ public struct PhotoBackupControlsView: View {
             Task { @MainActor in
                 photoAuthStatus = status
                 if status == .authorized || status == .limited {
-                    UserDefaults.standard.set(true, forKey: Self.enabledKey)
+                    AppDefaults.store.set(true, forKey: Self.enabledKey)
                     engine?.startObserving()
                     if let engine { _ = try? await engine.syncNewPhotos() }
                 } else {
                     photoBackupEnabled = false
-                    UserDefaults.standard.set(false, forKey: Self.enabledKey)
+                    AppDefaults.store.set(false, forKey: Self.enabledKey)
                 }
             }
         }
@@ -250,3 +251,5 @@ public struct PhotoBackupControlsView: View {
 
 // `groupedSection` (`GroupedSection.swift`) is the shared eager-container
 // replacement for `Form`'s `Section` this file uses.
+
+#endif // !FAUNA_KIDS

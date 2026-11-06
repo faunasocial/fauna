@@ -59,12 +59,11 @@ struct WelcomeView: View {
                 case .recoveryEntry:
                     RecoveryEntryView(vm: vm, isAddingAccount: { appState.isAddingAccount })
                 // The signed-out lock door (ui/sessions.md § The signed-out door)
-                // is unbuilt on apple: nothing renders emergency-lockout-entry-
-                // button, so the machine never enters this step here. Shown as
-                // the choice page so the switch stays exhaustive until the
-                // trickle-down lands it.
+                // — shared FaunaKit view, reached from `IdentityChoiceView`'s
+                // `emergency-lockout-entry-button`. Mirrors
+                // `OnboardingContainerView` (macOS).
                 case .emergencyLockoutEntry:
-                    IdentityChoiceView(vm: vm)
+                    EmergencyLockoutEntryView(vm: vm)
                 // The one-tap trust offer (onboarding.md § 3b-ter) — shared
                 // FaunaKit view, `setRendersTrustPrompt(true)` declared at
                 // `OnboardingVM.init`.

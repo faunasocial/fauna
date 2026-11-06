@@ -678,6 +678,137 @@ async fn remove_device_by_index_calls_delete_then_refreshes() {
     assert_eq!(nest.calls().len(), 1);
 }
 
+/// `devices.md` § Device names, rule (1): the rename seals the name under the
+/// owner's root — the one seal site the provisioner's register shares — sends
+/// only the seal, and the refreshed roster renders the new name.
+#[tokio::test]
+async fn rename_device_seals_under_the_owner_root_and_the_roster_shows_the_new_name() {
+    let (m, nest, _) = setup();
+    let owner = fauna_core::crypto::BackupKey::from_bytes([7u8; 32]);
+    m.set_label_custody(fauna_core::label_custody::LabelCustody::owner_only(
+        owner.clone(),
+    ));
+    nest.set_devices(vec![device("aa", "fauna-tui"), device("bb", "fauna-ios")]);
+    m.refresh().await;
+
+    let phone = "bb".repeat(32);
+    m.rename_device(phone.clone(), "  kitchen tablet ".into())
+        .await;
+
+    let calls = nest.calls();
+    let [
+        FakeCall::RenameDevice {
+            device_id,
+            label_sealed,
+        },
+    ] = calls.as_slice()
+    else {
+        panic!("one rename call, got {calls:?}");
+    };
+    assert_eq!(device_id, &phone);
+    let salt = fauna_core::hex32::decode(&phone).unwrap();
+    assert_eq!(
+        fauna_core::label_custody::render_device_label(
+            &fauna_core::file_download::FileDownloadKeys::owner(owner),
+            Some(label_sealed),
+            "",
+            &salt,
+        ),
+        fauna_core::path_crypto::SealedLabelRender::Sealed("kitchen tablet".into()),
+        "the seal opens under the owner key to the trimmed name"
+    );
+    let snap = m.snapshot();
+    assert_eq!(snap.error, None);
+    let labels: Vec<_> = snap.devices.iter().map(|d| d.label.as_str()).collect();
+    assert_eq!(labels, vec!["fauna-tui", "kitchen tablet"]);
+}
+
+/// The wire carries no plaintext, so a reader holding no owner key sends
+/// nothing and says why; a blank name and an id no longer listed are ignored;
+/// a nest refusal paints the page error.
+#[tokio::test]
+async fn rename_device_refuses_without_a_seal_and_surfaces_a_nest_failure() {
+    let (m, nest, _) = setup();
+    nest.set_devices(vec![device("aa", "fauna-tui")]);
+    m.refresh().await;
+    let laptop = "aa".repeat(32);
+
+    m.rename_device(laptop.clone(), "desk".into()).await;
+    assert_eq!(nest.calls(), vec![]);
+    assert_eq!(
+        m.snapshot().error.expect("refused").key,
+        "devices.error_rename_needs_key"
+    );
+
+    m.set_label_custody(fauna_core::label_custody::LabelCustody::owner_only(
+        fauna_core::crypto::BackupKey::from_bytes([7u8; 32]),
+    ));
+    m.rename_device(laptop.clone(), "   ".into()).await;
+    m.rename_device("cc".repeat(32), "desk".into()).await;
+    assert_eq!(
+        nest.calls(),
+        vec![],
+        "blank name and unlisted id send nothing"
+    );
+
+    nest.set_rename_device_response(Err(DevicesApiError::NotFound {
+        detail: "device not found".into(),
+    }));
+    m.rename_device(laptop, "desk".into()).await;
+    assert_eq!(nest.calls().len(), 1);
+    assert_eq!(
+        m.snapshot().error.expect("surfaced").key,
+        "devices.error_rename_device"
+    );
+}
+
+/// `device-rename-input` opens prefilled with the row's NAME — the opened
+/// name, before rule (c)'s ` · code` composition — so two alike phones each
+/// open on `fauna-ios`, never on the disambiguated label the roster paints.
+/// An unknown row has no name to open on.
+#[tokio::test]
+async fn device_name_is_the_opened_name_without_the_disambiguating_code() {
+    let (m, nest, _) = setup();
+    nest.set_devices(vec![device("aa", "fauna-ios"), device("bb", "fauna-ios")]);
+    m.refresh().await;
+
+    let painted = m.snapshot().devices[0].label.clone();
+    assert!(
+        painted.starts_with("fauna-ios · "),
+        "precondition: rule (c) suffixed the alike rows, got {painted:?}"
+    );
+    assert_eq!(m.device_name("aa".repeat(32)), Some("fauna-ios".into()));
+    assert_eq!(m.device_name("bb".repeat(32)), Some("fauna-ios".into()));
+    assert_eq!(m.device_name("cc".repeat(32)), None);
+}
+
+/// Confirming the editor on the name the row already has changes nothing and
+/// says nothing — an unrenamed row's app default included, which the seal
+/// would otherwise refuse as machine-authored. A DIFFERENT reserved app
+/// default typed by hand is refused with its own reason, never the
+/// needs-a-key one, and nothing is sent.
+#[tokio::test]
+async fn rename_device_to_the_same_name_is_a_no_op_and_a_reserved_name_is_refused() {
+    let (m, nest, _) = setup();
+    m.set_label_custody(fauna_core::label_custody::LabelCustody::owner_only(
+        fauna_core::crypto::BackupKey::from_bytes([7u8; 32]),
+    ));
+    nest.set_devices(vec![device("aa", "fauna-tui")]);
+    m.refresh().await;
+    let laptop = "aa".repeat(32);
+
+    m.rename_device(laptop.clone(), " fauna-tui ".into()).await;
+    assert_eq!(nest.calls(), vec![], "an unchanged name sends nothing");
+    assert_eq!(m.snapshot().error, None, "and raises no error");
+
+    m.rename_device(laptop, "fauna-ios".into()).await;
+    assert_eq!(nest.calls(), vec![], "a reserved name sends nothing");
+    assert_eq!(
+        m.snapshot().error.expect("refused").key,
+        "devices.error_rename_reserved_name"
+    );
+}
+
 /// The fleet-scope removal leg (`devices.md` § Removing a Device): the target
 /// is whatever the door RESOLVES from client-held truth for the chosen row —
 /// never the principal the nest put on that row. Here the nest pairs the
@@ -1672,6 +1803,112 @@ async fn successful_gesture_after_error_clears_error() {
     assert!(m.snapshot().error.is_none());
 }
 
+// ── A gesture's error across a re-read ────────────────────────────────────────
+
+fn page_error_key(m: &DevicesMachine) -> Option<String> {
+    m.snapshot().error.map(|e| e.key)
+}
+
+/// A background re-read answers no gesture, so it cannot retire a gesture's
+/// answer: the refusal stays on the page however many store changes land after
+/// it (measured on macOS: a store-change `refresh()` 23 ms after the own-device
+/// refusal wiped it before anyone could read it). A visit's `refresh` is the
+/// edge that starts the page clean.
+#[tokio::test]
+async fn a_resync_leaves_a_gestures_error_standing_and_a_visit_retires_it() {
+    let (m, nest, _) = setup();
+    nest.set_devices(vec![device("aa", "laptop")]);
+    m.refresh().await;
+    m.rename_device("aa".repeat(32), "desk".into()).await;
+    let refused = Some("devices.error_rename_needs_key".to_string());
+    assert_eq!(page_error_key(&m), refused);
+
+    m.resync().await;
+    assert_eq!(page_error_key(&m), refused, "a re-read answers no gesture");
+
+    m.refresh().await;
+    assert_eq!(page_error_key(&m), None, "the next visit starts clean");
+}
+
+/// A re-read still reports its own failure, and its next good read retires
+/// exactly that — while a gesture's error, standing over it, wins and outlives
+/// both.
+#[tokio::test]
+async fn a_resync_retires_only_the_read_error_it_put_up() {
+    let (m, nest, _) = setup();
+    nest.set_devices(vec![device("aa", "laptop")]);
+    m.refresh().await;
+
+    nest.fail_lists(DevicesApiError::Transient {
+        detail: "nest unreachable".into(),
+    });
+    m.resync().await;
+    let read_failed = Some("devices.error_refresh".to_string());
+    assert_eq!(page_error_key(&m), read_failed);
+
+    m.rename_device("aa".repeat(32), "desk".into()).await;
+    let refused = Some("devices.error_rename_needs_key".to_string());
+    assert_eq!(page_error_key(&m), refused, "a gesture's error wins");
+
+    m.resync().await;
+    assert_eq!(page_error_key(&m), refused);
+
+    nest.heal_lists();
+    m.resync().await;
+    assert_eq!(page_error_key(&m), refused, "the gesture's stays");
+
+    m.refresh().await;
+    assert_eq!(page_error_key(&m), None);
+
+    nest.fail_lists(DevicesApiError::Transient {
+        detail: "nest unreachable".into(),
+    });
+    m.resync().await;
+    assert_eq!(page_error_key(&m), read_failed);
+    nest.heal_lists();
+    m.resync().await;
+    assert_eq!(page_error_key(&m), None, "its own good read retires it");
+}
+
+/// Parks a refresh mid-read, so a gesture can land while it is in flight.
+#[derive(Default)]
+struct HeldFollowed {
+    entered: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+}
+
+#[async_trait::async_trait]
+impl FollowedFoldersSource for HeldFollowed {
+    async fn followed_folders(&self) -> Vec<FollowedFolderSummary> {
+        self.entered.notify_one();
+        self.release.notified().await;
+        Vec::new()
+    }
+}
+
+/// A visit's `refresh` retires what stood when it began. One already in flight
+/// when the gesture lands read the page before that gesture, so its commit
+/// leaves the gesture's error alone.
+#[tokio::test]
+async fn a_refresh_begun_before_a_gesture_leaves_its_error_standing() {
+    let (m, nest, _) = setup();
+    nest.set_devices(vec![device("aa", "laptop")]);
+    m.refresh().await;
+    let held = Arc::new(HeldFollowed::default());
+    m.set_followed_folders_source(held.clone());
+
+    tokio::join!(m.refresh(), async {
+        held.entered.notified().await;
+        m.rename_device("aa".repeat(32), "desk".into()).await;
+        held.release.notify_one();
+    });
+
+    assert_eq!(
+        page_error_key(&m),
+        Some("devices.error_rename_needs_key".to_string())
+    );
+}
+
 // ── Observer ──────────────────────────────────────────────────────────────────
 
 #[tokio::test]
@@ -2431,6 +2668,60 @@ async fn a_plaintext_device_row_still_renders_for_a_keyless_reader() {
     m.refresh().await;
 
     assert_eq!(m.snapshot().devices[0].label, "laptop");
+}
+
+// ── rule (c): alike names are told apart by the code (devices.md § Device names) ──
+
+/// Two phones of one platform, neither renamed: both rows rest the plaintext
+/// app default with no seal — the page's all-unsealed path — and still read
+/// apart, `name · code`, with no user action.
+#[tokio::test]
+async fn two_unsealed_rows_of_one_app_default_read_name_dot_code() {
+    let (m, nest, _) = setup();
+    nest.set_devices(vec![device("3f", "fauna-ios"), device("8c", "fauna-ios")]);
+
+    m.refresh().await;
+
+    let snap = m.snapshot();
+    assert_eq!(snap.devices[0].label, "fauna-ios · 3f3f3f3f3f3f\u{2026}");
+    assert_eq!(snap.devices[1].label, "fauna-ios · 8c8c8c8c8c8c\u{2026}");
+}
+
+/// The same rule on a page that also carries a sealed row: the opened names
+/// are compared, so a renamed device reads its name alone while the two alike
+/// defaults beside it read apart.
+#[tokio::test]
+async fn alike_rows_beside_a_sealed_row_read_apart_and_the_renamed_one_alone() {
+    let (m, nest, _) = setup();
+    let root = fauna_core::crypto::BackupKey::from_bytes([3u8; 32]);
+    m.set_label_custody(fauna_core::label_custody::LabelCustody::owner_only(
+        root.clone(),
+    ));
+    nest.set_devices(vec![
+        device("3f", "fauna-ios"),
+        device("8c", "fauna-ios"),
+        sealed_device("aa", &root, "my-phone"),
+    ]);
+
+    m.refresh().await;
+
+    let snap = m.snapshot();
+    assert_eq!(snap.devices[0].label, "fauna-ios · 3f3f3f3f3f3f\u{2026}");
+    assert_eq!(snap.devices[1].label, "fauna-ios · 8c8c8c8c8c8c\u{2026}");
+    assert_eq!(snap.devices[2].label, "my-phone");
+}
+
+/// A lone row keeps its bare name: the code is paid only where an ambiguity is.
+#[tokio::test]
+async fn a_lone_app_default_row_keeps_its_bare_name() {
+    let (m, nest, _) = setup();
+    nest.set_devices(vec![device("3f", "fauna-ios"), device("8c", "fauna-tui")]);
+
+    m.refresh().await;
+
+    let snap = m.snapshot();
+    assert_eq!(snap.devices[0].label, "fauna-ios");
+    assert_eq!(snap.devices[1].label, "fauna-tui");
 }
 
 // ── the selective-sync path render seam (path-sealing S6-c) ─────────────────

@@ -37,6 +37,7 @@ import pytest
 
 from common.auth import create_actor_and_register
 from actions.api_actor import ApiActor
+from clients._ws_rpc_core import RpcCallError
 from helpers.budgets import RPC_ROUNDTRIP_S
 from helpers.e2e_session import login_as
 from nacl.signing import SigningKey
@@ -103,7 +104,6 @@ def _login_as(app, request, nest, user, *, handle: str) -> None:
 
 @pytest.mark.feature("paid-posts-and-tips")
 def test_sell_post_mints_an_unlock_tier_and_gates_the_post(app, request, sell_nest):
-    app.subscriptions.require_sell_post_authoring_supported()
 
     admin_sk = _as_signing_key(sell_nest["admin"]["signing_key"])
     author = create_actor_and_register(
@@ -211,7 +211,6 @@ def test_sold_post_attachment_is_sealed_and_never_uploaded_in_plaintext(
        store actually holds, fetched with no credentials at all, exactly as any
        stranger holding the hash would.
     """
-    app.subscriptions.require_sell_post_authoring_supported()
     if not TEST_IMAGE.exists():
         pytest.skip("Test image fixture not found")
 
@@ -301,7 +300,6 @@ def test_sell_post_buyer_redeems_claim_and_unseals(app, request, sell_nest):
     rather than requiring the row to still be visible in §2 — clicking
     Approve is a fallback exercised only if the row is still pending when
     observed, not the mechanism under test."""
-    app.subscriptions.require_sell_post_buyer_leg_supported()
 
     admin_sk = _as_signing_key(sell_nest["admin"]["signing_key"])
     seller = create_actor_and_register(
@@ -415,7 +413,6 @@ def test_sell_post_teaser_price_and_self_serve_buy(app, request, sell_nest):
     buyer arm above proves) additionally needs an author-side subscriptions
     management surface and runs on every app but android (the guard below
     says why)."""
-    app.subscriptions.require_teaser_buy_supported()
 
     admin_sk = _as_signing_key(sell_nest["admin"]["signing_key"])
     seller = create_actor_and_register(
@@ -568,10 +565,10 @@ def test_sell_post_existing_subscriber_reads_it_free(app, request, sell_nest):
 
     The chain under test: §1 create tier → offers subscribe → §2 approve →
     sell with the toggle ON (creation-time fan-out reconcile enqueues the
-    subscriber's mint, payment-marked) → §2 approve the fan-out row (the same
-    call `drain_auto_approvals`' background poll would make, driven
-    synchronously like the buyer leg above) → the subscriber's detail-open
-    UNSEALS. Readability through the UI, never a rank integer."""
+    subscriber's mint, payment-marked) → the grant lands, by
+    `drain_auto_approvals`' background poll or by §2's approve, whichever comes
+    first → the subscriber's detail-open UNSEALS. Readability through the UI,
+    never a rank integer."""
     app.subscriptions.require_sell_post_seller_fanout_leg_supported()
 
     admin_sk = _as_signing_key(sell_nest["admin"]["signing_key"])
@@ -632,35 +629,54 @@ def test_sell_post_existing_subscriber_reads_it_free(app, request, sell_nest):
     app.driver.wait_for("compose-text-field")
     feed = app.feed
     feed.sell_post(FULL_BODY, PREVIEW, PRICE)
-    assert feed.wait_for_gated_badge_text() is not None, (
+    unlock = feed.wait_for_gated_badge_text()
+    assert unlock is not None, (
         f"a sold post's card should carry gated-post-badge; "
         f"error-message={app.error_text()!r}"
     )
 
     # ── The creation-time reconcile enqueued the existing subscriber's mint —
-    # payment-marked so the drain pump needs no creator judgment. Drive the
-    # same approve synchronously through §2 rather than waiting on the poll
-    # cadence (the buyer-leg pattern above).
-    subs.navigate()
-    subs.open_tiers_tab()
-    subs.refresh()
-    assert subs.wait_for_pending_request(1), (
-        f"selling with the toggle ON should enqueue the existing subscriber's "
-        f"unlock-tier mint; error={subs.error_text()!r}"
+    # payment-marked, so the drain pump grants it with no creator judgment.
+    # That pump races any read of the row: at web's e2e cadence (2 s) it has
+    # usually taken the row before §2 renders, so the row being THERE is not
+    # latency-independent (convention 14), and neither is reaching §2 first.
+    # What holds on every app: a row the nest still lists is payment-marked,
+    # and the grant lands — by the drain or by §2's approve, whichever is first.
+    # This is the nest's snapshot, not the rendered row: a row gone from it was
+    # drained, and the drain takes this row only because it is marked.
+    seller_api = ApiActor(
+        sell_nest["url"], seller["token"], seller["actor_id_hex"],
+        bytes(seller["signing_key"]),
     )
-    assert subs.request_paid(0), (
-        "the fan-out row must be payment-marked (the drain lane)"
+    fanned = [
+        r for r in seller_api.subscription_requests_list()
+        if r.get("tier_name") == unlock
+    ]
+    assert all(r.get("payment_entitled") for r in fanned), (
+        f"the fan-out row must be payment-marked (the drain lane), got {fanned!r}"
     )
-    subs.approve_first_request()
-    # The click returns before the mint+upload lands; the row leaves §2 only
-    # once `requests.approve` has stored the covering KeyBlob. Switching
-    # account before that (web's in-tab switch drops the in-flight approve)
-    # left the subscriber `not_subscribed` to the unlock tier (2026-10-10).
-    # gold's roster already holds them, so `wait_for_subscriber(1)` cannot
-    # observe this approve — the emptied §2 can.
-    assert subs.wait_for_pending_request_count(0), (
-        f"the fan-out row should leave §2 once its mint lands; "
-        f"still pending={subs.pending_request_ids()}; error={subs.error_text()!r}"
+    sub_api = ApiActor(
+        sell_nest["url"], sub["token"], sub["actor_id_hex"],
+        bytes(sub["signing_key"]),
+    )
+
+    def subscriber_holds_the_unlock_key() -> bool:
+        try:
+            return sub_api.subscription_key_blob(
+                bytes.fromhex(seller["actor_id_hex"]), unlock,
+            )["version"] >= 1
+        except RpcCallError:
+            return False
+
+    # The click returns before the mint+upload lands, and switching account
+    # before that (web's in-tab switch drops the in-flight approve) left the
+    # subscriber `not_subscribed` to the unlock tier (2026-10-10). gold's roster
+    # already holds them, so `wait_for_subscriber(1)` cannot observe this
+    # grant; the nest serving them the unlock tier's KeyBlob can.
+    assert subs.approve_until(subscriber_holds_the_unlock_key), (
+        f"selling with the toggle ON should grant the existing subscriber the "
+        f"unlock tier {unlock!r}; still pending={subs.pending_request_ids()}; "
+        f"error={subs.error_text()!r}"
     )
 
     # ── Subscriber: the sold post unseals on detail open — readability. ──────

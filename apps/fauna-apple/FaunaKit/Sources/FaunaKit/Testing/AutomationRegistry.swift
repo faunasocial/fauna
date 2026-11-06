@@ -65,6 +65,16 @@ public enum E2eEnv {
     /// status today.)
     public static let agentPortName = "FAUNA_E2E_AGENT_PORT"
 
+    /// A launch broken or parked on purpose (`TestAgentBootstrap.faultAtLaunchIfAsked`).
+    /// DEBUG-arm only and unpaired, as `agentPortName` is: its one call site is
+    /// `#if DEBUG` too.
+    public static var faultAtLaunch: String? { env["FAUNA_E2E_FAULT_AT_LAUNCH"] }
+
+    /// An app crashed at its next test-agent reset on purpose
+    /// (`TestAgentBootstrap.faultAtResetIfAsked`). DEBUG-arm only and unpaired,
+    /// as `faultAtLaunch` is.
+    public static var faultAtReset: String? { env["FAUNA_E2E_FAULT_AT_RESET"] }
+
     /// The harness-owned credential directory: the file-backed keychain
     /// (`<dir>/keychain.json`) and the stage-2 re-auth verdict
     /// (`<dir>/reauth-result`) both live here.
@@ -86,6 +96,26 @@ public enum E2eEnv {
     /// Spawn the real external `fauna-sync-agent` as a private child.
     public static var realSyncAgent: Bool { env["FAUNA_E2E_REAL_SYNC_AGENT"] != nil }
 
+    /// Run `KeychainStore` on a REAL keychain instead of the e2e in-memory store:
+    /// the seat simulator's own on iOS, a harness-owned file on macOS
+    /// (`KeychainStore.e2eRealKeychain` owns the gate and the reason).
+    public static var realKeychain: Bool { env["FAUNA_E2E_REAL_KEYCHAIN"] != nil }
+
+    /// iOS: the `keep` value of [`realKeychain`] — the relaunch runs on the seat
+    /// simulator's keychain as the last launch left it, skipping the launch sweep
+    /// (the restored-device witness, `apps/ios.md` § Credential Storage).
+    public static var keepRealKeychain: Bool { env["FAUNA_E2E_REAL_KEYCHAIN"] == "keep" }
+
+    /// macOS: the legacy keychain FILE a real-keychain launch runs on, which the
+    /// harness created in the launch's own tmp tree.
+    public static var keychainPath: String? {
+        env["FAUNA_E2E_KEYCHAIN_PATH"].flatMap { $0.isEmpty ? nil : $0 }
+    }
+
+    /// macOS: the password that unlocks [`keychainPath`]. The harness's own, for a
+    /// throwaway file — never a person's.
+    public static var keychainPassword: String? { env["FAUNA_E2E_KEYCHAIN_PASSWORD"] }
+
     /// Actuate a disabled control anyway (the enumeration mode) instead of
     /// refusing with HTTP 409.
     public static var permissiveActuation: Bool { env["FAUNA_E2E_PERMISSIVE_ACTUATION"] != nil }
@@ -100,6 +130,19 @@ public enum E2eEnv {
     public static var releaseFeedUrl: String? {
         env["FAUNA_E2E_RELEASE_FEED_URL"].flatMap { $0.isEmpty ? nil : $0 }
     }
+
+    /// The harness's opener record: every URL the app would have handed to the
+    /// OS opener is appended here instead, one per line (`ExternalURLOpener`;
+    /// linux's `url_opener.rs` reads the same variable).
+    public static var openedUrlsRecord: String? { env["FAUNA_E2E_OPENED_URLS"] }
+
+    /// The hex device token standing in for APNs' answer, which no e2e build can
+    /// get: the bare macOS binary has no notification centre, and the iOS
+    /// simulator's prompt is out of the in-process driver's reach
+    /// (`PushManager.tokenStandIn`).
+    public static var apnsTokenStandIn: String? {
+        env["FAUNA_E2E_APNS_TOKEN_STAND_IN"].flatMap { $0.isEmpty ? nil : $0 }
+    }
     #else
     // Production twins. Same signatures, constant answers, no variable names in
     // the artifact — the half a `strings -a` of a Release build has to see.
@@ -110,9 +153,15 @@ public enum E2eEnv {
     public static var widgetDir: String? { nil }
     public static var realConversations: Bool { false }
     public static var realSyncAgent: Bool { false }
+    public static var realKeychain: Bool { false }
+    public static var keepRealKeychain: Bool { false }
+    public static var keychainPath: String? { nil }
+    public static var keychainPassword: String? { nil }
     public static var permissiveActuation: Bool { false }
     public static var actuationLog: String? { nil }
     public static var releaseFeedUrl: String? { nil }
+    public static var openedUrlsRecord: String? { nil }
+    public static var apnsTokenStandIn: String? { nil }
     #endif
 }
 
@@ -195,6 +244,19 @@ public enum FaunaE2E {
             ? "[e2e] real-conversations gate OPEN — building the real ConversationsSession"
             : "[e2e] real-conversations gate CLOSED (FAUNA_E2E_REAL_CONVERSATIONS unset) "
               + "— keeping the deterministic mock conversation backends"
+    }
+
+    /// The same verdict for a launch that never reaches the gate: the app
+    /// signing ITSELF in from its own store (`completeAuthenticatedLaunch` — a
+    /// pinned-store relaunch, `preserve_state_across_relaunch()`), which builds
+    /// the real session unconditionally. Without a line of its own that launch
+    /// is as silent as a closed gate, and the real-rail witness reads it as a
+    /// login path that never got anywhere. `nil` outside e2e; wording here for
+    /// the reason above.
+    public static var productionLaunchRailVerdict: String? {
+        guard isActive else { return nil }
+        return "[e2e] real-conversations rail: production launch — the app signed itself in "
+            + "and builds the real ConversationsSession unconditionally (no gate on this path)"
     }
 
     /// E2E-only: run the **real external `fauna-sync-agent`** for this launch,
@@ -365,6 +427,46 @@ public enum AutomationScrollOutcome {
     case detached
 }
 
+/// The outcome of `POST /element/scroll-to-bottom-fraction`: the linux agent's
+/// `scroll_to_bottom_fraction` reply shape 1:1 (`automation/agent.rs`). A
+/// placement answers `found: true` with the fraction MEASURED after the move;
+/// every way it cannot place answers an `error` string, which the driver
+/// (`http_bridge.py::scroll_to_bottom_fraction`) raises on.
+public enum AutomationBottomFractionOutcome: Equatable {
+    /// Moved, carrying the share of the element's height now above the
+    /// viewport's bottom edge, re-read after the move (the clamp at either end
+    /// of the content can leave it short of the ask, and the reply says so).
+    case placed(Double)
+    /// The element sits under no scroll view.
+    case noScrollableAncestor
+    /// The element has no height to place.
+    case noHeight
+    /// The sentinel is not realized or its view is detached.
+    case detached
+}
+
+/// The geometry behind `scroll-to-bottom-fraction`, in ONE frame both
+/// platforms map onto: the scroll view's content, y growing DOWNWARD, the
+/// offset being the content y at the top of the visible viewport and running
+/// `0...maxOffset`. The element's top lands at `viewport - fraction * height`
+/// below the viewport's top — linux's `wanted` exactly — clamped to the
+/// content, and the reply is the share of the element then inside the
+/// viewport, measured from the clamped offset rather than assumed.
+public enum AutomationBottomFraction {
+    /// `nil` when the element has no height. `top` is the element's content y
+    /// at the CURRENT layout (an offset change never moves it in content space).
+    public static func place(
+        top: CGFloat, height: CGFloat, viewport: CGFloat, maxOffset: CGFloat,
+        fraction: CGFloat
+    ) -> (offset: CGFloat, fraction: Double)? {
+        guard height > 0 else { return nil }
+        let wanted = top - (viewport - fraction * height)
+        let offset = min(max(0, wanted), max(0, maxOffset))
+        let visible = min(top + height, offset + viewport) - max(top, offset)
+        return (offset, Double(min(1, max(0, visible) / height)))
+    }
+}
+
 /// Test-only registry of interactive UI elements, keyed by the same test id the
 /// element carries in `.accessibilityIdentifier(...)`.
 ///
@@ -522,6 +624,15 @@ public final class AutomationRegistry {
         /// frame but no way to scroll to it would be exactly the half-wired
         /// state the route's stub-era trap was made of.
         var scrollIntoView: (() -> AutomationScrollOutcome)?
+        /// Move this slot's NEAREST enclosing scroll view by a pixel delta —
+        /// backs `scrollEnclosingScrollView(of:by:)`. Wired beside
+        /// `scrollIntoView`, for the same reason.
+        var scrollBy: ((CGFloat) -> Bool?)?
+        /// Place this slot's element so a fraction of its height shows above
+        /// its NEAREST scroll view's bottom edge — backs
+        /// `POST /element/scroll-to-bottom-fraction`. Wired beside
+        /// `scrollIntoView`, for the same reason.
+        var scrollToBottomFraction: ((CGFloat) -> AutomationBottomFractionOutcome)?
     }
 
     private var entries: [String: [Slot]] = [:] {
@@ -599,7 +710,10 @@ public final class AutomationRegistry {
     public func register(
         _ id: String, token: UUID, path: [AutomationScopeStep] = [],
         geometry: (() -> SentinelGeometry?)? = nil,
-        scrollIntoView: (() -> AutomationScrollOutcome)? = nil, _ entry: Entry
+        scrollIntoView: (() -> AutomationScrollOutcome)? = nil,
+        scrollBy: ((CGFloat) -> Bool?)? = nil,
+        scrollToBottomFraction: ((CGFloat) -> AutomationBottomFractionOutcome)? = nil,
+        _ entry: Entry
     ) {
         if var list = entries[id], let idx = list.firstIndex(where: { $0.token == token }) {
             list[idx].path = path
@@ -608,11 +722,14 @@ public final class AutomationRegistry {
             list[idx].sawDetach = false
             if geometry != nil { list[idx].geometry = geometry }
             if scrollIntoView != nil { list[idx].scrollIntoView = scrollIntoView }
+            if scrollBy != nil { list[idx].scrollBy = scrollBy }
+            if scrollToBottomFraction != nil { list[idx].scrollToBottomFraction = scrollToBottomFraction }
             entries[id] = list
         } else {
             entries[id, default: []].append(
                 Slot(token: token, path: path, entry: entry, geometry: geometry,
-                     scrollIntoView: scrollIntoView))
+                     scrollIntoView: scrollIntoView, scrollBy: scrollBy,
+                     scrollToBottomFraction: scrollToBottomFraction))
         }
     }
 
@@ -625,18 +742,24 @@ public final class AutomationRegistry {
     public func attach(
         _ id: String, token: UUID, path: [AutomationScopeStep] = [],
         geometry: (() -> SentinelGeometry?)? = nil,
-        scrollIntoView: (() -> AutomationScrollOutcome)? = nil, _ entry: Entry
+        scrollIntoView: (() -> AutomationScrollOutcome)? = nil,
+        scrollBy: ((CGFloat) -> Bool?)? = nil,
+        scrollToBottomFraction: ((CGFloat) -> AutomationBottomFractionOutcome)? = nil,
+        _ entry: Entry
     ) {
         if var list = entries[id], let idx = list.firstIndex(where: { $0.token == token }) {
             list[idx].path = path
             list[idx].entry = entry
             if geometry != nil { list[idx].geometry = geometry }
             if scrollIntoView != nil { list[idx].scrollIntoView = scrollIntoView }
+            if scrollBy != nil { list[idx].scrollBy = scrollBy }
+            if scrollToBottomFraction != nil { list[idx].scrollToBottomFraction = scrollToBottomFraction }
             entries[id] = list
         } else {
             entries[id, default: []].append(
                 Slot(token: token, path: path, entry: entry, geometry: geometry,
-                     scrollIntoView: scrollIntoView))
+                     scrollIntoView: scrollIntoView, scrollBy: scrollBy,
+                     scrollToBottomFraction: scrollToBottomFraction))
         }
     }
 
@@ -668,7 +791,10 @@ public final class AutomationRegistry {
     public func refresh(
         _ id: String, token: UUID, path: [AutomationScopeStep] = [],
         geometry: (() -> SentinelGeometry?)? = nil,
-        scrollIntoView: (() -> AutomationScrollOutcome)? = nil, _ entry: Entry
+        scrollIntoView: (() -> AutomationScrollOutcome)? = nil,
+        scrollBy: ((CGFloat) -> Bool?)? = nil,
+        scrollToBottomFraction: ((CGFloat) -> AutomationBottomFractionOutcome)? = nil,
+        _ entry: Entry
     ) {
         guard var list = entries[id],
               let idx = list.firstIndex(where: { $0.token == token }) else { return }
@@ -676,6 +802,8 @@ public final class AutomationRegistry {
         list[idx].entry = entry
         if geometry != nil { list[idx].geometry = geometry }
         if scrollIntoView != nil { list[idx].scrollIntoView = scrollIntoView }
+        if scrollBy != nil { list[idx].scrollBy = scrollBy }
+        if scrollToBottomFraction != nil { list[idx].scrollToBottomFraction = scrollToBottomFraction }
         entries[id] = list
     }
 
@@ -762,13 +890,41 @@ public final class AutomationRegistry {
     /// Safe to hand a bare id, by construction: this only casts the two votes,
     /// and `Slot.effectivelyVisible` is geometry-FIRST, so a slot settled on
     /// screen elsewhere under the same id is decided by its frame and shrugs
-    /// this off. Re-presenting restores the slot through the ordinary
-    /// `register` upsert, which clears both votes. No matching id → no-op.
-    public func hideAll(_ id: String) {
-        guard var list = entries[id] else { return }
+    /// this off. No matching id → no-op.
+    ///
+    /// Returns the tokens whose votes this call changed (the slots that were
+    /// not already retired), which is what `reshow` takes back on the next
+    /// presentation. Re-presenting can NOT be left to the ordinary `register`
+    /// upsert alone: observed on macOS, a second publish of one folder left
+    /// `folder-audience-public-confirm` hidden for the whole wait while the
+    /// confirm was armed — the content keeps its
+    /// identity across presentations and no show signal reaches its slot the
+    /// second time. The host's own `isPresented` declares the start of a
+    /// presentation as well as its end.
+    @discardableResult
+    public func hideAll(_ id: String) -> [UUID] {
+        guard var list = entries[id] else { return [] }
+        var retired: [UUID] = []
         for i in list.indices {
+            if !(list[i].sawDisappear && list[i].sawDetach) { retired.append(list[i].token) }
             list[i].sawDisappear = true
             list[i].sawDetach = true
+        }
+        entries[id] = list
+        return retired
+    }
+
+    /// Undo exactly what an earlier `hideAll(id)` did: clear both votes on the
+    /// slots it returned, and touch no other slot under `id` — a different
+    /// host's presentation (one `FolderRowBody` per folder, each with its own
+    /// alert under the same id) stays retired. A token whose slot has since
+    /// died (`unregister` on identity death) is skipped; its successor
+    /// identity registers itself through `.onAppear`. No matching id → no-op.
+    public func reshow(_ id: String, tokens: [UUID]) {
+        guard var list = entries[id], !tokens.isEmpty else { return }
+        for i in list.indices where tokens.contains(list[i].token) {
+            list[i].sawDisappear = false
+            list[i].sawDetach = false
         }
         entries[id] = list
     }
@@ -1000,6 +1156,27 @@ public final class AutomationRegistry {
         // A slot with no sentinel (watchOS, a sentinel-less context) resolves but
         // cannot scroll — report it as such rather than 404ing a real element.
         return slot.scrollIntoView ?? { .detached }
+    }
+
+    /// The scope-aware resolver behind `POST /element/scroll-to-bottom-fraction`
+    /// — `resolvedScrollIntoView`'s twin (slot-level, for the same reason).
+    /// `nil` = no such element (the caller 404s).
+    public func resolvedScrollToBottomFraction(
+        _ id: String, scope: [AutomationScopeStep], leafIndex: Int
+    ) -> ((CGFloat) -> AutomationBottomFractionOutcome)? {
+        guard let slot = resolvedSlot(id, scope: scope, leafIndex: leafIndex) else { return nil }
+        return slot.scrollToBottomFraction ?? { _ in .detached }
+    }
+
+    /// Move the scroll view `id`'s first on-screen element sits in by `px`
+    /// points (positive scrolls the content up, as a user's downward scroll
+    /// does), clamped to the content — the engagement-cue journeys' pixel step
+    /// (`feed_cue_scroll_by`, linux's vadjustment twin). Returns whether the
+    /// offset moved (`false` at either end); `nil` when no such element is on
+    /// screen or it sits under no scroll view.
+    public func scrollEnclosingScrollView(of id: String, by px: CGFloat) -> Bool? {
+        guard let slot = visibleSlots(id).first else { return nil }
+        return slot.scrollBy?(px) ?? nil
     }
 
     /// Scope-aware visibility (a missing element is `false`, never an error).
@@ -1322,7 +1499,8 @@ public extension View {
         visibleText: (() -> String?)? = nil,
         textRuns: (() -> String?)? = nil,
         pressKey: ((String) -> String?)? = nil,
-        commit: (() -> Void)? = nil
+        commit: (() -> Void)? = nil,
+        attributes: (() -> [String: String])? = nil
     ) -> some View {
         #if DEBUG
         modifier(_AutomationRegister(id: id, entry: .init(
@@ -1333,7 +1511,8 @@ public extension View {
             isEnabled: isEnabled,
             visibleText: visibleText,
             textRuns: textRuns,
-            pressKey: pressKey)))
+            pressKey: pressKey,
+            attributes: attributes)))
         #else
         self
         #endif
@@ -1437,7 +1616,10 @@ public extension View {
 
 #if DEBUG
 
-/// Retires `ids` when the host's presentation binding goes false. Internal —
+/// Retires `ids` when the host's presentation binding goes false, and brings
+/// back exactly the slots it retired when the binding goes true again (the
+/// `register` upsert alone never re-showed a second presentation —
+/// `AutomationRegistry.hideAll`). Internal —
 /// use the `automationPresentation(ids:isPresented:)` `View` extension, which
 /// carries the rationale.
 ///
@@ -1454,12 +1636,22 @@ public extension View {
 public struct _AutomationPresentation: ViewModifier {
     let ids: [String]
     let isPresented: Bool
+    /// The tokens this host's last dismissal retired, per id — only these come
+    /// back on the next presentation, so another host's retired slot under the
+    /// same id never does.
+    @State private var retired: [String: [UUID]] = [:]
 
     public func body(content: Content) -> some View {
         if AutomationRegistry.isEnabled {
             content.onChange(of: isPresented) { _, presented in
-                guard !presented else { return }
-                for id in ids { AutomationRegistry.shared.hideAll(id) }
+                if presented {
+                    for id in ids {
+                        AutomationRegistry.shared.reshow(id, tokens: retired[id] ?? [])
+                    }
+                    retired = [:]
+                } else {
+                    for id in ids { retired[id] = AutomationRegistry.shared.hideAll(id) }
+                }
             }
         } else {
             content
@@ -1697,6 +1889,97 @@ private final class _AutomationLifecycle {
         #endif
     }
 
+    /// Move the sentinel's NEAREST enclosing scroll view by `px` points through
+    /// the real clip view / content offset, clamped to the content — what a
+    /// user's scroll moves, so a viewport observer samples it honestly. Returns
+    /// whether the offset moved; `nil` when detached or under no scroll view.
+    @MainActor
+    func scrollEnclosingScrollView(by px: CGFloat) -> Bool? {
+        #if os(macOS)
+        guard let view = sentinel, view.window != nil,
+              let scrollView = view.enclosingScrollView,
+              let doc = scrollView.documentView else { return nil }
+        let clip = scrollView.contentView
+        var origin = clip.bounds.origin
+        let before = origin.y
+        // A flipped document grows downward, so a downward scroll RAISES y.
+        let delta = doc.isFlipped ? px : -px
+        origin.y = min(max(0, before + delta), max(0, doc.bounds.height - clip.bounds.height))
+        guard origin.y != before else { return false }
+        clip.scroll(to: origin)
+        scrollView.reflectScrolledClipView(clip)
+        return true
+        #elseif os(iOS)
+        guard let view = sentinel, view.window != nil else { return nil }
+        var probe: UIView? = view.superview
+        while let current = probe, !(current is UIScrollView) { probe = current.superview }
+        guard let scrollView = probe as? UIScrollView else { return nil }
+        let inset = scrollView.adjustedContentInset
+        let maxY = max(-inset.top,
+                       scrollView.contentSize.height + inset.bottom - scrollView.bounds.height)
+        var offset = scrollView.contentOffset
+        let before = offset.y
+        offset.y = min(max(-inset.top, before + px), maxY)
+        guard offset.y != before else { return false }
+        scrollView.setContentOffset(offset, animated: false)
+        return true
+        #else
+        return nil
+        #endif
+    }
+
+    /// Place the sentinel so `fraction` of its height shows above its NEAREST
+    /// enclosing scroll view's bottom edge, through the real clip view /
+    /// content offset (what the cue sampler reads), and answer the fraction
+    /// measured after the move — the apple half of `scroll-to-bottom-fraction`
+    /// (`e2e-conventions.md` § Driver primitives → *Placing an element at a
+    /// measured fraction*). Nearest only, as linux's `nearest_scrolled_window`:
+    /// the exposure the cue gates read is the feed's own viewport.
+    @MainActor
+    func placeAtBottomFraction(_ fraction: CGFloat) -> AutomationBottomFractionOutcome {
+        #if os(macOS)
+        guard let view = sentinel, view.window != nil else { return .detached }
+        guard let scrollView = view.enclosingScrollView,
+              let doc = scrollView.documentView else { return .noScrollableAncestor }
+        let target = view.convert(view.bounds, to: doc)
+        let clip = scrollView.contentView
+        let viewport = clip.bounds.height
+        let docH = doc.bounds.height
+        // Map the document onto the y-down frame `AutomationBottomFraction`
+        // works in: a flipped document already is; an unflipped one grows up.
+        let top = doc.isFlipped ? target.minY : docH - target.maxY
+        guard let placed = AutomationBottomFraction.place(
+            top: top, height: target.height, viewport: viewport,
+            maxOffset: docH - viewport, fraction: fraction) else { return .noHeight }
+        var origin = clip.bounds.origin
+        origin.y = doc.isFlipped ? placed.offset : docH - placed.offset - viewport
+        clip.scroll(to: origin)
+        scrollView.reflectScrolledClipView(clip)
+        return .placed(placed.fraction)
+        #elseif os(iOS)
+        guard let view = sentinel, view.window != nil else { return .detached }
+        var probe: UIView? = view.superview
+        while let current = probe, !(current is UIScrollView) { probe = current.superview }
+        guard let scrollView = probe as? UIScrollView else { return .noScrollableAncestor }
+        // Content coordinates are y-down already; the visible viewport is the
+        // bounds less the adjusted insets, so the frame's offset is the
+        // content offset plus the top inset.
+        let target = view.convert(view.bounds, to: scrollView)
+        let inset = scrollView.adjustedContentInset
+        let viewport = scrollView.bounds.height - inset.top - inset.bottom
+        guard let placed = AutomationBottomFraction.place(
+            top: target.minY, height: target.height, viewport: viewport,
+            maxOffset: scrollView.contentSize.height - viewport, fraction: fraction)
+        else { return .noHeight }
+        var offset = scrollView.contentOffset
+        offset.y = placed.offset - inset.top
+        scrollView.setContentOffset(offset, animated: false)
+        return .placed(placed.fraction)
+        #else
+        return .detached
+        #endif
+    }
+
     /// Three-valued: `true`/`false` = the sentinel's window attachment; `nil` =
     /// no sentinel realized (yet, or ever — a platform/context without one), in
     /// which case callers fall back to trusting `.onAppear`/`.onDisappear` alone,
@@ -1840,6 +2123,8 @@ private struct _AttachmentSentinel {
                     id, token: token, path: path,
                     geometry: { lifecycle?.sentinelGeometry },
                     scrollIntoView: { lifecycle?.scrollSentinelIntoView() ?? .detached },
+                    scrollBy: { lifecycle?.scrollEnclosingScrollView(by: $0) },
+                    scrollToBottomFraction: { lifecycle?.placeAtBottomFraction($0) ?? .detached },
                     entry)
             } else {
                 AutomationRegistry.shared.hide(id, token: token, signal: .windowDetach)
@@ -1931,15 +2216,21 @@ public struct _AutomationRegister: ViewModifier {
                 geometry: { [weak lifecycle] in lifecycle?.sentinelGeometry },
                 scrollIntoView: { [weak lifecycle] in
                     lifecycle?.scrollSentinelIntoView() ?? .detached
-                }, registeredEntry)
+                },
+                scrollBy: { [weak lifecycle] in lifecycle?.scrollEnclosingScrollView(by: $0) },
+                scrollToBottomFraction: { [weak lifecycle] in lifecycle?.placeAtBottomFraction($0) ?? .detached },
+                registeredEntry)
             withSentinel(content)
-                .onAppear {
+                .onAppear { [lifecycle] in
                     AutomationRegistry.shared.register(
                         id, token: lifecycle.token, path: scopePath,
                         geometry: { [weak lifecycle] in lifecycle?.sentinelGeometry },
                         scrollIntoView: { [weak lifecycle] in
                             lifecycle?.scrollSentinelIntoView() ?? .detached
-                        }, registeredEntry)
+                        },
+                        scrollBy: { [weak lifecycle] in lifecycle?.scrollEnclosingScrollView(by: $0) },
+                        scrollToBottomFraction: { [weak lifecycle] in lifecycle?.placeAtBottomFraction($0) ?? .detached },
+                        registeredEntry)
                 }
                 .onDisappear {
                     // A disappear is a COVER only while the sentinel is still

@@ -42,9 +42,9 @@ import uuid
 import pytest
 
 from clients.ws_rpc_admin_client import WsRpcAdminClient
-from helpers.app_surface import app_name, skip_unbuilt
 from helpers.set_names import find_set
-from helpers.waiting import wait_until
+from helpers.budgets import APP_RELAUNCH_S
+from helpers.waiting import await_session_actor, wait_until
 from i18n.strings import S
 
 pytestmark = [
@@ -77,11 +77,6 @@ pytestmark = [
     # apart from the parked knock button). Re-added here.
     pytest.mark.tui,
 ]
-
-# The apps that paint `folder-paywall-hint` by id (user-approved 2026-10-16; tui
-# led 2026-10-18). Every other marked app still proves the disabled half, then
-# declares the hint as unbuilt parity debt — this set is the hint's parity ledger.
-_PAYWALL_HINT_BUILT = {"tui", "web", "linux", "android"}
 
 
 @pytest.fixture
@@ -177,7 +172,10 @@ def test_folder_paywall_select_paywalls_a_website_set(app, paywall_nest):
         },
         "nav": {"stack": [{"view": "feed"}]},
     })
-    time.sleep(1.5)
+    # The session lands asynchronously: wait on the live session before
+    # driving the UI (convention 14 — a barrier, never a fixed sleep).
+    await_session_actor(app.driver, admin["actor_id_hex"], budget_s=APP_RELAUNCH_S,
+                        what="the admin sign-in")
 
     # ── Creator: define a subscription tier (the paywall select's options are the
     # creator's own tiers; the nest also validates the tier exists on set).
@@ -274,6 +272,9 @@ def test_folder_paywall_select_is_unavailable_without_a_tier(app, paywall_nest):
         },
         "nav": {"stack": [{"view": "feed"}]},
     })
+    # Same barrier as the test above.
+    await_session_actor(app.driver, admin["actor_id_hex"], budget_s=APP_RELAUNCH_S,
+                        what="the admin sign-in")
 
     gt = _admin_client(paywall_nest)
     with gt:
@@ -307,16 +308,7 @@ def test_folder_paywall_select_is_unavailable_without_a_tier(app, paywall_nest):
         )
         assert _paywalled_tier(gt, name) is None, "nothing may have been paywalled"
 
-        if app_name(app.driver) not in _PAYWALL_HINT_BUILT:
-            skip_unbuilt(
-                app.driver,
-                surface="folder-paywall-hint",
-                detail="the create-a-tier-first line beside the disabled paywall "
-                "select is painted by id on tui first (ui/folders.md § Element IDs "
-                "→ Web paywall)",
-                tracked="",
-            )
-        want = S.devices.paywall_tier_needs_tier
+        want =S.devices.paywall_tier_needs_tier
         wait_until(
             lambda: b.paywall_hint_text() == want,
             15.0,

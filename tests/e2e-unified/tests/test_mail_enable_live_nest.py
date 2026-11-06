@@ -1,6 +1,6 @@
 """tier_4 (live-remote, OPT-IN): the **believable, 100%-client-driven** mail
-round-trip against a LIVE nest (e.g. example.net), using ONLY the linux Fauna
-app UI + a Python IMAP client — no nest-API *config* calls, no `set_state`
+round-trip against a LIVE nest (e.g. example.net), using ONLY the Fauna app UI
+(every app's driver; the CD gate runs it on tui) + a Python IMAP client — no nest-API *config* calls, no `set_state`
 session shortcut.
 
 Flow (everything a real operator/user would do, in order):
@@ -11,7 +11,7 @@ Flow (everything a real operator/user would do, in order):
      test drives the re-claim with it. The box restarts into a wipe that
      preserves the host identity + the real ACME cert (so it stays reachable
      over TLS). See `docs/goal/architecture/nest/common.md` § Factory reset.
-  1. **Onboard from scratch through the linux UI**: import the identity, type the
+  1. **Onboard from scratch through the app UI**: import the identity, type the
      handle `test@example.net` (the client resolves the domain to the nest via
      real DoH — `resolve_handle_domain("example.net") → https://example.net`), run the
      handle check (discovers the unclaimed nest), submit, enter the claim code on
@@ -55,6 +55,10 @@ destructive — it factory-resets the nest):
                             The seed MUST currently be the box's admin (the
                             reset is admin-gated); the test re-onboards as
                             this same identity, so it stays admin across runs.
+  FAUNA_LIVE_CLAIM_CODE     only for a box left UNCLAIMED (a reset nobody
+                            re-claimed): the code in its container's
+                            ``/data/claim-code``. The run then claims with it
+                            instead of resetting (``live_box_door.claim_pending``).
   mailbox                   resolved per box (``live_box_door.mailbox``):
                             FAUNA_LIVE_MAIL_ADDRESS / FAUNA_LIVE_MAIL_PASSWORD
                             > the box's staging-box file ``handle`` /
@@ -70,13 +74,19 @@ the SAME address + password over the box's real publicly-trusted cert.
 """
 
 import imaplib
+import os
 import ssl
 import time
 
 import pytest
 
-from helpers.app_surface import skip_unbuilt
 from helpers import live_box_door
+from helpers.live_admin import (
+    approve_pending_bridges,
+    enable_mail,
+    wait_logged_in,
+    wait_port_open,
+)
 
 # DESTRUCTIVE (see the module docstring): the box is the run's
 # declared-disposable one and the admin seed is resolved for THAT box
@@ -87,6 +97,7 @@ URL, _NOT_DISPOSABLE = live_box_door.destructive_live_box()
 SECRET, SECRET_SOURCE = live_box_door.admin_seed(URL)
 
 ADDRESS, PASSWORD = live_box_door.mailbox(URL)
+CLAIM_CODE = os.environ.get("FAUNA_LIVE_CLAIM_CODE", "").strip()
 
 pytestmark = [
     pytest.mark.tier_4,
@@ -162,11 +173,11 @@ def _wait_nest_fresh(timeout: float = 120.0) -> None:
     )
 
 
-# ── Phase 1: real onboarding through the linux UI ─────────────────────────────
+# ── Phase 1: real onboarding through the app UI ───────────────────────────────
 
 
 def _onboard_and_claim(app, claim_code: str) -> None:
-    """Drive the linux onboarding wizard from identity import to logged-in.
+    """Drive the onboarding wizard from identity import to logged-in.
 
     identity import → handle entry (`test@example.net`, resolved to the nest by
     real DoH) → handle check → submit → claim-code page → nat_mode_choice
@@ -192,55 +203,9 @@ def _onboard_and_claim(app, claim_code: str) -> None:
     app.driver.wait_for("nat-mode-confirm-button", timeout=40)
     app.onboarding.finish_nat_mode()
 
-    # Logged in → the feed view renders. A cold launch against a *remote* nest
-    # (WS connect + initial sync over the internet) is slower than a local one,
-    # and the launch screen may surface a transient connect error that needs a
-    # retry click, so poll generously and drive the retry button if it appears.
-    _wait_logged_in(app, timeout=150.0)
-
-
-def _wait_logged_in(app, timeout: float = 150.0) -> None:
-    """Wait for the feed view after claim, driving the launch screen's retry on a
-    transient connect error. Fails with the launch error text for diagnosis."""
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if app.driver.is_visible("feed-view") or app.driver.is_visible("feed-tab"):
-            return
-        if app.driver.is_visible("launch-retry-button"):
-            try:
-                app.driver.click("launch-retry-button")
-            except Exception:
-                pass
-        time.sleep(2.0)
-    err = ""
-    for eid in ("launch-transient-error", "error-message"):
-        try:
-            if app.driver.is_visible(eid):
-                err = app.driver.get_text(eid)
-                break
-        except Exception:
-            pass
-    # Dump the accessibility tree so the stuck screen is identifiable.
-    tree = ""
-    try:
-        tree = app.driver.tree()
-    except Exception as e:
-        tree = f"(tree dump failed: {e})"
-    visible = {
-        eid: app.driver.is_visible(eid)
-        for eid in (
-            "nat-mode-confirm-button",
-            "launch-retry-button",
-            "feed-tab",
-            "feed-view",
-        )
-    }
-    pytest.fail(
-        f"client never reached the feed view within {timeout:.0f}s after the "
-        f"claim (the claim itself succeeded on the nest). "
-        f"launch error: {err!r}; candidate visibility: {visible}\n"
-        f"--- accessibility tree ---\n{tree}"
-    )
+    # Logged in → the feed view renders (a remote cold launch may need the
+    # launch screen's retry — `live_admin.wait_logged_in` drives it).
+    wait_logged_in(app)
 
 
 # ── Phase 1b: T3 — factory reset through the UI button, then re-claim ──────────
@@ -277,59 +242,7 @@ def _reclaim_after_ui_reset(app) -> None:
     # A factory reset clears the nest_nat_mode row, so the page is re-asked.
     app.driver.wait_for("nat-mode-confirm-button", timeout=40)
     app.onboarding.finish_nat_mode()
-    _wait_logged_in(app)
-
-
-# ── Phase 2/3: enable mail + approve bridge (existing UI surfaces) ─────────────
-
-
-def _ensure_mail_enabled(app) -> None:
-    """Enable mail (PLAIN, the known password) through the mail-settings UI."""
-    app.mail_settings.navigate()
-    if app.mail_settings.wait_for_credential_count_at_least(1, timeout=12.0):
-        return  # already enabled (idempotent across re-runs of phase 2)
-    app.mail_settings.enable_mail_plain(PASSWORD, display_name="Default")
-    assert app.mail_settings.wait_for_credential_count_at_least(1, timeout=30.0), (
-        "enabling mail did not mint a credential — the WS-RPC enable round-trip "
-        f"failed. mail-page error: {app.mail_settings.page_error_text(timeout=3.0)!r}; "
-        f"app error: {app.error_text()!r}"
-    )
-
-
-def _ensure_bridge_serving(app) -> None:
-    """Approve any pending mail bridge through the admin UI. No-op if none pending
-    (already approved, or email-on-by-default auto-approved it)."""
-    app.admin.navigate_bridges_pending()
-    deadline = time.monotonic() + 60.0
-    while time.monotonic() < deadline:
-        n = app.driver.count("admin-bridges-pending-pubkey-hex")
-        if n == 0:
-            break
-        for i in range(n):
-            try:
-                app.driver.click("admin-bridges-pending-approve-button", index=i)
-            except Exception:
-                pass
-        time.sleep(3.0)
-
-
-def _wait_imap_serving(host: str, port: int, timeout: float = 150.0) -> None:
-    import socket
-
-    deadline = time.monotonic() + timeout
-    last = ""
-    while time.monotonic() < deadline:
-        try:
-            with socket.create_connection((host, port), timeout=4.0):
-                return
-        except OSError as e:
-            last = str(e)
-            time.sleep(3.0)
-    pytest.fail(
-        f"{host}:{port} (IMAPS) never accepted a connection within {timeout:.0f}s "
-        f"(last: {last}). The bridge isn't serving and/or the firewall doesn't "
-        f"allow {port}."
-    )
+    wait_logged_in(app)
 
 
 # ── The test ──────────────────────────────────────────────────────────────────
@@ -339,24 +252,18 @@ def _wait_imap_serving(host: str, port: int, timeout: float = 150.0) -> None:
 def test_believable_live_mail_roundtrip(app):
     """Factory-reset → onboard → enable mail → IMAP receive → see in conversations,
     all client-driven (+ Python IMAP as the external MUA)."""
-    if not app.driver.is_linux():
-        skip_unbuilt(
-            app.driver,
-            surface="the believable live-nest mail round-trip drive",
-            detail="drives the linux Fauna app UI + conversations; the "
-            "other apps are the remaining cross-app follow-on",
-            tracked="mail-settings.md",
-        )
-
     # -1) Preflight: the reset below is admin-gated, so a box that does not know
     #     the resolved seed (the wrong box's seed, or one already reset) skips as
-    #     environment, naming the seed's source, instead of failing the reset.
-    live_box_door.preflight_admin(URL, SECRET, SECRET_SOURCE)
+    #     environment, naming the seed's source, instead of failing the reset —
+    #     unless the run came to claim it (FAUNA_LIVE_CLAIM_CODE on a disposable
+    #     run, `live_box_door.claim_pending`): it is then already fresh.
+    ready = live_box_door.preflight_admin(URL, SECRET, SECRET_SOURCE)
 
     # 0) Bootstrap to a clean claimable state. One WS-RPC factory_reset (a
     #    reset, not config) guarantees the box is fresh regardless of any prior
-    #    run, so the UI onboard below has a code to claim with.
-    claim_code = _factory_reset_and_wait()
+    #    run, so the UI onboard below has a code to claim with. A box awaiting
+    #    this run's claim is fresh already, and its code is the run's.
+    claim_code = _factory_reset_and_wait() if ready else CLAIM_CODE
 
     # 1) Onboard from scratch through the UI and claim test@example.net → admin.
     _onboard_and_claim(app, claim_code)
@@ -370,11 +277,11 @@ def test_believable_live_mail_roundtrip(app):
     _reclaim_after_ui_reset(app)
 
     # 2) Enable mail (PLAIN password) via the UI.
-    _ensure_mail_enabled(app)
+    enable_mail(app, PASSWORD)
 
     # 3) Approve the co-located bridge + wait for IMAPS to serve.
-    _ensure_bridge_serving(app)
-    _wait_imap_serving(MAIL_HOST, IMAP_PORT)
+    approve_pending_bridges(app)
+    wait_port_open(MAIL_HOST, IMAP_PORT)
 
     # 4) Receive a mail via Python IMAP (LOGIN over TLS + APPEND).
     nonce = f"liveimap{int(time.time())}qx"

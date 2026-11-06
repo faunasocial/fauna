@@ -1751,6 +1751,48 @@ async fn resolve_recipient_rail_error_is_terminal_over_smtp() {
     );
 }
 
+/// The home nest's "found, not reachable yet" is terminal like `Error`
+/// (`conversations.md` § Errors & edge cases → *The picker tells the truth*,
+/// rule 2): the SMTP rail must never claim `localpart@<home domain>` by shape,
+/// the picker reads `NotReachable` with nothing resolved, and Enter commits no
+/// chip.
+#[tokio::test]
+async fn resolve_recipient_not_reachable_is_terminal_over_smtp() {
+    let m = ConversationsManager::new();
+    let neighbour = "bob@home.test";
+    let fauna = Arc::new(MockRailBackend::new(Rail::FaunaMls));
+    fauna.override_resolve(neighbour, ResolveResult::NotReachable);
+    m.register_backend(fauna);
+    // SMTP's default mock resolves any string to Email — it must not be asked.
+    m.register_backend(Arc::new(MockRailBackend::new(Rail::Smtp)));
+
+    m.start_new_conversation();
+    m.set_new_thread_recipient_input(neighbour.into());
+    m.resolve_recipient().await;
+
+    let picker = m
+        .snapshot()
+        .new_thread_compose
+        .unwrap()
+        .recipient_picker
+        .unwrap();
+    assert_eq!(picker.resolve_state, ResolveState::NotReachable);
+    assert_eq!(picker.resolved, None, "no mail chip for a Fauna neighbour");
+    assert!(
+        !m.accept_current_recipient_chip(),
+        "a not-reachable resolve commits no chip — not even by shape"
+    );
+    assert!(
+        m.snapshot()
+            .new_thread_compose
+            .unwrap()
+            .recipient_picker
+            .unwrap()
+            .chips
+            .is_empty()
+    );
+}
+
 /// Typing owes a probe and Enter waits for it: the sync input write lands in
 /// `Resolving` (not a shape-derived `Resolved`), and `accept_current_recipient_chip`
 /// commits nothing until the async probe has stamped a resolved address — then
@@ -2031,6 +2073,84 @@ async fn a_restore_the_outgoing_account_started_writes_nothing_after_the_identit
              asked to resolve A's recipient (a_lands_first = {a_lands_first})"
         );
     }
+}
+
+/// **A new-message (threadless) draft survives an identity switch and back
+/// through the keyed blob** (`conversation-drafts.md` § Persistence; the e2e
+/// arc is `helpers/identity_switch_drafts.py`). Per-thread drafts rest under
+/// the thread's stable key, and a restored one whose thread is not on this
+/// device yet is parked — exactly the state of a manager the switch has just
+/// wiped. The new-message draft has no thread and no key at all, so neither
+/// rule may touch it: it rests in the same blob as a keyed reply, is filled
+/// by the switch-back restore while that reply is still parked, and the
+/// other identity's own new message comes back on the next switch.
+#[tokio::test]
+async fn a_new_message_draft_survives_a_switch_away_and_back_beside_a_parked_reply() {
+    let m = ConversationsManager::new();
+    m.register_backend(Arc::new(MockRailBackend::new(Rail::Smtp)));
+
+    // The user: a reply half-written in alice's thread, and a new message.
+    m.ingest_inbound(smtp_inbound("alice@host.test", Some("hello"), "hi", None))
+        .unwrap();
+    let alice = m.snapshot().threads[0].thread_id.clone();
+    m.set_compose_body(alice, "a reply to alice".into());
+    m.start_new_conversation();
+    m.set_new_thread_body("the user's new message".into());
+    let user_blob = m.drafts_snapshot_bytes();
+
+    // Switch to the admin, who writes their own new message.
+    m.clear_for_identity_change();
+    m.start_new_conversation();
+    assert_eq!(
+        m.snapshot()
+            .new_thread_compose
+            .expect("the composer")
+            .body_draft,
+        "",
+        "the user's new message never follows the device to the admin"
+    );
+    m.set_new_thread_body("the admin's new message".into());
+    let admin_blob = m.drafts_snapshot_bytes();
+
+    // Back to the user: the restore lands before any thread has re-arrived.
+    m.clear_for_identity_change();
+    m.restore_drafts_at(m.identity_epoch(), user_blob).await;
+    m.start_new_conversation();
+    assert_eq!(
+        m.snapshot()
+            .new_thread_compose
+            .expect("the composer")
+            .body_draft,
+        "the user's new message",
+        "the threadless draft is filled although every keyed one is parked"
+    );
+    assert!(
+        String::from_utf8_lossy(&m.drafts_snapshot_bytes()).contains("a reply to alice"),
+        "the parked reply still rides the next autosave"
+    );
+    m.ingest_inbound(smtp_inbound("alice@host.test", Some("hello"), "hi", None))
+        .unwrap();
+    let alice = m.snapshot().threads[0].thread_id.clone();
+    assert_eq!(
+        m.thread_detail(alice)
+            .expect("alice's thread")
+            .compose
+            .body_draft,
+        "a reply to alice",
+        "and fills alice's thread when it lands"
+    );
+
+    // The admin once more: their own new message, never the user's.
+    m.clear_for_identity_change();
+    m.restore_drafts_at(m.identity_epoch(), admin_blob).await;
+    m.start_new_conversation();
+    assert_eq!(
+        m.snapshot()
+            .new_thread_compose
+            .expect("the composer")
+            .body_draft,
+        "the admin's new message"
+    );
 }
 
 /// The epoch is a guard on the stale writer, not a new precondition on the
@@ -2751,6 +2871,20 @@ fn set_search_query_filters_thread_list_by_label_and_snippet() {
     assert!(
         m.snapshot().threads.is_empty(),
         "non-matching query → no threads"
+    );
+
+    // The home-screen widget's count is the account total, never the narrowed
+    // list's (`apps/common.md` § Home-screen widget): a search leaves it alone.
+    assert_eq!(
+        m.unread_total(),
+        3,
+        "a search that matches nothing must not move the unread total"
+    );
+    m.set_search_query(Some("tacos".into()));
+    assert_eq!(
+        m.unread_total(),
+        3,
+        "a narrowed list must not move the total"
     );
 
     // A blank / whitespace-only query is treated as no filter (empty box = all).
@@ -3565,6 +3699,45 @@ fn forged_delete_from_non_sender_is_ignored() {
     assert!(
         snap_msg(&m, &t, &mid).deleted,
         "real delete (claimer == sender) must mark deleted"
+    );
+}
+
+/// A deleted message leaves the thread list too (`conversations.md` § State &
+/// data shape, the snippet): the row's snippet previews the newest message the
+/// delete did not take, never the deleted body. The delete is folded by the
+/// manager at read time, so the list's projection has to read the same fold
+/// the bubble's tombstone does — the 2026-10-29 store reviewer walk saw the
+/// tester's list keep showing a reply its author had deleted.
+#[test]
+fn a_deleted_latest_message_leaves_the_thread_list_snippet() {
+    let (m, t) = manager_with_fauna_thread();
+    let first = MessageId("msg-snip-1".into());
+    let last = MessageId("msg-snip-2".into());
+    m.ingest_inbound_to_thread(
+        t.clone(),
+        fauna_inbound_actor(ActorId([2u8; 32]), "still here", first),
+    )
+    .unwrap();
+    m.ingest_inbound_to_thread(
+        t.clone(),
+        fauna_inbound_actor(ActorId([2u8; 32]), "taken back", last.clone()),
+    )
+    .unwrap();
+    let snippet = |m: &ConversationsManager| {
+        m.snapshot()
+            .threads
+            .into_iter()
+            .find(|s| s.thread_id == t)
+            .map(|s| s.snippet)
+            .unwrap()
+    };
+    assert_eq!(snippet(&m), "taken back");
+
+    m.apply_inbound_delete(last, ActorId([2u8; 32]));
+    assert_eq!(
+        snippet(&m),
+        "still here",
+        "the list must not preview a deleted message"
     );
 }
 
@@ -5191,10 +5364,15 @@ async fn a_restored_drafts_attachment_either_reaches_the_backend_or_refuses_the_
             handle: "me@nest".into(),
         });
         m.register_backend(mock.clone());
-        let t = m.create_mls_group(vec![TypedAddress::Fauna {
-            actor_id: ActorId([2u8; 32]),
-            handle: "peer@nest".into(),
-        }]);
+        // Channel-keyed, as every device of the user holds the conversation:
+        // a draft rests under that key, not the device-local thread id.
+        let t = m.materialize_conv_thread(
+            "ab12".into(),
+            vec![TypedAddress::Fauna {
+                actor_id: ActorId([2u8; 32]),
+                handle: "peer@nest".into(),
+            }],
+        );
         (m, mock, t)
     }
     fn echoed(m: &ConversationsManager, t: &ThreadId) -> usize {
@@ -5220,8 +5398,7 @@ async fn a_restored_drafts_attachment_either_reaches_the_backend_or_refuses_the_
     let drafts = a.drafts_snapshot_bytes();
 
     // Device B restores that blob. Its store has never held the bytes.
-    let (b, mock, t_b) = device();
-    assert_eq!(t_b, t, "a fresh manager mints the same first thread id");
+    let (b, mock, t) = device();
     b.restore_drafts(drafts).await;
     assert_eq!(
         b.thread_detail(t.clone())
@@ -5280,6 +5457,45 @@ async fn a_restored_drafts_attachment_either_reaches_the_backend_or_refuses_the_
         sent.len(),
         "the Sent echo lists exactly what the backend received"
     );
+}
+
+/// A draft rests under its conversation's channel, not the device-local
+/// thread id (`conversation-drafts.md` § Persistence). Device B numbers the
+/// conversations in a different order from A, and restores A's drafts before
+/// one of the two has even arrived: each draft still lands in its own
+/// conversation — the late one when its Welcome materializes it — and never in
+/// the conversation that happens to share A's local id.
+#[tokio::test]
+async fn a_restored_draft_follows_its_conversation_not_the_local_thread_id() {
+    fn peer(n: u8) -> Vec<TypedAddress> {
+        vec![TypedAddress::Fauna {
+            actor_id: ActorId([n; 32]),
+            handle: format!("peer{n}@nest"),
+        }]
+    }
+
+    let a = ConversationsManager::new();
+    let bob_on_a = a.materialize_conv_thread("b0b0".into(), peer(2));
+    let carol_on_a = a.materialize_conv_thread("ca11".into(), peer(3));
+    a.set_compose_body(bob_on_a.clone(), "to bob".into());
+    a.set_compose_body(carol_on_a, "to carol".into());
+    let blob = a.drafts_snapshot_bytes();
+
+    // B holds only carol's conversation so far, at the id A gave bob's.
+    let b = ConversationsManager::new();
+    let carol_on_b = b.materialize_conv_thread("ca11".into(), peer(3));
+    assert_eq!(carol_on_b, bob_on_a, "the precondition: the ids collide");
+    b.restore_drafts(blob).await;
+
+    let compose = |m: &ConversationsManager, t: &ThreadId| {
+        m.thread_detail(t.clone()).unwrap().compose.body_draft
+    };
+    assert_eq!(compose(&b, &carol_on_b), "to carol");
+
+    // Bob's conversation arrives afterwards; his draft was waiting for it.
+    let bob_on_b = b.materialize_conv_thread("b0b0".into(), peer(2));
+    assert_ne!(bob_on_b, bob_on_a);
+    assert_eq!(compose(&b, &bob_on_b), "to bob");
 }
 
 // ── Room-restricted posts: the rooms the composer offers ─────────────────
@@ -5358,6 +5574,77 @@ async fn a_room_this_device_was_removed_from_is_not_offered_for_a_post() {
         vec![[0xaa; 32], [0xcc; 32]],
         "the room this device was removed from is no longer offered; \
          the other end-to-end room and the community room still are"
+    );
+}
+
+/// `ui/feed.md` § Encryption at rest → *Room-restricted — the app half*: the
+/// room is offered — and a member's card names it — "by the reader's own
+/// label", the one the list row and `thread-header` paint. A member met
+/// through a Welcome joins the thread with handle-less participants, so the
+/// stored label is their short ids; the roster names them later, and the
+/// offer must follow the list row, never keep the short-id join.
+#[tokio::test]
+async fn a_room_is_offered_by_the_label_its_list_row_paints() {
+    use fauna_conversations::{
+        PrincipalKind, RoomClass, RoomMemberSnapshot, RoomRole, RoomSnapshot,
+    };
+    let m = ConversationsManager::new();
+    let fauna = Arc::new(MockRailBackend::new(Rail::FaunaMls));
+    fauna.set_self_address(TypedAddress::Fauna {
+        actor_id: ActorId([1u8; 32]),
+        handle: "me@nest".into(),
+    });
+    m.register_backend(fauna.clone());
+    let nameless = TypedAddress::Fauna {
+        actor_id: ActorId([2u8; 32]),
+        handle: String::new(),
+    };
+    let owner = TypedAddress::Fauna {
+        handle: "owner".into(),
+        actor_id: ActorId([0x11; 32]),
+    };
+    let t = m.materialize_conv_thread("dd".repeat(32), vec![owner, nameless.clone()]);
+    let member = |role| RoomMemberSnapshot {
+        kind: PrincipalKind::User,
+        role: Some(role),
+    };
+    fauna.set_room(
+        t.clone(),
+        RoomSnapshot {
+            class: RoomClass::EndToEnd,
+            members: vec![member(RoomRole::Owner), member(RoomRole::Member)],
+            policy: None,
+            my_role: Some(RoomRole::Member),
+            nest_read: None,
+            labelers: None,
+            awaiting_key: false,
+            moderation_unverified: false,
+            bridge_disconnected: false,
+            pending_invites: None,
+            search: None,
+        },
+    );
+    fauna.set_engine_roster(t.clone(), vec![ActorId([0x11; 32]), ActorId([2u8; 32])]);
+    m.apply_contact_roster(vec![RosterEntry {
+        actor_id_hex: ActorId([2u8; 32]).to_hex(),
+        handle: Some("tester".into()),
+        domain: Some("nest.test".into()),
+        status: "accepted".into(),
+    }]);
+
+    // The header label, which the list row shares
+    // (`a_roster_contact_is_named_by_handle_across_the_thread`); the list
+    // itself holds no message-less thread.
+    let row = m.thread_detail(t.clone()).unwrap().label;
+    assert!(
+        row.ends_with(&["tester", "nest.test"].join("@")),
+        "the precondition: the roster names the Welcome-met member, got {row:?}"
+    );
+    let offered: Vec<String> = m.room_post_rooms().into_iter().map(|r| r.label).collect();
+    assert_eq!(
+        offered,
+        vec![row],
+        "the offer names the room as its list row does"
     );
 }
 
@@ -5634,6 +5921,162 @@ fn a_contact_overlay_nickname_paints_as_the_message_sender() {
 
     assert!(m.apply_contact_overlays(generation, Default::default()));
     assert_eq!(snap_msg(&m, &t, &mid).sender_display, "", "cleared again");
+}
+
+/// A verified re-point of a member met through a Welcome keeps the name the
+/// roster gave them, though the roster row still sits under the predecessor's
+/// id: the handle moved with the person (`identity-succession.md` § Propagation).
+#[test]
+fn a_verified_succession_keeps_the_rosters_name_on_a_handle_less_row() {
+    let m = ConversationsManager::new();
+    let mock = Arc::new(MockRailBackend::new(Rail::FaunaMls));
+    mock.set_self_address(TypedAddress::Fauna {
+        actor_id: ActorId([1u8; 32]),
+        handle: "me@nest".into(),
+    });
+    m.register_backend(mock.clone());
+    let (old, new) = (ActorId([2u8; 32]), ActorId([9u8; 32]));
+    let t = m.create_mls_group(vec![TypedAddress::Fauna {
+        actor_id: old,
+        handle: String::new(),
+    }]);
+    mock.set_engine_roster(t.clone(), vec![old]);
+    // The roster row still names the predecessor: the nest moved the handle
+    // inside the succession transaction, and no roster read has run since.
+    m.apply_contact_roster(vec![RosterEntry {
+        actor_id_hex: old.to_hex(),
+        handle: Some("tester".into()),
+        domain: Some("nest.test".into()),
+        status: "accepted".into(),
+    }]);
+    let named = ["tester", "nest.test"].join("@");
+    let label_of = |m: &ConversationsManager| m.thread_detail(t.clone()).unwrap().label;
+    assert_eq!(label_of(&m), named, "named before the ceremony");
+
+    mock.set_engine_roster(t.clone(), vec![new]);
+    m.apply_inbound_succession(t.clone(), &old, new);
+
+    assert_eq!(
+        label_of(&m),
+        named,
+        "the re-point is continuity: the row must not fall back to the short id \
+         of a retired identity"
+    );
+    assert_eq!(
+        m.thread_detail(t.clone()).unwrap().participant_displays,
+        vec![named]
+    );
+}
+
+/// A thread whose stored label is a short-id join follows the re-point even
+/// with no name to give it: a label naming the retired key is the one the
+/// roster-naming seam cannot repair, since it no longer matches the row.
+#[test]
+fn a_derived_label_follows_the_re_point_and_a_chosen_one_stays() {
+    let m = ConversationsManager::new();
+    let (old, new) = (ActorId([2u8; 32]), ActorId([9u8; 32]));
+    let nameless = |actor_id| TypedAddress::Fauna {
+        actor_id,
+        handle: String::new(),
+    };
+    let derived = m.create_mls_group(vec![nameless(old)]);
+    m.apply_inbound_succession(derived.clone(), &old, new);
+    assert_eq!(
+        m.thread_detail(derived).unwrap().label,
+        nameless(new).display()
+    );
+
+    let chosen = m.create_mls_group(vec![nameless(old)]);
+    m.apply_inbound_rename(chosen.clone(), "Book club".into());
+    m.apply_inbound_succession(chosen.clone(), &old, new);
+    assert_eq!(m.thread_detail(chosen).unwrap().label, "Book club");
+}
+
+/// A contact met through a Welcome carries no handle on its address, but the
+/// account's contact roster knows them by one: the list row, the
+/// `thread-header`, the member chip, each `dm-sender` and the reply preview
+/// name them by that handle, never the short id (`value-formatting.md`
+/// § Peer display label — the handle precedes the short id).
+#[test]
+fn a_roster_contact_is_named_by_handle_across_the_thread() {
+    let m = ConversationsManager::new();
+    let mock = Arc::new(MockRailBackend::new(Rail::FaunaMls));
+    mock.set_self_address(TypedAddress::Fauna {
+        actor_id: ActorId([1u8; 32]),
+        handle: "me@nest".into(),
+    });
+    m.register_backend(mock.clone());
+    let nameless = TypedAddress::Fauna {
+        actor_id: ActorId([2u8; 32]),
+        handle: String::new(),
+    };
+    let t = m.create_mls_group(vec![nameless.clone()]);
+    let short = nameless.display();
+    let label_of = |m: &ConversationsManager| {
+        let row = m
+            .snapshot()
+            .threads
+            .into_iter()
+            .find(|s| s.thread_id == t)
+            .unwrap()
+            .label;
+        (row, m.thread_detail(t.clone()).unwrap().label)
+    };
+    assert_eq!(
+        label_of(&m),
+        (short.clone(), short.clone()),
+        "no roster yet"
+    );
+
+    mock.set_engine_roster(t.clone(), vec![ActorId([2u8; 32])]);
+    let mid = MessageId("msg-tester".into());
+    m.ingest_inbound_to_thread(
+        t.clone(),
+        RailInboundMessage {
+            rail: Rail::FaunaMls,
+            sender: nameless.clone(),
+            recipients: vec![],
+            subject: None,
+            body: "hello".into(),
+            body_format: BodyFormat::PlainText,
+            timestamp_ms: 0,
+            message_id: mid.clone(),
+            in_reply_to: None,
+            attachments: vec![],
+            badges: Default::default(),
+            legal_takedown_ref: None,
+            admin_block_reason: None,
+            plane_ref: None,
+        },
+    )
+    .unwrap();
+    m.apply_contact_roster(vec![RosterEntry {
+        actor_id_hex: ActorId([2u8; 32]).to_hex(),
+        handle: Some("tester".into()),
+        domain: Some("nest.test".into()),
+        status: "accepted".into(),
+    }]);
+    let named = ["tester", "nest.test"].join("@");
+    assert_eq!(label_of(&m), (named.clone(), named.clone()));
+    assert_eq!(
+        m.thread_detail(t.clone()).unwrap().participant_displays,
+        vec![named.clone()]
+    );
+    assert_eq!(snap_msg(&m, &t, &mid).sender_display, named);
+    m.start_reply(t.clone(), mid.clone(), false);
+    assert_eq!(m.reply_preview(t.clone()).unwrap().sender_display, named);
+    assert_eq!(
+        m.thread_detail(t.clone()).unwrap().participants,
+        vec![nameless],
+        "painted, never authored"
+    );
+
+    // A renamed thread keeps its name.
+    m.apply_inbound_rename(t.clone(), "Book club".into());
+    assert_eq!(
+        label_of(&m),
+        ("Book club".to_string(), "Book club".to_string())
+    );
 }
 
 /// Records every fold the manager asks its seam for, in order.

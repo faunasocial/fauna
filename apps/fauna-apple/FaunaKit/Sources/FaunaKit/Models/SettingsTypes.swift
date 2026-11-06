@@ -21,18 +21,24 @@ public enum EmailFilterOptions {
         ("SenderDomain", "Sender domain"),
         ("SubjectContains", "Subject contains"),
         ("BodyContains", "Body contains"),
+        ("HeaderExists", "Header exists"),
+        ("HeaderContains", "Header contains"),
+        ("SpamScoreAtLeast", "Spam score at least"),
     ]
     public static let actions: [(tag: String, label: String)] = [
         ("Allow", "Allow"),
         ("Discard", "Discard"),
         ("Reject", "Reject"),
         ("Forward", "Forward"),
+        ("FileInto", "Move to folder"),
+        ("AddLabel", "Add label"),
+        ("AutoReply", "Auto-reply"),
     ]
 }
 
 // The dialog-tag → typed `FfiEmailFilterRule` / `FfiEmailFilterAction` composition
 // lives in the shared `fauna_protocol::email` encoder, surfaced as the UniFFI free
-// funcs `encodeEmailFilterRule(kind:value:)` / `encodeEmailFilterActionInputs(inputs:)`
+// funcs `encodeEmailFilterRuleInputs(inputs:)` / `encodeEmailFilterActionInputs(inputs:)`
 // (called from `PrivacySettingsVM`, which holds the whole `FfiFilterActionInputs`). One source of truth across every app — no
 // Swift-side `from(...)` factory to drift from the protocol.
 

@@ -255,12 +255,12 @@ struct NotificationsVMAccountScopeTests {
     @Test("a switch drops the previous account's notifications and unread count")
     func aSwitchDropsTheNotifications() async throws {
         let vm = NotificationsVM()
-        vm.configure(api: plainAPI(), actorId: "actor-a")
+        vm.configure(api: plainAPI(), actorId: "actor-a", overlays: FfiContactOverlays(manager: ConversationsManager()))
         vm.seedForTest(notifications: [notificationA], unreadCount: 7)
         vm.errorMessage = "account A's error"
         try #require(!vm.notifications.isEmpty, "precondition: account A's rows are on the page")
 
-        vm.configure(api: plainAPI(), actorId: "actor-b")
+        vm.configure(api: plainAPI(), actorId: "actor-b", overlays: FfiContactOverlays(manager: ConversationsManager()))
 
         #expect(vm.notifications.isEmpty, "account A's notifications are on account B's page")
         #expect(vm.unreadCount == 0, "account A's unread count is on account B's page")
@@ -270,7 +270,7 @@ struct NotificationsVMAccountScopeTests {
     @Test("reset drops the notifications and the unread count")
     func resetDropsTheNotifications() async throws {
         let vm = NotificationsVM()
-        vm.configure(api: plainAPI(), actorId: "actor-a")
+        vm.configure(api: plainAPI(), actorId: "actor-a", overlays: FfiContactOverlays(manager: ConversationsManager()))
         vm.seedForTest(notifications: [notificationA], unreadCount: 7)
 
         vm.reset()
@@ -810,7 +810,7 @@ private final class ScriptedFeedAPI: APIClient {
         super.init(nodeUrl: URL(string: "https://nest.invalid/")!)
     }
 
-    override func feedManager(secret secretHex: String) async throws -> FfiFeedManager {
+    override func feedManager(secret secretHex: String, deviceIdHex: String? = nil) async throws -> FfiFeedManager {
         buildCount += 1
         // Deliberately NOT calling `adoptActor` as the real one does: this double
         // exists to count builds, not to prime a connection.
@@ -844,12 +844,12 @@ struct FeedVMAccountScopeTests {
     func aResetVMRebuildsForTheSameSecret() async throws {
         let api = ScriptedFeedAPI()
         let vm = FeedVM()
-        await vm.configure(api: api, secretHex: "aa")
+        await vm.configure(api: api, secretHex: "aa", deviceIdHex: "")
         try #require(api.buildCount == 1, "precondition: a manager was built")
         try #require(vm.manager != nil, "precondition: the manager is installed")
 
         vm.reset()
-        await vm.configure(api: api, secretHex: "aa")   // the SAME actor, re-claimed
+        await vm.configure(api: api, secretHex: "aa", deviceIdHex: "")   // the SAME actor, re-claimed
 
         #expect(api.buildCount == 2,
                 "the outgoing session's manager outlived the reset — `configuredSecret` was not dropped")
@@ -861,9 +861,9 @@ struct FeedVMAccountScopeTests {
     func aSameSecretReconfigureIsOneBuild() async throws {
         let api = ScriptedFeedAPI()
         let vm = FeedVM()
-        await vm.configure(api: api, secretHex: "aa")
+        await vm.configure(api: api, secretHex: "aa", deviceIdHex: "")
 
-        await vm.configure(api: api, secretHex: "aa")
+        await vm.configure(api: api, secretHex: "aa", deviceIdHex: "")
 
         #expect(api.buildCount == 1, "a same-actor reconfigure rebuilt the manager")
     }
@@ -872,7 +872,7 @@ struct FeedVMAccountScopeTests {
     func resetDropsTheManagerAndGlue() async throws {
         let api = ScriptedFeedAPI()
         let vm = FeedVM()
-        await vm.configure(api: api, secretHex: "aa")
+        await vm.configure(api: api, secretHex: "aa", deviceIdHex: "")
         vm.searchText = "the outgoing actor's search"
         vm.showCreateForm = true
         vm.pendingPostOpen = "outgoing-post"
@@ -900,7 +900,7 @@ struct FeedVMAccountScopeTests {
     func resetBumpsTheManagerGeneration() async throws {
         let api = ScriptedFeedAPI()
         let vm = FeedVM()
-        await vm.configure(api: api, secretHex: "aa")
+        await vm.configure(api: api, secretHex: "aa", deviceIdHex: "")
         let before = vm.managerGeneration
 
         vm.reset()
@@ -916,7 +916,7 @@ struct FeedVMAccountScopeTests {
     func resetEmptiesTheMirroredPostList() async throws {
         let api = ScriptedFeedAPI()
         let vm = FeedVM()
-        await vm.configure(api: api, secretHex: "aa")
+        await vm.configure(api: api, secretHex: "aa", deviceIdHex: "")
         FeedVM.lastLoadedPosts = []   // whatever the observer last mirrored
 
         vm.reset()

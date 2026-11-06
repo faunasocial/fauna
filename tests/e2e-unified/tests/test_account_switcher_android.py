@@ -856,3 +856,43 @@ def test_android_switching_identity_keeps_device_settings_and_moves_drafts(
         )
     finally:
         driver.teardown()
+
+
+@pytest.mark.feature("drafts-survive")
+def test_android_a_new_message_draft_never_shows_under_another_identity(
+    nest_instance, request
+):
+    """Each identity's half-written new message stays its own across switches —
+    the shared arc in `helpers/identity_switch_drafts.py`, which every app's
+    switcher module runs (the linux and tui twins of the same name).
+
+    android's re-auth is the native prompt, which carries no test id
+    (`AccountReauth.kt`), so the helper's in-app re-auth branch never fires here;
+    the switch is the same one the settings-and-drafts journey above makes."""
+    from helpers.identity_switch_drafts import assert_new_message_draft_never_crosses_identity
+
+    admin_sk = nest_instance["admin"]["signing_key"]
+    admin_actor = bytes(admin_sk.verify_key).hex()
+    user = create_actor_and_register(nest_instance["port"], admin_signing_key=admin_sk)
+    user_actor = user["actor_id_hex"]
+    seed = build_registry_seed(
+        [
+            {"actor_id": user_actor, "secret_hex": bytes(user["signing_key"]).hex(),
+             "nest_url": nest_instance["url"], "device_id": "drafts-user", "handle": "user"},
+            {"actor_id": admin_actor, "secret_hex": bytes(admin_sk).hex(),
+             "nest_url": nest_instance["url"], "device_id": "drafts-admin", "handle": "admin"},
+        ],
+        active=user_actor,
+    )
+    driver = _launch(request, nest_instance, seed)
+    try:
+        assert_new_message_draft_never_crosses_identity(
+            driver, nest_instance["url"],
+            user=(user_actor, bytes(user["signing_key"])),
+            admin=(admin_actor, bytes(admin_sk)),
+            show_switcher=lambda: _wait_switcher_count(driver, 2, timeout=30),
+            await_session=lambda actor, what: await_session_actor(
+                driver, actor, budget_s=APP_RELAUNCH_S, what=what),
+        )
+    finally:
+        driver.teardown()

@@ -168,6 +168,49 @@ def test_a_subset_run_updates_lines_but_leaves_the_cell_alone(tmp_path):
     assert "cell" not in entry, "an incomplete observation may not stamp a cell"
 
 
+def _half_run(tmp_path, node, *, stamp="0.1.2-dev+abcdef12 standalone", dirty=False):
+    """One invocation that collects and observes ONE of the two app witnesses."""
+    fl.reset_session_state()
+    fl.note_collected("feed-read", node)
+    _record("tui", "feed-read", node, stamp=stamp, dirty=dirty)
+    fl.write(tmp_path, surfaces=SURFACES)
+    return json.loads((tmp_path / "tui.json").read_text(encoding="utf-8"))["features"]["feed-read"]
+
+
+def test_two_runs_at_one_clean_commit_complete_the_set_together(tmp_path):
+    """§ Cell semantics, *one artifact, several runs* (ruled 2026-11-01): a set no
+    single invocation may collect — the drafts-survive set, whose re-timed witness
+    conftest refuses beside the production-window ones — is completed by two runs
+    of the SAME clean stamp on the same platform. Both observed one artifact."""
+    assert "cell" not in _half_run(tmp_path, "t.py::a")
+    entry = _half_run(tmp_path, "t.py::b")
+    assert entry["cell"]["complete"] is True
+    assert entry["cell"]["stamp"] == "0.1.2-dev+abcdef12 standalone"
+
+
+def test_a_half_at_another_commit_does_not_combine(tmp_path):
+    """An earlier half observed another artifact: no complete observation of one."""
+    _half_run(tmp_path, "t.py::a", stamp="0.1.2-dev+99999999 standalone")
+    assert "cell" not in _half_run(tmp_path, "t.py::b")
+
+
+def test_a_dirty_half_never_combines(tmp_path):
+    """A dirty stamp names a lower bound, not the code: two dirty runs of one HEAD
+    may have seen different edits, so neither half borrows the other."""
+    dirty = "0.1.2-dev+abcdef12.dirty standalone"
+    _half_run(tmp_path, "t.py::a", stamp=dirty, dirty=True)
+    assert "cell" not in _half_run(tmp_path, "t.py::b", stamp=dirty, dirty=True)
+
+
+def test_a_half_on_another_platform_does_not_combine(tmp_path, monkeypatch):
+    """One platform's half is not another's: the cell's per-platform record is the
+    complete observation of THAT platform (§ The ledger, *Platform keying*)."""
+    monkeypatch.setattr(fl, "host_platform", lambda: "windows")
+    _half_run(tmp_path, "t.py::a")
+    monkeypatch.setattr(fl, "host_platform", lambda: "linux")
+    assert "cell" not in _half_run(tmp_path, "t.py::b")
+
+
 def test_an_apps_cell_is_judged_against_the_app_witnesses_only(tmp_path):
     """The nest witness of the same feature is not part of an app column's set."""
     for node in ("t.py::a", "t.py::b", "t.py::n"):
@@ -232,7 +275,7 @@ def test_the_declaration_helpers_name_their_skip_class():
         (lambda: app_surface.declared_absence("tui", capability="x", doc="d.md § s"),
          fl.ABSENCE),
         (lambda: app_surface.skip_environment("no credential"), fl.ENVIRONMENT),
-        (lambda: app_surface.skip_unbuilt("tui", surface="x"), fl.UNBUILT),
+        (lambda: app_surface._skip_unbuilt("tui", surface="x"), fl.UNBUILT),
     ):
         fl.reset_test_state()
         with pytest.raises(BaseException):
@@ -489,7 +532,7 @@ def test_known_slugs_is_the_pages_and_costs_no_tree_scan():
     run on Windows, and the same toll on every other pytest gate in the tree
     (`merge-gates.md` § Local-merge gates -> The 10-second budget).
 
-    The `scan_app_marks` assertion is the load-bearing half: equality alone would
+    The `scan_marks` assertion is the load-bearing half: equality alone would
     stay green if the cheap path quietly became the expensive one again.
     """
     assert fl.known_slugs() == set(fl.contract_surfaces())
@@ -497,15 +540,15 @@ def test_known_slugs_is_the_pages_and_costs_no_tree_scan():
     calls = []
     fc, _pages = fl._catalog_pages()
     assert fc is not None, "the catalog must be importable"
-    real_scan = fc.scan_app_marks
-    fc.scan_app_marks = lambda *a, **k: (calls.append(1), real_scan(*a, **k))[1]
+    real_scan = fc.scan_marks
+    fc.scan_marks = lambda *a, **k: (calls.append(1), real_scan(*a, **k))[1]
     try:
         fl.known_slugs()
         assert calls == [], "known_slugs must not scan the test tree"
         fl.contract_surfaces()
         assert calls == [1], "contract_surfaces still needs the per-column split"
     finally:
-        fc.scan_app_marks = real_scan
+        fc.scan_marks = real_scan
 
 
 def test_known_slugs_reports_an_unreadable_catalog_as_None_not_as_empty(tmp_path):
@@ -610,12 +653,41 @@ def test_an_artifact_observed_by_the_test_body_counts_too():
     assert provenance["image_id"] == IMAGE and provenance["image_digest"] is None
 
 
-def test_two_distinct_artifacts_are_declined_because_a_record_names_one():
+def test_two_distinct_builds_are_declined_because_a_record_names_one():
     _boot()
     _boot("second_nest", commit="e" * 40, image_id="sha256:" + "e" * 64)
     _own_artifact_test(closure=("relay_nest", "second_nest"))
     provenance, why = fl.own_artifact_resolution()
-    assert provenance is None and "2 distinct artifacts" in why
+    assert provenance is None and "2 distinct builds" in why
+
+
+def test_two_image_ids_reporting_one_build_are_one_artifact():
+    """The updater bench republishes one saved image under several version
+    labels — a new config digest, hence a new image id, over the very same
+    binary — so a test it moves the nest across observes two image ids whose
+    health reports one (version, commit). The record names a BUILD: its stamp,
+    `<version>-dev+<commit> docker`, cannot tell the two apart, so they are one
+    artifact and the record is written; the registry digest, which could tell
+    them apart, folds to `null` because no single one names what was observed
+    (feature-catalog.md § The ledger, *One artifact is one build*)."""
+    _boot()
+    _own_artifact_test()
+    # The successor answers health in the test's own body, after the move.
+    fl.note_artifact(image_id="sha256:" + "b" * 64, image_digest="sha256:" + "c" * 64,
+                     version="0.1.1", commit=IMAGE_COMMIT)
+    provenance, why = fl.own_artifact_resolution()
+    assert why == "" and provenance["commit"] == IMAGE_COMMIT
+    assert provenance["version"] == "0.1.1"
+    assert provenance["image_digest"] is None
+
+
+def test_one_build_under_one_digest_keeps_that_digest():
+    """Two containers of one image share its digest, and the fold keeps it."""
+    _boot()
+    _boot("second_nest")
+    _own_artifact_test(closure=("relay_nest", "second_nest"))
+    provenance, why = fl.own_artifact_resolution()
+    assert why == "" and provenance["image_digest"] == IMAGE_DIGEST
 
 
 def test_two_containers_of_one_image_are_one_artifact():
@@ -732,6 +804,40 @@ def test_an_ordinary_outcome_still_carries_the_runs_provenance(monkeypatch):
     assert record["commit"] == "f" * 40 and record["nest_mode"] == "standalone"
 
 
+@pytest.mark.parametrize("phase_outcome", ["failed", "error"])
+def test_a_strict_app_refusal_of_an_unbuilt_surface_is_recorded_as_unbuilt(
+        monkeypatch, phase_outcome):
+    """No test body ran: the call-phase `failed` and the setup-phase `error` both
+    land as `skipped`/`unbuilt`, as the non-strict run writes."""
+    from helpers import app_surface
+
+    nodeid = "tests/test_feed.py::test_own_post_appears"
+    conftest = _run_context(monkeypatch, nodeid)
+    fl.reset_test_state()
+    fl.note_app("tui")
+    monkeypatch.setattr(app_surface, "_STRICT_APP", True)
+    with pytest.raises(BaseException):
+        app_surface._unbuilt("tui", surface="x", detail="", tracked="")
+
+    conftest._feature_ledger_note(_FakeReport(nodeid), phase_outcome)
+
+    (record,) = fl._records.values()
+    assert record["outcome"] == "skipped" and record["skip_class"] == fl.UNBUILT
+
+
+def test_any_other_failure_still_records_failed(monkeypatch):
+    nodeid = "tests/test_feed.py::test_own_post_appears"
+    conftest = _run_context(monkeypatch, nodeid)
+    fl.reset_test_state()
+    fl.note_app("tui")
+    fl.note_skip_class(fl.UNBUILT)  # a gate noted, then the body failed for its own reason
+
+    conftest._feature_ledger_note(_FakeReport(nodeid), "failed")
+
+    (record,) = fl._records.values()
+    assert record["outcome"] == "failed"
+
+
 def test_the_refusal_is_tallied_once_per_TEST_not_once_per_REPORT(monkeypatch):
     """One test reaches the hook up to three times (setup / call / teardown).
 
@@ -756,10 +862,10 @@ DOCKER_SURFACES = {"relay": {"app": set(), "nest": {"d.py::a", "d.py::b"}},
                    "mixed": {"app": set(), "nest": {"api.py::x", "d.py::a"}}}
 
 
-def _nest_record(slug, node, *, commit, stamp, nest_mode="docker"):
+def _nest_record(slug, node, *, commit, stamp, nest_mode="docker", dirty=False):
     fl.record("nest", slug, node, outcome="passed", skip_class=None, version="0.1.2",
               commit=commit, base=commit, image_digest=None, nest_mode=nest_mode,
-              record_stamp=stamp, dirty=False,
+              record_stamp=stamp, dirty=dirty,
               today="2026-08-29")
 
 
@@ -805,17 +911,83 @@ def test_a_mixed_complete_observation_stamps_the_cell_with_the_OLDEST_artifact(t
     assert _cell(tmp_path, "mixed")["cell"]["stamp"] == f"0.1.2-dev+{parent[:8]} docker"
 
 
-def test_artifacts_git_cannot_order_leave_the_cell_alone(tmp_path):
-    """Two artifacts at one commit (the image IS HEAD, under two modes), or commits
-    this checkout cannot see: the per-test lines carry their stamps, the cell waits."""
+def test_two_modes_at_one_commit_stamp_the_cell_with_the_earlier_mode(tmp_path):
+    """The image IS the run's commit, so the whole set saw one commit: the ordinary
+    shape of a nest page with `tests/api/` and own-image witnesses. The order of
+    modes names the cell, and the commit needs no history to be read."""
     fl.note_collected("mixed", "api.py::x")
     fl.note_collected("mixed", "d.py::a")
     _nest_record("mixed", "api.py::x", commit="a" * 40, stamp="0.1.2-dev+aaaaaaaa standalone",
                  nest_mode="standalone")
     _nest_record("mixed", "d.py::a", commit="a" * 40, stamp="0.1.2-dev+aaaaaaaa docker")
     fl.write(tmp_path, surfaces=DOCKER_SURFACES)
+    cell = _cell(tmp_path, "mixed")["cell"]
+    assert cell["stamp"] == "0.1.2-dev+aaaaaaaa standalone" and cell["dirty"] is False
+
+
+def test_a_dirty_stamp_at_one_commit_outranks_the_order_of_modes(tmp_path):
+    """Dirty-tree records of the run's nest beside a clean image's, with `docker` the
+    earlier mode so that the two rules disagree. The cell's `dirty` is read from the
+    records carrying the chosen stamp, so choosing the clean stamp would call the cell
+    clean over its dirty witnesses (§ The ledger, *Dirty trees*, (b))."""
+    fl.note_collected("mixed", "api.py::x")
+    fl.note_collected("mixed", "d.py::a")
+    _nest_record("mixed", "api.py::x", commit="a" * 40, nest_mode="live", dirty=True,
+                 stamp="0.1.2-dev+aaaaaaaa.dirty live")
+    _nest_record("mixed", "d.py::a", commit="a" * 40, stamp="0.1.2-dev+aaaaaaaa docker")
+    fl.write(tmp_path, surfaces=DOCKER_SURFACES)
+    cell = _cell(tmp_path, "mixed")["cell"]
+    assert cell["stamp"] == "0.1.2-dev+aaaaaaaa.dirty live" and cell["dirty"] is True
+
+
+def test_a_candidate_runs_mixed_set_never_takes_the_bare_stamp(tmp_path):
+    """One commit, one mode: a candidate run's `tests/api/` record against the released
+    image, and an own-image witness against a container it booted itself. A bare stamp
+    claims every witness saw the released artifact, and one did not."""
+    fl.note_collected("mixed", "api.py::x")
+    fl.note_collected("mixed", "d.py::a")
+    _nest_record("mixed", "api.py::x", commit="a" * 40, stamp="0.1.2 docker")
+    _nest_record("mixed", "d.py::a", commit="a" * 40, stamp="0.1.2-dev+aaaaaaaa docker")
+    fl.write(tmp_path, surfaces=DOCKER_SURFACES)
+    assert _cell(tmp_path, "mixed")["cell"]["stamp"] == "0.1.2-dev+aaaaaaaa docker"
+
+
+def test_two_modes_at_the_older_commit_still_take_the_oldest_artifact(tmp_path):
+    """The rules compose: history picks the commit, the order picks within it."""
+    head, parent = _head_and_parent()
+    for node in ("api.py::x", "d.py::a", "d.py::b"):
+        fl.note_collected("mixed", node)
+    _nest_record("mixed", "api.py::x", commit=parent, nest_mode="standalone",
+                 stamp=f"0.1.2-dev+{parent[:8]} standalone")
+    _nest_record("mixed", "d.py::a", commit=parent, stamp=f"0.1.2-dev+{parent[:8]} docker")
+    _nest_record("mixed", "d.py::b", commit=head, stamp=f"0.1.2-dev+{head[:8]} docker")
+    surfaces = {"mixed": {"app": set(), "nest": {"api.py::x", "d.py::a", "d.py::b"}}}
+    fl.write(tmp_path, surfaces=surfaces)
+    assert _cell(tmp_path, "mixed")["cell"]["stamp"] == f"0.1.2-dev+{parent[:8]} standalone"
+
+
+def test_commits_git_cannot_order_leave_the_cell_alone(tmp_path):
+    """Two commits this checkout cannot see, or with no ancestry between them: the
+    per-test lines carry their stamps, the cell waits."""
+    fl.note_collected("mixed", "api.py::x")
+    fl.note_collected("mixed", "d.py::a")
+    _nest_record("mixed", "api.py::x", commit="a" * 40, stamp="0.1.2-dev+aaaaaaaa standalone",
+                 nest_mode="standalone")
+    _nest_record("mixed", "d.py::a", commit="b" * 40, stamp="0.1.2-dev+bbbbbbbb docker")
+    fl.write(tmp_path, surfaces=DOCKER_SURFACES)
     entry = _cell(tmp_path, "mixed")
     assert "cell" not in entry and len(entry["tests"]) == 2
+
+
+def test_two_stamps_with_no_commit_leave_the_cell_alone(tmp_path):
+    """A stamp with no commit names nothing the rule can compare."""
+    fl.note_collected("mixed", "api.py::x")
+    fl.note_collected("mixed", "d.py::a")
+    _nest_record("mixed", "api.py::x", commit="", stamp="0.1.2-dev standalone",
+                 nest_mode="standalone")
+    _nest_record("mixed", "d.py::a", commit="", stamp="0.1.2-dev docker")
+    fl.write(tmp_path, surfaces=DOCKER_SURFACES)
+    assert "cell" not in _cell(tmp_path, "mixed")
 
 
 def test_the_by_image_digest_read_is_none_for_an_image_docker_does_not_know():
@@ -865,6 +1037,74 @@ def test_another_columns_witness_is_not_this_columns_subset(tmp_path):
     assert "cell" not in entry
 
 
+# ── ruling (h): a nest set with platform-exclusive witnesses is observed in legs ──
+LEGS = {"feed-read": {
+    "app": {"t.py::a"},
+    "nest": {"t.py::n", "lin.py::n", "win.py::n"},
+    # `lin.py::n` runs on linux alone, `win.py::n` on windows alone; macos can run
+    # only the ordinary witness, a set both siblings' contain, so it is on no leg.
+    "nest_by_platform": {"linux": {"t.py::n", "lin.py::n"}, "windows": {"t.py::n", "win.py::n"}},
+    "nest_legs": (frozenset({"linux"}), frozenset({"windows"})),
+}}
+LIN = {"stamp": "0.1.5-dev+aaaaaaaa standalone", "date": "2026-10-20", "complete": True, "dirty": False, "base": None}
+WIN = {"stamp": "0.1.3-dev+bbbbbbbb standalone", "date": "2026-10-09", "complete": True, "dirty": False, "base": None}
+
+
+def test_the_fold_withholds_the_top_level_until_every_leg_is_stamped():
+    legs = (frozenset({"linux"}), frozenset({"windows"}))
+    assert fl.fold_platform_cells({"linux": LIN}, legs=legs) == {"complete": False, "platforms": {"linux": LIN}}
+    assert fl.fold_platform_cells({"linux": LIN, "windows": WIN}, legs=legs) == {**WIN, "platforms": {"linux": LIN, "windows": WIN}}
+    # a leg any of several platforms can run is stamped by any one of them
+    assert fl.fold_platform_cells({"linux": LIN}, legs=(frozenset({"linux", "macos", "windows"}),))["complete"] is True
+    assert fl.fold_platform_cells({"linux": LIN}, legs=())["complete"] is True  # no witness, nothing owed
+    assert fl.fold_platform_cells({"linux": LIN})["complete"] is True  # an app file: every platform present
+
+
+def _nest_leg_run(tmp_path, monkeypatch, platform, *nodes):
+    fl.reset_session_state()
+    monkeypatch.setattr(fl, "host_platform", lambda: platform)
+    for node in nodes:
+        fl.note_collected("feed-read", node)
+        _record("nest", "feed-read", node)
+    fl.write(tmp_path, surfaces=LEGS)
+    return json.loads((tmp_path / "nest.json").read_text(encoding="utf-8"))["features"]["feed-read"]
+
+
+def test_a_nest_cell_is_judged_per_platform_leg_and_completes_once_every_leg_landed(tmp_path, monkeypatch):
+    """The `notifications` shape: a linux run collects the linux leg in full and
+    stamps it, yet the top level stays unstamped — every column reads its app half
+    alone — until a windows run lands the windows leg; then the top level is the
+    older leg's."""
+    entry = _nest_leg_run(tmp_path, monkeypatch, "linux", "t.py::n", "lin.py::n")
+    assert entry["cell"]["platforms"]["linux"]["complete"] is True
+    assert entry["cell"]["complete"] is False and "stamp" not in entry["cell"]
+    entry = _nest_leg_run(tmp_path, monkeypatch, "windows", "t.py::n", "win.py::n")
+    assert sorted(entry["cell"]["platforms"]) == ["linux", "windows"]
+    assert entry["cell"]["complete"] is True
+    assert entry["cell"]["stamp"] == entry["cell"]["platforms"]["linux"]["stamp"]
+
+
+def test_a_run_on_a_platform_on_no_leg_stamps_nothing(tmp_path, monkeypatch):
+    """macos observes the ordinary witness alone — a complete observation of nothing
+    a sibling leg does not contain — so it records the line and leaves the cell."""
+    entry = _nest_leg_run(tmp_path, monkeypatch, "macos", "t.py::n")
+    assert "t.py::n" in entry["tests"] and "cell" not in entry
+
+
+def test_a_leg_short_of_one_of_its_own_witnesses_is_the_subset_case(tmp_path, monkeypatch):
+    """Collecting the windows witness on linux (it is collected, then skips through a
+    plain `skipif` and records nothing) adds nothing: linux's leg is judged on
+    linux's set, and missing `lin.py::n` is the `-k` subset case."""
+    fl.reset_session_state()
+    monkeypatch.setattr(fl, "host_platform", lambda: "linux")
+    for node in ("t.py::n", "win.py::n"):
+        fl.note_collected("feed-read", node)
+    _record("nest", "feed-read", "t.py::n")
+    fl.write(tmp_path, surfaces=LEGS)
+    entry = json.loads((tmp_path / "nest.json").read_text(encoding="utf-8"))["features"]["feed-read"]
+    assert "t.py::n" in entry["tests"] and "cell" not in entry
+
+
 def test_the_real_contract_surfaces_carry_the_per_column_split():
     """The split is what `cell_complete` judges against, and the flat fallback is for
     a hand-built payload only — so the REAL producer must never take it. Pinned
@@ -874,13 +1114,28 @@ def test_the_real_contract_surfaces_carry_the_per_column_split():
     if not surfaces:            # the catalog is unreadable on this box; nothing to pin
         pytest.skip("no catalog in this tree")
     assert all("app_by_column" in entry for entry in surfaces.values())
+    # The nest split too (ruling (h)): a platform on no leg has no scope, and every
+    # scope is a subset of the contract's nest witnesses.
+    assert all("nest_by_platform" in entry and "nest_legs" in entry for entry in surfaces.values())
+    assert all(scope <= entry["nest"] for entry in surfaces.values()
+               for scope in entry["nest_by_platform"].values())
+    assert all(set(entry["nest_by_platform"]) == set().union(*entry["nest_legs"])
+               for entry in surfaces.values() if entry["nest_legs"])
+    # And each column's (ruling (i)): a platform on no leg of the column has no scope,
+    # and every platform's scope is a subset of the column's.
+    assert all(set(entry["app_by_column_platform"][app]) == (
+                   set().union(*entry["app_legs"][app]) if entry["app_legs"][app] else set())
+               for entry in surfaces.values() for app in entry["app_by_column"])
+    assert all(scope <= entry["app_by_column"][app] for entry in surfaces.values()
+               for app, by_platform in entry["app_by_column_platform"].items()
+               for scope in by_platform.values())
     split = next(e for e in surfaces.values() if e["app"])
     assert set(split["app_by_column"]) == set(_catalog_apps())
     assert all(scope <= split["app"] for scope in split["app_by_column"].values()), \
         "a column's scope is a subset of the contract's app witnesses, never wider"
 
 
-def test_a_real_per_app_page_becomes_stampable_by_one_machines_run(tmp_path):
+def test_a_real_per_app_page_becomes_stampable_by_one_machines_run(tmp_path, monkeypatch):
     """End-to-end against the REAL catalog, not a fixture: the union-reading made
     `multiple-accounts` unstampable on every column, and the per-column reading makes
     it stampable by a run that drives only the app it is about.
@@ -890,6 +1145,17 @@ def test_a_real_per_app_page_becomes_stampable_by_one_machines_run(tmp_path):
     terminal-UI test), and those apps are each drivable only on their own development
     machine — so the union is collectable nowhere and the old reading left every
     column of this page blank forever, in every nest mode.
+
+    "One machine" is one machine PER LEG, and each run is simulated on a platform of
+    its leg, never on whatever host runs this test (feature-ledger.md § The ledger,
+    *Stale records*, ruling (i), point (3)): a column's set on platform P is its
+    witnesses whose host platforms include P, a platform whose set a sibling's
+    contains outright is REDUNDANT and holds no stamp, and the rest form the legs.
+    tui on this page is one leg, linux + macos, because its flock witness is marked
+    `host_platform("linux", "macos")`; windows's set is a strict subset of theirs, so
+    a Windows host's run of the very same witnesses rightly stamps nothing. Reading
+    the host's platform made this test pass on Linux and macOS and fail on Windows,
+    from the day that marker landed until 2026-11-04.
     """
     surfaces = fl.contract_surfaces()
     if not surfaces or "multiple-accounts" not in surfaces:
@@ -903,16 +1169,36 @@ def test_a_real_per_app_page_becomes_stampable_by_one_machines_run(tmp_path):
         "becomes equal, the narrowing has stopped happening and every such page is "
         "silently unstampable again")
 
-    # A run that drove exactly the terminal UI's witnesses, and nothing else.
-    for node in tui_scope:
-        fl.note_collected("multiple-accounts", node)
-        _record("tui", "multiple-accounts", node)
-    fl.write(tmp_path, surfaces=surfaces)
+    import features_catalog
+    legs = entry["app_legs"]["tui"]
+    by_platform = entry["app_by_column_platform"]["tui"]
+    assert legs, "a column with witnesses is observed in at least one leg"
 
-    written = json.loads((tmp_path / "tui.json").read_text(encoding="utf-8"))
-    cell = written["features"]["multiple-accounts"].get("cell")
-    assert cell is not None and cell["complete"] is True, (
-        "one machine's honest run must be able to stamp this cell")
+    def run_on(platform, nodes):
+        """A run on `platform` that drove exactly `nodes`, and nothing else."""
+        fl.reset_session_state()
+        monkeypatch.setattr(fl, "host_platform", lambda: platform)
+        for node in nodes:
+            fl.note_collected("multiple-accounts", node)
+            _record("tui", "multiple-accounts", node)
+        fl.write(tmp_path, surfaces=surfaces)
+        return json.loads((tmp_path / "tui.json").read_text(encoding="utf-8"))[
+            "features"]["multiple-accounts"]
+
+    # A redundant platform's run — the whole column collected, everything it can run
+    # observed — stamps nothing: a sibling leg observes all of it and more.
+    for platform in sorted(features_catalog.COLUMN_PLATFORMS["tui"] - set().union(*legs)):
+        assert "cell" not in run_on(platform, tui_scope), (
+            f"{platform} is on no leg of tui here, so its run must hold no stamp")
+
+    # One run per leg, each on one of the leg's platforms, driving that platform's set.
+    for leg in legs:
+        platform = min(leg)
+        cell = run_on(platform, by_platform[platform]).get("cell")
+        assert cell is not None and cell["platforms"][platform]["complete"] is True, (
+            f"one machine's honest run on {platform} must be able to stamp its leg")
+    assert cell["complete"] is True, (
+        "once every leg holds a stamp, the cell is a complete observation")
 
 
 # ── dirty trees: the commit is a lower bound, and the record says so ────────
@@ -1436,6 +1722,29 @@ def test_the_session_summary_says_when_the_base_is_unknown(monkeypatch, capsys):
     assert "origin/main" in out and "unknown" in out, out
 
 
+@pytest.mark.parametrize("failure", [AttributeError("'TestFacts' object has no attribute "
+                                                    "'platforms'"),
+                                     ValueError("bad stamp"), OSError("disk full")],
+                         ids=["attribute", "value", "os"])
+def test_a_failed_ledger_write_never_turns_a_run_red(monkeypatch, capsys, failure):
+    """Never fatal, whatever the failure (`feature-ledger.md`; the hook's own
+    docstring): bookkeeping that raises at session finish is reported as NOT
+    written and the exit status stays the tests'. Only `OSError` was caught until
+    2026-11-04, so a scan that raised `AttributeError` turned two passing windows
+    runs into exit 1."""
+    conftest = _run_context(monkeypatch, "tests/test_feed.py::test_x")
+
+    def boom():
+        raise failure
+
+    monkeypatch.setattr(fl, "write", boom)
+
+    conftest._write_feature_ledger(None)
+
+    out = capsys.readouterr().out
+    assert "feature ledger: NOT written" in out and type(failure).__name__ in out, out
+
+
 # ── the live box door: an unreachable box is environment, never a record ─────
 # `feature-catalog.md` § Cell semantics: "`skip_environment` outcomes are never
 # recorded. A missing credential or an unreachable port says nothing about the
@@ -1765,6 +2074,18 @@ def test_a_red_then_a_green_at_the_same_commit_is_flaky(tmp_path, _origin):
     assert rec["red_since"] is None and rec["last_green"]["commit"] == COMMIT_B
 
 
+@pytest.mark.parametrize("red_dirty,green_dirty", [(True, True), (True, False), (False, True)])
+def test_a_red_then_a_green_on_a_dirty_tree_is_no_flake(tmp_path, _origin, red_dirty, green_dirty):
+    """A dirty tree is not the commit it sits on: a session that edits between two runs
+    at one HEAD changed the code, so the green is a fix in progress, never a flake (the
+    directory once filed 2026-11-05's add-account and apple-gating 'flakes' this way)."""
+    _lg_session(_origin, tmp_path, {LG_A: "failed"}, commit=COMMIT_B, dirty=red_dirty)
+    tests = _lg_session(_origin, tmp_path, {LG_A: "passed"}, commit=COMMIT_B, dirty=green_dirty)
+    rec = tests[LG_KEY_A]
+    assert rec["flaky"]["count"] == 0, rec
+    assert rec["red_since"] is None and rec["last_green"]["dirty"] is green_dirty
+
+
 def test_a_red_twice_is_broken_and_its_last_green_stays(tmp_path, _origin):
     _lg_session(_origin, tmp_path, {LG_A: "passed"}, commit=COMMIT_A)
     _lg_session(_origin, tmp_path, {LG_A: "failed"}, commit=COMMIT_B)
@@ -1920,3 +2241,203 @@ def test_a_file_outside_the_rootdir_keys_by_its_real_path():
     unnamed = real._repo_node_id(_Cfg(), "::test_a")
     assert unnamed == "::test_a" and not real._has_repo_file(unnamed)
     assert real._has_repo_file(real._repo_node_id(_Cfg(), "tests/test_y.py::test_a"))
+
+
+# ── the surface-registry fields (§ The ledger, `surface` / `surfaces`) ───────
+@contextmanager
+def _registry(**entries):
+    """A substituted surface registry: `key=(kind, built)` per entry, `_` for `-`.
+    The run's unbuilt tally is snapshotted and put back, so these fake hits never
+    reach the terminal summary (`app_surface.reset_unbuilt_hits`)."""
+    from helpers import app_surface
+
+    sys.path.insert(0, str(fl.REPO / "scripts"))
+    from features_catalog import Surface
+
+    outer = app_surface.unbuilt_hits()
+    # These tests fire the unbuilt gate on purpose against a fake registry and
+    # read the skip it raises; the session's `--strict-app` would turn that skip
+    # into a failure (and `--strict-app -rs` walks would red them for nothing).
+    outer_strict = app_surface.strict_app_enabled()
+    app_surface.set_strict_app(False)
+    app_surface.set_surface_registry({
+        key.replace("_", "-"): Surface(key=key.replace("_", "-"), kind=kind,
+                                       built=frozenset(built), detail="d", tracked="t")
+        for key, (kind, built) in entries.items()})
+    try:
+        yield app_surface
+    finally:
+        app_surface.set_surface_registry(None)
+        app_surface.set_strict_app(outer_strict)
+        app_surface.restore_unbuilt_hits(outer)
+
+
+def test_a_record_carries_no_surface_fields_unless_given():
+    """Additive: a record of a test that reached no registry gate, or of the
+    pre-registry `skip_unbuilt` form, is shaped exactly as before the fields."""
+    _record("tui", "feed-read", "t.py::a")
+    (record,) = fl._records.values()
+    assert "surface" not in record and "surfaces" not in record
+
+
+def test_require_surface_puts_the_firing_key_and_every_reached_key_on_the_record(monkeypatch):
+    nodeid = "tests/test_feed.py::test_own_post_appears"
+    conftest = _run_context(monkeypatch, nodeid)
+    fl.reset_test_state()
+    with _registry(feed_built=("product", {"tui"}),
+                   feed_unbuilt=("product", {"web"})) as app_surface:
+        app_surface.require_surface("tui", "feed-built")
+        with pytest.raises(pytest.skip.Exception):
+            app_surface.require_surface("tui", "feed-unbuilt")
+
+    conftest._feature_ledger_note(_FakeReport(nodeid), "skipped")
+
+    (record,) = fl._records.values()
+    assert record["skip_class"] == fl.UNBUILT
+    assert record["surface"] == "feed-unbuilt"
+    assert record["surfaces"] == ["feed-built", "feed-unbuilt"]
+
+
+def test_a_passing_record_lists_the_keys_its_gates_reached_and_names_none_fired(monkeypatch):
+    nodeid = "tests/test_feed.py::test_own_post_appears"
+    conftest = _run_context(monkeypatch, nodeid)
+    fl.reset_test_state()
+    with _registry(feed_built=("product", {"tui"})) as app_surface:
+        app_surface.require_surface("tui", "feed-built")
+
+    conftest._feature_ledger_note(_FakeReport(nodeid), "passed")
+
+    (record,) = fl._records.values()
+    assert "surface" not in record
+    assert record["surfaces"] == ["feed-built"]
+
+
+def test_the_free_text_form_writes_no_surface_fields(monkeypatch):
+    nodeid = "tests/test_feed.py::test_own_post_appears"
+    conftest = _run_context(monkeypatch, nodeid)
+    fl.reset_test_state()
+    with _registry() as app_surface, pytest.raises(pytest.skip.Exception):
+        app_surface._skip_unbuilt("tui", surface="feed")
+    conftest._feature_ledger_note(_FakeReport(nodeid), "skipped")
+
+    (record,) = fl._records.values()
+    assert record["skip_class"] == fl.UNBUILT
+    assert "surface" not in record and "surfaces" not in record
+
+
+def test_the_surface_slots_reset_between_tests():
+    fl.note_surface("feed-built", fired=True)
+    fl.reset_test_state()
+    assert fl.surface_this_test() is None and fl.surfaces_this_test() == []
+
+
+class _SetupRefusalReport:
+    """A setup-phase report whose crash line names a `NestModeError`."""
+
+    when = "setup"
+
+    def __init__(self, nodeid, message):
+        self.nodeid = nodeid
+        crash = type("Crash", (), {"message": message})()
+        self.longrepr = type("Repr", (), {"reprcrash": crash})()
+
+
+def test_a_setup_time_nest_mode_error_writes_no_record(monkeypatch):
+    """An image-missing `--nest docker` refusal never booted anything: it is no
+    witness, so the ledger keeps the previous line (feature-catalog.md § The ledger,
+    `outcome`; testing.md § Default app and nest mode)."""
+    conftest = _run_context(monkeypatch, NODE)
+
+    conftest._feature_ledger_note(
+        _SetupRefusalReport(NODE, "helpers.nest_mode.NestModeError: needs the image"),
+        "error")
+
+    assert fl._records == {}
+
+
+def test_any_other_setup_error_is_still_recorded(monkeypatch):
+    conftest = _run_context(monkeypatch, NODE)
+
+    conftest._feature_ledger_note(
+        _SetupRefusalReport(NODE, "RuntimeError: nest failed to boot"), "error")
+
+    (record,) = fl._records.values()
+    assert record["outcome"] == "error"
+
+
+# ── ruling (i): an app column's set is observed in legs, by host_platform ────
+APP_LEGS = {"feed-read": {
+    "app": {"t.py::a", "lin.py::a", "win.py::a"},
+    "nest": set(),
+    "app_by_column": {"tui": {"t.py::a", "lin.py::a", "win.py::a"}},
+    # `lin.py::a` is marked `host_platform("linux")`, `win.py::a` `("windows")`; macos
+    # can run only the ordinary witness, a set both siblings' contain: on no leg.
+    "app_by_column_platform": {"tui": {"linux": {"t.py::a", "lin.py::a"},
+                                       "windows": {"t.py::a", "win.py::a"}}},
+    "app_legs": {"tui": (frozenset({"linux"}), frozenset({"windows"}))},
+}}
+
+
+def _app_leg_run(tmp_path, monkeypatch, platform, *nodes):
+    fl.reset_session_state()
+    monkeypatch.setattr(fl, "host_platform", lambda: platform)
+    for node in nodes:
+        fl.note_collected("feed-read", node)
+        _record("tui", "feed-read", node)
+    fl.write(tmp_path, surfaces=APP_LEGS)
+    return json.loads((tmp_path / "tui.json").read_text(encoding="utf-8"))["features"]["feed-read"]
+
+
+def test_an_app_cell_is_judged_per_platform_leg_and_completes_once_every_leg_landed(tmp_path, monkeypatch):
+    """The identity-protected-on-this-device shape on tui: a linux run stamps the
+    linux leg and the top level stays unstamped until a windows run lands its leg."""
+    entry = _app_leg_run(tmp_path, monkeypatch, "linux", "t.py::a", "lin.py::a")
+    assert entry["cell"]["platforms"]["linux"]["complete"] is True
+    assert entry["cell"]["complete"] is False and "stamp" not in entry["cell"]
+    entry = _app_leg_run(tmp_path, monkeypatch, "windows", "t.py::a", "win.py::a")
+    assert sorted(entry["cell"]["platforms"]) == ["linux", "windows"]
+    assert entry["cell"]["complete"] is True
+    assert entry["cell"]["stamp"] == entry["cell"]["platforms"]["linux"]["stamp"]
+
+
+def test_an_app_run_on_a_redundant_platform_stamps_nothing(tmp_path, monkeypatch):
+    entry = _app_leg_run(tmp_path, monkeypatch, "macos", "t.py::a")
+    assert "t.py::a" in entry["tests"] and "cell" not in entry
+
+
+class _MarkedItem:
+    """The two things `_apply_host_platform_markers` reads off a pytest item."""
+
+    def __init__(self, nodeid, *marks):
+        self.nodeid = nodeid
+        self._marks = [pytest.mark.host_platform(*m).mark for m in marks]
+
+    def iter_markers(self, name=None):
+        return iter(m for m in self._marks if name is None or m.name == name)
+
+
+def test_a_host_platform_skip_records_nothing(monkeypatch):
+    """Convention 7's fourth skip kind: on a host its folded marks do not name, the
+    item skips before any fixture with NO skip class, so the ledger holds no record
+    for a platform the witness is not owed on — the windows witness on linux."""
+    nodeid = "tests/test_feed_credman.py::test_the_feed_key_rests_in_credman"
+    conftest = _run_context(monkeypatch, nodeid)
+    monkeypatch.setattr(fl, "host_platform", lambda: "linux")
+    fl.reset_test_state()
+    item = _MarkedItem(nodeid, ("windows", "linux"), ("windows",))  # module ∩ function
+    with pytest.raises(pytest.skip.Exception, match="host platform: windows"):
+        conftest._apply_host_platform_markers(item)
+    assert fl.skip_class_this_test() is None
+    conftest._feature_ledger_note(_FakeReport(nodeid), "skipped")
+    assert fl._records == {}
+    # on its own host it runs
+    monkeypatch.setattr(fl, "host_platform", lambda: "windows")
+    conftest._apply_host_platform_markers(item)
+
+
+def test_an_unknown_host_platform_word_is_a_collection_error():
+    import conftest
+
+    with pytest.raises(pytest.UsageError, match="darwin"):
+        conftest._check_host_platform_markers([_MarkedItem("t.py::x", ("darwin",))])
+    conftest._check_host_platform_markers([_MarkedItem("t.py::x", ("macos",))])

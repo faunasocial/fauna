@@ -81,19 +81,27 @@ def media_item(blob_hash_hex: str, mime: str, size_bytes: int) -> dict:
     }
 
 
-def post_reference(kind: str, target_post_id_hex: str) -> dict:
-    """A `Post` `Reference::{Reply,Repost,Quote}` to a target post.
+def post_reference(kind: str, target_post_id_hex: str, *, emoji: str | None = None) -> dict:
+    """A `Post` `Reference::{Reply,Repost,Quote,Upvote,React}` to a target post.
 
-    `kind` ∈ {"Reply", "Repost", "Quote"}. The target is identified by its
-    32-byte content digest — the hex ``post_id`` ``ws_api.create_post`` returns —
-    which we wrap in the 36-byte dag-cbor CID shape `PostId` deserializes; the
-    nest strips it back to the digest to key `content_meta` (`cid_to_digest` in
-    `db/posts.rs`). Each is an externally-tagged single-key map carrying only
-    `post_id` (React/Upvote/Downvote carry more and aren't interaction counts).
+    `kind` ∈ {"Reply", "Repost", "Quote", "Upvote", "React"}. The target is
+    identified by its 32-byte content digest — the hex ``post_id``
+    ``ws_api.create_post`` returns — which we wrap in the 36-byte dag-cbor CID
+    shape `PostId` deserializes; the nest strips it back to the digest to key
+    `content_meta` (`cid_to_digest` in `db/posts.rs`). Each is an
+    externally-tagged single-key map carrying `post_id`; ``React`` additionally
+    carries its ``emoji`` (`Reference::React { post_id, emoji }`,
+    `libs/fauna-core/src/data.rs`) and requires the ``emoji`` argument.
     """
     digest = bytes.fromhex(target_post_id_hex)
     assert len(digest) == 32, f"target post id must be a 32-byte digest, got {len(digest)}"
-    return {kind: {"post_id": cid_link(CID_DAG_CBOR_PREFIX + digest)}}
+    body: dict = {"post_id": cid_link(CID_DAG_CBOR_PREFIX + digest)}
+    if kind == "React":
+        assert emoji, "a React reference carries its emoji"
+        body["emoji"] = emoji
+    else:
+        assert emoji is None, f"only a React reference carries an emoji, not {kind}"
+    return {kind: body}
 
 
 def sign_and_encode_tombstone(

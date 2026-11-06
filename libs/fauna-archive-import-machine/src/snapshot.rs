@@ -8,6 +8,7 @@
 //! (web) unchanged and all 7 apps render from the identical shape
 //! (priorities #1–#3).
 
+use fauna_core::localized::LocalizedText;
 use serde::{Deserialize, Serialize};
 
 /// Which wizard screen is showing (`archive-import.md` § The wizard and its
@@ -85,6 +86,14 @@ pub enum AudienceMode {
     OnlyMe,
 }
 
+/// The order Step 1's platform picker offers its entries in (and the index an
+/// app's select widget maps back through). One owner for every app.
+pub const SOURCE_KINDS: [ArchiveSourceKind; 2] =
+    [ArchiveSourceKind::Facebook, ArchiveSourceKind::Instagram];
+
+/// The order Step 3's audience-mode switch offers its entries in.
+pub const AUDIENCE_MODES: [AudienceMode; 2] = [AudienceMode::Original, AudienceMode::OnlyMe];
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
 pub enum ArchiveImportStatus {
@@ -137,6 +146,22 @@ pub struct ArchiveSummaryView {
     pub unknown_audience: u64,
 }
 
+/// Step 6's profile prefill offer (`archive-import.md` § What each category
+/// becomes, the Profile row: "offered as a one-tap prefill at Done, never
+/// applied silently") — the archive's own profile, read from the folder's
+/// `model/profile.cbor` when the run completes. What
+/// [`ArchiveImportAction::ApplyArchiveProfile`] writes onto the user's own
+/// profile, and nothing until that tap.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct ArchiveProfileView {
+    pub display_name: String,
+    pub bio: Option<String>,
+    pub links: Vec<String>,
+    /// The export carries a profile picture (the apply uploads it).
+    pub has_picture: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct ArchiveImportSnapshot {
@@ -183,6 +208,31 @@ pub struct ArchiveImportSnapshot {
     pub resume_available: bool,
     pub status: ArchiveImportStatus,
     pub error: Option<String>,
+    /// Phase two (ruling 11): comments and reactions that came back as this
+    /// user's own replies and reactions on linked contacts' posts, and the
+    /// ones no post could be matched to — the Done step's one added line.
+    /// Set by [`crate::ArchiveImportMachine::set_link_counts`] from
+    /// [`crate::link::ArchiveLinks::counts`]; `0` before any link exists.
+    pub link_claimed: u64,
+    pub link_unmatched: u64,
+    /// The comments on the owner's own posts no rung of ruling 5's ladder
+    /// placed under a post (§ What each category becomes → *Placement under
+    /// the owner's own post*) — the Done step's "N comments could not be
+    /// placed under a post" line. Counted from the folders when a run
+    /// finishes; `0` before.
+    #[serde(default)]
+    #[cfg_attr(feature = "uniffi", uniffi(default = 0))]
+    pub comments_unplaced: u64,
+    /// Step 6's profile prefill offer — `None` before a run completes, or
+    /// when the archive carries no profile; the button paints disabled then.
+    #[serde(default)]
+    #[cfg_attr(feature = "uniffi", uniffi(default = None))]
+    pub archive_profile: Option<ArchiveProfileView>,
+    /// Set once the offer was applied: the button paints disabled, so a
+    /// second tap never re-publishes the same profile.
+    #[serde(default)]
+    #[cfg_attr(feature = "uniffi", uniffi(default = false))]
+    pub profile_applied: bool,
 }
 
 impl ArchiveImportSnapshot {
@@ -215,6 +265,11 @@ impl ArchiveImportSnapshot {
             resume_available: false,
             status: ArchiveImportStatus::Idle,
             error: None,
+            link_claimed: 0,
+            link_unmatched: 0,
+            comments_unplaced: 0,
+            archive_profile: None,
+            profile_applied: false,
         }
     }
 }
@@ -225,9 +280,211 @@ impl Default for ArchiveImportSnapshot {
     }
 }
 
+// ── the page's vocabularies ──────────────────────────────────────────────
+//
+// Every app paints the same few token → word maps on this page. They live
+// here once, returned as `LocalizedText` so each app resolves them through
+// its own i18n runtime (the `export_format_label` /
+// `import_source_kind_label` precedent in `fauna-client-mail-settings`), and
+// no app re-spells a map tui already had.
+
+/// Step 1's picker option: the platform's canonical name — a brand, never
+/// translated, so a plain string ([`ArchiveSourceKind::label`]); the picker
+/// round-trips it as its value.
+#[cfg_attr(feature = "uniffi", uniffi::export)]
+pub fn archive_import_source_kind_label(kind: ArchiveSourceKind) -> String {
+    kind.label().to_string()
+}
+
+/// Step 1's `archive-import-source-help`: how to request the export on the
+/// chosen platform.
+#[cfg_attr(feature = "uniffi", uniffi::export)]
+pub fn archive_import_source_help(kind: ArchiveSourceKind) -> LocalizedText {
+    LocalizedText::key(match kind {
+        ArchiveSourceKind::Facebook => "archive_import.source_help_facebook",
+        ArchiveSourceKind::Instagram => "archive_import.source_help_instagram",
+    })
+}
+
+/// The word for a [`CategoryRow::token`] (`fauna_archive::Category::token`)
+/// on the Scope and Progress rows. A token this build has no word for (a
+/// newer machine's category) resolves to the token itself — every resolver
+/// falls back to the key when the lookup misses — so the row shows something
+/// rather than nothing.
+#[cfg_attr(feature = "uniffi", uniffi::export)]
+pub fn archive_import_category_label(token: &str) -> LocalizedText {
+    let key = match token {
+        "posts" => "archive_import.category_posts",
+        "albums" => "archive_import.category_albums",
+        "comments" => "archive_import.category_comments",
+        "reactions" => "archive_import.category_reactions",
+        "events" => "archive_import.category_events",
+        "groups" => "archive_import.category_groups",
+        "friends" => "archive_import.category_friends",
+        "threads" => "archive_import.category_threads",
+        "messages" => "archive_import.category_messages",
+        "profile" => "archive_import.category_profile",
+        other => other,
+    };
+    LocalizedText::key(key)
+}
+
+/// Step 5's state word inside `archive-import-progress-summary`; no run state
+/// yet reads as running (the Progress screen is only shown once Start
+/// landed).
+#[cfg_attr(feature = "uniffi", uniffi::export)]
+pub fn archive_import_run_state_label(state: Option<RunState>) -> LocalizedText {
+    LocalizedText::key(match state {
+        Some(RunState::Running) | None => "archive_import.state_running",
+        Some(RunState::Paused) => "archive_import.state_paused",
+        Some(RunState::Cancelled) => "archive_import.state_cancelled",
+        Some(RunState::Completed) => "archive_import.state_completed",
+        Some(RunState::Errored) => "archive_import.state_errored",
+    })
+}
+
+/// `YYYY-MM-DD` of an epoch-micros archive instant, as a UTC day — the Archive
+/// step's date range ([`ArchiveSummaryView::first_at`] / `last_at`). UTC, not
+/// the device's local day, because the Scope step's bare dates name whole UTC
+/// days (`mail-export.md` § UX shape step 2's rule, which this page follows),
+/// so the range the summary shows is the range the user types back.
+#[cfg_attr(feature = "uniffi", uniffi::export)]
+pub fn archive_import_utc_day(micros: u64) -> String {
+    let days = (micros / 1_000_000 / 86_400) as i64;
+    let (year, month, day) = fauna_core::caltime::civil_from_days(days);
+    format!("{year:04}-{month:02}-{day:02}")
+}
+
+/// Step 3's `archive-import-scope-audience-mode` option.
+#[cfg_attr(feature = "uniffi", uniffi::export)]
+pub fn archive_import_audience_mode_label(mode: AudienceMode) -> LocalizedText {
+    LocalizedText::key(match mode {
+        AudienceMode::Original => "archive_import.audience_original",
+        AudienceMode::OnlyMe => "archive_import.audience_only_me",
+    })
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+pub enum ArchiveImportAction {
+    Refresh,
+    SelectSource {
+        kind: ArchiveSourceKind,
+    },
+    SetArchivePath {
+        value: String,
+    },
+    /// Step 2: open the path through the `ArchiveOpener`, index it, show the
+    /// summary.
+    OpenArchive,
+    Next,
+    Back,
+    ToggleCategory {
+        token: String,
+        selected: bool,
+    },
+    SetAudienceMode {
+        mode: AudienceMode,
+    },
+    SetDateFrom {
+        value: String,
+    },
+    SetDateTo {
+        value: String,
+    },
+    /// Step 4's durable commit: create the folder, upload the raw zip, then
+    /// the app spawns `run_import`.
+    Start,
+    Pause,
+    Resume,
+    Cancel,
+    /// Step 6's one-tap profile prefill: write the archive's name, bio, links
+    /// and picture onto the user's own profile. Never dispatched by the
+    /// machine itself — the profile changes only on this tap.
+    ApplyArchiveProfile,
+}
+
 #[cfg(test)]
 mod vocabulary_tests {
-    use super::ArchiveSourceKind;
+    use super::*;
+
+    fn resolve(text: LocalizedText) -> String {
+        text.resolve(fauna_i18n::strings::lookup)
+    }
+
+    /// The picker orders are the apps' shared contract: the first entry is the
+    /// default, and the order is what every app's select shows.
+    #[test]
+    fn picker_orders_are_pinned() {
+        assert_eq!(
+            SOURCE_KINDS,
+            [ArchiveSourceKind::Facebook, ArchiveSourceKind::Instagram]
+        );
+        assert_eq!(
+            AUDIENCE_MODES,
+            [AudienceMode::Original, AudienceMode::OnlyMe]
+        );
+    }
+
+    /// Every word the page's shared maps hand an app is a real string: a key
+    /// missing from `en.yaml` would resolve to the key itself, which is the
+    /// unknown-token fallback and nothing else.
+    #[test]
+    fn every_page_vocabulary_key_is_a_shipped_string() {
+        for token in fauna_archive::Category::ALL.iter().map(|c| c.token()) {
+            let key = archive_import_category_label(token).key;
+            assert!(
+                fauna_i18n::strings::lookup(&key).is_some(),
+                "category {token}: {key}"
+            );
+        }
+        for state in [
+            None,
+            Some(RunState::Running),
+            Some(RunState::Paused),
+            Some(RunState::Cancelled),
+            Some(RunState::Completed),
+            Some(RunState::Errored),
+        ] {
+            let key = archive_import_run_state_label(state).key;
+            assert!(
+                fauna_i18n::strings::lookup(&key).is_some(),
+                "{state:?}: {key}"
+            );
+        }
+        for mode in [AudienceMode::Original, AudienceMode::OnlyMe] {
+            let key = archive_import_audience_mode_label(mode).key;
+            assert!(
+                fauna_i18n::strings::lookup(&key).is_some(),
+                "{mode:?}: {key}"
+            );
+        }
+        for kind in [ArchiveSourceKind::Facebook, ArchiveSourceKind::Instagram] {
+            let key = archive_import_source_help(kind).key;
+            assert!(
+                fauna_i18n::strings::lookup(&key).is_some(),
+                "{kind:?}: {key}"
+            );
+            assert_eq!(archive_import_source_kind_label(kind), kind.label());
+        }
+    }
+
+    /// The archive day is the UTC day: 2021-01-07T06:13:20Z, and a second
+    /// before and after UTC midnight either side of it.
+    #[test]
+    fn an_archive_instant_renders_as_its_utc_day() {
+        const MICROS: u64 = 1_000_000;
+        assert_eq!(archive_import_utc_day(1_610_000_000 * MICROS), "2021-01-07");
+        assert_eq!(archive_import_utc_day(1_609_977_599 * MICROS), "2021-01-06");
+        assert_eq!(archive_import_utc_day(1_610_064_000 * MICROS), "2021-01-08");
+        assert_eq!(archive_import_utc_day(0), "1970-01-01");
+    }
+
+    #[test]
+    fn a_category_this_build_cannot_name_shows_its_token() {
+        assert_eq!(resolve(archive_import_category_label("stories")), "stories");
+        assert_eq!(resolve(archive_import_category_label("posts")), "Posts");
+    }
 
     /// `fauna-archive` depends on no `fauna-*` crate, so its platform tokens
     /// and Fauna's post `source` vocabulary (`fauna_core::source`) are two
@@ -266,40 +523,4 @@ mod vocabulary_tests {
             );
         }
     }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
-pub enum ArchiveImportAction {
-    Refresh,
-    SelectSource {
-        kind: ArchiveSourceKind,
-    },
-    SetArchivePath {
-        value: String,
-    },
-    /// Step 2: open the path through the `ArchiveOpener`, index it, show the
-    /// summary.
-    OpenArchive,
-    Next,
-    Back,
-    ToggleCategory {
-        token: String,
-        selected: bool,
-    },
-    SetAudienceMode {
-        mode: AudienceMode,
-    },
-    SetDateFrom {
-        value: String,
-    },
-    SetDateTo {
-        value: String,
-    },
-    /// Step 4's durable commit: create the folder, upload the raw zip, then
-    /// the app spawns `run_import`.
-    Start,
-    Pause,
-    Resume,
-    Cancel,
 }

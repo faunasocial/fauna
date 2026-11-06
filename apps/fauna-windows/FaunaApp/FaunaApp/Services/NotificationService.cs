@@ -110,11 +110,14 @@ public static class NotificationService
     /// <see cref="KnockToastText.For"/> (`notifications.md` § Localized body
     /// → *The knock toast*) — never the raw sender id alone. Every knock is
     /// tagged <see cref="KnockToastBuilder.Tag"/> so a new knock replaces the
-    /// earlier toast, however many distinct senders knock.
+    /// earlier toast, however many distinct senders knock. A knock whose message
+    /// carries a muted word raises none (<see cref="KnockToastText.Withheld"/>) —
+    /// gated here, not on <c>KnockReceived</c>, which also refreshes the contacts
+    /// roster.
     /// </summary>
     internal static void ShowKnockNotification(FfiKnock knock)
     {
-        if (!_initialized) return;
+        if (!_initialized || KnockToastText.Withheld(knock, MutedKeywordsCache.Keywords)) return;
         try
         {
             var (title, body) = KnockToastText.For(knock);

@@ -163,6 +163,28 @@ impl CacheDb {
         Ok(rows.len())
     }
 
+    /// Every post a federated follow delivered here (`content.follow_delivered
+    /// = 1`; `federated-follow.md` § Decision 3). The withhold walk leaves
+    /// these out: their attachments rest at the author's home and are never
+    /// held here (`crate::moderation_withhold::PostWithholds::fold_post`).
+    pub async fn follow_delivered_post_ids(&self) -> Result<HashSet<[u8; 32]>> {
+        let conn = self.conn.lock().await;
+        let mut stmt = conn
+            .prepare("SELECT id FROM content WHERE follow_delivered = 1")
+            .context("prepare follow_delivered_post_ids")?;
+        let rows = stmt
+            .query_map([], |r| r.get::<_, Vec<u8>>(0))
+            .context("query follow_delivered_post_ids")?;
+        let mut out = HashSet::new();
+        for row in rows {
+            let id = row.context("read content.id")?;
+            if let Ok(arr) = <[u8; 32]>::try_from(id.as_slice()) {
+                out.insert(arr);
+            }
+        }
+        Ok(out)
+    }
+
     /// Every post currently under a legal takedown. Tiny by construction (a
     /// legal takedown is a rare, compelled act), so the withhold walk carries
     /// it as a set and asks it per post rather than joining per row.

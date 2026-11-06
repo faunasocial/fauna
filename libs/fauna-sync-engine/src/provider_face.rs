@@ -86,6 +86,13 @@ pub struct ProviderRow {
     /// manifest head hash (always present for a live row), else empty. See
     /// [`content_version`].
     pub content_version: Vec<u8>,
+    /// The holder-keeps gate keeps this file's body on the device — this seat's
+    /// own record, materialized, in a folder whose nest took no bytes
+    /// (`relay-serving.md` § Relay serving → *A holder keeps what it wrote*). The
+    /// binding holds such an item out of the OS's own eviction while it still
+    /// reads as synced (`on-demand-files-apple.md` § Apple File Provider binding,
+    /// *an own record the nest took no bytes of is kept downloaded*).
+    pub kept: bool,
 }
 
 /// One enumerated item handed back to the OS: a tracked file, or a synthesized
@@ -104,6 +111,15 @@ pub struct ProviderItem {
     pub is_dir: bool,
     /// FP `contentVersion` bytes (empty for a directory).
     pub content_version: Vec<u8>,
+    /// [`ProviderRow::kept`]; `false` for a directory.
+    pub kept: bool,
+    /// This file can carry a share link — a non-directory item of a set whose
+    /// engine [shares links](ProviderEngine::shares_links). The binding hands
+    /// it to the OS as the per-item fact a file manager's Share entry gates on
+    /// (`macos.md` § Sync → *Finder's Share entry*, link 1); `false` for a
+    /// directory, the set's root included. Set by the serving cores, never by
+    /// the pure folds.
+    pub share_link_eligible: bool,
 }
 
 /// The result of [`serve_fetch`] — the materialized bytes plus the item's new
@@ -271,6 +287,18 @@ pub trait ProviderEngine {
         self.ingest(rel).await
     }
 
+    /// Ingest the OS's re-create of an item it held edited when a remote delete
+    /// removed it — `createItem` carrying `deletionConflicted`, the platform's
+    /// own word that this create is the survivor of a declined delete
+    /// (`on-demand-files-apple.md` § Apple File Provider binding, *A remote
+    /// delete of a hydrated item*, case (3)). The survivor is uploaded and the
+    /// delete-vs-edit conflict reported, as a declined delete is everywhere. The
+    /// default is a plain [`Self::ingest`]: a host with no conflict surface
+    /// has nothing more to say.
+    async fn ingest_deletion_conflicted(&self, rel: &str) -> Result<UploadOutcome> {
+        self.ingest(rel).await
+    }
+
     /// Tombstone one path (`handle_delete` → a `manifest_hash = None` change
     /// record). Record-first: `recorded` is the ack signal, exactly like
     /// [`Self::ingest`] — a not-recorded delete leaves the row in place so the
@@ -284,6 +312,22 @@ pub trait ProviderEngine {
     fn read_only(&self) -> bool {
         false
     }
+
+    /// Can a file of this set carry a share link — the engine holds the
+    /// public-audience write arm (`SyncEngine::is_public_audience`, the
+    /// owner-attested fact the nest's serve gate seals by) AND the set is this
+    /// nest's own (a cross-nest set is never a share route's target: the routes
+    /// name a set by this nest's `folders.id`)? The same decision the Windows
+    /// agent's `ShareFile` makes. `false` by default.
+    fn shares_links(&self) -> bool {
+        false
+    }
+}
+
+/// Stamp [`ProviderItem::share_link_eligible`] on served items: files only.
+fn stamp_share_link<E: ProviderEngine>(engine: &E, mut item: ProviderItem) -> ProviderItem {
+    item.share_link_eligible = !item.is_dir && engine.shares_links();
+    item
 }
 
 /// Derive the FP `contentVersion` bytes for a row: the hydration-proven
@@ -319,10 +363,8 @@ pub fn enumerate_children(rows: &[ProviderRow], parent_rel: &str) -> Vec<Provide
             mtime: r.mtime,
         })
         .collect();
-    let versions: std::collections::HashMap<&str, &[u8]> = rows
-        .iter()
-        .map(|r| (r.rel.as_str(), r.content_version.as_slice()))
-        .collect();
+    let by_rel: std::collections::HashMap<&str, &ProviderRow> =
+        rows.iter().map(|r| (r.rel.as_str(), r)).collect();
 
     immediate_children(&ph_rows, parent)
         .into_iter()
@@ -332,21 +374,16 @@ pub fn enumerate_children(rows: &[ProviderRow], parent_rel: &str) -> Vec<Provide
             } else {
                 format!("{parent}/{}", c.name)
             };
-            let content_version = if c.is_dir {
-                Vec::new()
-            } else {
-                versions
-                    .get(rel.as_str())
-                    .map(|v| v.to_vec())
-                    .unwrap_or_default()
-            };
+            let row = (!c.is_dir).then(|| by_rel.get(rel.as_str())).flatten();
             ProviderItem {
+                content_version: row.map(|r| r.content_version.clone()).unwrap_or_default(),
+                kept: row.is_some_and(|r| r.kept),
                 rel,
                 name: c.name,
                 size: c.size,
                 mtime: c.mtime,
                 is_dir: c.is_dir,
-                content_version,
+                share_link_eligible: false,
             }
         })
         .collect()
@@ -368,6 +405,8 @@ pub fn find_item(rows: &[ProviderRow], rel: &str) -> Option<ProviderItem> {
             mtime: rows.iter().map(|r| r.mtime).max().unwrap_or(0),
             is_dir: true,
             content_version: Vec::new(),
+            kept: false,
+            share_link_eligible: false,
         });
     }
     if let Some(row) = rows.iter().find(|r| r.rel == rel) {
@@ -379,6 +418,8 @@ pub fn find_item(rows: &[ProviderRow], rel: &str) -> Option<ProviderItem> {
             mtime: row.mtime,
             is_dir: false,
             content_version: row.content_version.clone(),
+            kept: row.kept,
+            share_link_eligible: false,
         });
     }
     let dir_prefix = format!("{rel}/");
@@ -396,6 +437,8 @@ pub fn find_item(rows: &[ProviderRow], rel: &str) -> Option<ProviderItem> {
             mtime,
             is_dir: true,
             content_version: Vec::new(),
+            kept: false,
+            share_link_eligible: false,
         }
     })
 }
@@ -428,13 +471,16 @@ pub async fn serve_enumerate<E: ProviderEngine>(
     parent_rel: &str,
 ) -> Result<Vec<ProviderItem>> {
     let rows = engine.provider_rows().await?;
-    Ok(enumerate_children(&rows, parent_rel))
+    Ok(enumerate_children(&rows, parent_rel)
+        .into_iter()
+        .map(|item| stamp_share_link(engine, item))
+        .collect())
 }
 
 /// `item(for:)` → the metadata for one identifier (file, directory, or unknown).
 pub async fn serve_item<E: ProviderEngine>(engine: &E, rel: &str) -> Result<Option<ProviderItem>> {
     let rows = engine.provider_rows().await?;
-    Ok(find_item(&rows, rel))
+    Ok(find_item(&rows, rel).map(|item| stamp_share_link(engine, item)))
 }
 
 /// `fetchContents` → the materialized bytes plus the item's new `contentVersion`.
@@ -520,6 +566,22 @@ pub async fn serve_ingest_with_base<E: ProviderEngine>(
         return serve_ingest(engine, rel).await;
     }
     let outcome = engine.ingest_conflicting(rel).await?;
+    Ok(upload_ack(&outcome))
+}
+
+/// `createItem` carrying `deletionConflicted` → the survivor of a declined remote
+/// delete ([`ProviderEngine::ingest_deletion_conflicted`]): uploaded with its
+/// delete-vs-edit conflict reported, acked off the recorded-head gate like every
+/// write core. Ignored rels are excluded as by [`serve_ingest`].
+pub async fn serve_ingest_deletion_conflicted<E: ProviderEngine>(
+    engine: &E,
+    rel: &str,
+) -> Result<WriteAck> {
+    refuse_read_only(engine)?;
+    if engine.is_ignored(rel) {
+        return Ok(WriteAck::excluded());
+    }
+    let outcome = engine.ingest_deletion_conflicted(rel).await?;
     Ok(upload_ack(&outcome))
 }
 
@@ -651,6 +713,7 @@ mod tests {
             size,
             mtime,
             content_version: version.to_vec(),
+            kept: false,
         }
     }
 
@@ -800,7 +863,9 @@ mod tests {
         deleted: RefCell<Vec<String>>,
         ingested: RefCell<Vec<String>>,
         conflicted: RefCell<Vec<String>>,
+        deletion_conflicted: RefCell<Vec<String>>,
         read_only: bool,
+        shares_links: bool,
     }
 
     #[async_trait::async_trait(?Send)]
@@ -849,6 +914,13 @@ mod tests {
                 content_changed: self.conflicting_content_changed,
             })
         }
+        async fn ingest_deletion_conflicted(&self, rel: &str) -> Result<UploadOutcome> {
+            self.deletion_conflicted.borrow_mut().push(rel.into());
+            Ok(UploadOutcome {
+                recorded: self.ingest_recorded,
+                ..Default::default()
+            })
+        }
         async fn delete(&self, rel: &str) -> Result<UploadOutcome> {
             self.deleted.borrow_mut().push(rel.into());
             Ok(UploadOutcome {
@@ -859,6 +931,78 @@ mod tests {
         fn read_only(&self) -> bool {
             self.read_only
         }
+        fn shares_links(&self) -> bool {
+            self.shares_links
+        }
+    }
+
+    /// The share-link fact rides each served item: a FILE of a set whose
+    /// engine shares links is eligible; a directory (a sub-folder or the root)
+    /// never is — the root's member sharing is the binding's own projection —
+    /// and nothing is eligible on a set that does not share links
+    /// (`macos.md` § Sync → *Finder's Share entry*, link 1).
+    #[tokio::test]
+    async fn served_items_carry_share_link_eligibility_on_files_only() {
+        let rows = vec![row("a.txt", 1, 1, b"v"), row("sub/b.txt", 1, 1, b"v")];
+        let public = FakeEngine {
+            rows: rows.clone(),
+            shares_links: true,
+            ..Default::default()
+        };
+        let out = serve_enumerate(&public, "").await.unwrap();
+        let by = |name: &str| {
+            out.iter()
+                .find(|i| i.name == name)
+                .unwrap()
+                .share_link_eligible
+        };
+        assert!(by("a.txt"), "a public set's file carries a link");
+        assert!(!by("sub"), "a sub-folder is not a shareable unit");
+        let nested = serve_enumerate(&public, "sub").await.unwrap();
+        assert!(
+            nested[0].share_link_eligible,
+            "eligibility is set-wide, any depth"
+        );
+        assert!(
+            serve_item(&public, "a.txt")
+                .await
+                .unwrap()
+                .unwrap()
+                .share_link_eligible
+        );
+        assert!(
+            !serve_item(&public, "sub")
+                .await
+                .unwrap()
+                .unwrap()
+                .share_link_eligible
+        );
+        assert!(
+            !serve_item(&public, "")
+                .await
+                .unwrap()
+                .unwrap()
+                .share_link_eligible
+        );
+
+        let sealed = FakeEngine {
+            rows,
+            ..Default::default()
+        };
+        assert!(
+            serve_enumerate(&sealed, "")
+                .await
+                .unwrap()
+                .iter()
+                .all(|i| !i.share_link_eligible)
+        );
+        assert!(
+            !serve_item(&sealed, "a.txt")
+                .await
+                .unwrap()
+                .unwrap()
+                .share_link_eligible
+        );
     }
 
     /// A reader's host has no write half: every write core refuses the typed
@@ -884,6 +1028,10 @@ mod tests {
             serve_ingest_with_base(&engine, "a.txt", b"stale").await
         ));
         assert!(refused(serve_ingest_with_base(&engine, "a.txt", b"").await));
+        assert!(refused(
+            serve_ingest_deletion_conflicted(&engine, "a.txt").await
+        ));
+        assert!(engine.deletion_conflicted.borrow().is_empty());
         assert!(refused(serve_delete(&engine, "a.txt").await));
         assert!(refused(serve_rename(&engine, "a.txt", "b.txt").await));
         assert!(engine.ingested.borrow().is_empty());
@@ -944,6 +1092,44 @@ mod tests {
             *engine.hydrated.borrow(),
             vec![("a.txt".to_string(), expected)],
             "same dehydration-honesty stamp as serve_fetch"
+        );
+    }
+
+    /// The OS's re-create of an item it held edited when a remote delete removed
+    /// it (`createItem` with `deletionConflicted`) reaches the engine's
+    /// declined-delete arm, never the plain ingest; the ack keys on `recorded`
+    /// as every write core's does, and an ignored rel is still excluded.
+    #[tokio::test]
+    async fn serve_ingest_deletion_conflicted_routes_to_the_declined_delete_arm() {
+        let engine = FakeEngine {
+            ingest_recorded: true,
+            ignored: vec![".hidden".into()],
+            ..Default::default()
+        };
+        let ack = serve_ingest_deletion_conflicted(&engine, "a.txt")
+            .await
+            .expect("ingest");
+        assert!(ack.acked);
+        assert_eq!(
+            *engine.deletion_conflicted.borrow(),
+            vec!["a.txt".to_string()]
+        );
+        assert!(engine.ingested.borrow().is_empty(), "not a plain create");
+
+        assert!(
+            serve_ingest_deletion_conflicted(&engine, ".hidden")
+                .await
+                .expect("excluded")
+                .excluded
+        );
+        assert_eq!(engine.deletion_conflicted.borrow().len(), 1);
+
+        let unrecorded = FakeEngine::default();
+        assert!(
+            !serve_ingest_deletion_conflicted(&unrecorded, "a.txt")
+                .await
+                .expect("ingest")
+                .acked
         );
     }
 

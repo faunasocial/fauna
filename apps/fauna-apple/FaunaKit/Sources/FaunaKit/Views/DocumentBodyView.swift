@@ -328,22 +328,22 @@ public func documentMediaImageHash(_ document: RenderDocument) -> String? {
 
 /// The nest-relative path of the document's first folded `ProxiedImage` block — a bridged
 /// post's picture (render-model.md § D6c) — or `nil` when the post has a blob image, which
-/// takes the one `post-image` slot first. The exact twin of tui's `proxied_post_image`, over
-/// the shared `renderDocumentProxiedImages` face (which recurses, like its siblings).
+/// takes the one `post-image` slot first. One call to the shared
+/// `RenderDocument::proxied_post_image_ref` precedence (render-model.md § D6c), over its
+/// `renderDocumentProxiedPostImage` face (which recurses, like its siblings).
 public func documentMediaProxiedImagePath(_ document: RenderDocument) -> String? {
-    guard documentMediaImageHash(document) == nil else { return nil }
-    return renderDocumentProxiedImages(document: document).first?.path
+    renderDocumentProxiedPostImage(document: document)?.path
 }
 
 /// The nest-relative path of the document's first folded `ProxiedVideo` block — a bridged
 /// post's video (render-model.md § D6c → *Proxied video*) — or `nil` when the post has a blob
 /// `Video`, which takes the one `video-thumbnail` slot first. The strict twin of
-/// ``documentMediaProxiedImagePath`` and of `RenderDocument::proxied_post_video`, over the shared
-/// `renderDocumentProxiedVideos` face (which recurses, like its siblings). The slot paints the
+/// ``documentMediaProxiedImagePath`` — one call to the shared
+/// `RenderDocument::proxied_post_video_ref` precedence over its `renderDocumentProxiedPostVideo`
+/// face (which recurses, like its siblings). The slot paints the
 /// play glyph + this path as text; nothing fetches or parses it.
 public func documentMediaProxiedVideoPath(_ document: RenderDocument) -> String? {
-    guard documentMediaVideoHash(document) == nil else { return nil }
-    return renderDocumentProxiedVideos(document: document).first?.path
+    renderDocumentProxiedPostVideo(document: document)?.path
 }
 
 /// The content hash of the document's folded trusted-media `Video` block, or `nil` — the exact

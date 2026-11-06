@@ -25,19 +25,9 @@ class ModerationActions:
         The native FFI clients' equivalent readers are the cross-machine
         slice-4 legs (`test_moderation_local_detection.py`'s module
         docstring) — not yet built for any of them."""
-        if not self.driver.is_web():
-            from helpers.app_surface import skip_unbuilt
+        from helpers.app_surface import require_surface
 
-            skip_unbuilt(
-                self.driver,
-                surface="the single-real-engine local-detection leg (web's "
-                        "throwaway-sender-engine test shape)",
-                detail="only web has this leg today; the native FFI clients' "
-                       "equivalent is the cross-machine slice-4 legs, not yet "
-                       "built for any of them",
-                tracked="test_moderation_local_detection.py module docstring "
-                        "(slice-4 legs)",
-            )
+        require_surface(self.driver, "single-engine-local-detection")
 
     def require_second_real_engine_fixture_supported(self, *, flow: str) -> None:
         """Skip unless this app is one of the two the `second_real_faunamls_app`
@@ -46,29 +36,20 @@ class ModerationActions:
 
         These journeys drive `flow` through TWO real GUI engines at once
         (alice's + bob's), so both need a standalone moderation queue AND a
-        `second_real_faunamls_app`-capable fixture: linux (the original leg)
-        and tui (joined 2026-07-29 with its own moderation queue).
+        `second_real_faunamls_app`-capable fixture: linux (the original leg),
+        tui (joined 2026-07-29 with its own moderation queue), macos and ios.
 
         ⚠ **Widening means widening TWO places.** Each consuming test also
-        carries `@pytest.mark.linux`/`@pytest.mark.tui` so collection deselects
+        carries its app markers so collection deselects
         it before any fixture runs — necessary since `real_faunamls_app` became
         a real precondition on the launch-gate apps
         (`helpers/real_rail_control.py`), which would otherwise raise here
         before this guard ever got to speak. This remains the single place the
         supported set is *described*; the markers are its collection-time
         shadow."""
-        if not (self.driver.is_linux() or self.driver.is_tui()):
-            from helpers.app_surface import skip_unbuilt
+        from helpers.app_surface import require_surface
 
-            skip_unbuilt(
-                self.driver,
-                surface="a second_real_faunamls_app-capable standalone "
-                        "moderation queue",
-                detail=f"drives {flow} through two real GUI engines — only "
-                       "linux and tui support the second-real-engine fixture "
-                       "today",
-                tracked="second_real_faunamls_app fixture (conftest.py)",
-            )
+        require_surface(self.driver, "moderation-queue-second-real-engine")
 
     def correction_count(self) -> int:
         """Return the number of train-correction buttons (one per item)."""

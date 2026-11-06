@@ -157,6 +157,8 @@ pub fn rpc_error_response(err: &fauna_protocol::RpcError) -> Response {
         StatusCode::CONFLICT
     } else if code.ends_with("scope_full") || code.ends_with("inbox_full") {
         StatusCode::INSUFFICIENT_STORAGE
+    } else if code.ends_with("too_many_uploads") {
+        StatusCode::TOO_MANY_REQUESTS
     } else if code.ends_with("unavailable") {
         StatusCode::SERVICE_UNAVAILABLE
     } else {
@@ -305,7 +307,7 @@ pub async fn admit_presentation(
         }
     };
     let claims = verify_presentation(runtime, &keys, &issuer, htm, htu, token, proofs, now)
-        .map_err(&refuse)?;
+        .map_err(refuse)?;
 
     // (4) A principal row for `(fauna_actor, client_id)`, and an account whose
     // own authority is live: not deleted, suspended, locked out or superseded.

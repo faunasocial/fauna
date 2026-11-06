@@ -1759,6 +1759,9 @@ mod tests {
     /// (installers/vps.md § Host OS Maintenance step 2): reboot iff a reboot is
     /// pending AND (the nest is idle OR the 24 h ceiling has elapsed). We source
     /// the exact shell that ships and feed it fixture arguments via `sh`.
+    /// Linux-only, like every test that sources the whole script: see
+    /// `run_coordinator_fns` for why.
+    #[cfg(target_os = "linux")]
     #[test]
     fn test_reboot_decision_logic() {
         // (reboot_pending, connection_count, reboot_deferred_since, now, ceiling, expected)
@@ -1797,7 +1800,9 @@ mod tests {
     /// The admin "restart now" request (the 6th arg) overrides idle + ceiling:
     /// the admin explicitly chose to reboot immediately
     /// (installers/vps.md § Host OS Maintenance step 4). A `false` (or absent)
-    /// restart_now leaves the idle/ceiling logic intact.
+    /// restart_now leaves the idle/ceiling logic intact. Linux-only: see
+    /// `run_coordinator_fns`.
+    #[cfg(target_os = "linux")]
     #[test]
     fn test_restart_now_overrides_decision() {
         // (reboot_pending, connection_count, reboot_deferred_since, now, ceiling, restart_now, expected)
@@ -1836,7 +1841,10 @@ mod tests {
     /// `Type=oneshot` coordinator forever and suppressing every future security
     /// reboot. We source the shipped script and feed `fauna_read_connection_count`
     /// a real FIFO; pre-fix this call hangs indefinitely
-    /// (`installers/vps.md` § Host OS Maintenance step 3).
+    /// (`installers/vps.md` § Host OS Maintenance step 3). Linux-only: see
+    /// `run_coordinator_fns`; the bound is GNU `timeout` besides, which macOS
+    /// does not ship.
+    #[cfg(target_os = "linux")]
     #[test]
     fn test_readiness_read_hang_proof_on_fifo() {
         let dir = std::env::temp_dir().join(format!("fauna-hm3-{}", std::process::id()));
@@ -2066,6 +2074,17 @@ mod tests {
     /// Run `body` against the sourced coordinator script (functions only —
     /// `FAUNA_COORDINATOR_TEST=1` skips the entry point), feeding `stdin`, and
     /// return stdout.
+    ///
+    /// Gated to **linux**, as is every test that sources the whole script: the
+    /// script only ever runs on a Linux box. On windows a cargo started from
+    /// PowerShell finds no `sh` at all, and one started from Git Bash finds
+    /// Git's launcher, which cuts a long command line near 8 KB without saying
+    /// so; the script is longer, so `sh -c` parses a truncated copy
+    /// (`unexpected end of file`, naming a line near the 8 KB mark). Either way
+    /// every test fails for a reason that says nothing about the code. Not
+    /// `not(windows)`: no machine runs this crate's tests on macOS, so nothing
+    /// shows its userland passes them.
+    #[cfg(target_os = "linux")]
     fn run_coordinator_fns(body: &str, stdin: &str) -> String {
         use std::io::Write;
         let script = format!("{REBOOT_COORDINATOR_SCRIPT}\n{body}\n");
@@ -2098,6 +2117,7 @@ mod tests {
     /// bridge, a ULA, a CGNAT address and two more private ranges. Only the
     /// two global addresses survive the coarse host-side filter (the nest
     /// re-applies `is_global_ip`).
+    #[cfg(target_os = "linux")]
     const CANNED_IP_O_ADDR: &str = "\
 1: lo    inet 127.0.0.1/8 scope host lo\\       valid_lft forever preferred_lft forever
 1: lo    inet6 ::1/128 scope host noprefixroute \\       valid_lft forever preferred_lft forever
@@ -2114,6 +2134,7 @@ mod tests {
     /// The pure filter turns the host's interface listing into one
     /// `address=<ip>` line per global-unicast address, v4 and v6, dropping
     /// loopback, link-local, ULA, RFC 1918 and CGNAT.
+    #[cfg(target_os = "linux")]
     #[test]
     fn test_host_address_lines_filters_the_interface_listing() {
         let got = run_coordinator_fns("fauna_host_address_lines", CANNED_IP_O_ADDR);
@@ -2125,6 +2146,7 @@ mod tests {
 
     /// A line whose address field carries anything but hex digits, `.` and `:`
     /// is dropped, never echoed into the root-owned file.
+    #[cfg(target_os = "linux")]
     #[test]
     fn test_host_address_lines_drops_malformed_addresses() {
         let got = run_coordinator_fns(
@@ -2164,6 +2186,7 @@ mod tests {
     /// freshly patched box may already carry /run/reboot-required at first
     /// boot); a bare run is the full coordinator. Stubs stand in for the two
     /// effectful functions so the dispatch itself is what is pinned.
+    #[cfg(target_os = "linux")]
     #[test]
     fn test_publish_addresses_entry_point_skips_the_reboot_decision() {
         let stubs = "fauna_publish_host_addresses() { echo publish; }\n\
@@ -2416,15 +2439,20 @@ mod tests {
                 .filter(|l| !l.trim_start().starts_with('#'))
                 .collect();
             assert_eq!(stripped.lines().skip(1).collect::<Vec<_>>(), kept);
-            let out = std::process::Command::new("sh")
-                .args(["-n", "-c", &stripped])
-                .output()
-                .expect("sh");
-            assert!(
-                out.status.success(),
-                "{}",
-                String::from_utf8_lossy(&out.stderr)
-            );
+            // The parse check needs a POSIX `sh`, which a windows machine may
+            // not have on PATH (see `run_coordinator_fns`); the scripts only
+            // ever run on a Linux box.
+            if cfg!(unix) {
+                let out = std::process::Command::new("sh")
+                    .args(["-n", "-c", &stripped])
+                    .output()
+                    .expect("sh");
+                assert!(
+                    out.status.success(),
+                    "{}",
+                    String::from_utf8_lossy(&out.stderr)
+                );
+            }
         }
     }
 
@@ -2558,6 +2586,10 @@ mod tests {
 
     /// Run `body` against the sourced door script (functions only —
     /// `FAUNA_SSH_DOOR_TEST=1` skips the pass) and return (status, stdout).
+    /// unix-only, as are the door-pass tests below: it shells `sh`, which a
+    /// windows machine may not have on PATH, and the script only ever runs on
+    /// a Linux box.
+    #[cfg(unix)]
     fn run_door_fns(body: &str) -> (bool, String) {
         let script = format!("{SSH_DOOR_SCRIPT}\n{body}\n");
         let out = std::process::Command::new("sh")
@@ -2575,6 +2607,7 @@ mod tests {
     /// The validator admits exactly one IPv4 or IPv6 literal and refuses
     /// everything ufw could read as more — a range, `any`, the unspecified
     /// address, a shell fragment.
+    #[cfg(unix)]
     #[test]
     fn test_door_address_validation() {
         for good in [

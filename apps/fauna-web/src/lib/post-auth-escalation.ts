@@ -230,6 +230,23 @@ export function escalateSignInRefused(): boolean {
 }
 
 /**
+ * Route a device that can recover the nest it cannot reach to the launch
+ * surface. Not a terminal verdict, so never through
+ * `escalateIfTerminalAuthVerdict`: the caller has already found that this tab
+ * never reached its nest and that this device's own store custodies a box
+ * (`box-recovery.md` § The plane-era recovery floor, (b)). The `LaunchMachine`
+ * meets the same failure on its own challenge and lands `launch_retry`, the one
+ * surface that offers `launch-recover-button`. Credentials stay put, and Retry
+ * still reaches a nest that was only down.
+ */
+export function escalateLostNest(): boolean {
+  return escalateToLaunchSurface(
+    '[identity] the stored nest stays unreachable and this device custodies a box — ' +
+      're-entering the launch flow, which offers recovery',
+  );
+}
+
+/**
  * Route the home nest's `fauna.nest.outdated` — met mid-session when the nest
  * restarted into its degraded needs-update mode, by the WS client's re-mint or
  * the background silent challenge — to the launch surface, where the

@@ -10,6 +10,7 @@
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
     mc:Ignorable="d"
     Loaded="Panel_Loaded"
+    Unloaded="Panel_Unloaded"
     xmlns:ids="using:FaunaApp.UiIds">
 
     <!-- User-facing mail-import wizard (docs/goal/behavior/mailbox-migration.md § UX
@@ -68,16 +69,31 @@
             <TextBlock x:Name="AppPasswordHelp"
                        Opacity="0.7" FontSize="12" TextWrapping="Wrap" />
 
-            <!-- Outlook only. Painted because ui.yaml requires the element exist, but
-                 never actuable — no app wires the Microsoft Graph dance yet
-                 (mailbox-migration.md's own "Not in scope" list). The IMAP fallback
-                 fields beside it are the real, working path for an Outlook account. -->
+            <!-- Outlook only: Sign in with Microsoft (mailbox-migration.md § Microsoft
+                 sign-in — the device-code grant). Dispatches the shared
+                 MicrosoftSignInActions; once Microsoft has answered with a code the code
+                 row below paints it beside Open in browser, and the grant connects by
+                 itself. Inert while the deployment has no registration or a sign-in is
+                 under way. -->
             <Button x:Name="OauthButton"
                     AutomationProperties.AutomationId="{x:Bind ids:Ids.MailImportSourceOauthButton}"
-                    IsEnabled="False"
-                    Content="{loc:Localize Key=mail_import/source_oauth_button}" />
+                    Content="{loc:Localize Key=mail_import/source_oauth_button}"
+                    Click="Oauth_Click" />
+            <!-- mail-import-source-oauth-code: the sentence carries the address and the
+                 code; its `code` and `url` attributes ride each alone, packed into
+                 HelpText as the flaui bridge reads them (PackedAttr). -->
+            <StackPanel x:Name="OauthCodeRow" Visibility="Collapsed"
+                        Orientation="Horizontal" Spacing="8">
+                <TextBlock x:Name="OauthCode"
+                           AutomationProperties.AutomationId="{x:Bind ids:Ids.MailImportSourceOauthCode}"
+                           VerticalAlignment="Center" TextWrapping="Wrap" IsTextSelectionEnabled="True" />
+                <Button Click="OauthOpenBrowser_Click"
+                        Content="{loc:Localize Key=mail_import/microsoft_open_browser}" />
+            </StackPanel>
+            <TextBlock x:Name="OauthNote" Visibility="Collapsed"
+                       Opacity="0.7" FontSize="12" TextWrapping="Wrap" />
 
-            <!-- Generic IMAP, and Outlook's fallback. -->
+            <!-- Generic IMAP. -->
             <TextBox x:Name="HostInput"
                      AutomationProperties.AutomationId="{x:Bind ids:Ids.MailImportSourceHost}"
                      PlaceholderText="{loc:Localize Key=mail_import/source_host_placeholder}" />
@@ -95,10 +111,20 @@
                          AutomationProperties.AutomationId="{x:Bind ids:Ids.MailImportSourcePassword}"
                          PlaceholderText="{loc:Localize Key=mail_import/source_password_placeholder}" />
 
-            <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.MailImportConnectButton}"
+            <Button x:Name="ConnectButton"
+                    AutomationProperties.AutomationId="{x:Bind ids:Ids.MailImportConnectButton}"
                     Style="{StaticResource AccentButtonStyle}"
                     Content="{loc:Localize Key=mail_import/connect_button}"
                     Click="Connect_Click" />
+
+            <!-- The remembered source (mailbox-migration.md § Credential handling → The
+                 remembered source): offered for every provider while the account holds a
+                 saved source; ForgetSource deletes the record and resets these fields. -->
+            <Button x:Name="ForgetSourceButton"
+                    Visibility="Collapsed"
+                    AutomationProperties.AutomationId="{x:Bind ids:Ids.MailImportSourceForgetButton}"
+                    Content="{loc:Localize Key=mail_import/source_forget_button}"
+                    Click="ForgetSource_Click" />
         </StackPanel>
 
         <!-- ════ Step 2 — Scope ════ -->
@@ -166,6 +192,18 @@
                        Opacity="0.7" TextWrapping="Wrap"
                        Text="{loc:Localize Key=mail_import/scope_mailbox_mapping_label}" />
 
+            <!-- mail-import-scope-import-duplicates-toggle (§ Opt-out per session): off by
+                 default, the label carries the double-storage warning itself. A CheckBox
+                 like the mailbox rows: Click fires only on user action, and HelpText is the
+                 `state` attribute read from the snapshot (RenderState), never a click echo. -->
+            <CheckBox x:Name="ImportDuplicatesToggle"
+                      AutomationProperties.AutomationId="{x:Bind ids:Ids.MailImportScopeImportDuplicatesToggle}"
+                      AutomationProperties.HelpText="off"
+                      Click="ImportDuplicates_Click">
+                <TextBlock TextWrapping="Wrap"
+                           Text="{loc:Localize Key=mail_import/scope_import_duplicates_label}" />
+            </CheckBox>
+
             <StackPanel Orientation="Horizontal" Spacing="8">
                 <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.WizardBackButton}"
                         Content="{loc:Localize Key=mail_import/back}" Click="Back_Click" />
@@ -201,6 +239,42 @@
             <ProgressBar x:Name="ImportProgressBar"
                          AutomationProperties.AutomationId="{x:Bind ids:Ids.MailImportProgressBar}"
                          Minimum="0" Maximum="1" />
+
+            <!-- The restart-resume credential prompt (mailbox-migration.md § Wizard steps
+                 step 5, § Resume protocol step 2): painted while an adopted session needs
+                 the source credential again. The Source step's own ids, as every app
+                 paints them — SourceGroup is Collapsed on Progress, so each id is unique
+                 in the UIA tree. Gmail/iCloud: the app password; Generic: port, connection
+                 security and password; Outlook: the sentence alone (Resume re-asks). -->
+            <StackPanel x:Name="ResumeCredentialGroup" Spacing="8" Visibility="Collapsed">
+                <TextBlock x:Name="ResumeNeedsText" TextWrapping="Wrap" />
+                <PasswordBox x:Name="ResumeAppPasswordInput"
+                             AutomationProperties.AutomationId="{x:Bind ids:Ids.MailImportSourceAppPassword}"
+                             Header="{loc:Localize Key=mail_import/source_app_password_label}" />
+                <TextBox x:Name="ResumePortInput"
+                         AutomationProperties.AutomationId="{x:Bind ids:Ids.MailImportSourcePort}"
+                         PlaceholderText="{loc:Localize Key=mail_import/source_port_placeholder}" />
+                <ComboBox x:Name="ResumeTlsModePicker"
+                          AutomationProperties.AutomationId="{x:Bind ids:Ids.MailImportSourceTlsMode}"
+                          AutomationProperties.Name="TLS mode"
+                          SelectionChanged="ResumeTlsModePicker_SelectionChanged" />
+                <PasswordBox x:Name="ResumePasswordInput"
+                             AutomationProperties.AutomationId="{x:Bind ids:Ids.MailImportSourcePassword}"
+                             PlaceholderText="{loc:Localize Key=mail_import/source_password_placeholder}" />
+            </StackPanel>
+
+            <!-- The full-mailbox notice (§ Failure handling → Nest-side errors): shown while
+                 the session is paused with pauseReason MailboxFull; Resume and Cancel are the
+                 buttons below, Skip the rest is its own. -->
+            <StackPanel x:Name="QuotaGroup" Spacing="8" Visibility="Collapsed">
+                <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.MailImportQuotaNotice}"
+                           TextWrapping="Wrap"
+                           Text="{loc:Localize Key=mail_import/quota_notice}" />
+                <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.MailImportQuotaSkipRestButton}"
+                        Content="{loc:Localize Key=mail_import/quota_skip_rest_button}"
+                        Click="SkipRest_Click" />
+            </StackPanel>
+
             <StackPanel Orientation="Horizontal" Spacing="8">
                 <Button x:Name="PauseButton"
                         AutomationProperties.AutomationId="{x:Bind ids:Ids.MailImportPauseButton}"
@@ -215,17 +289,33 @@
                         Content="{loc:Localize Key=mail_import/cancel_button}"
                         Click="Cancel_Click" />
             </StackPanel>
+            <!-- A second row, so the longer labels never push a button off the edge of
+                 the page (an off-screen button is not actionable). -->
+            <StackPanel Orientation="Horizontal" Spacing="8">
+                <!-- Offered only while the snapshot lists a rebuilt source mailbox
+                     (UIDVALIDITY changed); the press drops those cursors and resumes. -->
+                <Button x:Name="RestartButton"
+                        Visibility="Collapsed"
+                        AutomationProperties.AutomationId="{x:Bind ids:Ids.MailImportRestartButton}"
+                        Content="{loc:Localize Key=mail_import/restart_button}"
+                        Click="Restart_Click" />
+                <!-- A failed import's one control (§ A failed import is a record the wizard
+                     shows until the user moves on): Dismiss returns to Source. -->
+                <Button x:Name="DismissButton"
+                        Visibility="Collapsed"
+                        AutomationProperties.AutomationId="{x:Bind ids:Ids.MailImportDismissButton}"
+                        Content="{loc:Localize Key=mail_import/dismiss_failed_button}"
+                        Click="Dismiss_Click" />
+            </StackPanel>
             <TextBlock Opacity="0.7" FontSize="12"
                        Text="{loc:Localize Key=mail_import/error_log_title}" />
             <TextBlock x:Name="ErrorLog"
                        AutomationProperties.AutomationId="{x:Bind ids:Ids.MailImportErrorLog}"
                        Opacity="0.7" FontSize="12" TextWrapping="Wrap" />
 
-            <!-- mail-import-mailbox-progress-list — per-mailbox rows, one per SELECTED
-                 source mailbox. The machine tracks only global counts (no mailboxProgress
-                 field the way export's snapshot has), so each row shows its planned
-                 message count rather than a live per-mailbox fraction — the tui lead
-                 app's own accurate-to-what-exists simplification. -->
+            <!-- mail-import-mailbox-progress-list — per-mailbox rows, one per mailbox
+                 the run takes. The view model paints them from the shared machine's
+                 snapshot mailboxProgress through ImportMailboxProgressText. -->
             <Border AutomationProperties.AutomationId="{x:Bind ids:Ids.MailImportMailboxProgressList}"
                     AutomationProperties.Name="Mailbox progress"
                     BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
@@ -269,6 +359,16 @@
                 <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.MailImportReviewSkippedButton}"
                         Content="{loc:Localize Key=mail_import/review_skipped_button}"
                         Click="ReviewSkipped_Click" />
+            </StackPanel>
+            <!-- Review skipped reveals the run's skip log here (§ Wizard steps step 6). The
+                 heading and the log collapse together; the log shares the Progress log's id
+                 (only one of the two groups is ever visible). -->
+            <StackPanel x:Name="DoneErrorLogGroup" Spacing="8" Visibility="Collapsed">
+                <TextBlock Opacity="0.7" FontSize="12"
+                           Text="{loc:Localize Key=mail_import/error_log_title}" />
+                <TextBlock x:Name="DoneErrorLog"
+                           AutomationProperties.AutomationId="{x:Bind ids:Ids.MailImportErrorLog}"
+                           Opacity="0.7" FontSize="12" TextWrapping="Wrap" />
             </StackPanel>
         </StackPanel>
     </StackPanel>

@@ -667,6 +667,37 @@ pub struct WasmConversationsManager {
 
 // Wasm-only like its one caller (`feed::manager`, the browser feed manager).
 #[cfg(target_arch = "wasm32")]
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+impl WasmConversationsManager {
+    /// Re-read the imported archives' threads into the read-only `Archive`
+    /// rail (`ConversationsManager::refresh_archive_threads`) — called once
+    /// `WsRpcClient::registerArchiveThreads` has registered the source and on
+    /// every visit to the conversations page, so an import finished since login
+    /// lists without a reload (`archive-import.md` § What each category
+    /// becomes). Resolves `undefined`; a failed read keeps what the last read
+    /// listed and rejects with the reason; no source is a no-op.
+    #[wasm_bindgen(js_name = refreshArchiveThreads, unchecked_return_type = "Promise<void>")]
+    pub fn refresh_archive_threads(&self) -> js_sys::Promise {
+        let m = Arc::clone(&self.manager);
+        future_to_promise(async move {
+            m.refresh_archive_threads()
+                .await
+                .map_err(|e| JsValue::from_str(&e))?;
+            Ok(JsValue::UNDEFINED)
+        })
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+impl WasmConversationsManager {
+    /// The shared manager — what the archive rail's registration
+    /// (`crate::archive_import::register_threads`) is wired on.
+    pub(crate) fn shared_manager(&self) -> &fauna_conversations::ConversationsManager {
+        &self.manager
+    }
+}
+
 impl WasmConversationsManager {
     /// The manager and its FaunaMls backend — what the account runtime's
     /// store-ready edge registers the account-plane seams on
@@ -1732,6 +1763,21 @@ impl WasmConversationsManager {
         let value = match self.fauna_mls.borrow().clone() {
             Some(backend) => fauna_conversations::state_json::mls_folded_commits_json(&backend),
             None => serde_json::Value::Object(serde_json::Map::new()),
+        };
+        crate::rpc::to_js(&value)
+    }
+
+    /// Every chat channel this page has bound a thread to, as a sorted array of
+    /// channel hex ids — the browser leg of the bound-channels restore witness
+    /// (`fauna_e2e_agent::MLS_BOUND_CHANNELS_KEY` owns the contract; the shape
+    /// is derived once in `fauna_conversations::state_json::mls_bound_channels_json`,
+    /// the same function tui and linux publish). `[]` before the FaunaMls rail
+    /// is wired, for [`Self::mls_folded_commits`]'s reason.
+    #[wasm_bindgen(js_name = mlsBoundChannels)]
+    pub fn mls_bound_channels(&self) -> Result<JsValue, JsValue> {
+        let value = match self.fauna_mls.borrow().clone() {
+            Some(backend) => fauna_conversations::state_json::mls_bound_channels_json(&backend),
+            None => serde_json::Value::Array(Vec::new()),
         };
         crate::rpc::to_js(&value)
     }

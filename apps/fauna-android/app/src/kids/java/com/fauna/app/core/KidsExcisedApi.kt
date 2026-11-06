@@ -39,8 +39,41 @@ abstract class KidsExcisedApi {
     /** Excised — no sweep (the registry's only feeder is compiled out). */
     fun startCriticalAlertSweep() = Unit
 
+    // The kids flavor carries no connected apps (`connected-apps` is excised),
+    // so a version's author line is the recorder alone: `null` here paints
+    // the plain wording, and there is no roster to read.
+    fun versionAuthor(authorDisplay: String, depositedBy: String?): uniffi.fauna_core.LocalizedText? = null
+
+    suspend fun readDepositorRoster(depositedBy: List<String>) = Unit
+
+    /** Excised — this flavor has no feed composer, so no `posts` draft rail to flush at a leave door. */
+    internal fun captureFeedLeaveFlush(): (suspend () -> Unit)? = null
+
     /** Excised — this flavor holds no feed / search / atproto singleton to tear down. */
     internal fun detachKidsExcised(): () -> Unit = {}
+
+    // Archive import (phase two's archive links) is compiled out of this
+    // flavor: no Contacts row paints an archive-link affordance, and nothing
+    // drives the links the full build's session registers.
+
+    /** Excised — the Contacts rows paint no archive-link affordance. */
+    val archiveLinkPainter: kotlinx.coroutines.flow.StateFlow<ArchiveLinkPainter> =
+        kotlinx.coroutines.flow.MutableStateFlow(ArchiveLinkPainter.NONE)
+
+    /** Excised — the kids FFI flavor builds no archive links. */
+    @Suppress("UNUSED_PARAMETER")
+    internal fun startArchiveLinks(client: FfiNestClient) = Unit
+
+    /** Excised — no links, so nothing to re-read. */
+    suspend fun refreshArchiveLinks() = Unit
+
+    /** Excised — no row offers the question in this flavor. */
+    @Suppress("UNUSED_PARAMETER")
+    suspend fun answerArchiveLink(contact: String, platform: String, yes: Boolean) = Unit
+
+    /** Excised — no row offers unlink in this flavor. */
+    @Suppress("UNUSED_PARAMETER")
+    suspend fun unlinkArchiveLink(contact: String, platform: String) = Unit
 
     /** Excised — the TLS auto-renew cadence rides the DNS machine (a bridge); a
      *  kids account is never the admin who would renew a certificate. */

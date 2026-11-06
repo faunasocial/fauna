@@ -48,6 +48,7 @@ Stamped 2026-10-01 at e5a7e5d758.
    - `tests/e2e-unified/tests/test_engagement_cues.py::test_saved_activity_data_that_cannot_be_opened_is_reported_not_started_over`
 14. [app] What a topic learns from your lingering moves matching posts up your feed, and the new order is still there after a restart — `docs/goal/behavior/engagement-cues.md` § Goal
    - `tests/e2e-unified/tests/test_engagement_cues.py::test_engagement_dwell_derives_watch_complete_reranks_and_rollup_round_trips`
+   - `tests/e2e-unified/tests/test_engagement_cues.py::test_engagement_dwell_derives_watch_complete_via_navigate_away_flush`
    - `tests/e2e-unified/tests/test_engagement_cues.py::test_engagement_dwell_derives_watch_complete_via_navigate_away_flush_apple`
 15. [app] A topic learns from your activity only after you turn its switch on; every topic starts with it off — `docs/goal/behavior/topic-factors.md` § Training signals
    - `tests/e2e-unified/tests/test_engagement_cues.py::test_engagement_toggle_and_clear_activity_data`
@@ -55,42 +56,45 @@ Stamped 2026-10-01 at e5a7e5d758.
    - `tests/e2e-unified/tests/test_engagement_cues.py::test_what_one_device_collected_informs_the_feeds_on_your_other_device`
 17. [app] Playing a post's video to the end in your feed teaches each topic you switched on, however briefly the post was on screen — `docs/goal/behavior/engagement-cues.md` § Cue vocabulary & derivation
    - `tests/e2e-unified/tests/test_engagement_cues.py::test_a_video_played_to_its_end_derives_watch_complete_through_the_media_arm`
+   - `tests/e2e-unified/tests/test_engagement_cues.py::test_a_video_played_near_the_bottom_edge_still_counts_as_watched`
 
 ## Status
 
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ⚠ partial | 0.1.5-dev+110d1248 standalone |
-| linux | ⚠ partial | 0.1.4-dev+5bf6e2c5.dirty standalone |
-| windows | ⚠ partial | 0.1.2-dev+98b03c39 standalone |
-| macos | ⚠ partial | 0.1.2-dev+ac32864b standalone |
-| ios | ⚠ partial | 0.1.2-dev+ac32864b standalone |
+| web | ✅ full | 0.1.5-dev+3b591c2e standalone |
+| linux | ✅ full | 0.1.5-dev+3b591c2e standalone |
+| windows | ✅ full | 0.1.5-dev+3b591c2e standalone |
+| macos | ⚠ partial | 0.1.5-dev+617b4b9c standalone |
+| ios | ⚠ partial | 0.1.5-dev+617b4b9c standalone |
 | android |  no run recorded | |
-| tui | ⚠ partial | 0.1.4-dev+a3bd9d85 standalone |
+| tui | ⚠ partial | 0.1.5-dev+3b591c2e standalone |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
-| 1 | app | `tests/e2e-unified/tests/test_engagement_cues.py::test_engagement_dwell_derives_watch_complete_reranks_and_rollup_round_trips` | linux (linux): passed, tui (linux): passed |
+| 1 | app | `tests/e2e-unified/tests/test_engagement_cues.py::test_engagement_dwell_derives_watch_complete_reranks_and_rollup_round_trips` | linux (linux): passed, tui (linux): passed, tui (macos): passed |
 | 1 | app | `tests/e2e-unified/tests/test_engagement_cues.py::test_engagement_dwell_derives_watch_complete_via_navigate_away_flush` | windows (windows): passed |
 | 1 | app | `tests/e2e-unified/tests/test_engagement_cues.py::test_engagement_dwell_derives_watch_complete_via_navigate_away_flush_apple` | web (linux): passed, macos (macos): passed, ios (macos): passed |
-| 2 | app | `tests/e2e-unified/tests/test_engagement_cues.py::test_engagement_toggle_and_clear_activity_data` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (windows): passed |
+| 2 | app | `tests/e2e-unified/tests/test_engagement_cues.py::test_engagement_toggle_and_clear_activity_data` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
 | 3 | app | `tests/e2e-unified/tests/test_engagement_cues.py::test_signal_sharing_optin_producer_and_transparency_pane` | web (linux): passed, linux (linux): passed |
-| 3 | app | `tests/e2e-unified/tests/test_engagement_cues.py::test_signal_sharing_toggle_and_pane_render` | web (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (windows): passed |
-| 3 | app | `tests/e2e-unified/tests/test_engagement_cues.py::test_signal_sharing_persisted_optin_honoured_by_producer_after_relaunch` | — |
-| 4 | nest | `tests/e2e-unified/tests/api/test_signal_sharing.py::test_signal_sharing_k_gate_transparency_flip_public_gate_and_opt_out` | nest (linux): passed |
-| 5 | app | `tests/e2e-unified/tests/test_engagement_cues.py::test_scrolling_past_a_post_teaches_less_like_this_and_lingering_later_takes_it_back` | web (linux): failed, linux (linux): passed, tui (linux): passed |
-| 6 | app | `tests/e2e-unified/tests/test_engagement_cues.py::test_flicking_fast_past_a_post_teaches_nothing` | web (linux): passed, linux (linux): passed, tui (linux): passed |
-| 7 | app | `tests/e2e-unified/tests/test_engagement_cues.py::test_scrolling_past_a_post_teaches_less_like_this_and_lingering_later_takes_it_back` | web (linux): failed, linux (linux): passed, tui (linux): passed |
-| 8 | app | `tests/e2e-unified/tests/test_engagement_cues.py::test_a_switched_off_topic_learns_nothing_and_switching_off_keeps_what_it_learned` | web (linux): passed, linux (linux): passed, tui (linux): passed |
-| 9 | app | `tests/e2e-unified/tests/test_engagement_cues.py::test_a_switched_off_topic_learns_nothing_and_switching_off_keeps_what_it_learned` | web (linux): passed, linux (linux): passed, tui (linux): passed |
-| 10 | nest | `tests/e2e-unified/tests/api/test_personalization_sealed_at_rest.py::test_the_engagement_rollup_rests_on_the_nest_only_sealed` | nest (linux): passed |
-| 11 | nest | `tests/e2e-unified/tests/api/test_federation_exchange_originator.py::test_a_shared_verdict_enough_people_agree_on_reaches_the_peer_nest_as_a_count` | nest (linux): passed |
-| 12 | nest | `tests/e2e-unified/tests/api/test_signal_sharing.py::test_opting_out_of_one_sharing_family_leaves_the_other_shared` | nest (linux): passed |
-| 13 | app | `tests/e2e-unified/tests/test_engagement_cues.py::test_saved_activity_data_that_cannot_be_opened_is_reported_not_started_over` | tui (linux): passed |
-| 14 | app | `tests/e2e-unified/tests/test_engagement_cues.py::test_engagement_dwell_derives_watch_complete_reranks_and_rollup_round_trips` | linux (linux): passed, tui (linux): passed |
+| 3 | app | `tests/e2e-unified/tests/test_engagement_cues.py::test_signal_sharing_toggle_and_pane_render` | web (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 3 | app | `tests/e2e-unified/tests/test_engagement_cues.py::test_signal_sharing_persisted_optin_honoured_by_producer_after_relaunch` | windows (windows): passed, macos (macos): passed, ios (macos): passed |
+| 4 | nest | `tests/e2e-unified/tests/api/test_signal_sharing.py::test_signal_sharing_k_gate_transparency_flip_public_gate_and_opt_out` | nest (linux): passed, nest (macos): passed |
+| 5 | app | `tests/e2e-unified/tests/test_engagement_cues.py::test_scrolling_past_a_post_teaches_less_like_this_and_lingering_later_takes_it_back` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 6 | app | `tests/e2e-unified/tests/test_engagement_cues.py::test_flicking_fast_past_a_post_teaches_nothing` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 7 | app | `tests/e2e-unified/tests/test_engagement_cues.py::test_scrolling_past_a_post_teaches_less_like_this_and_lingering_later_takes_it_back` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 8 | app | `tests/e2e-unified/tests/test_engagement_cues.py::test_a_switched_off_topic_learns_nothing_and_switching_off_keeps_what_it_learned` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 9 | app | `tests/e2e-unified/tests/test_engagement_cues.py::test_a_switched_off_topic_learns_nothing_and_switching_off_keeps_what_it_learned` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 10 | nest | `tests/e2e-unified/tests/api/test_personalization_sealed_at_rest.py::test_the_engagement_rollup_rests_on_the_nest_only_sealed` | nest (linux): passed, nest (macos): passed |
+| 11 | nest | `tests/e2e-unified/tests/api/test_federation_exchange_originator.py::test_a_shared_verdict_enough_people_agree_on_reaches_the_peer_nest_as_a_count` | nest (linux): passed, nest (macos): passed |
+| 12 | nest | `tests/e2e-unified/tests/api/test_signal_sharing.py::test_opting_out_of_one_sharing_family_leaves_the_other_shared` | nest (linux): passed, nest (macos): passed |
+| 13 | app | `tests/e2e-unified/tests/test_engagement_cues.py::test_saved_activity_data_that_cannot_be_opened_is_reported_not_started_over` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 14 | app | `tests/e2e-unified/tests/test_engagement_cues.py::test_engagement_dwell_derives_watch_complete_reranks_and_rollup_round_trips` | linux (linux): passed, tui (linux): passed, tui (macos): passed |
+| 14 | app | `tests/e2e-unified/tests/test_engagement_cues.py::test_engagement_dwell_derives_watch_complete_via_navigate_away_flush` | windows (windows): passed |
 | 14 | app | `tests/e2e-unified/tests/test_engagement_cues.py::test_engagement_dwell_derives_watch_complete_via_navigate_away_flush_apple` | web (linux): passed, macos (macos): passed, ios (macos): passed |
-| 15 | app | `tests/e2e-unified/tests/test_engagement_cues.py::test_engagement_toggle_and_clear_activity_data` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (windows): passed |
-| 16 | app | `tests/e2e-unified/tests/test_engagement_cues.py::test_what_one_device_collected_informs_the_feeds_on_your_other_device` | tui (linux): passed |
-| 17 | app | `tests/e2e-unified/tests/test_engagement_cues.py::test_a_video_played_to_its_end_derives_watch_complete_through_the_media_arm` | web (linux): passed, linux (linux): passed |
+| 15 | app | `tests/e2e-unified/tests/test_engagement_cues.py::test_engagement_toggle_and_clear_activity_data` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 16 | app | `tests/e2e-unified/tests/test_engagement_cues.py::test_what_one_device_collected_informs_the_feeds_on_your_other_device` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 17 | app | `tests/e2e-unified/tests/test_engagement_cues.py::test_a_video_played_to_its_end_derives_watch_complete_through_the_media_arm` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed |
+| 17 | app | `tests/e2e-unified/tests/test_engagement_cues.py::test_a_video_played_near_the_bottom_edge_still_counts_as_watched` | web (linux): passed, linux (linux): passed, macos (macos): failed, ios (macos): failed |
 <!-- features-render:end -->

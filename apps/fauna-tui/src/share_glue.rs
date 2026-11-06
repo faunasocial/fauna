@@ -1,4 +1,4 @@
-//! tui's **host** for the shared share-plane driver (`p2p.md` § Cross-user
+//! tui's **host** for the shared share-plane driver (`p2p-shared-set.md` § Cross-user
 //! shared-set transfer): the app-shaped seams only.
 //!
 //! The plane's decisions — the pump loop, the `FolderRef`-first spec join

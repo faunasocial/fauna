@@ -223,7 +223,7 @@ async fn user_class_encrypted_calendar_roundtrip_via_crate() {
                 after_event_id: None,
                 limit: 0,
             },
-            &DavRecipientKeys::derive(&MSEK),
+            &DavRecipientKeys::derive(fauna_client_caldav::DavKind::Calendar, &MSEK),
         )
         .await
         .expect("decoded read ok");
@@ -340,7 +340,7 @@ async fn add_attendee_re_put_carries_mailto_into_stored_roster() {
                 after_event_id: None,
                 limit: 0,
             },
-            &DavRecipientKeys::derive(&MSEK),
+            &DavRecipientKeys::derive(fauna_client_caldav::DavKind::Calendar, &MSEK),
         )
         .await
         .expect("decoded read ok");
@@ -376,7 +376,7 @@ async fn query_events_decoded_calendar_not_found_end_to_end() {
                 after_event_id: None,
                 limit: 0,
             },
-            &DavRecipientKeys::derive(&MSEK),
+            &DavRecipientKeys::derive(fauna_client_caldav::DavKind::Calendar, &MSEK),
         )
         .await
         .expect("transport ok");

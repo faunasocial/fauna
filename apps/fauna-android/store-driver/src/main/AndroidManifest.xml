@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Self-instrumenting: the instrumentation targets this APK's own package, so
+  `am instrument` needs no target signed with this key. The Fauna app and the
+  Play Store are reached only through UiAutomation and the shell commands it
+  runs (`StoreDriverInstrumentation`), never by attaching to them.
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <uses-permission android:name="android.permission.INTERNET" />
+
+    <application android:label="Fauna store driver" />
+
+    <instrumentation
+        android:name="com.fauna.storedriver.StoreDriverInstrumentation"
+        android:targetPackage="social.fauna.storedriver"
+        android:label="Fauna store driver" />
+</manifest>

@@ -27,17 +27,21 @@ posture → The custody grant + ceremony / Custody policy.
 
 from __future__ import annotations
 
+import contextlib
 import time
 
 import pytest
+import requests
 
 from helpers import enrollment
-from helpers.app_surface import skip_unbuilt
+from helpers.app_surface import require_surface
 from helpers.fleet import SiblingSeats, poked_pass
 from helpers.budgets import MLS_HANDSHAKE_S, RECEIVE_CYCLE_S
 from helpers.waiting import (
+    CUSTODY_CEREMONY_INGEST_KEY,
     account_pump_cycles,
     account_pump_role,
+    await_account_runtime_assembled,
     await_device_removal_ready,
     await_receive_cycle_after,
     conv_receive_cycles,
@@ -96,7 +100,6 @@ def _custody_log_tail(app) -> str:
     narrative = [ln for ln in lines if "pass complete" not in ln]
     kept = narrative[-60:] + reports[-1:]
     return "\n".join(kept) or "(no pump/custody lines in the app log)"
-
 
 
 @pytest.fixture
@@ -158,21 +161,16 @@ def _open_carrier(alice, bob_app, bob, port) -> None:
 
 def _require_owner_resend(app) -> None:
     """Skip as unbuilt (convention 7) where the app has neither the owner's
-    send-again poke nor the host's ceremony-ingest tally — both seats run the
-    same app, so one read decides. Checked before any setup: the devices
-    outcome 15 journeys below have nothing to witness without them."""
-    if custody_ceremony_ingest(app.driver) is None:
-        skip_unbuilt(
-            app.driver,
-            surface="custody_owner_resend_now / custody_ceremony_ingest",
-            detail=(
-                "the owner's send-again poke (shared body: "
-                "fauna_client_custody::spawn_owner_resend) and the host's "
-                "ceremony-ingest tally (fauna_client_conversations::"
-                "custody_ceremony_ingest_counts) are not wired on this app"
-            ),
-            tracked="",
-        )
+    send-again poke nor the host's ceremony-ingest tally — the registry's
+    `custody-ceremony-resend`; both seats run the same app. Checked before any
+    setup: the devices outcome 15 journeys below have nothing to witness
+    without them. On an app that lists it, the tally not being published is a
+    red, never a skip."""
+    require_surface(app.driver, "custody-ceremony-resend")
+    assert custody_ceremony_ingest(app.driver) is not None, (
+        "the app lists `custody-ceremony-resend` yet publishes no "
+        f"`{CUSTODY_CEREMONY_INGEST_KEY}` state key"
+    )
 
 
 def _owner_resends(owner, host, *, counted: str, what: str) -> tuple[dict, dict]:
@@ -224,6 +222,20 @@ def _poll_ui(app, predicate, *, what: str, receive: bool = False, budget_s: floa
 # engine through a LAUNCH-TIME gate on windows/macOS/iOS/android, which only this
 # marker sets. Without it windows errors at fixture setup (a 60 s readiness
 # timeout) instead of reaching `require_supported()`'s declared skip.
+#
+# This journey and the three below it are marked for the six apps that can run
+# the ceremony: web lacks the mint and the accept (`require_supported`), and the
+# second seat they drive is `second_real_faunamls_app`, which skips on web. They
+# are never gated on web at run time, which would write no record and hold web's
+# cell short for ever (feature-catalog.md § Cell semantics, the marked-witness
+# rule). What web does render, piece 2, is witnessed by
+# `test_a_custody_minted_on_another_device_renders_and_revokes_here`.
+@pytest.mark.linux
+@pytest.mark.windows
+@pytest.mark.macos
+@pytest.mark.ios
+@pytest.mark.android
+@pytest.mark.tui
 @pytest.mark.real_conversations
 @pytest.mark.feature("backup-destinations-and-restore")
 @pytest.mark.feature("devices")
@@ -503,6 +515,12 @@ def test_custody_ceremony_two_accounts(
     )
 
 
+@pytest.mark.linux
+@pytest.mark.windows
+@pytest.mark.macos
+@pytest.mark.ios
+@pytest.mark.android
+@pytest.mark.tui
 @pytest.mark.real_conversations
 @pytest.mark.feature("devices")
 def test_a_declined_custody_offer_goes_away(
@@ -532,7 +550,10 @@ def test_a_declined_custody_offer_goes_away(
     # (`fauna_core::format::short_id`: 12 hex + `…`) — the joiner's side of
     # the carrier, where the opener's side shows the full hex. The select
     # refuses an unoffered value loudly, listing what it painted.
-    bob_app.custody.mint_offer(test_user["actor_id_hex"][:12] + "…")
+    bob_app.custody.mint_offer(
+        test_user["actor_id_hex"][:12] + "…",
+        f"e2e-{test_user['actor_id_hex'][:12]}@fauna.test",  # apple paints the peer's handle
+    )
 
     _poll_ui(
         alice,
@@ -565,6 +586,12 @@ def test_a_declined_custody_offer_goes_away(
     )
 
 
+@pytest.mark.linux
+@pytest.mark.windows
+@pytest.mark.macos
+@pytest.mark.ios
+@pytest.mark.android
+@pytest.mark.tui
 @pytest.mark.real_conversations
 @pytest.mark.feature("devices")
 def test_a_removed_custody_stays_gone_when_its_owner_sends_again(
@@ -690,6 +717,12 @@ def test_a_removed_custody_stays_gone_when_its_owner_sends_again(
     )
 
 
+@pytest.mark.linux
+@pytest.mark.windows
+@pytest.mark.macos
+@pytest.mark.ios
+@pytest.mark.android
+@pytest.mark.tui
 @pytest.mark.real_conversations
 @pytest.mark.feature("devices")
 def test_a_declined_custody_offer_stays_gone_when_its_owner_sends_again(
@@ -712,7 +745,10 @@ def test_a_declined_custody_offer_stays_gone_when_its_owner_sends_again(
 
     _open_carrier(alice, bob_app, bob, nest_instance["port"])
     bob_app.backups.navigate_devices()
-    bob_app.custody.mint_offer(test_user["actor_id_hex"][:12] + "…")
+    bob_app.custody.mint_offer(
+        test_user["actor_id_hex"][:12] + "…",
+        f"e2e-{test_user['actor_id_hex'][:12]}@fauna.test",  # apple paints the peer's handle
+    )
     _poll_ui(
         alice,
         lambda: alice.custody.offer_count() >= 1,
@@ -784,6 +820,7 @@ def _poll_observer(observer, owner_tui, predicate, *, what: str, budget_s: float
     )
 
 
+@pytest.mark.feature("backup-destinations-and-restore")
 @pytest.mark.feature("devices")
 def test_a_custody_minted_on_another_device_renders_and_revokes_here(
     app, request, nest_instance, test_user, sibling_seats
@@ -955,7 +992,6 @@ def test_custody_ceremony_nest_anchored(
     bob_app, bob = domainless_second_real_faunamls_app
     nest = domainless_nest
     alice.custody.require_supported()
-    alice.nest_trust.require_custody_rows_supported()
     port = nest["port"]
 
     # ── The carrier conversation.
@@ -1173,7 +1209,10 @@ def test_custody_ceremony_nest_anchored(
             if alice.driver.count("error-message") > 0
             else "",
         )
-        return last_seen["answered"] and last_seen["rows"] >= 1
+        return (
+            last_seen["answered"]
+            and alice.admin.hosting_row_index(bob["actor_id_hex"]) is not None
+        )
 
     deadline = time.time() + _ADMIN_LEG_S
     listed = False
@@ -1189,35 +1228,37 @@ def test_custody_ceremony_nest_anchored(
     )
 
     # The row is attributed to its DEPOSITING host and carries the address the
-    # pump dials — the two facts an admin needs to hold someone responsible.
-    assert alice.admin.hosting_row_host(0).startswith(bob["actor_id_hex"][:8]), (
-        f"the row must name bob as the host, got {alice.admin.hosting_row_host(0)!r}"
-    )
-    assert alice.admin.hosting_row_url(0).startswith("http"), (
+    # pump dials — the two facts an admin needs to hold someone responsible. The
+    # registry is nest-wide and `domainless_nest` outlives this test, so bob's
+    # row is found by its host, never by position.
+    row = alice.admin.hosting_row_index(bob["actor_id_hex"])
+    assert alice.admin.hosting_row_url(row).startswith("http"), (
         "the row must render the owner-nest URL the pump dials, verbatim"
     )
     # The pump completed a pull above, so the metering and the receipt are real
     # rather than the never-ran placeholders.
-    assert alice.admin.hosting_row_receipt(0) == S.admin.custody_hosting.receipt_fresh, (
+    assert alice.admin.hosting_row_receipt(row) == S.admin.custody_hosting.receipt_fresh, (
         "a row the pump just attested must read fresh, got "
-        f"{alice.admin.hosting_row_receipt(0)!r}"
+        f"{alice.admin.hosting_row_receipt(row)!r}"
     )
 
     # Cancel touches nothing — the confirm is a real gate, not decoration.
-    alice.driver.click("admin-custody-hosting-remove-button", index=0)
+    alice.driver.click("admin-custody-hosting-remove-button", index=row)
     alice.driver.wait_for("admin-custody-hosting-remove-confirm-button", timeout=10.0)
     alice.admin.hosting_cancel_remove()
     assert not alice.admin.hosting_remove_armed(), "cancel must disarm the confirm"
-    assert alice.admin.hosting_row_count() >= 1, "cancel must remove nothing"
+    assert alice.admin.hosting_row_index(bob["actor_id_hex"]) is not None, (
+        "cancel must remove nothing"
+    )
 
     # …and the remove really drops it. This is the affordance that replaces
     # `sqlite3` on `nest.db` plus `rm -rf`.
-    alice.admin.hosting_remove(0)
+    alice.admin.hosting_remove(alice.admin.hosting_row_index(bob["actor_id_hex"]))
 
     def _row_gone() -> bool:
         alice.admin.navigate_custody_hosting()
         return alice.admin.hosting_registry_answered() and (
-            alice.admin.hosting_row_count() == 0
+            alice.admin.hosting_row_index(bob["actor_id_hex"]) is None
         )
 
     deadline = time.time() + _ADMIN_LEG_S
@@ -1228,3 +1269,220 @@ def test_custody_ceremony_nest_anchored(
             break
         time.sleep(0.5)
     assert gone, "the admin remove never dropped the row from the registry"
+
+
+@pytest.fixture
+def domainless_sibling_seats(request, domainless_nest):
+    """Extra tui seats on ``domainless_nest`` (`helpers.fleet.SiblingSeats`), the
+    ceremony's two parties when the app under test only observes."""
+    seats = SiblingSeats(request, domainless_nest)
+    try:
+        yield seats
+    finally:
+        seats.teardown()
+
+
+@pytest.mark.web
+@pytest.mark.feature("nests-and-trust")
+def test_a_custodian_nests_receipt_reads_never_fresh_then_stale_on_web(
+    app,
+    request,
+    domainless_nest,
+    domainless_spa_url,
+    domainless_user,
+    domainless_sibling_seats,
+    custody_pump_held,
+):
+    """The custodian-NEST row's three-state honesty on web (``nests.md`` § Trust
+    facet — custody rows): no confirmation yet, last confirmed, then stale —
+    weakened protection the owner sees, never a row that vanishes.
+
+    Web cannot run the ceremony (``CustodyActions.require_supported``), so it
+    runs tui ↔ tui, bob accepting on his nest, and the web seat is the owner's
+    other device, which only observes. ``test_custody_ceremony_nest_anchored``
+    explains why this rig is ``domainless_nest``.
+
+    **The owner's tui seat stops as soon as the nest has deposited the receipt.**
+    The native ingest would otherwise carry it to web through the account's own
+    sync, and this would pass without web's facet load ever fetching a staged
+    receipt (``account-data-plane.md`` § Replica posture, stage (c)'s owner-side
+    leg). Stopped, the fresh state can only be web's own fetch, the shape of an
+    owner whose one device is a browser.
+
+    The web seat is a browser of its own, not the session's ``app``: a web
+    runtime reads the trust seed at sign-in and no relaunch re-seeds it
+    (``_relaunch_trusting_nest``), so the seed naming this nest's proxy origin
+    has to be there from launch. ``app`` still selects the column the outcome is
+    recorded under; the tui seats are helpers (``attributed_apps``).
+    """
+    from actions import ActionLayer
+    from common import auth
+    from conftest import (
+        _login_app_as,
+        _make_user,
+        _merge_trust_seed,
+        _nest_id_hex,
+        _seeded_environment,
+    )
+    from drivers import create_driver
+
+    nest = domainless_nest
+    port = nest["port"]
+    owner = domainless_user
+    # The owner enrols two seats, and a user on a dedicated nest gets no
+    # `test_user` lift.
+    auth.set_tier_caps(
+        port,
+        admin_signing_key=nest["admin"]["signing_key"],
+        max_devices=auth.UNBINDING_MAX_DEVICES,
+        base_url=nest["url"],
+    )
+
+    # The browser reaches the nest through the proxy, so the trust seed names
+    # that origin too: the seed is keyed by the nest url the runtime dials.
+    environment = _seeded_environment(request, nest)
+    key = "FAUNA_E2E_TRUST_NEST_IDENTITY"
+    if key in environment:
+        environment[key] = _merge_trust_seed(
+            environment[key], domainless_spa_url, _nest_id_hex(port)
+        )
+    driver = create_driver("web")
+    driver.launch({"url": domainless_spa_url + "/app/", "environment": environment})
+    observer = ActionLayer(driver)
+    try:
+        observer.nest_trust.require_trust_clock_supported()
+        _login_app_as(
+            observer, request, nest, owner, spa_url=domainless_spa_url, verify_live_actor=True
+        )
+        await_account_runtime_assembled(driver)
+
+        owner_tui = domainless_sibling_seats.launch(user=owner)
+        bob = _make_user(nest)
+        # bob accepts the owner, or the nest refuses the carrier's Welcome
+        # (direct-messages.md § Reach policy — the `allow_knock` default).
+        conv_api.accept_contact(port, bob, owner["actor_id_hex"])
+        bob_app = domainless_sibling_seats.launch(user=bob)
+        owner_tui.conversations.enable_real_faunamls()
+        bob_app.conversations.enable_real_faunamls()
+
+        # ── The ceremony, tui ↔ tui, bob choosing his nest.
+        _open_carrier(owner_tui, bob_app, bob, port)
+        owner_tui.backups.navigate_devices()
+        owner_tui.custody.mint_offer(bob["actor_id_hex"])
+        _poll_ui(
+            bob_app,
+            lambda: bob_app.custody.offer_count() >= 1
+            and bob_app.custody.offer_has_nest_choice(0),
+            what="the consent card WITH the nest choice on bob's Devices page",
+            receive=True,
+        )
+        bob_app.custody.accept_offer_on_nest(0)
+
+        # ── State 1: the row reached the observing seat through the account's
+        # own sync, and with the periodic pump held nothing has confirmed yet.
+        def row_listed() -> bool:
+            _receive_once(owner_tui)
+            _receive_once(bob_app)
+            poked_pass(owner_tui.driver, what="the owner tui seat's plane publish", budget_s=_PUMP_PASS_S)
+            poked_pass(driver, what="the web seat's plane merge", budget_s=_PUMP_PASS_S)
+            observer.linked_nests.navigate()
+            return observer.nest_trust.custody_count() >= 1
+
+        wait_until(
+            row_listed,
+            240.0,
+            interval=0.5,
+            diagnose=lambda: (
+                "the custodian nest never reached the web seat's Nests page; "
+                f"error={observer.error_text()!r}, pump role {account_pump_role(driver)}"
+                f"\n--- owner tui seat's custody log ---\n{_custody_log_tail(owner_tui)}\n"
+                + "\n".join(driver.console_log()[-40:])
+            ),
+        )
+        assert observer.nest_trust.custody_receipt_status_text(0) == S.devices.custody_receipt_none, (
+            "before any pump pass the custodian has confirmed nothing — the row must "
+            f"read {S.devices.custody_receipt_none!r}, got "
+            f"{observer.nest_trust.custody_receipt_status_text(0)!r}"
+        )
+
+        # ── The ceremony finishes over the channel and the NEST takes over:
+        # every pass is an explicit poke, and the check comes right after it,
+        # so no receive cycle runs on the tui seat once a receipt is staged.
+        hook = f"{nest['url']}/api/v1/test/custody_hosting/run-now"
+        report: dict = {}
+
+        def receipt_deposited() -> bool:
+            _receive_once(owner_tui)
+            _receive_once(bob_app)
+            resp = requests.post(hook, timeout=30)
+            assert resp.status_code == 200, (
+                f"custody_hosting run-now returned {resp.status_code}: {resp.text}"
+            )
+            report.update(resp.json())
+            return report.get("receipts_deposited", 0) >= 1
+
+        wait_until(
+            receipt_deposited,
+            240.0,
+            interval=0.5,
+            diagnose=lambda: (
+                f"the nest pump never deposited a receipt; last pass report: {report}"
+                f"\n--- bob's custody log ---\n{_custody_log_tail(bob_app)}"
+                f"\n--- owner tui seat's custody log ---\n{_custody_log_tail(owner_tui)}"
+            ),
+        )
+        owner_tui.driver.teardown()
+
+        # ── State 2: fresh, off the web seat's own facet refresh.
+        def row_fresh() -> bool:
+            observer.linked_nests.navigate()
+            return (
+                observer.nest_trust.custody_count() >= 1
+                and observer.nest_trust.custody_receipt_status_text(0).startswith("Last confirmed")
+            )
+
+        wait_until(
+            row_fresh,
+            _UI_LEG_S,
+            interval=0.5,
+            diagnose=lambda: (
+                "the web seat never read the staged receipt fresh: status "
+                f"{observer.nest_trust.custody_receipt_status_text(0)!r}, "
+                f"error={observer.error_text()!r}\n"
+                + "\n".join(ln for ln in driver.console_log() if "custody" in ln)
+            ),
+        )
+        assert (driver.get_text("nest-trust-custody-held-bytes", index=0) or "").strip(), (
+            "a confirmed custodian must say how much it holds"
+        )
+
+        # ── State 3: the staleness window is a 48-hour Rust constant, so the
+        # render clock moves past it (convention 14) and no further pass runs.
+        observer.nest_trust.advance_trust_clock(3 * 24 * 60 * 60)
+        try:
+            stale_prefix = S.devices.custody_receipt_stale(when="\0").split("\0")[0]
+
+            def row_stale() -> bool:
+                observer.linked_nests.navigate()
+                return (
+                    observer.nest_trust.custody_count() >= 1
+                    and observer.nest_trust.custody_receipt_status_text(0).startswith(stale_prefix)
+                )
+
+            wait_until(
+                row_stale,
+                _UI_LEG_S,
+                interval=0.5,
+                diagnose=lambda: (
+                    "past the staleness window the custodian row must read stale, not "
+                    f"vanish; {observer.nest_trust.custody_count()} row(s), status "
+                    f"{observer.nest_trust.custody_receipt_status_text(0)!r}"
+                ),
+            )
+            held = driver.get_text("nest-trust-custody-held-bytes", index=0) or ""
+            assert held.strip(), "a stale custodian must still say how much it holds"
+        finally:
+            observer.nest_trust.advance_trust_clock(0)
+    finally:
+        with contextlib.suppress(Exception):
+            driver.teardown()

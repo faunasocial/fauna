@@ -50,9 +50,8 @@ pub const REDEPLOY_RECONNECT_DIALS: u32 = 64;
 /// device-handshake mint and authenticated dial. Rounded up, and kept at the
 /// 2026-09-28 measurement: the device principal's one to five mints refused
 /// `not_registered` it also counted are gone (its first connect now waits for
-/// the grant), and so is the post-auth silent challenge tui and linux ran
-/// beside the session's own mint (they read the mint's identity now; apple's
-/// Swift leg is still to follow, and fits inside the rounding); a
+/// the grant), and so is the post-auth silent challenge tui, linux and apple
+/// ran beside the session's own mint (they read the mint's identity now); a
 /// ceiling that outlives what it covered only widens the margin.
 pub const DIALS_PER_SESSION_START: u32 = 12;
 

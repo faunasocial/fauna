@@ -158,6 +158,17 @@ imap-client-native = [
     # over the `reqwest` client the native apps already carry.
     "dep:reqwest",
 ]
+# The WEB half of the `imap-client` transport seam (`imap_client::tunnel`):
+# a sans-io `rustls::ClientConnection` over the nest's blind WebSocket byte
+# tunnel (mailbox-migration.md § Where the IMAP client runs → *The web
+# tunnel*), plus the Microsoft sign-in's `OAuthHttp` over the same kind of
+# session. Target-agnostic — the platform shell supplies the WebSocket through
+# the module's `TunnelDialer`/`TunnelPipe` seams — and WASM-safe: `rustls` with
+# the workspace's `ring` provider and the bundled roots through
+# `fauna-tls-bootstrap` check clean for wasm32 (verified 2026-10-30), both
+# workspace entries already in this crate's graph, so no new dependency.
+# `fauna-wasm` enables it through `fauna-client-mail-settings`' wasm table.
+imap-client-tunnel = ["imap-client", "dep:rustls", "dep:fauna-tls-bootstrap"]
 # Real-TLS server test fixtures (`imap_client::test_fixtures`): mints a
 # self-signed cert and builds the `rustls` `TlsAcceptor` that terminates it,
 # for standing up a fake IMAP-over-TLS source server in an integration test.

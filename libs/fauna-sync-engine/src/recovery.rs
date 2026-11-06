@@ -142,9 +142,15 @@ pub(crate) async fn connect_enrolled_destination(
 ) -> Result<Arc<NestClient>, String> {
     let url = destination.destination_nest_url.clone();
     let dest = NestClient::new(url.clone(), ActorKeypair::from_secret(owner_secret));
-    dest.connect()
-        .await
-        .map_err(|e| format!("connect to backup destination {url}: {e}"))?;
+    // The mint first: an unreachable destination is this connect's failure.
+    // `connect()` alone is `Ok` over it, its supervisor retrying, and a pinned
+    // origin's bound identity would then read without a round trip.
+    async {
+        dest.authenticate().await?;
+        dest.connect().await
+    }
+    .await
+    .map_err(|e| format!("connect to backup destination {url}: {e}"))?;
     let bound = fauna_client::trust::connection_bound_identity(&*dest, &url)
         .await
         .map_err(|e| format!("backup destination {url} identity: {e}"))?;
@@ -228,4 +234,26 @@ pub async fn recover_from_own_store(
         &sets,
     )
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// An unreachable destination is the connect's failure — not a session that
+    /// never came up, read one step later as an identity failure.
+    #[tokio::test]
+    async fn an_unreachable_destination_fails_at_the_connect() {
+        let destination = BackupDestination {
+            // Nothing listens on port 1 of the loopback.
+            destination_nest_url: "http://127.0.0.1:1".to_string(),
+            destination_actor_pubkey: [0x33; 32],
+            ..Default::default()
+        };
+        let err = match connect_enrolled_destination(&destination, [0x24; 32], "recover").await {
+            Ok(_) => panic!("an unreachable destination connected"),
+            Err(e) => e,
+        };
+        assert!(err.starts_with("connect to backup destination"), "{err}");
+    }
 }

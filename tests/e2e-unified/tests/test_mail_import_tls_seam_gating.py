@@ -59,7 +59,7 @@ _PRESETS = _REPO / "libs" / "fauna-client-mail-settings" / "src" / "import.rs"
 # The two production sites that build a source-IMAP trust store. Both must go
 # through `NativeImapConnector::new`, which is where the seed lives.
 _CONSUMERS = (
-    _REPO / "libs" / "fauna-client-mail-settings" / "src" / "rpc_glue.rs",
+    _REPO / "libs" / "fauna-client-mail-settings" / "src" / "import_source.rs",
     _REPO / "libs" / "fauna-ffi" / "src" / "mail_import.rs",
 )
 

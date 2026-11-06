@@ -8,7 +8,9 @@ import Observation
 // *Inline playback*). `FeedManager::playback_source` says WHAT plays; everything
 // here is the player's own transient state, which the ruling keeps out of the
 // model: the phase the element publishes, the turn of a `PlaybackSource` into
-// something `AVPlayer` opens, and the `AVPlayer` itself.
+// something `AVPlayer` opens, and the `AVPlayer` itself. A streamed source never
+// reaches `AVPlayer` as a nest URL: it reads through `NestAssetResourceLoader`
+// (`transport-trust.md` § Transport trust → *The native-player leg*).
 
 /// The `state` the `video-thumbnail` element publishes — the four strings
 /// `tests/e2e-unified/drivers/base.py::get_attr` documents for every app.
@@ -28,7 +30,7 @@ public enum VideoPlaybackPhase: String, Equatable, Sendable {
 public struct VideoPlaybackMachine: Equatable, Sendable {
     public private(set) var phase: VideoPlaybackPhase = .idle
     /// What the player was handed, once the source resolved.
-    public private(set) var media: URL?
+    public private(set) var media: VideoPlaybackMedia?
 
     public init() {}
 
@@ -43,15 +45,15 @@ public struct VideoPlaybackMachine: Equatable, Sendable {
         return true
     }
 
-    /// The source resolved: `nil` is nothing playable. A URL is not playback yet —
-    /// the phase stays `loading` until the player says otherwise.
-    public mutating func resolved(_ url: URL?) {
+    /// The source resolved: `nil` is nothing playable. A source is not playback
+    /// yet — the phase stays `loading` until the player says otherwise.
+    public mutating func resolved(_ resolved: VideoPlaybackMedia?) {
         guard phase == .loading, media == nil else { return }
-        guard let url else {
+        guard let resolved else {
             phase = .error
             return
         }
-        media = url
+        media = resolved
     }
 
     /// The player reported `playing`.
@@ -70,7 +72,9 @@ public struct VideoPlaybackMachine: Equatable, Sendable {
 /// What a `PlaybackSource` asks the app to do — the apple reading of the shared
 /// decision, kept pure so the mapping is tested apart from the fetches.
 public enum VideoPlaybackPlan: Equatable, Sendable {
-    /// Stream this nest-relative path; the app prefixes its nest origin.
+    /// Stream this nest-relative path, its query kept whole — a `ProxiedVideo`'s
+    /// `exp=`/`sig=` ticket rides there, and the proxy refuses the request
+    /// without it. The pinned reader takes it verbatim (`VideoPlaybackMedia`).
     case stream(path: String)
     /// Fetch the blob, open it through the manager, play the plaintext from a file.
     case openSealed(hash: String)
@@ -142,8 +146,23 @@ public final class InlineVideoPlayer {
     /// play glyph for a `VideoPlayer` over it in the same slot.
     public private(set) var player: AVPlayer?
     @ObservationIgnored private var observers: Set<AnyCancellable> = []
+    /// A streamed item's byte source; the asset's resource loader holds it weakly.
+    @ObservationIgnored private var loader: NestAssetResourceLoader?
     /// Bumped on every tap and stop, so a resolve that outlives its tap is dropped.
     @ObservationIgnored private var attempt = 0
+    /// The periodic time observer's token, removed with the player.
+    @ObservationIgnored private var timeObserver: Any?
+    /// Every position the player reports, with its item's duration (both in
+    /// seconds) — its end included — for the engagement-cue capture's media
+    /// arm (`FfiCueTracker.notePlayed`). Set by the hosting view.
+    @ObservationIgnored public var onProgress: ((Double, Double) -> Void)?
+    /// The player's engagement, relayed as the player reports it — `true` at the
+    /// tap (loading counts) and on play/resume, `false` on pause, end, error and
+    /// teardown — for the capture's `FfiCueTracker.notePlaying` (`engagement-cues.md`
+    /// § Cue vocabulary & derivation, *A play is attention*). Only changes are
+    /// relayed. Set by the hosting view.
+    @ObservationIgnored public var onPlaying: ((Bool) -> Void)?
+    @ObservationIgnored private var engaged = false
 
     public init() {}
 
@@ -156,20 +175,22 @@ public final class InlineVideoPlayer {
         return seconds
     }
 
-    /// What the player was handed, for the drivers' source read.
-    public var source: String? { machine.media?.absoluteString }
+    /// What the player was handed, for the drivers' source read — a stream's
+    /// nest-relative path, never the private-scheme URL the asset carries.
+    public var source: String? { machine.media?.source }
 
     /// The tap: resolve what plays, then play it. `play()` is called here and
     /// nowhere else — a video never starts by itself.
-    public func activate(resolve: @escaping () async -> URL?) {
+    public func activate(resolve: @escaping () async -> VideoPlaybackMedia?) {
         guard machine.tap() else { return }
         tearDown()
+        noteEngaged(true)
         attempt += 1
         let attempt = attempt
         Task { @MainActor [weak self] in
-            let url = await resolve()
+            let media = await resolve()
             guard let self, attempt == self.attempt else { return }
-            self.start(url)
+            self.start(media)
         }
     }
 
@@ -180,32 +201,107 @@ public final class InlineVideoPlayer {
         machine = VideoPlaybackMachine()
     }
 
-    private func start(_ url: URL?) {
-        machine.resolved(url)
-        guard let url = machine.media else { return }
-        let item = AVPlayerItem(url: url)
+    private func start(_ media: VideoPlaybackMedia?) {
+        machine.resolved(media)
+        guard let media = machine.media else {
+            noteEngaged(false)
+            return
+        }
+        let item: AVPlayerItem
+        switch media {
+        case .file(let url, _, _):
+            item = AVPlayerItem(url: url)
+        case .stream(let nestUrl, let path):
+            let loader = NestAssetResourceLoader(nestUrl: nestUrl, path: path)
+            guard let asset = loader.asset(path: path) else {
+                machine.playerFailed()
+                noteEngaged(false)
+                return
+            }
+            self.loader = loader
+            item = AVPlayerItem(asset: asset)
+        }
         let player = AVPlayer(playerItem: item)
         player.publisher(for: \.timeControlStatus)
+            // The initial `.paused` is the player before `play()`, not a pause: it would
+            // clear the tap's engagement. Buffering (`.waitingToPlayAtSpecifiedRate`)
+            // is still engaged, so only `.playing` and a later `.paused` are relayed.
+            .dropFirst()
             .receive(on: DispatchQueue.main)
             .sink { [weak self] status in
-                guard status == .playing else { return }
-                MainActor.assumeIsolated { self?.machine.playerStartedPlaying() }
+                switch status {
+                case .playing:
+                    MainActor.assumeIsolated {
+                        self?.machine.playerStartedPlaying()
+                        self?.noteEngaged(true)
+                    }
+                case .paused:
+                    MainActor.assumeIsolated { self?.noteEngaged(false) }
+                default:
+                    break
+                }
             }
             .store(in: &observers)
         item.publisher(for: \.status)
             .receive(on: DispatchQueue.main)
             .sink { [weak self] status in
                 guard status == .failed else { return }
-                MainActor.assumeIsolated { self?.machine.playerFailed() }
+                // Domain + code only, down the underlying chain: the error's
+                // user info carries the failing URL, whose query may be a
+                // playback ticket.
+                var codes: [String] = []
+                var next = item.error as NSError?
+                while let error = next {
+                    codes.append("\(error.domain) \(error.code)")
+                    next = error.userInfo[NSUnderlyingErrorKey] as? NSError
+                }
+                NSLog("[InlineVideoPlayer] player item failed: %@", codes.joined(separator: " <- "))
+                MainActor.assumeIsolated {
+                    self?.machine.playerFailed()
+                    self?.noteEngaged(false)
+                }
+            }
+            .store(in: &observers)
+        // Progress for the cue capture: a reading per quarter second (the
+        // capture's own sampling tick) and one at the end, so a play finishing
+        // between two readings still reports its last frame.
+        timeObserver = player.addPeriodicTimeObserver(
+            forInterval: CMTime(value: 1, timescale: 4), queue: .main
+        ) { [weak self, weak item] time in
+            MainActor.assumeIsolated {
+                guard let item else { return }
+                self?.onProgress?(time.seconds, item.duration.seconds)
+            }
+        }
+        NotificationCenter.default.publisher(for: AVPlayerItem.didPlayToEndTimeNotification, object: item)
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self, weak item] _ in
+                MainActor.assumeIsolated {
+                    guard let item else { return }
+                    let duration = item.duration.seconds
+                    self?.onProgress?(duration, duration)
+                    self?.noteEngaged(false)
+                }
             }
             .store(in: &observers)
         self.player = player
         player.play()
     }
 
+    private func noteEngaged(_ playing: Bool) {
+        guard playing != engaged else { return }
+        engaged = playing
+        onPlaying?(playing)
+    }
+
     private func tearDown() {
+        noteEngaged(false)
         observers.removeAll()
+        if let timeObserver { player?.removeTimeObserver(timeObserver) }
+        timeObserver = nil
         player?.pause()
         player = nil
+        loader?.release()
+        loader = nil
     }
 }

@@ -67,6 +67,25 @@ SESSIONS_LOCKOUT = "fauna.sessions.lockout"
 # ── harness ──────────────────────────────────────────────────────────────────
 
 
+@pytest.fixture(scope="module")
+def lockout_nest(request, nest_mode, tmp_path_factory):
+    """A nest of the module's own. Its subject is sign-ins — each test mints
+    several over challenge/verify (about 19 across the module) — and under
+    `--nest docker` every caller reaches a nest from the one gateway address,
+    so on the shared session nest they spend the run's single per-source
+    `fauna.auth.challenge` budget (60 a minute, `anonymous_rate_limit.rs`)
+    together with whatever module ran the minute before: measured 2026-10-23,
+    the module passed alone and failed eight of ten after the API modules
+    ahead of it. Its own nest keeps it inside the shipped budget and off its
+    neighbours' (`testing.md` § Default app and nest mode, the shipped-limit
+    fit rule) — never a paced retry, never a lifted limit."""
+    from conftest import _start_dedicated_nest
+
+    nest, cleanup = _start_dedicated_nest(request, nest_mode, tmp_path_factory, "lockout-nest")
+    yield nest
+    cleanup()
+
+
 class _HeldBearer(WsRpcAdminClient):
     """One connection upgraded with ONE given bearer, never re-minted.
 
@@ -82,6 +101,9 @@ class _HeldBearer(WsRpcAdminClient):
 
     def _acquire_bearer(self) -> _BearerToken:
         return _BearerToken(token=self._held, expires_at=time.time() + 3600)
+
+    def _replace_refused_bearer(self, refused: _BearerToken) -> _BearerToken:
+        return refused
 
     def _mint_bearer(self) -> _BearerToken:  # pragma: no cover - a harness guard
         raise AssertionError("a held-bearer connection never mints a bearer of its own")
@@ -160,12 +182,12 @@ def _assert_still_this_socket(client: WsRpcAdminClient, raw, what: str) -> None:
 
 @pytest.mark.feature("sessions")
 def test_ending_a_sign_in_closes_its_connections_at_once_and_leaves_the_others_working(
-    nest_instance,
+    lockout_nest,
 ):
     """Sessions page, outcomes 10 + 11 (`devices.md` § What a session is, and what revoking
     one does; `transport-connection.md` § Connection lifecycle → the per-token
     twin of the revocation teardown)."""
-    nest = nest_instance
+    nest = lockout_nest
     actor = _fresh_actor(nest)
     doomed, kept = _sign_in(nest, actor), _sign_in(nest, actor)
 
@@ -201,9 +223,9 @@ def test_ending_a_sign_in_closes_its_connections_at_once_and_leaves_the_others_w
 
 
 @pytest.mark.feature("sessions")
-def test_naming_someone_elses_sign_in_ends_nothing(nest_instance):
+def test_naming_someone_elses_sign_in_ends_nothing(lockout_nest):
     """Sessions page, outcome 12 (`devices.md` § Session Management)."""
-    nest = nest_instance
+    nest = lockout_nest
     intruder, victim = _fresh_actor(nest), _fresh_actor(nest)
     victims_sign_in = _sign_in(nest, victim)
 
@@ -226,7 +248,7 @@ def test_naming_someone_elses_sign_in_ends_nothing(nest_instance):
 
 
 @pytest.mark.feature("sessions")
-def test_a_lock_lasts_exactly_24_hours_whatever_the_request_asks(nest_instance):
+def test_a_lock_lasts_exactly_24_hours_whatever_the_request_asks(lockout_nest):
     """Sessions page, outcome 17 (`devices.md` § Emergency lockout: a hard-coded 24 hours,
     and neither request carries a duration).
 
@@ -235,7 +257,7 @@ def test_a_lock_lasts_exactly_24_hours_whatever_the_request_asks(nest_instance):
     refused as malformed — either way it cannot shorten anything), and the
     signed-out kind, whose signed bytes have no room for a duration at all.
     """
-    nest = nest_instance
+    nest = lockout_nest
 
     signed_in = _fresh_actor(nest)
     with _client(nest, signed_in) as app:
@@ -271,7 +293,7 @@ def _assert_24_hours(locked_until: int, before: int, after: int, what: str) -> N
 
 @pytest.mark.feature("sessions")
 def test_locking_ends_every_sign_in_and_closes_every_connection_the_pressers_included(
-    nest_instance,
+    lockout_nest,
 ):
     """Sessions page, outcome 18 (`devices.md` § Emergency lockout).
 
@@ -279,7 +301,7 @@ def test_locking_ends_every_sign_in_and_closes_every_connection_the_pressers_inc
     arrives before its own socket closes (`transport-connection.md`
     § Connection lifecycle) — and only then is the socket asserted gone.
     """
-    nest = nest_instance
+    nest = lockout_nest
     actor = _fresh_actor(nest)
     other = _sign_in(nest, actor)
 
@@ -306,13 +328,13 @@ def test_locking_ends_every_sign_in_and_closes_every_connection_the_pressers_inc
 
 @pytest.mark.feature("sessions")
 def test_while_locked_nobody_signs_in_and_the_refusal_says_when_the_lock_ends(
-    nest_instance,
+    lockout_nest,
 ):
     """Sessions page, outcome 19 (`login.md` § Silent Challenge; `transport-connection.md`
     § Connection lifecycle) — on BOTH sign-in paths: the direct handshake and
     the challenge/verify every app signs in through. The owner holding the
     right key is refused like anyone else."""
-    nest = nest_instance
+    nest = lockout_nest
     actor = _fresh_actor(nest)
     locked_until = emergency_lockout(
         nest["url"],
@@ -336,14 +358,14 @@ def test_while_locked_nobody_signs_in_and_the_refusal_says_when_the_lock_ends(
 
 @pytest.mark.feature("sessions")
 def test_while_locked_nothing_still_connected_can_act_and_no_new_connection_opens(
-    nest_instance,
+    lockout_nest,
 ):
     """Sessions page, outcome 20 (`transport-connection.md` § Connection lifecycle).
 
     The lock comes from the signed-out door — the thief-proof one, pressed from
     a device that holds no session — while the account holds a live
     connection elsewhere."""
-    nest = nest_instance
+    nest = lockout_nest
     actor = _fresh_actor(nest)
     held = _sign_in(nest, actor)
 
@@ -373,10 +395,10 @@ def test_while_locked_nothing_still_connected_can_act_and_no_new_connection_open
 
 
 @pytest.mark.feature("sessions")
-def test_a_lock_request_more_than_five_minutes_old_is_refused(nest_instance):
+def test_a_lock_request_more_than_five_minutes_old_is_refused(lockout_nest):
     """Sessions page, outcome 27 (`devices.md` § Emergency lockout): a captured, correctly
     signed lock request presented late locks nothing."""
-    nest = nest_instance
+    nest = lockout_nest
     actor = _fresh_actor(nest)
     stale = int(time.time()) - LOCK_REQUEST_WINDOW_SECS - CLOCK_SLACK_S
 
@@ -422,11 +444,11 @@ def _device_sign_in(nest, actor, device_key: SigningKey) -> dict:
 
 
 @pytest.mark.feature("devices")
-def test_removing_a_device_ends_every_sign_in_it_made_for_good(nest_instance):
+def test_removing_a_device_ends_every_sign_in_it_made_for_good(lockout_nest):
     """devices 16 (`devices.md` § What a session is, and what revoking one
     does): the device's sign-ins end and their connections close; the device
     key can never sign in again; the account's other sign-ins are untouched."""
-    nest = nest_instance
+    nest = lockout_nest
     actor = _fresh_actor(nest)
     device_id, device_key = _granted_device(nest, actor)
     device_pub_hex = bytes(device_key.verify_key).hex()
@@ -509,11 +531,11 @@ def _successor_acts(nest, successor_key: SigningKey) -> None:
 
 
 @pytest.mark.feature("take-your-account-back")
-def test_taking_the_account_back_lands_in_an_account_that_is_not_locked(nest_instance):
+def test_taking_the_account_back_lands_in_an_account_that_is_not_locked(lockout_nest):
     """take-your-account-back 26 (`devices.md` § The two panic buttons): the
     thief locked the account; the recovery lands anyway, and the account it
     lands in is not locked."""
-    nest = nest_instance
+    nest = lockout_nest
     actor = _fresh_actor(nest)
     kit = _register_kit(nest, actor)
     emergency_lockout(
@@ -531,12 +553,12 @@ def test_taking_the_account_back_lands_in_an_account_that_is_not_locked(nest_ins
 
 @pytest.mark.feature("take-your-account-back")
 def test_after_taking_it_back_the_stolen_key_cannot_lock_the_account_and_is_told_where_it_went(
-    nest_instance,
+    lockout_nest,
 ):
     """take-your-account-back 27 (`identity-succession.md` § Enforcement on the
     home nest: the lockout kind refuses the old key with ``superseded`` naming
     the successor)."""
-    nest = nest_instance
+    nest = lockout_nest
     actor = _fresh_actor(nest)
     successor_id, successor_key = _take_back(nest, actor, _register_kit(nest, actor))
 

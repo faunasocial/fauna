@@ -146,6 +146,31 @@ internal interface INestRpcClient
     event Action? MailSpamPushChanged;
 
     /// <summary>
+    /// Raised on the UI thread when the shared classifier marks a push stale for the
+    /// Import wizard (<c>StaleSurfacesForPushEvent(ev).mailImport</c>) — an import
+    /// event (progress, pause, failure) from this account's own session, possibly
+    /// driven from another device (<c>mailbox-migration.md</c> § A failed import is a
+    /// record the wizard shows until the user moves on). Carries no payload: the open
+    /// <c>MailImportPanel</c> re-reads its machine as a repaint, WITHOUT disarming an
+    /// armed Cancel (the tui's <c>Op::ResyncMailImport</c> shape). Production raises it
+    /// from the push pump; the test double via <c>RaiseMailImportPushChanged()</c>.
+    /// </summary>
+    event Action? MailImportPushChanged;
+
+    /// <summary>
+    /// The export twin of <see cref="MailImportPushChanged"/>: raised on the UI thread
+    /// when the shared classifier marks a push stale for the Export wizard
+    /// (<c>StaleSurfacesForPushEvent(ev).mailExport</c>) — an export event (progress,
+    /// error, complete) from this account's own session, possibly driven from another
+    /// device (<c>mail-export.md</c> § A failed export is a record the wizard shows until
+    /// the user moves on). Carries no payload — a nudge, never a source: the open
+    /// <c>MailExportPanel</c> dispatches the shared machine's <c>Refresh</c>. Production
+    /// raises it from the push pump; the test double via
+    /// <c>RaiseMailExportPushChanged()</c>.
+    /// </summary>
+    event Action? MailExportPushChanged;
+
+    /// <summary>
     /// Raised on the UI thread for each inbound <c>fauna.sync.changed</c> push (a
     /// device recorded a change in a folder this actor participates in —
     /// file-sync.md § Remote-change nudge), carrying the folder NAME the nest
@@ -160,7 +185,10 @@ internal interface INestRpcClient
     /// stream (<see cref="NestRpcClient.StartPushPump"/>), alongside the existing
     /// resident-sync-agent nudge (<c>IAgentSyncNudge.PullFolderNowAsync</c>) — both
     /// react to the SAME push, one for the local engine, one for this page's UI; the
-    /// test double raises it via <c>RaiseFolderChangedPushed(folder)</c>.
+    /// test double raises it via <c>RaiseFolderChangedPushed(folder, folderHash)</c>.
+    /// The pair is the push's <c>folder</c> (blank for a sealed set) and
+    /// <c>folder_hash</c>; a subscriber matches it through
+    /// <see cref="SyncChangedGate.NamesSet"/>, never by comparing the name.
     /// <c>MediaPage</c> also subscribes, for its cross-set aggregate
     /// (<c>fauna.media.list</c>) — any push while it's open means some readable
     /// set changed. Both <c>FoldersPage</c> and <c>MediaPage</c> ALSO subscribe
@@ -169,7 +197,33 @@ internal interface INestRpcClient
     /// outside the reconnect sweep entirely, so an ordinary reconnect or a
     /// <c>ResyncRequired</c> push never recovered a dropped sync change.
     /// </summary>
-    event Action<string>? FolderChangedPushed;
+    event Action<string, byte[]?>? FolderChangedPushed;
+
+    /// <summary>
+    /// The Devices &amp; Folders surface went stale (transport.md § Which surfaces a
+    /// push invalidates, the <c>devices</c> paragraph): raised on the UI thread
+    /// from <c>FfiStaleSurfaces.devices</c> — true for a <c>ResyncRequired</c> push
+    /// and for the reconnect pump's <c>StaleSurfacesOnReconnect()</c>, false for
+    /// every single push kind. Deliberately NOT <see cref="Reconnected"/>: that
+    /// event also fires for every <c>Notification</c> push, which says nothing about
+    /// the folder rows. <see cref="DevicesMachineHost"/> answers it with the
+    /// machine's <c>Resync()</c> (the one machine both pages share), and the
+    /// rebuilt rows re-fire every open row's reads. The test double raises it via
+    /// <c>RaiseDevicesStale()</c>.
+    /// </summary>
+    event Action? DevicesStale;
+
+    /// <summary>
+    /// The nest's self-description went stale (<c>transport.md</c> § Which surfaces a
+    /// push invalidates, <c>nest_info</c>): raised on the UI thread from
+    /// <c>FfiStaleSurfaces.nestInfo</c> — the <c>fauna.nest.info_changed</c> push an
+    /// accepted <c>fauna.admin.content_policy.set</c> sends every connected member,
+    /// and the reconnect pump's <c>StaleSurfacesOnReconnect()</c>.
+    /// <see cref="NestRulesHost"/> answers it by re-reading the nest's rules past the
+    /// connection's memo (<c>nest-rules.md</c> § Acceptance at joining, and a change
+    /// of rules). The test double raises it via <c>RaiseNestInfoStale()</c>.
+    /// </summary>
+    event Action? NestInfoStale;
 
     // ── connection-state indicator ──────────────────────────────────────
 
@@ -362,6 +416,41 @@ internal interface INestRpcClient
     /// writes nothing.</summary>
     Task<bool> RefreshRegionPlaneAsync(FfiRegionPlane plane, bool onlyIfDue);
 
+    // ── Nest rules (nest-rules.md) ───────────────────────────────────────
+    // Every decision is shared Rust (fauna-client-policy behind FfiNestRulesBook /
+    // FfiRuleEditor); these are the connected-session legs the paint needs.
+
+    /// <summary>Read this session's nest's self-description past the connection's
+    /// memo (<c>fauna.nest.info</c>) and fold its signed rules into
+    /// <paramref name="book"/> (<c>FfiNestRulesBook.refresh</c>) — the one read at
+    /// sign-in, on every <see cref="NestInfoStale"/> push and on reconnect.</summary>
+    Task<FfiNestRulesRefresh> RefreshNestRulesBookAsync(FfiNestRulesBook book);
+
+    /// <summary><c>fauna.admin.content_policy.get</c> — the nest's rules as last
+    /// accepted, the document as canonical bytes for <c>FfiRuleEditor.ForNest</c>
+    /// (<c>FfiAdminClient.ContentPolicy</c>).</summary>
+    Task<FfiAdminContentPolicy> AdminContentPolicyAsync();
+
+    /// <summary><c>fauna.admin.content_policy.set</c> — replace the nest's whole rules
+    /// with <c>FfiRuleEditor.DocumentBytes()</c>; a document the nest refuses comes
+    /// back as <c>defect</c>, not an error (<c>FfiAdminClient.SetContentPolicy</c>).</summary>
+    Task<FfiAdminContentPolicy> AdminSetContentPolicyAsync(byte[] document);
+
+    /// <summary>Save a ward's content rules — a guardian editor's
+    /// <c>DocumentBytes()</c> (<c>FfiFamilyClient.SaveContentRules</c>: re-reads the
+    /// ward, writes the reach knobs as reported plus the content pillar). <c>null</c>
+    /// when the caller no longer guards <paramref name="ward"/>.</summary>
+    Task<FfiFamilyWardInfo?> FamilySaveContentRulesAsync(byte[] ward, byte[] document);
+
+    /// <summary>The caller's subscribed <c>wasm</c> labelers over posts, as hex ids —
+    /// the <c>subscribed</c> argument of <c>FfiRuleEditor.LabelerChoices</c>
+    /// (<c>FfiRuleLabelersClient.RuleLabelers</c>).</summary>
+    Task<IReadOnlyList<string>> RuleLabelersAsync();
+
+    /// <summary>One labeler's module for a rule to bundle, or <c>null</c> when it is
+    /// not a <c>wasm</c> module over posts (<c>FfiRuleLabelersClient.RuleModule</c>).</summary>
+    Task<byte[]?> RuleModuleAsync(byte[] labelerId);
+
     /// <summary><c>fauna.account.am_i_admin</c> — whether the calling actor is a
     /// nest admin. Drives the gated Admin nav entry (MainPage). Replaces the
     /// dead <c>GET /admin/api/stats</c> HTTP probe; fail-closed (the caller
@@ -436,6 +525,16 @@ internal interface INestRpcClient
     /// <summary><c>fauna.bridges.remove_follow</c>.</summary>
     Task BridgesRemoveFollowAsync(string bridgeId, string followId);
 
+    /// <summary><c>fauna.bridges.list_follow_requests</c> — the follow requests waiting
+    /// on the account, as the shared row model paints them (bridges.md § Follow
+    /// requests).</summary>
+    Task<IReadOnlyList<BridgeFollowRequest>> BridgesListFollowRequestsAsync(string bridgeId);
+
+    /// <summary><c>fauna.bridges.resolve_follow_request</c> — approve
+    /// (<paramref name="approve"/> true) or refuse one request by its id. Idempotent:
+    /// answering one already gone succeeds.</summary>
+    Task BridgesAnswerFollowRequestAsync(string bridgeId, string id, bool approve);
+
     /// <summary><c>fauna.bridges.feeds.list</c> — the bridge-feed subscriptions.</summary>
     Task<IReadOnlyList<BridgeFeedSubscription>> BridgesFeedsListAsync();
 
@@ -445,6 +544,36 @@ internal interface INestRpcClient
 
     /// <summary><c>fauna.bridges.feeds.delete</c>.</summary>
     Task BridgesFeedsDeleteAsync(long id);
+
+    // ── fauna.plugins.{list,install,uninstall} — ADMIN (bridges.md § Hosted plugins
+    //    on this page; third-party.md § The runner contract → The install-approval leg) ──
+
+    /// <summary><c>fauna.plugins.list</c> — ADMIN: every installed plugin with its
+    /// runner's state, oldest install first, each row's texts composed once in shared
+    /// Rust (<c>fauna_client_bridges::installed_plugin_text</c>).</summary>
+    Task<IReadOnlyList<FfiInstalledPlugin>> PluginsListAsync();
+
+    /// <summary><c>fauna.plugins.install</c> — ADMIN: the nest resolves and verifies the
+    /// plugin's document and opens the install card in Connected apps → Requests.</summary>
+    Task PluginsInstallAsync(string documentUrl);
+
+    /// <summary><c>fauna.plugins.uninstall</c> — ADMIN: every user's binding ends and the
+    /// runner stops. <paramref name="principalIdHex"/> is
+    /// <see cref="FfiInstalledPlugin.principalIdHex"/>.</summary>
+    Task PluginsUninstallAsync(string principalIdHex);
+
+    // ── fauna.plugins.{available,set_settings} — every account (third-party.md § The
+    //    principal model → Hosted principals; bridges.md § Hosted plugins on this page) ──
+
+    /// <summary><c>fauna.plugins.available</c> — every installed plugin as this account's
+    /// settings card, oldest install first, each composed once in shared Rust
+    /// (<c>fauna_client_bridges::plugin_card</c> / <c>plugin_card_text</c>).</summary>
+    Task<IReadOnlyList<FfiPluginCard>> PluginsAvailableAsync();
+
+    /// <summary><c>fauna.plugins.set_settings</c> — set one of this account's own settings
+    /// for a plugin it has bound. <paramref name="principalIdHex"/> is
+    /// <see cref="FfiPluginCard.principalIdHex"/>.</summary>
+    Task PluginsSetSettingAsync(string principalIdHex, BridgeSettingValue value);
 
     // ── fauna.nostr.bunker.* ────────────────────────────────────────────
     //
@@ -516,7 +645,8 @@ internal interface INestRpcClient
     /// discarded; the panel reloads.</summary>
     Task EmailFiltersCreateAsync(
         string name, IReadOnlyList<FfiEmailFilterRule> rules,
-        string combination, FfiEmailFilterAction action, int priority);
+        string combination, FfiEmailFilterAction action, int priority,
+        bool continueOnMatch = false);
 
     /// <summary><c>fauna.email.filters.delete</c>.</summary>
     Task EmailFiltersDeleteAsync(long id);
@@ -530,7 +660,8 @@ internal interface INestRpcClient
     /// <see cref="EmailFiltersCreateAsync"/> plus the target <paramref name="id"/>.</summary>
     Task EmailFiltersUpdateAsync(
         long id, string name, IReadOnlyList<FfiEmailFilterRule> rules,
-        string combination, FfiEmailFilterAction action, int priority);
+        string combination, FfiEmailFilterAction action, int priority,
+        bool continueOnMatch = false);
 
     // ── fauna.knocks.* / fauna.contacts.* / fauna.inbox.mode.* ──────────
 
@@ -764,6 +895,17 @@ internal interface INestRpcClient
     /// false dismisses it. A record, never an enforcement. Admin-class.</summary>
     Task AbuseReportResolveAsync(string reportId, bool acted);
 
+    /// <summary><c>fauna.moderation.admin_block</c> — block the item an open report
+    /// names (<paramref name="restore"/> false), or unblock it (true)
+    /// (takedown-and-block.md § Admin block of a reported item). Returns the reply's
+    /// raw status (<c>"blocked"</c> / <c>"restored"</c>); the user-facing wording is
+    /// <c>FaunaFfiMethods.ReportBlockVerdict</c>'s, never hand-worded. Admin-class.</summary>
+    Task<string> AdminBlockAsync(string reportId, bool restore);
+
+    /// <summary><c>fauna.moderation.admin_block.list</c> — every blocked item, newest
+    /// first, worded by the shared fold. Admin-class.</summary>
+    Task<IReadOnlyList<FfiBlockedRow>> AdminBlockListAsync();
+
     /// <summary>The reporter-side hide (moderation.md § Corollary): add
     /// <paramref name="id"/> (a post or message id, or an account's actor id) to
     /// the owner's stored hidden-content list and return the whole list. Local
@@ -804,6 +946,30 @@ internal interface INestRpcClient
     /// <summary><c>fauna.bridges.set_forward_per_hour</c> — set the hourly limit,
     /// then re-read (value + ceiling).</summary>
     Task<ForwardPerHour> ForwardPerHourSetAsync(uint value);
+
+    /// <summary><c>fauna.bridges.get_mail_switches</c> — the caller's receive, send
+    /// and scan-result-row switches (mail-policy-config.md § Tier 3).</summary>
+    Task<MailSwitches> MailSwitchesGetAsync();
+
+    /// <summary><c>fauna.bridges.set_mail_switches</c> — set either switch
+    /// (<c>null</c> keeps its stored value), then re-read.</summary>
+    Task<MailSwitches> MailSwitchesSetAsync(bool? receiveEnabled, bool? sendEnabled);
+
+    /// <summary><c>fauna.bridges.get_mail_quotas</c> — the caller's mailbox quota and
+    /// daily sending allowance (imap-server.md § Composition with submission
+    /// quota).</summary>
+    Task<uniffi.fauna_client_mail_settings.MailQuotas> MailQuotasGetAsync();
+
+    /// <summary>The automatic reply, read from the caller's filter rules
+    /// (email-filters.md § The auto-respond setting).</summary>
+    Task<FfiAutoRespond> AutorespondGetAsync();
+
+    /// <summary>Turn the automatic reply on with <paramref name="message"/>, or change
+    /// it. Check the draft with <c>autorespond_message_draft_outcome</c> first.</summary>
+    Task AutorespondSetAsync(string message);
+
+    /// <summary>Turn the automatic reply off.</summary>
+    Task AutorespondClearAsync();
 
     // ── fauna.family.* (Family page — family-safety.md § App surface) ──
 
@@ -1214,6 +1380,11 @@ internal interface INestRpcClient
     /// <summary><c>fauna.notifications.mark_read</c> — mark notifications at or
     /// before <paramref name="upTo"/> (micros; null ⇒ now) read; returns the count flipped.</summary>
     Task<long> NotificationsMarkReadAsync(long? upTo);
+    /// <summary><c>fauna.notifications.dismiss</c> — delete one row; false = no such row.</summary>
+    Task<bool> NotificationsDismissAsync(long id);
+    /// <summary><c>fauna.notifications.clear</c> — delete every row up to <paramref name="upTo"/>
+    /// (null = all); returns the count deleted.</summary>
+    Task<long> NotificationsClearAsync(long? upTo);
 
     /// <summary><c>fauna.notifications.count</c> — the unread notification count.</summary>
     Task<long> NotificationsCountAsync();
@@ -1292,6 +1463,13 @@ internal interface INestRpcClient
     Task AdminTiersUpdateAsync(
         string name, long maxInboxBytes, long maxStorageBytes, long maxDevices, long maxBlobSize, long maxFeeds);
 
+    /// <summary><c>fauna.admin.tiers.delete</c> — remove the named tier (the admin-settings
+    /// per-row delete button). Which tier is removable is the nest's call: an in-use tier
+    /// or <c>free</c> is refused with <c>fauna.admin.conflict</c>, and the UniFFI face
+    /// already words that refusal (<c>tier_delete_refusal</c>), so callers show the
+    /// exception text as is.</summary>
+    Task AdminTiersDeleteAsync(string name);
+
     /// <summary><c>fauna.admin.tiers.create</c> — define a new tier with the given caps
     /// (the admin-settings add-a-tier form; the name is already trimmed, caps are raw
     /// i64). An empty/duplicate name is <c>fauna.admin.conflict</c> — the nest's
@@ -1317,8 +1495,14 @@ internal interface INestRpcClient
     /// <summary><c>fauna.admin.users.create</c> — direct admission of a known actor id
     /// (<c>admin-users-admit-button</c>); the third account-creation path. A
     /// <c>null</c> <paramref name="handle"/> admits the deliberate handle-less
-    /// state (public-mode.md § A handle-less account).</summary>
-    Task AdminUsersCreateAsync(byte[] actorId, string tier, string? handle);
+    /// state (public-mode.md § A handle-less account). <paramref name="guardianActorId"/>
+    /// links the admitted account to a guardian (<c>admin-users-admit-guardian-select</c>,
+    /// family-safety.md § The guardianship link); <c>null</c> admits an ordinary account.
+    /// <paramref name="ageBand"/> is the <c>admin-users-admit-age-band-select</c> option
+    /// VALUE (its not-set value or <c>null</c> = no band), meaningful only beside a
+    /// guardian.</summary>
+    Task AdminUsersCreateAsync(byte[] actorId, string tier, string? handle,
+        byte[]? guardianActorId = null, string? ageBand = null);
 
     // ── fauna.admin.membership_tiers.* (monetization.md § Pillar 4) ──────
     //
@@ -1448,6 +1632,15 @@ internal interface INestRpcClient
     /// section repaints from the set's own answer.</summary>
     Task<FfiAdminWebAppOriginView> SetWebAppOriginAsync(FfiWebAppOrigin mode);
 
+    /// <summary><c>fauna.admin.update_channel.get</c>, folded through the shared
+    /// <c>fauna_client_admin::admin_update_channel_view</c> (nest/update-channel.md
+    /// § The UI) — everything <c>admin-nest-update-channel-section</c> paints.</summary>
+    Task<FfiAdminUpdateChannelView> AdminUpdateChannelStatusAsync();
+
+    /// <summary><c>fauna.admin.update_channel.set</c> — commit
+    /// <paramref name="channel"/>; the reply is the fold of a fresh read.</summary>
+    Task<FfiAdminUpdateChannelView> SetUpdateChannelAsync(uniffi.fauna_provisioning.UpdateChannel channel);
+
     /// <summary>The shared <c>fauna_client_admin::seed_rotation_confirm_view</c>
     /// fold (<c>admin-nest-seed-rotate-button</c>'s arm click,
     /// box-recovery.md § Deployment-seed rotation): the current admin roster —
@@ -1531,6 +1724,14 @@ internal interface INestRpcClient
     /// client's own Settings → Logs page renders. The admin Logs page filters this in
     /// memory (no refetch) and has no clear (no admin RPC to wipe the nest ring).</summary>
     Task<IReadOnlyList<LogEntry>> AdminLogsAsync();
+
+    /// <summary>A fresh, empty admin audit-log section over this session's nest
+    /// (<c>admin.md</c> § The admin audit log on <c>admin-logs</c>) —
+    /// <c>FfiAdminClient.AuditLog()</c>, whose <c>Load</c>/<c>More</c> read
+    /// <c>fauna.admin.audit.{list,integrity}</c> and hand back the folded section
+    /// (row texts, the chain check's line, the more cursor), so no hash or check
+    /// lives in C#.</summary>
+    Task<IFfiAuditLog> AdminAuditLogAsync();
 
     /// <summary><c>fauna.admin.custody_hosting.list</c> — every hosting row on
     /// this nest, host-attributed (account-data-plane.md § Two-sided bounds). Read class — never desensitizes offline.</summary>
@@ -1733,6 +1934,14 @@ internal interface INestRpcClient
     /// removing a term already gone is a success no-op.</summary>
     Task<MutedWordsSnapshot> MutedKeywordsRemoveAsync(string word);
 
+    /// <summary><c>set_muted_word_level</c> — the level picker's save
+    /// (<c>docs/goal/ui/settings.md</c> § Muted words — the level picker): one
+    /// term's level as a delta, exact stored spelling; a term the list does not
+    /// hold is a success no-op. The weight behind each level is
+    /// <c>fauna_core::scoring::MutedKeywordLevel</c>'s, never this app's; each
+    /// returned row's level reads back through <c>muted_keyword_level</c>.</summary>
+    Task<MutedWordsSnapshot> MutedKeywordsSetLevelAsync(string word, uniffi.fauna_core.MutedKeywordLevel level);
+
     // ── Trained topics (topic-factors.md § Authoring surface & picker) ──
     // The Personalization home's Trained-topics facet: list/create/rename/
     // delete over the shared fauna_client_personalization::topics::TrainedTopics
@@ -1899,6 +2108,17 @@ internal interface INestRpcClient
     /// consumes these bytes is platform glue.</summary>
     Task<byte[]> DownloadSnapshotFileBytesAsync(string deviceId, ulong snapshotId, string path);
 
+    /// <summary><c>restore_snapshot_to_dir</c> — restore the WHOLE snapshot into
+    /// <paramref name="outputDir"/> (<c>snapshot-restore-button</c>; backups.md § Where
+    /// logic lives → <i>Whole-snapshot restore</i>). The free FFI fn over the shared
+    /// <c>restore_snapshot_into_dir</c> — windows builds no engine host — so a
+    /// <b>sealed</b> snapshot restores, and the per-file manifest hashes never cross to
+    /// C#. A partial result comes back in <c>FfiRestoreSummary.unverified</c>, not as a
+    /// throw; a failure before the walk throws <c>FfiException.General</c> carrying the
+    /// reason. <paramref name="outputDir"/> is the resolved destination; a missing
+    /// directory is created.</summary>
+    Task<FfiRestoreSummary> RestoreSnapshotToDirAsync(string deviceId, ulong snapshotId, string outputDir);
+
     // ── Subscriptions — profile Tiers-tab SELF author management ─────────────
     // The cross-app subscriptions Slice A (monetization.md § Pillar 1 — UX;
     // profile.md). Tier CRUD / request queue / roster reads are thin pass-throughs
@@ -2009,7 +2229,25 @@ internal interface INestRpcClient
     /// <see cref="FfiSubscribeReply.Approved"/> (plaintext / auto-approve) or
     /// <see cref="FfiSubscribeReply.Queued"/> (encrypted mode — pending the author's
     /// approval/key rotation).</summary>
-    Task<FfiSubscribeReply> SubscriptionSubscribeAsync(byte[] authorId, string tier);
+    /// <paramref name="homeNestUrl"/> is the page's actor-home slot (the shared
+    /// <c>actor_home</c> rule): non-blank routes the across-nests form so the
+    /// follow reaches the author's home; <c>null</c>/blank is the local follow.
+    Task<FfiSubscribeReply> SubscriptionSubscribeAsync(byte[] authorId, string tier, string? homeNestUrl = null);
+
+    /// <summary>Publish this account's subscriber encapsulation-key registry entry
+    /// (the shared <c>subscriptions_publish_encaps_key</c>; <c>post-quantum.md</c>
+    /// surface B). Idempotent; called once per session start by
+    /// <c>SubscriberEncapsKeyPublish</c>.</summary>
+    Task SubscriptionPublishEncapsKeyAsync();
+
+    /// <summary>Start the shared mail connect-time refresh trigger for this
+    /// client (the UniFFI <c>StartMailEpochRefreshOnEveryConnect</c>): it runs
+    /// <c>MailSettingsMachine::refresh_epoch_schedule</c> now and after every
+    /// reconnect of this client, and refreshes the submission token.
+    /// <b>Idempotent per client</b> — the second and later calls are no-ops
+    /// (<c>mail-credentials.md</c> § Hard revoke, rule 4). Called by
+    /// <c>MailEpochSchedule.StartAsync</c>.</summary>
+    Task StartMailEpochRefreshOnEveryConnectAsync();
 
     // ── Subscriptions — subscription-settings CONSUMER page ──────────────────
     // Cross-app subscriptions Slice B (monetization.md § Pillar 1 consumer
@@ -2024,8 +2262,11 @@ internal interface INestRpcClient
     /// given author. Returns <see cref="FfiUnsubscribeReply.Removed"/> when the
     /// subscription is immediately removed (plaintext) or
     /// <see cref="FfiUnsubscribeReply.Queued"/> when it enters the pending queue
-    /// (encrypted — request waits for the author's key rotation).</summary>
-    Task<FfiUnsubscribeReply> SubscriptionUnsubscribeAsync(byte[] authorId);
+    /// (encrypted — request waits for the author's key rotation). A non-blank
+    /// <paramref name="homeNestUrl"/> (the <c>mine.list</c> row's home) leaves
+    /// through the across-nests form with the row's <paramref name="tier"/>.</summary>
+    Task<FfiUnsubscribeReply> SubscriptionUnsubscribeAsync(
+        byte[] authorId, string? tier = null, string? homeNestUrl = null);
 
 #if PAYMENTS
     // The whole plane is the App-Store escape hatch's excision unit on windows
@@ -2078,6 +2319,12 @@ internal interface INestRpcClient
     /// and webhook-minted codes.</summary>
     Task<IReadOnlyList<FfiClaimItem>> PaymentsClaimsListAsync();
 
+    /// <summary><c>fauna.payments.claims.void</c> — the author withdraws one of
+    /// their own claim codes (a redeemed code also ends its redeemer's entitlement
+    /// to the tier). Idempotent; returns the void's stamp (micros). Typed error:
+    /// <c>fauna.payments.claim_not_found</c>.</summary>
+    Task<ulong> PaymentsClaimsVoidAsync(string code);
+
 #endif   // PAYMENTS
 
     // ── Profile edit (display-name / bio / links read-modify-write) ──────────
@@ -2113,6 +2360,13 @@ internal interface INestRpcClient
     /// Mirrors tui/linux/android/apple/web's edit-open leg.</summary>
     Task<ProfileGetResult?> LoadProfileEditBaseAsync();
 
+    /// <summary>The OTHER profile's header read — the composed shared read
+    /// (<c>FfiProfileClient.ProfileHeaderRead</c> → <c>profile_get_or_relay</c> plus
+    /// the answering nest) with the page's actor-home slot as the open seeded it.
+    /// <c>null</c> when the actor has not opted in / the read fails: the id
+    /// fallback, never <c>error-message</c>.</summary>
+    Task<ProfileGetResult?> ProfileHeaderReadAsync(string actorId, string? home);
+
     /// <summary>Build the signed wire via the shared read-modify-write
     /// (<c>build_edited_profile_with_images</c> — overwrites display-name / bio /
     /// links / avatar / banner, preserving the non-display fields from
@@ -2123,7 +2377,8 @@ internal interface INestRpcClient
     /// ownership). Errors propagate to the VM (which surfaces them via
     /// <c>ShowError</c>).</summary>
     Task ProfileSetAsync(
-        ProfileDisplay edited, byte[]? baseBody, FfiProfileImageEdit avatar, FfiProfileImageEdit banner);
+        ProfileDisplay edited, byte[]? baseBody, FfiProfileImageEdit avatar, FfiProfileImageEdit banner,
+        byte[]? lastDirectBody = null, bool? audienceEveryone = null);
 
     // ── Folder creation wizard (shared FolderWizardMachine) ──────────────
 
@@ -2244,6 +2499,20 @@ internal interface INestRpcClient
     /// </summary>
     Task<FfiReseedResult> ReseedCustodianStoreAsync(IFfiSyncAgentProvisioner agent, string thisDeviceId);
 
+    /// <summary>
+    /// Restore this session's nest from the copy a surviving <b>nest-kind</b>
+    /// destination holds — the confirm of <c>backup-destination-reseed-button</c>
+    /// on that destination's row (<c>client-device-custodian.md</c> § <i>The
+    /// nest-held pull-back</i>). A pass-through to the shared FFI face
+    /// <c>backup_pull_back_from_destination</c>, which runs in this process (no
+    /// custodian store is involved, so no agent) and owns the order, the
+    /// re-enrollment and the verdict; <paramref name="destinationId"/> is resolved
+    /// against the client's own pinned list on the Rust side. On this seam for the
+    /// same reason as <see cref="ReseedCustodianStoreAsync"/>: the connected client
+    /// and the identity seed are this client's.
+    /// </summary>
+    Task<FfiReseedResult> PullBackFromDestinationAsync(string deviceIdHex, string destinationId);
+
     // ── fauna.feed.* page (shared FeedManager) ──────────────────────────────
 
     /// <summary>
@@ -2260,7 +2529,7 @@ internal interface INestRpcClient
     /// factories: reuses the shared auto-reconnecting client. The page registers a
     /// <c>FeedNotifyObserver</c> and re-renders off <c>Snapshot()</c> on each tick.
     /// </summary>
-    Task<uniffi.fauna_ffi.FfiFeedManager> BuildFeedManagerAsync();
+    Task<uniffi.fauna_ffi.FfiFeedManager> BuildFeedManagerAsync(string? deviceIdHex = null);
 
     // ── search page (shared SearchManager) ──────────────────────────────────
 
@@ -2277,6 +2546,16 @@ internal interface INestRpcClient
     /// on each tick.
     /// </summary>
     Task<uniffi.fauna_ffi.FfiSearchManager> BuildSearchManagerAsync();
+
+    /// <summary>
+    /// This session's post-blob planes (<c>FfiNestClient::post_blob_hosts</c> →
+    /// <c>fauna_client::PostBlobHosts</c>): the one host pick and graduated foreign byte
+    /// plane every post byte leg rides — gated body, media, thumbnails, the C2PA probe
+    /// (<c>feed.md</c> § The read model → <i>A post homed on another nest</i>). One
+    /// handle per session, because the foreign pins it graduates live as long as it does;
+    /// <see cref="FaunaApp.Core.PostBlobHostsHost"/> holds it.
+    /// </summary>
+    Task<uniffi.fauna_ffi.FfiPostBlobHosts> BuildPostBlobHostsAsync();
 
     /// <summary>
     /// Register this login's local sealed-index arm (backend 2) on
@@ -2307,9 +2586,9 @@ internal interface INestRpcClient
     // observes (mirrors DeleteCueRollupAsync's `FeedViewModel.Current?.Manager`
     // accessor — never a second manager). `HydrateSignalOptin` is deliberately
     // NOT wrapped here: it is producer-internal (primes the manager's cached
-    // opt-in for the not-yet-built windows capture shell) and no shipped
-    // client's pane calls it either (engagement-cues.md § Implementation
-    // status today — linux/android/apple all skip it at the pane layer).
+    // opt-in for the capture shell) and no shipped client's pane calls it —
+    // `FeedPage.Page_Loaded` calls it beside `HydrateCues()` at feed init
+    // (engagement-cues.md § Implementation status today).
 
     /// <summary><c>fauna.moderation.signal_share.status</c> — the caller's
     /// Layer-B opt-in plus the nest-wide ≥k transparency export (both
@@ -2406,8 +2685,16 @@ internal interface INestRpcClient
     /// sort/filter logic runs in shared Rust (<c>libs/fauna-media-machine</c>); the
     /// page is pure glue. <paramref name="observer"/> ticks on every snapshot change;
     /// the page re-renders off <c>Snapshot()</c>.
+    /// <para>
+    /// <paramref name="convSession"/> is the client's one per-actor
+    /// <c>ConversationsSession</c>; the build wires the machine's member-row
+    /// join-filter over it (<c>wire_media_mls_query</c>, the Devices twin), so the
+    /// filter offers each shared set by its row and labelled with its owner
+    /// (media.md § Encryption at rest → <i>The filter and the upload target
+    /// address the row</i>). <c>null</c> leaves every shared set's row out.
+    /// </para>
     /// </summary>
-    Task<MediaMachine> BuildMediaMachineAsync(MediaObserver observer);
+    Task<MediaMachine> BuildMediaMachineAsync(MediaObserver observer, ConversationsSession? convSession);
 
     /// <summary>
     /// Inject the followed-public-folder source into a built
@@ -2484,6 +2771,14 @@ internal interface INestRpcClient
     /// one-shot per-page <c>FfiNestClient.Connect()</c>.
     /// </summary>
     Task<ForwarderMachine> BuildForwardersMachineAsync();
+
+    /// <summary>
+    /// Build the shared-Rust <c>DmarcReportsMachine</c> (the admin-mail-reports
+    /// page's DMARC aggregate-report window summary) bound to this session's
+    /// connected, auto-reconnecting WS-RPC requester — the same seam as
+    /// <see cref="BuildForwardersMachineAsync"/>.
+    /// </summary>
+    Task<DmarcReportsMachine> BuildDmarcReportsMachineAsync();
 
     /// <summary>
     /// Build the shared-Rust <c>BridgeApprovalMachine</c> (the
@@ -2610,6 +2905,20 @@ internal interface INestRpcClient
 
     /// <summary>Build the <c>MailImportMachine</c> (Settings → Mail import wizard).</summary>
     Task<MailImportMachine> BuildMailImportMachineAsync();
+
+    /// <summary>Build the <c>ArchiveImportMachine</c> (Settings → Import from other
+    /// services, archive-import.md § The wizard and its machine) for the signed-in actor
+    /// whose sync device id is <paramref name="deviceIdHex"/> — the archive folder's files
+    /// are stamped with it. Throws on a bearer-only session (no identity key to sign the
+    /// imported posts with).</summary>
+    Task<uniffi.fauna_archive_import_machine.ArchiveImportMachine> BuildArchiveImportMachineAsync(string deviceIdHex);
+
+    /// <summary>The account's archive links (phase two — archive-import.md § Linking and
+    /// merging, ruling 8) that <see cref="BuildConversationsSessionAsync"/> built and
+    /// registered as the session's archive-signal sink (<c>FfiNestClient.ArchiveLinks()</c>),
+    /// or <c>null</c> before a session, or for one with no sync device id. Read once
+    /// after the session is built and handed to <see cref="ArchiveLinksHost"/>.</summary>
+    Task<uniffi.fauna_archive_import_machine.ArchiveLinks?> ArchiveLinksAsync();
 
     /// <summary>Build the <c>MailAliasesMachine</c> (Settings → Mail aliases panel).</summary>
     Task<MailAliasesMachine> BuildMailAliasesMachineAsync();
@@ -2795,6 +3104,39 @@ internal interface INestRpcClient
     /// </summary>
     Task<FfiLetGoOutcome> RecoveryLetGoAsync(byte[][] generationIds);
 
+    // ── Settings → Sessions (ui/sessions.md § Where logic lives) ──
+    // One seam method per UniFFI export (libs/fauna-ffi/src/sessions.rs). Each
+    // runs the shared SessionsClient::pass and answers the re-folded page beside
+    // the act's error and whether the lock landed; none throws for a refusal —
+    // only a pass that could not start (no connection) does. `previous` is the
+    // page painted last (a failed re-read keeps its rows); `devices` names
+    // device-minted sessions; `ownDeviceId` is the This-device rule's fallback.
+
+    /// <summary><c>sessions_load</c> — the nav-edge hydrate: read and fold.</summary>
+    Task<FfiSessionsPage> SessionsLoadAsync(
+        uniffi.fauna_devices_machine.DevicesMachine? devices, string? ownDeviceId,
+        FfiSessionsSnapshot? previous);
+
+    /// <summary><c>sessions_revoke</c> — <c>session-revoke-button[i]</c>: end
+    /// that one session, then re-fold.</summary>
+    Task<FfiSessionsPage> SessionsRevokeAsync(
+        uniffi.fauna_devices_machine.DevicesMachine? devices, string? ownDeviceId,
+        FfiSessionsSnapshot? previous, string tokenId);
+
+    /// <summary><c>sessions_revoke_others</c> — the second press of
+    /// <c>sessions-revoke-others-*</c>: end every session but this app's (the
+    /// keep-id read from the bearer holder at call time), then re-fold.</summary>
+    Task<FfiSessionsPage> SessionsRevokeOthersAsync(
+        uniffi.fauna_devices_machine.DevicesMachine? devices, string? ownDeviceId,
+        FfiSessionsSnapshot? previous);
+
+    /// <summary><c>sessions_lockout</c> — <c>sessions-lockout-button</c>:
+    /// <paramref name="confirmWord"/> is the field verbatim, checked by the face
+    /// (the action arm); on a landed lock the page comes back <c>locked</c>.</summary>
+    Task<FfiSessionsPage> SessionsLockoutAsync(
+        uniffi.fauna_devices_machine.DevicesMachine? devices, string? ownDeviceId,
+        FfiSessionsSnapshot? previous, string confirmWord);
+
     /// <summary>
     /// <c>succession_succeed_with_held_kit</c> — <c>identity-stolen-button</c>'s
     /// ONE call. Re-points the account to a freshly minted successor, persists
@@ -2880,6 +3222,15 @@ internal interface INestRpcClient
     /// applied whether or not <c>Error</c> is set.</summary>
     Task<FfiCustodyActOutcome> CustodyRevokeAsync(byte[] grantId, byte[]? holder);
 
+    /// <summary><c>account_restore_from_custodian</c> — the Nests page's restore
+    /// gesture (<c>ui/nests.md</c> § Trust facet — restore from a custodian nest):
+    /// the shared runtime command <c>RestoreFromCustodian { url }</c>, the one
+    /// both entries dispatch (the typed address, a custodian row's own). The
+    /// shell holds no dial, handshake or walk logic. Never throws: a gesture that
+    /// could not run at all (no connected client, no runtime yet) answers
+    /// <see cref="FfiCustodianRestoreOutcome.Failed"/> carrying why.</summary>
+    Task<FfiCustodianRestoreOutcome> AccountRestoreFromCustodianAsync(string url);
+
     /// <summary><c>custody_escrow_holders</c> — lowercase-hex identities of the
     /// nests holding this account's generation-key escrow, read from the hosted
     /// account runtime: the Nests page's <c>participant-escrow-holder-badge</c>
@@ -2950,6 +3301,16 @@ internal interface INestRpcClient
     /// notice it painted; only an exception means "unknown, keep what you
     /// painted" (see <c>DevicesEnrollmentNotice</c>).</summary>
     Task<string?> AccountEnrollmentNoticeAsync();
+
+    // ── The once-per-sign-in newer-version look (installers/README.md § Knowing a
+    // newer version is out → The nest's newest-release field) ──
+
+    /// <summary><c>FfiNestClient.LookForNewerReleaseAtSignIn</c> — the newer release
+    /// this nest reports in its <c>fauna.nest.info</c> reply (shared Rust decides
+    /// "newer"), or <c>null</c>: nothing newer, the nest says nothing, or the read
+    /// failed. One read of the connection's shared nest info; no request reaches the
+    /// release host.</summary>
+    Task<NewerRelease?> LookForNewerReleaseAtSignInAsync();
 
     /// <summary><c>devices_this_device_row</c> — the roster row the Devices
     /// page's <c>device-this-mark-badge</c> marks (behavior/devices.md

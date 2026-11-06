@@ -48,7 +48,8 @@ import time
 import pytest
 
 from i18n.strings import S
-from helpers.family_wire import admit_adult_directly, admit_ward
+from helpers.admin_wire import admit_adult
+from helpers.family_wire import admit_ward
 from tests.test_family import _unique_suffix
 
 pytestmark = [pytest.mark.tier_3]
@@ -67,10 +68,10 @@ def _admit_guardian_and_two_wards(
     TWO anonymous invite-request submits, and both are structural: this test's
     whole subject is the seam between two DIFFERENT supervised accounts, so the
     wards cannot be shared or collapsed. The guardian is direct-admitted over
-    the admin path instead (`admit_adult_directly`), which is what brings the
+    the admin path instead (`admit_adult`), which is what brings the
     cost down from three — the shipped-budget fit rule, `testing.md` § Default
     app and nest mode."""
-    guardian_identity = admit_adult_directly(nest_instance, guardian_handle)
+    guardian_identity = admit_adult(nest_instance, guardian_handle)
     ward_a_identity = admit_ward(nest_instance, guardian_identity, ward_a_handle)
     ward_b_identity = admit_ward(nest_instance, guardian_identity, ward_b_handle)
     return guardian_identity, ward_a_identity, ward_b_identity
@@ -96,11 +97,18 @@ def _switch_to(app, request, nest, user, *, handle: str) -> None:
 @pytest.mark.web
 @pytest.mark.linux
 # tui added 2026-08-21: a single-seat sequential-login test (one
-# admin_app, repeated driver.reset()+login), not a two-seat scenario. The
-# action gate (`require_guardian_notify_client_supported`) already lists tui
-# as built (2026-08-02, content_policy.rs's NotifyAccumulator) — this marker
-# set had simply stopped growing after web+linux landed first.
+# admin_app, repeated driver.reset()+login), not a two-seat scenario. tui
+# built guardian notify 2026-08-02 (content_policy.rs's NotifyAccumulator) —
+# this marker set had simply stopped growing after web+linux landed first.
 @pytest.mark.tui
+# macos, ios and windows arm `family_notify_check_now` and sign in by `set_state`
+# like the others (marked 2026-10-26); android's leg is declared through the
+# registry until its test agent arms the command.
+@pytest.mark.macos
+@pytest.mark.ios
+@pytest.mark.windows
+@pytest.mark.android
+@pytest.mark.requires_surface("family-notify-check-now")
 @pytest.mark.feature("family-safety")
 def test_actor_switch_mid_accrual_does_not_leak_the_outgoing_wards_pending_notify_count(
     admin_app, request, nest_instance
@@ -112,7 +120,6 @@ def test_actor_switch_mid_accrual_does_not_leak_the_outgoing_wards_pending_notif
     and never a second notice row.
     """
     app = admin_app
-    app.family.require_guardian_notify_client_supported()
 
     # A random tail, not a fixed literal: the nest is session-scoped, so a
     # fixed handle collides with itself the moment this module runs under a

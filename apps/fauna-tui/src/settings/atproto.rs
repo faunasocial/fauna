@@ -21,11 +21,16 @@
 //! - **full-PDS panel** — the F1 login-plane surface (app credentials; the
 //!   connected-apps list and the external-apps switch live on the Connected
 //!   apps page), gated on level =
-//!   `hosted_full`, plus the **D10 authoring-delegation row**
-//!   (`atproto-delegation-*`). That row answers a different question from the
-//!   rest of the panel and the two must not blur: everything above it governs
-//!   who may *sign in*; the delegation governs whether a signed-in app may
-//!   *post as you*. Signing in is not authorization to author.
+//!   `hosted_full`, plus the EMPTY state of the **D10 authoring-delegation
+//!   row** (`atproto-delegation-*`). That row answers a different question
+//!   from the rest of the panel and the two must not blur: everything above
+//!   it governs who may *sign in*; the delegation governs whether a signed-in
+//!   app may *post as you*. Signing in is not authorization to author.
+//! - **the held delegation row** — gated on the DELEGATION, not on the level
+//!   (`ui/atproto.md` § Layout & flow, ruled 2026-10-23): approving a
+//!   connected app's posting or profile line provisions the delegation at
+//!   any level, so wherever one is held the row renders whole — leaves,
+//!   Re-authorize, Stop — at Off, Linked and both hosted levels.
 //! - **delete presence** (`atproto-delete-presence`) — visible whenever a
 //!   hosted identity exists; the destructive flow itself is S5-scoped.
 //!
@@ -35,7 +40,7 @@
 //! Unlike linux's push-observer render loop, this follows the Mail/Devices
 //! sub-page shape already established in this module: an awaited nav-edge
 //! hydrate + re-snapshot after every mutating gesture, no live observer tick
-//! (`NoopObserver` below is wired but never fires a repaint itself). The
+//! (the shared `NullObserver` is wired but never fires a repaint itself). The
 //! selector's `select_level`/`confirm_transition` gestures are async (a nest
 //! round trip) and go through an `Op`; `cancel_transition`/`set_did_method`/
 //! `set_history_backfill` are pure local machine mutations (no nest call) and
@@ -54,6 +59,7 @@ use fauna_ui_ids as ids;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use fauna_atproto_settings_machine::observer::NullObserver;
 use fauna_atproto_settings_machine::{
     AppCredentialRow, AtprotoSettingsMachine, AtprotoSettingsObserver, AtprotoSettingsSnapshot,
     DelegationRow, depth_level_options,
@@ -68,16 +74,6 @@ use crate::element::{Element, Gesture};
 
 fn resolve(text: &LocalizedText) -> String {
     text.clone().resolve(fauna_i18n::strings::lookup)
-}
-
-/// [`AtprotoSettingsObserver`] is only a construction requirement — the
-/// machine notifies it synchronously after every mutation, but this page reads
-/// a fresh `snapshot()` right after each awaited `Op` instead (the
-/// Mail/Devices shape), so there is nothing for the callback to do.
-struct NoopObserver;
-
-impl AtprotoSettingsObserver for NoopObserver {
-    fn on_changed(&self) {}
 }
 
 /// The AT Protocol sub-page's state.
@@ -125,7 +121,7 @@ impl AtprotoState {
         alerts: Arc<fauna_client_alerts::CriticalAlerts>,
         runtime: super::AccountRuntimeSlot,
     ) -> Self {
-        let observer: Arc<dyn AtprotoSettingsObserver> = Arc::new(NoopObserver);
+        let observer: Arc<dyn AtprotoSettingsObserver> = Arc::new(NullObserver);
         let seams = consent_grant_seams(secret_hex, Arc::clone(&nest), runtime.clone());
         let machine = match crate::mail_glue::build_atproto_settings_machine(
             nest, secret_hex, observer, alerts,
@@ -312,7 +308,8 @@ pub(super) fn atproto_elements(app: &App, state: &AtprotoState) -> Vec<Element> 
         // Pre-mint: the DID-method radio + the either-way handle line.
         if snap.show_did_method_radio {
             els.push(Element::label(ids::ATPROTO_DID_METHOD, String::new()));
-            // "radio" in the field's own name — one-of-two, radio paint.
+            // "radio" in the field's own name — one-of-two, radio paint. The
+            // `state` attr is the depth rungs' active/inactive, as on every app.
             let plc = snap.did_method == "plc";
             els.push(
                 Element::radio_gesture(
@@ -321,7 +318,7 @@ pub(super) fn atproto_elements(app: &App, state: &AtprotoState) -> Vec<Element> 
                     plc,
                     Gesture::Settings(Action::AtprotoSetDidMethod("plc".to_string())),
                 )
-                .attr("state", if plc { "on" } else { "off" }),
+                .attr("state", if plc { "active" } else { "inactive" }),
             );
             let web = snap.did_method == "web";
             els.push(
@@ -331,7 +328,7 @@ pub(super) fn atproto_elements(app: &App, state: &AtprotoState) -> Vec<Element> 
                     web,
                     Gesture::Settings(Action::AtprotoSetDidMethod("web".to_string())),
                 )
-                .attr("state", if web { "on" } else { "off" }),
+                .attr("state", if web { "active" } else { "inactive" }),
             );
             if !snap.handle_preview.is_empty() {
                 els.push(Element::chrome(t::handle_either_way(&snap.handle_preview)));
@@ -451,7 +448,25 @@ pub(super) fn atproto_elements(app: &App, state: &AtprotoState) -> Vec<Element> 
         for (i, cred) in snap.credentials.iter().enumerate() {
             credential_row_elements(state, cred, i, &mut els);
         }
+    }
 
+    // ── The D10 delegation row: gated on the DELEGATION, not on the level ──
+    //
+    // `ui/atproto.md` § Layout & flow (ruled 2026-10-23): approving a directly
+    // connected app's posting or profile line provisions the account's one
+    // authoring delegation at ANY level (`consent_grant::
+    // ensure_authoring_delegation` checks none), and the shared machine
+    // fetches it at every level. A row rendered only at `hosted_full` left a
+    // user below it holding a live, account-wide posting permission with no
+    // visible row and no Stop — the dark-grant class `principles.md` § The
+    // user always controls their data forbids. So a HELD delegation renders
+    // whole wherever it exists — the same identity-not-level shape as the
+    // summary above — while the EMPTY state (heading, no-permission line,
+    // first-grant control) stays full-PDS-only: below it nothing a first grant
+    // would authorize is signed in, and the Fauna-native path provisions
+    // through the consent card, so a mint control there would be a grant with
+    // no consumer.
+    if snap.level == "hosted_full" || snap.delegation.is_some() {
         delegation_elements(snap.delegation.as_ref(), &mut els);
     }
 
@@ -473,8 +488,10 @@ pub(super) fn atproto_elements(app: &App, state: &AtprotoState) -> Vec<Element> 
 }
 
 /// The D10 authoring-delegation row — what authorizes an external ATProto app
-/// to *post* as this account, as opposed to merely signing in (the credentials
-/// and connected-apps groups above govern that).
+/// (or an approved Fauna principal) to *post* as this account, as opposed to
+/// merely signing in (the credentials and connected-apps groups above govern
+/// that). Rendered at every level when a delegation is held, at `hosted_full`
+/// only otherwise — the caller's gate.
 ///
 /// Two states, one always-present control:
 ///
@@ -1090,6 +1107,12 @@ mod tests {
             .find(|e| e.id == "atproto-did-method-plc")
             .unwrap();
         assert!(matches!(plc.role, Role::Radio { selected: true, .. }));
+        assert_eq!(attr(plc, "state"), Some("active"));
+        let web = els
+            .iter()
+            .find(|e| e.id == "atproto-did-method-web")
+            .unwrap();
+        assert_eq!(attr(web, "state"), Some("inactive"));
         assert!(!els.iter().any(|e| e.id == "atproto-hosted-handle"));
 
         let app2 = app_with_snapshot(snap(|s| {
@@ -1511,15 +1534,55 @@ mod tests {
         assert!(scope.text.contains("FutureCapability"));
     }
 
+    /// The row is gated on the DELEGATION, not on the level (`ui/atproto.md`
+    /// § Layout & flow, the delegation paragraph, ruled 2026-10-23): approving
+    /// a connected app's posting or profile line provisions the account's one
+    /// authoring delegation at ANY level (`consent_grant::
+    /// ensure_authoring_delegation` checks none), so a row that rendered only
+    /// at `hosted_full` left a user below it holding a live, account-wide
+    /// posting permission with no visible row and no Stop — the dark-grant
+    /// class `principles.md` § The user always controls their data forbids.
+    /// Wherever a verified delegation exists the row renders whole: every
+    /// leaf, Re-authorize (renewal) and Stop. The EMPTY state — heading, the
+    /// "cannot post as you yet" line and the first-grant control — stays
+    /// `hosted_full`-only: below it nothing a first grant would authorize is
+    /// signed in, and the Fauna-native path provisions through the consent
+    /// card, so a mint button there would be a grant with no consumer.
     #[test]
-    fn the_delegation_row_is_gated_on_hosted_full_like_the_rest_of_the_panel() {
-        let app = app_with_snapshot(snap(|s| {
-            s.level = "hosted_visible".to_string();
-            s.delegation = Some(delegation("active", Some(1_800_000_000_000_000)));
-        }));
-        let els = atproto_elements(&app, &app.settings.atproto);
-        assert!(!els.iter().any(|e| e.id == "atproto-delegation-row"));
-        assert!(!els.iter().any(|e| e.id == "atproto-delegation-authorize"));
+    fn the_delegation_row_is_gated_on_the_delegation_not_the_level() {
+        for level in ["off", "linked", "hosted_visible"] {
+            let held = app_with_snapshot(snap(|s| {
+                s.level = level.to_string();
+                s.delegation = Some(delegation("active", Some(1_800_000_000_000_000)));
+            }));
+            let els = atproto_elements(&held, &held.settings.atproto);
+            assert!(
+                els.iter().any(|e| e.id == "atproto-delegation-row"),
+                "a held delegation renders its row at level {level}"
+            );
+            assert!(
+                els.iter().any(|e| e.id == "atproto-delegation-revoke"),
+                "Stop renders wherever the row does ({level})"
+            );
+            assert!(
+                els.iter().any(|e| e.id == "atproto-delegation-authorize"),
+                "renewal renders wherever the row does ({level})"
+            );
+            // The rest of the full-PDS panel stays gated on the level.
+            assert!(!els.iter().any(|e| e.id == "atproto-app-credential-mint"));
+
+            let none = app_with_snapshot(snap(|s| s.level = level.to_string()));
+            let els = atproto_elements(&none, &none.settings.atproto);
+            assert!(
+                !els.iter().any(|e| e.id == "atproto-delegation-authorize"),
+                "no empty state and no first-grant control below hosted_full ({level})"
+            );
+            assert!(
+                !els.iter()
+                    .any(|e| e.text == t::DELEGATION_HEADING || e.text == t::DELEGATION_EMPTY),
+                "no delegation chrome at all when nothing is held below hosted_full ({level})"
+            );
+        }
     }
 
     #[test]

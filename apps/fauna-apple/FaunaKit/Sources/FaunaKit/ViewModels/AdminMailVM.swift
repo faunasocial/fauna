@@ -55,13 +55,22 @@ public final class AdminMailVM {
     /// Vend the machine from APIClient and load the effective config. Idempotent.
     public func configure(api: APIClient) async {
         if machine == nil || configuredApi !== api {
+            let built: MailPolicyMachine
             do {
-                machine = try await api.mailPolicyMachine()
+                built = try await api.mailPolicyMachine()
+            } catch {
+                // A concurrent build for this api that succeeded owns the page.
+                if machine == nil || configuredApi !== api { errorMessage = DisplayError.message(error) }
+                return
+            }
+            // Re-entrant `configure`: the build that finishes first wins; a
+            // later one for the same api hydrates it, never replaces it (same
+            // shape as `LabelerCatalogVM`). A re-point to another api still
+            // re-vends.
+            if machine == nil || configuredApi !== api {
+                machine = built
                 configuredApi = api
                 applySnapshot()
-            } catch {
-                errorMessage = DisplayError.message(error)
-                return
             }
         }
         await hydrate()
@@ -104,9 +113,14 @@ public final class AdminMailVM {
         await dispatch(.saveAlias(policy: policy))
     }
 
-    /// Publish the opt-in aggregate as the deployment baseline; the outcome lands
-    /// in `snapshot.baselinePublishResult`.
-    public func publishSpamBaseline() async { await dispatch(.publishSpamBaseline) }
+    public func saveDmarc(_ policy: DmarcPolicyView) async { await dispatch(.saveDmarc(policy: policy)) }
+
+    /// `admin-mail-microsoft-save-button`: the two drafts go out as typed; the
+    /// shared machine checks them (both blank clears) and refuses a bad pair onto
+    /// the error banner before any round trip.
+    public func saveMicrosoftRegistration(clientId: String, tenant: String) async {
+        await dispatch(.setMicrosoftRegistration(clientId: clientId, tenant: tenant))
+    }
 
     /// The standing-publish switch — its own gesture and its own dispatch, off the
     /// PERSISTED group, never a Spam-group draft (mail-spam.md § Cold start Path 2
@@ -123,7 +137,8 @@ public final class AdminMailVM {
 
     /// One press of a confirm button — the shared machine holds the same-button
     /// two-click: the first press arms it (`snapshot.armed`), the second
-    /// dispatches the guarded action, and any re-read disarms. The view only
+    /// dispatches the guarded action (the baseline publish's outcome lands in
+    /// `snapshot.baselinePublishResult`), and any re-read disarms. The view only
     /// relabels the armed button; nothing is armed on the Swift side.
     public func press(_ button: MailPolicyConfirm) async {
         await dispatch(.press(button: button))

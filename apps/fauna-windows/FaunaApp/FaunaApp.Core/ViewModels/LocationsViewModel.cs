@@ -70,20 +70,24 @@ public partial class LocationsViewModel : ViewModelBase
     /// </summary>
     public Task OnAgentReachableAsync() => DriveAsync(surfaceErrors: false);
 
-    /// <summary>Project the controller's rendered union into the bound collection, joining
-    /// each row with the agent's last-reported mode. UI thread only.</summary>
+    /// <summary>Project the controller's rendered union into the bound collection; each
+    /// row's mode is the shared model's agent-mirrored one. UI thread only.</summary>
     public void Render()
     {
         Locations.Clear();
         foreach (var row in _controller.Rendered())
         {
+            var verb = _controller.FreeSpaceVerb(row.@path);
             Locations.Add(new LocationRowVm(
                 row.@path,
                 row.@folder,
-                _controller.ModeFor(row.@path),
+                row.@mode,
                 row.@accessRevoked,
                 row.@deletesHeld,
-                row.@deletesSkippedUnreadable));
+                row.@deletesSkippedUnreadable,
+                verb is null
+                    ? null
+                    : new FreeSpaceVerbVm(verb.@running, verb.@buttonLabel, verb.@onDeviceLine, verb.@resultLine)));
         }
     }
 
@@ -182,12 +186,40 @@ public partial class LocationsViewModel : ViewModelBase
                 return true;
             }
         });
+
+    /// <summary><i>Free up space</i> on the bound on-demand folder at <paramref name="path"/>
+    /// (<c>folder-location-free-space-button</c>; on-demand-files.md § The free-up-space
+    /// gesture where the OS offers none). Never optimistic: the row repaints from the
+    /// agent's <c>ListLocations</c> after the press, and the status tick carries the sweep's
+    /// readings as it moves them. A refusal goes to the error line.</summary>
+    public Task FreeLocationSpaceAsync(string path) =>
+        DriveAsync(surfaceErrors: true, () => _controller.FreeLocationSpaceAsync(path));
+}
+
+/// <summary>How a bound row renders its <i>Free up space</i> verb — the shared
+/// <c>FreeSpaceVerb</c> as the FFI resolves it: whether a sweep is walking the location
+/// (<c>folder-location-free-space-button</c>'s <c>state</c>), the button's label, the
+/// standing on-this-device line (<c>folder-location-on-device</c>) and the latest sweep's
+/// outcome (<c>folder-location-free-space-result</c>, <c>null</c> until one has run).</summary>
+public sealed record FreeSpaceVerbVm(bool Running, string ButtonLabel, string OnDeviceLine, string? ResultLine)
+{
+    /// <summary>The button's <c>state</c> attr: <c>running</c> or <c>idle</c>.</summary>
+    public string State => Running ? "running" : "idle";
 }
 
 /// <summary>One bound-folder row (<c>folder-location-row</c>): the local path
 /// (<c>folder-location-path</c>), the bound folder name, and the sync mode
-/// (<c>folder-location-mode-toggle</c>). Projected from the shared binding model.</summary>
-public sealed record LocationRowVm(string Path, string Folder, string Mode, bool AccessRevoked, ulong DeletesHeld, ulong DeletesSkippedUnreadable)
+/// (<c>folder-location-mode-toggle</c>). Projected from the shared binding model.
+/// <see cref="FreeSpace"/> is the row's <i>Free up space</i> verb, <c>null</c> where the shared
+/// rule withholds it (a resident row, a root without its placeholder surface).</summary>
+public sealed record LocationRowVm(
+    string Path,
+    string Folder,
+    string Mode,
+    bool AccessRevoked,
+    ulong DeletesHeld,
+    ulong DeletesSkippedUnreadable,
+    FreeSpaceVerbVm? FreeSpace = null)
 {
     /// <summary>True when this folder serves placeholders on demand — drives the
     /// per-row <c>folder-location-mode-toggle</c> on/off state.</summary>

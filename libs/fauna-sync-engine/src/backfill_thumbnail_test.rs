@@ -1,10 +1,11 @@
 //! SyncEngine thumbnail **download-backfill** (Seam B): a file whose
 //! `sync_changes` row was recorded without a thumbnail (a build without the
 //! thumbnailer, or a failed thumbnail upload) carries `thumbnail_hash = None`. Downloading it from a peer
-//! hands us the plaintext, so [`SyncEngine::download_and_write_file`] generates
-//! the missing thumbnail, seals it under the owner `BackupKey`, uploads it as a
-//! standalone blob, and re-records the (live) file with its hash — additively,
-//! no data loss, so `fauna.media.list` surfaces it on the next list.
+//! hands us the plaintext, so [`SyncEngine::download_and_write_file`] renders
+//! the missing thumbnail, seals it as its file rests (under the file's root,
+//! chunks behind a manifest), and re-records the (live) file with that
+//! manifest's hash — additively, no data loss, so `fauna.media.list` surfaces it
+//! on the next list.
 //!
 //! Two halves are tested:
 //!   1. [`SyncEngine::thumbnail_backfill_targets`] — the pure per-path gate that
@@ -12,12 +13,12 @@
 //!      still lacking a thumbnail (so a same-batch delete can never be
 //!      resurrected by the backfill re-record — the NEXT Seam B guard 1).
 //!   2. The download-time effect: a real round-trip where downloading a
-//!      thumbnail-less image POSTs exactly one backfill thumbnail blob, and one
-//!      that already has a thumbnail (or is not an image) POSTs none.
+//!      thumbnail-less image posts exactly one backfill thumbnail manifest, and
+//!      one that already has a thumbnail (or is not an image) posts none.
 //!
 //! Like the sibling `upload_thumbnail_test.rs`, the WS-RPC record path is
 //! unconnected (the re-record fails-and-logs), so these assert the byte-plane
-//! thumbnail blob POST — the `thumbnail_hash` field carried by `changes_record`
+//! thumbnail manifest POST — the `thumbnail_hash` field carried by `changes_record`
 //! is covered by `fauna-client-sync`'s own test.
 //!
 //! Lives under `src/` (gated `#[cfg(test)]` in `lib.rs`), mirroring
@@ -187,9 +188,9 @@ pub(crate) fn test_engine(
 use fauna_media::test_fixtures::build_png;
 
 /// Upload `bytes` as `rel` through the real pipeline (populating the mock store)
-/// and return its manifest hash + on-nest size. The upload's own Seam-A
-/// thumbnail POST (if any) is captured by the counter; callers snapshot the
-/// counter *after* this to isolate the later backfill POST.
+/// and return its manifest hash — the FIRST manifest the upload posted: an
+/// image's own Seam-A thumbnail manifest posts after it. Callers snapshot the
+/// manifest log *after* this to isolate the later backfill post.
 pub(crate) async fn seed_file(
     engine: &SyncEngine,
     store: &crate::test_support::BlobStore,
@@ -200,12 +201,19 @@ pub(crate) async fn seed_file(
     let full = watch.join(rel);
     std::fs::create_dir_all(full.parent().unwrap()).unwrap();
     std::fs::write(&full, bytes).unwrap();
+    let before = store.posted_manifests.lock().unwrap().len();
     engine.upload_file(rel).await.expect("seed upload");
-    store
-        .last_manifest_hash
+    *store
+        .posted_manifests
         .lock()
         .unwrap()
+        .get(before)
         .expect("manifest posted")
+}
+
+/// How many manifests the byte plane has been POSTed so far.
+fn manifest_posts(store: &crate::test_support::BlobStore) -> usize {
+    store.posted_manifests.lock().unwrap().len()
 }
 
 /// The dehydration gate's proven-head half, download-apply side: a file written
@@ -278,10 +286,11 @@ async fn download_backfills_a_missing_thumbnail_for_an_image_recorded_without_on
     let size = std::fs::metadata(up_watch.path().join("photo.png"))
         .unwrap()
         .len() as i64;
-    let baseline = store.blob_posts();
+    let baseline = manifest_posts(&store);
 
     // A peer device downloads the thumbnail-less change (thumbnail_hash = None ⇒
-    // backfill = Some(size)); it must POST exactly one backfill thumbnail blob.
+    // backfill = Some(size)); it must post exactly one backfill thumbnail
+    // manifest, which opens under the file's own root.
     let dl_watch = tempfile::tempdir().unwrap();
     let downloader = test_engine(&server.uri(), dl_watch.path().to_path_buf(), Some(key));
     downloader
@@ -303,10 +312,22 @@ async fn download_backfills_a_missing_thumbnail_for_an_image_recorded_without_on
         .expect("download succeeds");
 
     assert_eq!(
-        store.blob_posts() - baseline,
+        manifest_posts(&store) - baseline,
         1,
-        "downloading a thumbnail-less image must POST exactly one backfill thumbnail blob"
+        "downloading a thumbnail-less image must post exactly one backfill thumbnail manifest"
     );
+    assert_eq!(store.blob_posts(), 0, "never a blob-store blob");
+    let thumb = store.expect_last_manifest_hash();
+    let opened = fauna_core::file_download::download_file_bytes_by_manifest(
+        &downloader.blob_fetcher(),
+        &fauna_core::file_download::FileDownloadKeys::owner(BackupKey::from_bytes([0x11; 32])),
+        thumb,
+        None,
+        "photo.png",
+    )
+    .await
+    .expect("the backfilled thumbnail opens under the file's root");
+    assert_eq!(&opened[..2], &[0xFF, 0xD8], "a JPEG thumbnail");
 }
 
 #[tokio::test]
@@ -323,7 +344,7 @@ async fn download_does_not_backfill_when_the_change_already_has_a_thumbnail() {
     );
     let png = build_png(800, 600);
     let manifest_hash = seed_file(&uploader, &store, up_watch.path(), "photo.png", &png).await;
-    let baseline = store.blob_posts();
+    let baseline = manifest_posts(&store);
 
     // backfill = None (the change already carries a thumbnail): no extra POST.
     let dl_watch = tempfile::tempdir().unwrap();
@@ -347,7 +368,7 @@ async fn download_does_not_backfill_when_the_change_already_has_a_thumbnail() {
         .expect("download succeeds");
 
     assert_eq!(
-        store.blob_posts(),
+        manifest_posts(&store),
         baseline,
         "a change that already has a thumbnail triggers no backfill POST"
     );
@@ -376,10 +397,10 @@ async fn download_does_not_backfill_a_non_image_even_when_eligible() {
     let size = std::fs::metadata(up_watch.path().join("notes.txt"))
         .unwrap()
         .len() as i64;
-    let baseline = store.blob_posts();
+    let baseline = manifest_posts(&store);
 
     // Eligible (backfill = Some) but not an image ⇒ maybe_upload_thumbnail
-    // declines, so no blob POST.
+    // declines, so no manifest POST.
     let dl_watch = tempfile::tempdir().unwrap();
     let downloader = test_engine(&server.uri(), dl_watch.path().to_path_buf(), Some(key));
     downloader
@@ -401,7 +422,7 @@ async fn download_does_not_backfill_a_non_image_even_when_eligible() {
         .expect("download succeeds");
 
     assert_eq!(
-        store.blob_posts(),
+        manifest_posts(&store),
         baseline,
         "a non-image file yields no backfill thumbnail even when eligible"
     );

@@ -134,6 +134,36 @@ def _callees(node: ast.AST) -> set[tuple[bool, str]]:
     return out
 
 
+def _self_private_calls(node: ast.AST) -> set[str]:
+    """Private names `node` calls as `self._x()` / `cls._x()` — a method of the
+    caller's own object, never a module-level function of that name. Kept apart
+    so `build_reach` merges such a call over private METHODS only: through the
+    module-level merge, a fake AT Protocol server's `self._record()` handed
+    every SPA-proxy journey the TLS issuance hook a test module's own
+    `_record` posts (measured 2026-10-23)."""
+    out: set[str] = set()
+    for sub in ast.walk(node):
+        if (
+            isinstance(sub, ast.Call)
+            and isinstance(sub.func, ast.Attribute)
+            and isinstance(sub.func.value, ast.Name)
+            and sub.func.value.id in ("self", "cls")
+            and _is_private(sub.func.attr)
+        ):
+            out.add(sub.func.attr)
+    return out
+
+
+def _method_ids(tree: ast.AST) -> set[int]:
+    """`id()` of every function defined directly in a class body."""
+    return {
+        id(item)
+        for cls in _classes(tree)
+        for item in cls.body
+        if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+
+
 def _callee_names(node: ast.AST) -> set[str]:
     """Every function name called anywhere inside `node` — `_callees` without
     the bare/attribute bit, for callers that only need the names."""
@@ -216,6 +246,53 @@ def _module_constants(tree: ast.AST, select) -> dict[str, set[str]]:
     return out
 
 
+def _module_aliases(tree: ast.AST) -> dict[str, str]:
+    """A module's second names for functions: `_advance = advance_mail_clock`
+    and `from m import seeded_outbound as _seeded_outbound`, alias → the name
+    it stands for. A bare call to the alias is a call to that name
+    (`build_reach`); without the edge a test calling a hook only through its
+    module's alias reached nothing, and the docker axis collected it against a
+    release image that carries no hook."""
+    out: dict[str, str] = {}
+    for stmt in getattr(tree, "body", ()):
+        if isinstance(stmt, ast.ImportFrom):
+            for alias in stmt.names:
+                if alias.asname and alias.asname != alias.name:
+                    out[alias.asname] = alias.name
+        elif (
+            isinstance(stmt, ast.Assign)
+            and isinstance(stmt.value, ast.Name)
+            and len(stmt.targets) == 1
+            and isinstance(stmt.targets[0], ast.Name)
+        ):
+            out[stmt.targets[0].id] = stmt.value.id
+    return out
+
+
+def _imported_privates(tree: ast.AST, roots) -> dict[str, str]:
+    """A module's private names imported from another module of the trees, by
+    the name they were defined under → that module's graph node
+    (`<path>::<name>`). `from tests.api.test_public_folder_fetch import _record`
+    is THAT module's `_record`, not every module's: resolved by the merge, a
+    share-link journey inherited the TLS issuance hook another module's
+    `_record` posts. An import the trees do not hold keeps the merge."""
+    out: dict[str, str] = {}
+    for stmt in getattr(tree, "body", ()):
+        if not isinstance(stmt, ast.ImportFrom) or stmt.level or not stmt.module:
+            continue
+        rel = stmt.module.replace(".", "/") + ".py"
+        source = next(
+            (c for base in roots for c in (base / rel, base.parent / rel) if c.is_file()),
+            None,
+        )
+        if source is None:
+            continue
+        for alias in stmt.names:
+            if _is_private(alias.name):
+                out[alias.name] = f"{source}::{alias.name}"
+    return out
+
+
 def _names_loaded(fn: ast.AST) -> set[str]:
     """Every bare name `fn` reads — its decorators included, which is where a
     `parametrize` table is named — less the names it binds itself, which
@@ -281,8 +358,13 @@ def build_reach(
     *,
     prefix: str | None = None,
     keys: frozenset[str] | None = None,
+    keyed: bool = False,
 ) -> dict[str, frozenset[str]]:
     """Map every function name in the e2e and common trees to the strings it can reach.
+
+    `keyed=True` answers by graph node instead of by bare name — a private
+    function as `<path>::<name>` — for a caller that knows which module's
+    function it means (`routes_reached_by_own_code`).
 
     `reach[f] = named directly in f  ∪  ⋃ reach[g] for every g that f calls`,
     computed to a fixpoint so a name three wrappers deep still lands on the test.
@@ -315,8 +397,17 @@ def build_reach(
     # object from anywhere) keep the merge, over every module's node of that
     # name — still the safe direction.
     direct: dict[str, set[str]] = {}
-    raw_calls: dict[str, tuple[str, set[tuple[bool, str]]]] = {}
+    # node → module → the calls that node's definition(s) in that module make. A
+    # public name is one merged node across modules, and each definition's
+    # private calls must resolve in ITS OWN module: keeping only the first
+    # module's namespace let `observe` in one helper (calling its own `_open`)
+    # resolve against another module and merge with every module's `_open`.
+    raw_calls: dict[str, dict[str, set[tuple[bool, str]]]] = {}
     private_nodes: dict[str, set[str]] = {}  # bare private name → its nodes
+    imported: dict[str, dict[str, str]] = {}  # module → `_imported_privates`
+    private_methods: dict[str, set[str]] = {}  # bare private name → method nodes
+    self_calls: dict[str, set[str]] = {}  # node → private names called on self/cls
+    other_calls: dict[str, set[str]] = {}  # node → private names called on anything else
     for path in (path for r in roots for path in _iter_sources(r)):
         try:
             tree = ast.parse(path.read_text(encoding="utf-8", errors="replace"))
@@ -328,14 +419,39 @@ def build_reach(
         constants = (
             {} if path.name in _VOCABULARY_MODULES else _module_constants(tree, select)
         )
+        aliases = _module_aliases(tree)
+        imported[module] = _imported_privates(tree, roots)
+        methods = _method_ids(tree)
+
+        def unaliased(callees: set[tuple[bool, str]]) -> set[tuple[bool, str]]:
+            # A bare call to a module alias is a bare call to what it names;
+            # chains (`a = b`, `b = c`) resolve to the end, cycles stop.
+            out = set()
+            for is_bare, name in callees:
+                seen = {name}
+                while is_bare and name in aliases and aliases[name] not in seen:
+                    name = aliases[name]
+                    seen.add(name)
+                out.add((is_bare, name))
+            return out
+
         for fn in _functions(tree):
             key = f"{module}::{fn.name}" if _is_private(fn.name) else fn.name
             if _is_private(fn.name):
                 private_nodes.setdefault(fn.name, set()).add(key)
+                if id(fn) in methods:
+                    private_methods.setdefault(fn.name, set()).add(key)
             direct.setdefault(key, set()).update(select(fn))
             for name in _names_loaded(fn) & constants.keys():
                 direct[key] |= constants[name]
-            raw_calls.setdefault(key, (module, set()))[1].update(_callees(fn))
+            callees = unaliased(_callees(fn))
+            raw_calls.setdefault(key, {}).setdefault(module, set()).update(callees)
+            on_self = _self_private_calls(fn)
+            self_calls.setdefault(key, set()).update(on_self)
+            other_calls.setdefault(key, set()).update(
+                name for is_bare, name in callees
+                if not is_bare and _is_private(name) and name not in on_self
+            )
         # A class is a node too, keyed by its own name: `FailingNestArm(port)`
         # is a call to the class, and what that call sets running is the
         # class's OWN protocol methods (`_CLASS_PROTOCOL`). `_callees` drops
@@ -349,26 +465,44 @@ def build_reach(
             key = f"{module}::{cls.name}" if _is_private(cls.name) else cls.name
             if _is_private(cls.name):
                 private_nodes.setdefault(cls.name, set()).add(key)
-            slot = raw_calls.setdefault(key, (module, set()))[1]
+            slot = raw_calls.setdefault(key, {}).setdefault(module, set())
             for method in _protocol_methods(cls):
                 direct.setdefault(key, set()).update(select(method))
                 for name in _names_loaded(method) & constants.keys():
                     direct[key] |= constants[name]
-                slot.update(_callees(method))
+                callees = unaliased(_callees(method))
+                slot.update(callees)
+                on_self = _self_private_calls(method)
+                self_calls.setdefault(key, set()).update(on_self)
+                other_calls.setdefault(key, set()).update(
+                    name for is_bare, name in callees
+                    if not is_bare and _is_private(name) and name not in on_self
+                )
             direct.setdefault(key, set())
 
     calls: dict[str, set[str]] = {}
-    for key, (module, callees) in raw_calls.items():
+    for key, by_module in raw_calls.items():
         resolved: set[str] = set()
-        for is_bare, name in callees:
-            if not _is_private(name):
-                resolved.add(name)
-                continue
-            own = f"{module}::{name}"
-            if is_bare and own in direct:
-                resolved.add(own)
-            else:
-                resolved |= private_nodes.get(name, set())
+        for module, callees in by_module.items():
+            for is_bare, name in callees:
+                if not _is_private(name):
+                    resolved.add(name)
+                    continue
+                own = f"{module}::{name}"
+                source = imported.get(module, {}).get(name)
+                if is_bare and own in direct:
+                    resolved.add(own)
+                elif is_bare and source in direct:
+                    resolved.add(source)
+                elif (
+                    not is_bare
+                    and name in self_calls.get(key, ())
+                    and name not in other_calls.get(key, ())
+                    and name in private_methods
+                ):
+                    resolved |= private_methods[name]
+                else:
+                    resolved |= private_nodes.get(name, set())
         calls[key] = resolved
 
     reach = {key: set(kinds) for key, kinds in direct.items()}
@@ -383,6 +517,9 @@ def build_reach(
                     reach[key] |= reach[callee]
             if len(reach[key]) != before:
                 grew = True
+
+    if keyed:
+        return {key: frozenset(kinds) for key, kinds in reach.items()}
 
     # The lookup view is by bare name: a test function is public, and a fixture
     # may be private (`_session_primary_mail_domain`) — for those the answer is
@@ -531,6 +668,28 @@ def own_code(item) -> list[ast.AST]:
             if is_bare and _is_private(callee) and callee in module_fns:
                 stack.append(module_fns[callee])
     return out
+
+
+def routes_reached_by_own_code(item, prefix: str) -> frozenset[str]:
+    """`routes_reached_by` over every function of `item`'s own code — the test,
+    the module fixtures it requests and the private helpers those call — each
+    followed through the merged graph. A route prefix is a rare string (the
+    `_route_literals` note), so the merge's over-reach costs nothing here, and a
+    hook a module fixture posts (`serve_nest` holding the custody pump) is the
+    test's as surely as one its body posts."""
+    path = getattr(item, "path", None) or getattr(item, "fspath", None)
+    module = str(Path(str(path)).resolve()) if path else ""
+    reach = _cached_keyed_route_reach(prefix)
+    out: set[str] = set(routes_reached_by(test_function_name(item), prefix))
+    for fn in own_code(item):
+        key = f"{module}::{fn.name}" if _is_private(fn.name) else fn.name
+        out |= reach.get(key, frozenset())
+    return frozenset(out)
+
+
+@lru_cache(maxsize=4)
+def _cached_keyed_route_reach(prefix: str) -> dict[str, frozenset[str]]:
+    return build_reach(prefix=prefix, keyed=True)
 
 
 def _shared_sources():

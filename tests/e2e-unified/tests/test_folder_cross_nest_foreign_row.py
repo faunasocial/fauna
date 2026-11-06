@@ -97,7 +97,7 @@ def test_cross_nest_shared_folder_renders_as_a_foreign_row(
 ):
     """A set shared from nest A appears in the recipient's folders list on nest B
     once accepted — sourced ONLY from their own `fauna.state.folder-keys` foreign-set row."""
-    from common.auth import register_handled_actor
+    from helpers.admin_wire import admit_adult
     from tests.api import conv_api
 
     recipient_app, nest_b, recipient = folder_share_recipient_app
@@ -107,12 +107,7 @@ def test_cross_nest_shared_folder_renders_as_a_foreign_row(
 
     # ── 1. A stranger owner on nest A, with a real set bound to a real MLS group ──
     owner_handle = "xnowner" + secrets.token_hex(3)
-    owner = register_handled_actor(
-        nest_a["port"],
-        handle=owner_handle,
-        domain=nest_a["authority"],
-        base_url=nest_a["url"],
-    )
+    owner = admit_adult(nest_a, owner_handle, domain=nest_a["authority"], token=True)
     set_name = "xnest-" + secrets.token_hex(3)
     conv_api.folder_create(nest_a["port"], owner, set_name, scheme="https")
 
@@ -206,7 +201,7 @@ def test_cross_nest_shared_folder_renders_as_a_foreign_row(
         "foreign-sets source (`wireDevicesForeignSets` in "
         f"`APIClient.devicesMachine()`). error={recipient_app.error_text()!r}"
     )
-    title = b.folder_title(0)
+    title = b.folder_titles()[0]
     assert set_name in title, (
         f"the foreign row should carry the home-nest-resolved set name {set_name!r} "
         "(relayed on the welcome envelope, recorded on the ForeignFolder, rendered "

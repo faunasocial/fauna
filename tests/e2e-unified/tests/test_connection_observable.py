@@ -17,12 +17,8 @@ the desensitizing rule (partitioned out of `account-data-plane.md`
 
 import pytest
 
-from helpers.app_surface import app_name, skip_unbuilt
-from helpers.connection import (
-    APPS_PUBLISHING_CONNECTION,
-    CONNECTION_KEY,
-    connection_observable,
-)
+from helpers.app_surface import app_name, require_surface
+from helpers.connection import CONNECTION_KEY, connection_observable
 
 pytestmark = pytest.mark.tier_3
 
@@ -37,18 +33,7 @@ def test_connection_observable_is_online_after_login(logged_in_app):
     driver = logged_in_app.driver
     name = app_name(driver)
 
-    if name not in APPS_PUBLISHING_CONNECTION:
-        skip_unbuilt(
-            driver,
-            surface=f"the `{CONNECTION_KEY}` state observable",
-            detail=(
-                "this app publishes no connection state, so the shared "
-                "connection barrier is a no-op on it and every OnlineOnly "
-                "affordance it drives after launch is still racing the "
-                "handshake"
-            ),
-            tracked="",
-        )
+    require_surface(driver, "connection-state-observable")
 
     observed = connection_observable(driver)
     assert observed is not None, (

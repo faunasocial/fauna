@@ -65,6 +65,10 @@ pytestmark = [
     pytest.mark.windows,
     pytest.mark.macos,
     pytest.mark.ios,
+    # android: the home-nest toggle, pending-invite withdraw and nest-read
+    # toggle are all built in `apps/fauna-android/`; its device run is the
+    # venue row's, the mark is the coverage contract.
+    pytest.mark.android,
 ]
 
 SEARCH_BUDGET_S = MESSAGE_BUDGET_S
@@ -261,6 +265,51 @@ def test_a_community_room_is_founded_joined_searched_and_its_read_withdrawn(
         f"a hit is a position, never the message's text: {hits!r}"
     )
 
+    # ── the same search, from the member's app (`room-search.md` § The surface)
+    # A community room offers it; a message hit opens selected and in view; a
+    # query nothing matches says so.
+    mconv = member.app.conversations
+    assert mconv.room_search_offered(), (
+        f"a community room offers its search: {seat_element(member, 'room-search-button')}"
+    )
+    mconv.search_room(reply_word)
+    found = wait_for(
+        "the member's room search painting the reply as a message hit",
+        lambda: mconv.room_search_results(),
+        lambda rows: any(kind == "message" for kind, _ in rows),
+        SEARCH_BUDGET_S,
+        diagnose=lambda: f"error={member.app.error_text()!r}\n"
+        f"{seat_element(member, 'room-search-result-item')}",
+    )
+    mconv.open_room_search_result(next(i for i, (k, _) in enumerate(found) if k == "message"))
+    def selected_text():
+        at = mconv.selected_message_index()
+        texts = member.app.driver.get_texts("dm-message-text")
+        return texts[at] if at is not None and at < len(texts) else None
+
+    wait_for(
+        "the opened hit selecting the reply in the stream",
+        selected_text,
+        lambda text: text is not None and reply_word in text,
+        MESSAGE_BUDGET_S,
+        diagnose=lambda: f"error={member.app.error_text()!r}\n"
+        f"{seat_element(member, 'dm-message-timestamp')}",
+    )
+    assert mconv.message_in_view(reply_word), (
+        f"the selected hit is brought into view: {seat_element(member, 'dm-message-text')}"
+    )
+    mconv.search_room(f"nothing{secrets.token_hex(6)}")
+    wait_for(
+        "the member's room search saying nothing matched",
+        lambda: mconv.room_search_found_nothing(),
+        lambda shown: shown,
+        SEARCH_BUDGET_S,
+        diagnose=lambda: f"error={member.app.error_text()!r}\n"
+        f"{seat_element(member, 'room-search-result-item')}",
+    )
+    assert not member.app.has_error(), member.app.error_text()
+    mconv.close_room_search()
+
     # ── withdrawing the read: one toggle and Save, in the app ────────────
     founder_view = thread_by_channel(founder.app, room_id)
     assert (founder_view.room or {}).get("nest_read") is True, founder_view.room
@@ -299,3 +348,135 @@ def test_a_community_room_is_founded_joined_searched_and_its_read_withdrawn(
         "withdrawing the read does not change what the room is — the class is its "
         f"seating, and the nest keeps its floor seat: {after.room!r}"
     )
+
+
+SEARCH_KIND = "fauna.conversations.room.search"
+FETCH_KIND = "fauna.conversations.channel.fetch"
+
+
+@pytest.mark.feature("group-conversations")
+def test_a_failed_room_search_shows_its_error_and_a_hit_not_yet_here_selects_once_it_lands(
+    room_seat_pair, nest_instance
+):
+    """Two edges of the room's search (``room-search.md`` § Errors & edge cases).
+
+    **A failed search shows the error, never the empty state.** The home nest
+    turns the member's search away (the test hook's refusal, the same reply a
+    refused or failing door gives the app): ``error-message`` carries it, and
+    neither a row nor ``room-search-no-results`` paints.
+
+    **A hit this device has not received yet says so, and is selected once it
+    lands.** The nest parks every ``channel.fetch`` (the member's device drains
+    the room only through it — a push is a wake), the founder writes, and the
+    home nest indexes the message at reception; the member's search then finds
+    a position its device does not hold, so the row reads *not on this device
+    yet*. Opening it and releasing the fetch lands the message, and the
+    selection the open set lights on it.
+
+    Latency-independent (convention 14): every wait is a deadline poll on a
+    painted row, ``error-message``, the nest's own refusal and hold counters or
+    its own search answer."""
+    from helpers.rpc_hold import (
+        arm_rpc_hold,
+        refuse_rpc,
+        release_rpc_hold,
+        wait_for_refused_rpc,
+    )
+    from helpers.room_seats import found_community_room, thread_by_id
+    from i18n.strings import S
+
+    founder, member = room_seat_pair
+    port = nest_instance["port"]
+    room_id, founder_thread, member_thread = found_community_room(
+        founder, member, f"hello {secrets.token_hex(4)}"
+    )
+    mconv = member.app.conversations
+    mconv.open_thread_by_id(member_thread)
+    wait_for(
+        "the member's device reading the room's floor and offering its search",
+        mconv.room_search_offered,
+        lambda offered: offered,
+        MEMBERSHIP_BUDGET_S,
+        diagnose=lambda: f"{seat_element(member, 'room-search-button')}\n{seat_story(member)}",
+    )
+    assert not member.app.has_error(), member.app.error_text()
+
+    # ── a refused search: the error, never the empty state ───────────────
+    refuse_rpc(port, SEARCH_KIND)
+    try:
+        mconv.search_room(f"refused{secrets.token_hex(4)}")
+        wait_for_refused_rpc(port, SEARCH_KIND)
+        wait_for(
+            "the refused search surfacing on error-message",
+            member.app.has_error,
+            lambda shown: shown,
+            MESSAGE_BUDGET_S,
+            diagnose=lambda: f"{seat_element(member, 'room-search-no-results')}\n"
+            f"{seat_element(member, 'room-search-result-item')}",
+        )
+        assert member.app.driver.is_absent("room-search-no-results"), (
+            "a failed search must never paint the empty state: "
+            f"{seat_element(member, 'room-search-no-results')}"
+        )
+        assert mconv.room_search_results() == [], (
+            f"a failed search paints no rows: {mconv.room_search_results()!r}"
+        )
+    finally:
+        release_rpc_hold(port, SEARCH_KIND)
+    mconv.close_room_search()
+
+    # ── a hit whose message has not reached this device yet ──────────────
+    word = f"pending{secrets.token_hex(4)}"
+    arm_rpc_hold(port, FETCH_KIND)
+    try:
+        fconv = founder.app.conversations
+        fconv.open_thread_by_id(founder_thread)
+        fconv.send_in_open_thread(f"this lands later {word}")
+        wait_for(
+            "the home nest's search index finding the founder's new message",
+            lambda: _search(port, member.actor, room_id, word),
+            lambda h: bool(h),
+            SEARCH_BUDGET_S,
+            diagnose=lambda: f"search={_search(port, member.actor, room_id, word)!r}\n"
+            f"{seat_story(founder)}",
+        )
+        held = thread_by_id(member.app, member_thread)
+        assert word not in (held.snippet or ""), (
+            "precondition: with every channel fetch parked the member's device "
+            f"cannot hold the new message yet, but its thread reads {held.snippet!r}"
+        )
+
+        mconv.search_room(word)
+        rows = wait_for(
+            "the member's search painting the not-yet-received hit",
+            mconv.room_search_results,
+            lambda rs: any(
+                kind == "message" and S.conversations.unified.room_search_hit_pending in text
+                for kind, text in rs
+            ),
+            SEARCH_BUDGET_S,
+            diagnose=lambda: f"error={member.app.error_text()!r}\n"
+            f"{seat_element(member, 'room-search-result-item')}",
+        )
+        at = next(
+            i for i, (kind, text) in enumerate(rows)
+            if kind == "message" and S.conversations.unified.room_search_hit_pending in text
+        )
+        mconv.open_room_search_result(at)
+    finally:
+        release_rpc_hold(port, FETCH_KIND)
+
+    def selected_text():
+        index = mconv.selected_message_index()
+        texts = member.app.driver.get_texts("dm-message-text")
+        return texts[index] if index is not None and index < len(texts) else None
+
+    wait_for(
+        "the opened pending hit selecting the message once it lands",
+        selected_text,
+        lambda text: text is not None and word in text,
+        MESSAGE_BUDGET_S,
+        diagnose=lambda: f"error={member.app.error_text()!r}\n"
+        f"{seat_element(member, 'dm-message-timestamp')}\n{seat_story(member)}",
+    )
+    assert not member.app.has_error(), member.app.error_text()

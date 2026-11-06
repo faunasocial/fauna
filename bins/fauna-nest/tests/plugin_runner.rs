@@ -836,6 +836,19 @@ async fn get(
     (status, csp, body)
 }
 
+/// One anonymous GET through the public router: the reply's headers.
+async fn reply_headers(app: &axum::Router, host: &str, path: &str) -> axum::http::HeaderMap {
+    use tower::ServiceExt as _;
+    let req = axum::http::Request::get(path).header("host", host);
+    let resp = app
+        .clone()
+        .oneshot(req.body(axum::body::Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 200, "{host}{path}");
+    resp.headers().clone()
+}
+
 /// `security.md` § Co-resident process trust boundary → *Hosted third-party
 /// code*: the nest terminates the request for a path the plugin declared and
 /// hands it the actor IT authenticated — never one a header claims — and a
@@ -852,6 +865,7 @@ async fn declared_ingress_reaches_the_plugin_with_the_nest_asserted_actor() {
             { "path": "/whoami/", "sni": null },
             { "path": "/spin/", "sni": null },
             { "path": "/nothing/" },
+            { "path": "/headers/" },
         ]),
     );
     let data = tempfile::tempdir().unwrap();
@@ -863,7 +877,7 @@ async fn declared_ingress_reaches_the_plugin_with_the_nest_asserted_actor() {
     let card = install(&state).await.unwrap().consent;
     assert_eq!(
         card.install.as_ref().unwrap().ingress_paths,
-        ["/whoami/", "/spin/", "/nothing/"]
+        ["/whoami/", "/spin/", "/nothing/", "/headers/"]
     );
     let _: ResolveConsentReply = call(
         &state,
@@ -923,6 +937,21 @@ async fn declared_ingress_reaches_the_plugin_with_the_nest_asserted_actor() {
         ("x-remote-user", user_hex.as_str()),
     ];
     assert_eq!(get(&app, NEST, "/whoami/me", &forged).await.0, 401);
+    // A header the browser applies to the whole origin never reaches it
+    // from the path half, sandbox or not: `Clear-Site-Data` would
+    // wipe the web app's identity store; a representation header passes.
+    let h = reply_headers(&app, NEST, "/headers/x").await;
+    assert_eq!(h.get("clear-site-data"), None, "{h:?}");
+    assert_eq!(h.get("alt-svc"), None, "{h:?}");
+    assert_eq!(
+        h.get("content-type").map(|v| v.to_str().unwrap()),
+        Some("text/plain")
+    );
+    assert_eq!(
+        h.get("content-security-policy")
+            .map(|v| v.to_str().unwrap()),
+        Some("sandbox")
+    );
     // The plugin's own 404.
     let (status, csp, _) = get(&app, NEST, "/nothing/here", &[]).await;
     assert_eq!((status, csp.as_deref()), (404, Some("sandbox")));
@@ -1300,6 +1329,14 @@ async fn a_claimed_whole_name_is_the_plugins_on_every_path() {
         get(&app, "matrix.nest.example", "/whoami/me", &[]).await.0,
         401
     );
+    // The name is the plugin's own origin: its origin-wide headers pass.
+    let h = reply_headers(&app, "matrix.nest.example", "/headers/x").await;
+    assert_eq!(
+        h.get("clear-site-data").map(|v| v.to_str().unwrap()),
+        Some("\"*\"")
+    );
+    assert!(h.get("alt-svc").is_some(), "{h:?}");
+    assert!(h.get("content-type").is_some(), "{h:?}");
     // Every path: the nest's own health route is the plugin's 404 here, and
     // the nest's 200 on its own host.
     assert_eq!(

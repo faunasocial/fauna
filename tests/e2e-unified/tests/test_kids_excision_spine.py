@@ -120,12 +120,11 @@ def test_the_floor_constant_is_the_four_guardian_categories_at_block():
     names = re.findall(r'"([a-z]+)"', cats.group(1))
     assert sorted(names) == ["commercial", "nsfw", "phishing", "spam"]
     floor = re.search(
-        r"pub const KIDS_CONTENT_FLOOR: ContentPolicy = ContentPolicy \{(.*?)\};", src, re.S
+        r"pub const KIDS_CONTENT_FLOOR: CompiledFloor = CompiledFloor \{(.*?)\};", src, re.S
     )
     assert floor, "fauna-core lost KIDS_CONTENT_FLOOR"
-    fields = dict(re.findall(r"(\w+): ContentFloor::(\w+)", floor.group(1)))
-    assert fields == {name: "Block" for name in names}, (
-        f"KIDS_CONTENT_FLOOR must floor every guardian category at Block: {fields}"
+    assert re.search(r"block:\s*&GUARDIAN_FLOOR_CATEGORIES\s*,", floor.group(1)), (
+        f"KIDS_CONTENT_FLOOR must block every guardian category: {floor.group(1)!r}"
     )
 
 
@@ -133,7 +132,7 @@ def test_the_ffi_floor_is_keyed_on_the_feature_and_reaches_every_render_face():
     family = (_FFI / "src" / "family.rs").read_text(encoding="utf-8")
     assert re.search(
         r'#\[cfg\(all\(feature = "value-format", feature = "kids-floor"\)\)\]\s*'
-        r"const COMPILED_CONTENT_FLOOR: Option<&ContentPolicy> =\s*"
+        r"const COMPILED_CONTENT_FLOOR: Option<&fauna_core::obligation::CompiledFloor> =\s*"
         r"Some\(&fauna_core::obligation::KIDS_CONTENT_FLOOR\);",
         family,
     ), "fauna-ffi's compiled floor must be KIDS_CONTENT_FLOOR exactly under `kids-floor`"
@@ -776,11 +775,14 @@ def test_the_ios_kids_build_routes_into_no_nest_setup_and_gates_the_retire_ids()
         )
     generator = _UI_IDS_GENERATOR.read_text(encoding="utf-8")
     m = re.search(r"SWIFT_KIDS_ONLY_ID_PREFIXES = \(([^)]*)\)", generator)
-    assert m and set(re.findall(r'"([^"]+)"', m.group(1))) == {"admin-nest-retire-", "launch-retire-button"}
+    assert m and set(re.findall(r'"([^"]+)"', m.group(1))) == {
+        "admin-nest-retire-", "launch-retire-button", "photo-backup-",
+    }
     table = _UI_IDS_SWIFT.read_text(encoding="utf-8")
     shared = table.split("public enum Ids {", 1)[1].split("\n}\n", 1)[0]
     gated = table.split("#if !FAUNA_KIDS\nextension Ids {", 1)[1]
-    for name in ("adminNestRetireSection", "adminNestRetireButton", "launchRetireButton"):
+    for name in ("adminNestRetireSection", "adminNestRetireButton", "launchRetireButton",
+                 "photoBackupControls", "photoBackupEnableToggle", "photoBackupSyncNowButton"):
         assert name not in shared, f"`{name}` is in the ungated Ids table"
         assert name in gated, f"`{name}` is missing from the kids-gated Ids extension"
 
@@ -802,8 +804,10 @@ def test_the_ios_kids_target_is_its_own_identity_and_the_main_target_is_not_kids
     for config in kids:
         assert "PRODUCT_BUNDLE_IDENTIFIER = social.fauna.faunakids;" in config
         assert "FAUNA_KIDS FAUNA_EXCISE_PAYMENTS FAUNA_EXCISE_P2P_SHARE" in config
-        assert "Fauna-iOS/Resources/Info.plist" in config, (
-            "the kids target reads the main app's Info.plist so its version stays in lockstep"
+        # Its own plist — the main one minus photo backup, held equal to it key for
+        # key by test_apple_identifier_pins.py and in version lockstep by the gate.
+        assert 'INFOPLIST_FILE = "Fauna-iOS/Resources/Info-Kids.plist";' in config, (
+            "the kids target must read the kids Info.plist (no photo-library key)"
         )
     for config in _pbx_target_configs("Fauna-iOS"):
         assert "FAUNA_KIDS" not in config and "faunakids" not in config
@@ -828,13 +832,19 @@ def test_the_apple_kids_witness_checks_both_columns():
     assert "vacuous" in body
 
 
-def test_the_kids_app_sends_a_declared_only_age_claim():
-    """The armed iOS arm pins the MAIN App ID, and App Attest signs under the running
-    bundle's — a kids attestation would fail the check and refuse the admission."""
+def test_the_kids_app_attests_the_age_claim_under_the_kids_app_id():
+    """The nest pins the kids App ID beside the main one and App Attest signs under the
+    running bundle's, so the kids build reaches the attestation path with the App ID
+    the FFI supplies (the kids flavor answers the kids one) — no Swift literal."""
     src = (_APPLE / "FaunaKit/Sources/FaunaKit/Core/StoreAgeClaim.swift").read_text(encoding="utf-8")
-    body = src.split("private func attestOrNil(", 1)[1]
-    gate = body.index("#if FAUNA_KIDS")
-    assert body.index("return nil", gate) < body.index("signals.attest(", gate)
+    assert "applicationId: String? = iosAgeAttestationAppId()" in src
+    body = src.split("private func attestOrNil(", 1)[1].split("private func warn(", 1)[0]
+    assert "FAUNA_KIDS" not in body, "the kids build skips attestation again"
+    assert "social.fauna" not in body, "the App ID must come from the FFI, not a Swift literal"
+    assert body.index("guard let applicationId") < body.index("signals.attest(")
+    ffi = (_REPO / "libs/fauna-ffi/src/family.rs").read_text(encoding="utf-8")
+    kids_arm = ffi.rsplit("fn ios_app_id_for_this_flavor", 1)[1]
+    assert "FAUNA_IOS_KIDS_APP_ID" in kids_arm[:100]
 
 
 def test_the_kids_build_opens_no_outbound_link():

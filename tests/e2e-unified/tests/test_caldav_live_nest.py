@@ -77,7 +77,7 @@ import pytest
 # (`test_caldav_onboarding_variants.py`) share ONE implementation (priorities
 # #2/#4 — reuse, don't copy). `_utc` is re-exported here because two of this
 # module's cases call it directly.
-from helpers.app_surface import skip_unbuilt
+from helpers.app_surface import require_surface
 from helpers.caldav_roundtrip import (
     _utc,
     caldav_has,
@@ -141,14 +141,7 @@ def test_three_client_caldav_roundtrip(app):
     """
     from helpers.caldav_client import CalDAVClient, build_vevent
 
-    if not app.driver.is_linux():
-        skip_unbuilt(
-            app.driver,
-            surface="the live-nest 3-client CalDAV round-trip drive",
-            detail="drives the linux Fauna app UI as the 3rd client; the "
-            "other apps are the remaining cross-app follow-on",
-            tracked="caldav-server.md",
-        )
+    require_surface(app.driver, "caldav-live-nest-drive")
 
     nonce = f"cal{int(time.time())}"
 

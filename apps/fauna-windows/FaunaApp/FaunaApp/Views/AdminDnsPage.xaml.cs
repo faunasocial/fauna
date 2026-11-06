@@ -89,6 +89,19 @@ public sealed partial class AdminDnsPage : Page
     /// "None").</summary>
     private List<(byte[] Id, string Label)> _adminActors = new();
 
+    /// <summary>The open page's background re-check (dns-management.md § Manual +
+    /// live verification — the slow cadence): ticks the shared
+    /// <c>DnsManagementMachine.BackgroundRecheck</c> every
+    /// <c>record_recheck_secs()</c> while the page is loaded. The cadence and the
+    /// tick are the shared crate's; this owns only the timer (linux
+    /// <c>arm_dns_background_recheck</c>). Created and stopped on the UI
+    /// thread.</summary>
+    private DispatcherTimer? _recheckTimer;
+
+    /// <summary>True while a tick's <c>BackgroundRecheck</c> is awaited, so a slow
+    /// one is never overlapped by the next.</summary>
+    private bool _recheckInFlight;
+
     public AdminDnsPage()
     {
         this.InitializeComponent();
@@ -110,6 +123,58 @@ public sealed partial class AdminDnsPage : Page
     private async void Page_Loaded(object sender, RoutedEventArgs e)
     {
         await LoadAsync();
+        // Armed once the load's own verify is done, so the first tick is a full
+        // period out — and not at all if the page was left while loading.
+        if (IsLoaded) StartBackgroundRecheck();
+    }
+
+    private void Page_Unloaded(object sender, RoutedEventArgs e)
+    {
+        _recheckTimer?.Stop();
+    }
+
+    private void StartBackgroundRecheck()
+    {
+        if (_recheckTimer is null)
+        {
+            _recheckTimer = new DispatcherTimer
+            {
+                Interval = TimeSpan.FromSeconds((double)FaunaClientDnsMethods.RecordRecheckSecs()),
+            };
+            _recheckTimer.Tick += async (_, _) => await BackgroundRecheckAsync();
+        }
+        if (!_recheckTimer.IsEnabled) _recheckTimer.Start();
+    }
+
+    /// <summary>One tick: the shared <c>BackgroundRecheck</c> re-reads the matrix
+    /// and verifies it (re-publishing a managed record public DNS no longer
+    /// serves), then the page re-renders from the snapshots — only when the tick
+    /// changed the snapshot (the shared <c>dns_snapshot_changed</c>): the render
+    /// rebuilds every row, and a tick that found nothing new must not tear down a
+    /// picker or button the admin is using. No progress ring — a tick the admin
+    /// did not ask for never marks the page busy — and it shows an error but never
+    /// clears one the admin has not acted on (macos/android
+    /// <c>backgroundRecheck</c>).</summary>
+    private async Task BackgroundRecheckAsync()
+    {
+        if (_machine is null || _recheckInFlight) return;
+        _recheckInFlight = true;
+        try
+        {
+            var before = _machine.Snapshot();
+            await _machine.BackgroundRecheck();
+            if (_recheckTimer?.IsEnabled != true) return; // the page was left mid-tick
+            if (!FaunaClientDnsMethods.DnsSnapshotChanged(before, _machine.Snapshot())) return;
+            if (RenderSections() is { } err) ShowError(err);
+        }
+        catch (Exception ex)
+        {
+            ShellLog.Warn("AdminDnsPage", $"background re-check failed: {ex.Message}");
+        }
+        finally
+        {
+            _recheckInFlight = false;
+        }
     }
 
     private async Task LoadAsync()
@@ -226,16 +291,7 @@ public sealed partial class AdminDnsPage : Page
     /// failure, then the DNS list/verify/credential error.</summary>
     private void RenderAll()
     {
-        var dns = _machine!.Snapshot();
-        var ld = _ldHydrated ? _localDomains!.Snapshot() : null;
-        _addingFirstDomain = ld?.addingFirstDomain ?? false;
-        RenderDomains(dns, ld);
-        RenderRenameBanner(ld);
-        RenderRemovedDomains(ld);
-        RenderCredentials(dns);
-        RenderManageAll(dns, ld);
-        var err = ld?.error ?? _ldLoadError ?? dns.error;
-        if (err is { } e)
+        if (RenderSections() is { } e)
         {
             ShowError(e);
         }
@@ -243,6 +299,58 @@ public sealed partial class AdminDnsPage : Page
         {
             ClearError();
         }
+    }
+
+    /// <summary>Re-render every section of <see cref="RenderAll"/> and return the
+    /// error the page should show by its precedence, leaving the error bar to the
+    /// caller.</summary>
+    private string? RenderSections()
+    {
+        var dns = _machine!.Snapshot();
+        var ld = _ldHydrated ? _localDomains!.Snapshot() : null;
+        _addingFirstDomain = ld?.addingFirstDomain ?? false;
+        RenderCertIssuanceErrors(dns);
+        RenderDomains(dns, ld);
+        RenderRenameBanner(ld);
+        RenderRemoveConfirm(ld);
+        RenderRemovedDomains(ld);
+        RenderCredentials(dns);
+        RenderManageAll(dns, ld);
+        return ld?.error ?? _ldLoadError ?? dns.error;
+    }
+
+    /// <summary>Rebuild the deployment-level failing-order lines
+    /// (<c>admin-dns-cert-issuance-error</c>, tls-certificates.md § Keeping the cert
+    /// alive, *The admin sees why issuance is failing*): one line per entry of
+    /// <c>DnsSnapshot.cert_issuance_errors</c>, worded by the shared
+    /// <c>cert_issuance_error_line</c> with the failure's local date rendered the way
+    /// the cert badge renders its expiry. The CA's text is untrusted data the shared
+    /// formatter has already folded onto one line, so it is painted as a plain
+    /// <c>TextBlock.Text</c>, never markup. The line carries no
+    /// <c>AutomationProperties.Name</c>, so its UIA name is its text (the e2e reads
+    /// it). Collapsed when no order fails.</summary>
+    private void RenderCertIssuanceErrors(DnsSnapshot dns)
+    {
+        CertIssuanceErrorsHost.Children.Clear();
+        var errors = dns.certIssuanceErrors ?? Array.Empty<CertIssuanceErrorRow>();
+        foreach (var e in errors)
+        {
+            var line = new TextBlock
+            {
+                Text = FaunaClientDnsMethods.CertIssuanceErrorLine(
+                    e, FormatCertExpiry(e.failedAtUnix)),
+                TextWrapping = TextWrapping.Wrap,
+            };
+            // The cert badge's warning tone (CertStatusDisplay).
+            if (ThemeBrush("SystemFillColorCautionBrush") is { } brush)
+            {
+                line.Foreground = brush;
+            }
+            AutomationProperties.SetAutomationId(line, Ids.AdminDnsCertIssuanceError);
+            CertIssuanceErrorsHost.Children.Add(line);
+        }
+        CertIssuanceErrorsHost.Visibility =
+            errors.Length == 0 ? Visibility.Collapsed : Visibility.Visible;
     }
 
     /// <summary>Rebuild the held DNS-provider credential list (the managed-mode
@@ -281,7 +389,9 @@ public sealed partial class AdminDnsPage : Page
     /// <c>managed</c> mode), guarding the programmatic <c>IsOn</c> set so its
     /// <c>Toggled</c> handler doesn't re-dispatch. This is the sole DNS
     /// master-switch render after the admin-services page was removed (2026-06-04,
-    /// admin.md § Admin IA redesign).</summary>
+    /// admin.md § Admin IA redesign). The checked state is mirrored as the
+    /// <c>state</c> attr (<c>on</c>/<c>off</c>, HelpText) the e2e reads, like
+    /// linux's <c>set_test_attr</c>.</summary>
     private void RenderManageAll(DnsSnapshot dns, LocalDomainsSnapshot? ld)
     {
         // Active-domain set: prefer the authoritative local-domains active list, fall
@@ -297,6 +407,7 @@ public sealed partial class AdminDnsPage : Page
         _syncingManageAll = true;
         ManageAllToggle.IsOn = allManaged;
         _syncingManageAll = false;
+        AutomationProperties.SetHelpText(ManageAllToggle, allManaged ? "on" : "off");
     }
 
     /// <summary>Rebuild the active per-domain rows by merging the authoritative
@@ -1212,6 +1323,14 @@ public sealed partial class AdminDnsPage : Page
         return resolved == slashed ? key : resolved;
     }
 
+    /// <summary>A new credential's label: the provider's translated display name, the same
+    /// <see cref="ResolveLabel"/> lookup over <c>Providers.All</c> the provider buttons
+    /// paint — the bare id only for a provider this build's registry does not list.</summary>
+    private static string CredentialLabel(string providerId) =>
+        Providers.All.FirstOrDefault(p => p.Id == providerId) is { } provider
+            ? ResolveLabel(provider.DisplayNameKey)
+            : providerId;
+
     private static string ReadField(Control input) => input switch
     {
         PasswordBox pb => pb.Password,
@@ -1243,8 +1362,10 @@ public sealed partial class AdminDnsPage : Page
     /// <c>fauna.state.dns</c>). No provider selected / any field blank → no-op (keep
     /// the form open; a blank token would fail provider verify anyway). On success
     /// the credential renders in the held list; a failed verify surfaces in
-    /// <c>error-message</c> and stores nothing. The credential label defaults to the
-    /// provider id (mirrors linux <c>dns_put_credentials</c>).</summary>
+    /// <c>error-message</c> and stores nothing. The credential label is the provider's
+    /// translated display name — the lookup the provider buttons use — as on the other six
+    /// apps (dns-management.md § Storage); an app-side i18n lookup, so it is not lifted
+    /// into <c>fauna-client-dns</c>.</summary>
     private async void AddCredentialSubmit_Click(object sender, RoutedEventArgs e)
     {
         if (_machine is null) return;
@@ -1263,7 +1384,7 @@ public sealed partial class AdminDnsPage : Page
         LoadProgress.Visibility = Visibility.Visible;
         try
         {
-            await _machine.Dispatch(new DnsAction.PutCredentials(pid, fields, pid));
+            await _machine.Dispatch(new DnsAction.PutCredentials(pid, fields, CredentialLabel(pid)));
             RenderAll();
         }
         catch (Exception ex)
@@ -1326,13 +1447,50 @@ public sealed partial class AdminDnsPage : Page
         // provisioning (automatic).
     }
 
-    /// <summary>Soft-delete the clicked domain (`admin-dns-domain-remove-button` →
-    /// <c>LocalDomainAction.RemoveDomain</c>). The nest refuses the primary
-    /// (`cannot_remove_primary_domain`); the button is disabled there anyway.</summary>
-    private async void RemoveDomain_Click(object sender, RoutedEventArgs e)
+    /// <summary>A row's remove control (`admin-dns-domain-remove-button`) opens the
+    /// remove confirm and removes nothing (mail-multidomain.md § Removing a local
+    /// domain): the shared <c>arm_remove_domain</c> names the domain — synchronous,
+    /// no nest — and the re-render paints the dialog from the snapshot. The nest
+    /// refuses the primary (`cannot_remove_primary_domain`); the button is disabled
+    /// there anyway.</summary>
+    private void RemoveDomain_Click(object sender, RoutedEventArgs e)
     {
-        if ((sender as FrameworkElement)?.DataContext is not DnsDomainItem item) return;
-        await DispatchLocalDomainAsync(new LocalDomainAction.RemoveDomain(item.DomainName));
+        if (_localDomains is null || (sender as FrameworkElement)?.DataContext is not DnsDomainItem item) return;
+        _localDomains.ArmRemoveDomain(item.DomainName);
+        RenderAll();
+        DomainRemoveConfirm.StartBringIntoView();
+    }
+
+    /// <summary>Paint the remove confirm while <c>LocalDomainsSnapshot.removeConfirmDomain</c>
+    /// names a domain: the shared <c>remove_confirm_title</c> then the ratified
+    /// <c>remove_confirm_body</c>, both for that domain. Collapsed otherwise — which
+    /// prunes it from UIA, so the modal reads as absent.</summary>
+    private void RenderRemoveConfirm(LocalDomainsSnapshot? ld)
+    {
+        if (ld?.removeConfirmDomain is { } domain)
+        {
+            DomainRemoveConfirmTitle.Text = Strings.Resolve(FaunaClientMailSettingsMethods.RemoveConfirmTitle(domain));
+            DomainRemoveConfirmBody.Text = Strings.Resolve(FaunaClientMailSettingsMethods.RemoveConfirmBody(domain));
+            DomainRemoveConfirm.Visibility = Visibility.Visible;
+        }
+        else
+        {
+            DomainRemoveConfirm.Visibility = Visibility.Collapsed;
+        }
+    }
+
+    /// <summary>The remove confirm's confirm (`admin-dns-domain-remove-confirm-button`
+    /// → <c>LocalDomainAction.ConfirmRemoveDomain</c>): the shared machine soft-deletes
+    /// the domain it armed and closes the dialog; nothing armed is a no-op.</summary>
+    private async void DomainRemoveConfirm_Click(object sender, RoutedEventArgs e)
+        => await DispatchLocalDomainAsync(new LocalDomainAction.ConfirmRemoveDomain());
+
+    /// <summary>The remove confirm's cancel (`admin-dns-domain-remove-cancel-button`
+    /// → the shared <c>cancel_remove_domain</c>): closes it with nothing removed.</summary>
+    private void DomainRemoveCancel_Click(object sender, RoutedEventArgs e)
+    {
+        _localDomains?.CancelRemoveDomain();
+        RenderAll();
     }
 
     /// <summary>Restore a soft-deleted domain (`admin-dns-removed-domain-restore-button`
@@ -1414,8 +1572,14 @@ public sealed partial class AdminDnsPage : Page
     /// <c>error</c> (surfaced via <see cref="RenderAll"/>'s precedence); a thrown
     /// <c>DispatchError</c> is shown too. On success the list is hydrated, so flag it
     /// so RenderAll uses the authoritative local-domains snapshot (recovers even if
-    /// the initial list-load had failed). No <c>ConfigureAwait(false)</c> — off-thread
-    /// bound-state mutation throws a silent COMException.</summary>
+    /// the initial list-load had failed). An action that moves the record matrix
+    /// (the shared <c>LocalDomainActionMovesRecordMatrix</c> — an added domain's
+    /// records, a removed one's gone, a new DMARC body) runs the shared
+    /// <c>RecheckMatrix</c> before the one render: the domain appears with its
+    /// records and their status (mail-multidomain.md § Wizard steps, step 8), and
+    /// the next background tick finds nothing new to redraw. No
+    /// <c>ConfigureAwait(false)</c> — off-thread bound-state mutation throws a silent
+    /// COMException.</summary>
     private async Task DispatchLocalDomainAsync(LocalDomainAction action)
     {
         if (_localDomains is null) return;
@@ -1426,6 +1590,11 @@ public sealed partial class AdminDnsPage : Page
             await _localDomains.Dispatch(action);
             _ldHydrated = true;
             _ldLoadError = null;
+            if (_machine is not null
+                && FaunaClientMailSettingsMethods.LocalDomainActionMovesRecordMatrix(action))
+            {
+                await _machine.RecheckMatrix();
+            }
         }
         catch (Exception ex)
         {

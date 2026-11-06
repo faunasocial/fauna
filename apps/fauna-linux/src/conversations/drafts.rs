@@ -44,7 +44,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use fauna_client::NestClient;
-use fauna_client_drafts::DraftsSync;
+use fauna_client_drafts::{DraftsSync, LaunchRestore};
 use fauna_conversations::ConversationsManager;
 use fauna_core::identity::ActorKeypair;
 
@@ -173,35 +173,30 @@ fn restore_on_launch(
     ));
 }
 
-/// The body of [`restore_on_launch`], over any load. The manager is the
-/// eternal singleton, kept across every switch and sign-out, and `main.rs`
-/// wipes it before the outgoing client shuts down — so the outgoing account's
-/// fetch can answer after the wipe. The identity epoch is read **here,
-/// synchronously, before the load is polled**, and the restore refuses the
-/// reply once it has moved (`account-scoping.md` § The scoping taxonomy — the
-/// one-shot detached read `actor_scope::current_generation`'s doc describes,
-/// guarded on the manager's own epoch).
+/// The body of [`restore_on_launch`], over any load: the shared
+/// [`fauna_client_drafts::restore_when_loaded`]. The manager is the eternal
+/// singleton, kept across every switch and sign-out, and `main.rs` wipes it
+/// before the outgoing client shuts down, so the outgoing account's fetch can
+/// answer after the wipe; the shared body reads the identity epoch
+/// synchronously before the load is polled and the restore refuses the reply
+/// once it has moved (`account-scoping.md` § The scoping taxonomy).
 fn restore_when_loaded<E: std::fmt::Display + Send>(
     manager: Arc<ConversationsManager>,
     load: impl std::future::Future<Output = Result<Option<Vec<u8>>, E>> + Send + 'static,
 ) -> impl std::future::Future<Output = ()> + Send + 'static {
-    let epoch = manager.identity_epoch();
+    let reader = Arc::clone(&manager);
+    let restore = fauna_client_drafts::restore_when_loaded(
+        move || reader.identity_epoch(),
+        load,
+        move |epoch, bytes| async move { manager.restore_drafts_at(epoch, bytes).await },
+    );
     async move {
-        match load.await {
-            Ok(Some(bytes)) => {
-                tracing::info!(
-                    "drafts: restored {} bytes of conversation drafts",
-                    bytes.len()
-                );
-                // Awaited: the restore is async, and a dropped future never
-                // fills the store — while the completed load has already
-                // lifted `save_if_changed`'s gate, so the first autosave
-                // would replace the account's `__drafts` with this device's
-                // edits alone.
-                manager.restore_drafts_at(epoch, bytes).await;
+        match restore.await {
+            LaunchRestore::Restored(len) => {
+                tracing::info!("drafts: restored {len} bytes of conversation drafts")
             }
-            Ok(None) => tracing::debug!("drafts: none persisted yet (first run)"),
-            Err(e) => tracing::warn!("drafts: load failed: {e}"),
+            LaunchRestore::FirstRun => tracing::debug!("drafts: none persisted yet (first run)"),
+            LaunchRestore::Failed(e) => tracing::warn!("drafts: load failed: {e}"),
         }
     }
 }

@@ -87,6 +87,22 @@ public sealed class DirectNestClient : INestHttpClient
     }
 
     /// <summary>
+    /// Test seam: a client whose HTTP traffic goes through <paramref name="handler"/>
+    /// and whose bearer is the ready <paramref name="bearer"/>, so a test's POST really
+    /// reaches a stub without the FFI bearer mint (<see cref="EnsureAuthAsync"/>).
+    /// </summary>
+    internal DirectNestClient(string nestUrl, ICryptoService crypto, HttpMessageHandler handler, string bearer)
+    {
+        _nestUrl = nestUrl.TrimEnd('/');
+        _crypto = crypto;
+        _launch = null;
+        _testBearer = bearer;
+        _http = CreateHttpClient(_nestUrl, handler);
+    }
+
+    private readonly string? _testBearer;
+
+    /// <summary>
     /// Builds the residual-HTTP client (health / blob / snapshot) with a
     /// <c>ServerCertificateCustomValidationCallback</c> that trusts a self-signed
     /// nest the same way the rest of the Rust stack does — the shared pinned SPKI —
@@ -98,11 +114,11 @@ public sealed class DirectNestClient : INestHttpClient
     /// host + port the carve-outs are granted to) for the URL it serves. See
     /// <c>docs/goal/architecture/security.md</c> § Transport trust.
     /// </summary>
-    private HttpClient CreateHttpClient(string nestUrl)
+    private HttpClient CreateHttpClient(string nestUrl, HttpMessageHandler? injected = null)
     {
         _authority = FaunaFfiMethods.AuthorityOf(nestUrl);
         _nestUri = new Uri(nestUrl);
-        var handler = new HttpClientHandler
+        HttpMessageHandler handler = injected ?? new HttpClientHandler
         {
             ServerCertificateCustomValidationCallback = ValidateServerCertificate,
         };
@@ -198,6 +214,12 @@ public sealed class DirectNestClient : INestHttpClient
     /// </summary>
     private async Task EnsureAuthAsync(CancellationToken ct)
     {
+        if (_testBearer is not null)
+        {
+            _http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", _testBearer);
+            return;
+        }
+
         if (_launch is not null)
         {
             var snap = _launch.Snapshot();
@@ -575,7 +597,10 @@ public sealed class DirectNestClient : INestHttpClient
         var resp = await _http.PostAsync("/api/v1/blob", content, ct).ConfigureAwait(false);
         resp.EnsureSuccessStatusCode();
         var json = await resp.Content.ReadFromJsonAsync<JsonElement>(JsonOptions, ct).ConfigureAwait(false);
-        return json.GetProperty("hash").GetString() ?? throw new InvalidOperationException("Blob upload missing hash");
+        var echoed = json.GetProperty("hash").GetString() ?? throw new InvalidOperationException("Blob upload missing hash");
+        // Client-computed media hash (security.md § Signed-envelope shape): the hash the
+        // caller signs is the local blake3 of the bytes just POSTed, never the nest's echo.
+        return FaunaFfiMethods.VerifyBlobUploadEcho(echoed, payload.@primary.@bytes);
     }
 
     public async Task<string> UploadPreparedBlobAsync(
@@ -609,7 +634,8 @@ public sealed class DirectNestClient : INestHttpClient
         var resp = await _http.PostAsync("/api/v1/blob", content, ct).ConfigureAwait(false);
         resp.EnsureSuccessStatusCode();
         var json = await resp.Content.ReadFromJsonAsync<JsonElement>(JsonOptions, ct).ConfigureAwait(false);
-        return json.GetProperty("hash").GetString() ?? throw new InvalidOperationException("Blob upload missing hash");
+        var echoed = json.GetProperty("hash").GetString() ?? throw new InvalidOperationException("Blob upload missing hash");
+        return FaunaFfiMethods.VerifyBlobUploadEcho(echoed, bytes);
     }
 
     public async Task<string> UploadSealedBlobAsync(byte[] sidecarCbor, byte[] sealedBytes, CancellationToken ct = default)

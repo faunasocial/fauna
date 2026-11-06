@@ -1,5 +1,6 @@
 using FaunaApp.Core.Services;
 using uniffi.fauna_core;
+using uniffi.fauna_ffi;
 using Xunit;
 
 namespace FaunaApp.Tests;
@@ -7,7 +8,9 @@ namespace FaunaApp.Tests;
 /// <summary>
 /// Pins <see cref="KnockToastText.For"/> — the shared <c>knock_text_for</c>
 /// decision resolved through windows' RESW pipeline
-/// (`notifications.md` § Localized body → *The knock toast*).
+/// (`notifications.md` § Localized body → *The knock toast*) — and
+/// <see cref="KnockToastText.Withheld"/>, the toast's muted-word gate
+/// (`notifications.md` § Muted words rule 6).
 /// </summary>
 [Collection("StringsGlobal")]
 public class KnockToastTextTests
@@ -73,5 +76,27 @@ public class KnockToastTextTests
         Assert.Equal("abcd1234 wants to connect: hi there", text);
         Assert.DoesNotContain('\n', text);
         Assert.DoesNotContain('\u0007', text);
+    }
+
+    // ── The toast gate (`notifications.md` § Muted words rule 6) ──
+
+    private static readonly MutedKeyword[] HideLottery = { new("lottery", -1000) };
+
+    private static FfiKnock KnockSaying(string message) => MockNestRpcClient.MakeKnock(
+        "abcd1234deadbeef", message,
+        new LocalizedText("notifications.row_knock",
+            new Dictionary<string, string> { ["sender"] = "abcd1234", ["message"] = message }));
+
+    [Fact]
+    public void KnockWhoseMessageCarriesAHideWord_IsWithheld()
+    {
+        Assert.True(KnockToastText.Withheld(KnockSaying("you won the LOTTERY"), HideLottery));
+    }
+
+    [Fact]
+    public void CleanKnock_IsNotWithheld()
+    {
+        Assert.False(KnockToastText.Withheld(KnockSaying("hi there"), HideLottery));
+        Assert.False(KnockToastText.Withheld(KnockSaying("you won the lottery"), Array.Empty<MutedKeyword>()));
     }
 }

@@ -34,6 +34,16 @@ public sealed record MailAliasImportResult(
         v.created, v.skippedDuplicate, v.invalid, v.outcomes.Select(MailAliasImportOutcome.From).ToList());
 }
 
+/// <summary>One received message in an address's history
+/// (<c>mail-aliases-audit-item</c>): the address it arrived on, the sending domain and
+/// the local receive time, projected from the shared machine's <see cref="AliasHitView"/>.</summary>
+public sealed record MailAliasAuditHit(string MatchedAddress, string SenderDomain, string ReceivedAt)
+{
+    internal static MailAliasAuditHit From(AliasHitView h) => new(
+        h.matchedAddress, h.senderDomain,
+        uniffi.fauna_ffi.FaunaFfiMethods.FormatUnixLocalMs(h.receivedAtMs));
+}
+
 /// <summary>
 /// One alias row (<c>mail-aliases-list-item</c>), projected from the shared
 /// machine's <see cref="AliasView"/>. Carries both the display strings the
@@ -70,9 +80,26 @@ public sealed class MailAliasRow
     public required string EditLabel { get; init; }
     public required string RevokeLabel { get; init; }
     public required string DeleteLabel { get; init; }
+    /// <summary>The audit toggle's label: "Show audit" while closed, "Hide audit" while
+    /// this row's history is the open disclosure.</summary>
     public required string ShowAuditLabel { get; init; }
+    /// <summary>Whether this row's per-address history is the snapshot's open
+    /// disclosure (<c>MailAliasesSnapshot.audit</c>) — only one row at a time.</summary>
+    public bool AuditOpen { get; init; }
+    /// <summary>Open with no hits: the <c>mail-aliases-audit-empty</c> state.</summary>
+    public bool AuditEmpty => AuditOpen && AuditHits.Count == 0;
+    /// <summary>The open history, newest first (one <c>mail-aliases-audit-item</c> each).</summary>
+    public IReadOnlyList<MailAliasAuditHit> AuditHits { get; init; } = Array.Empty<MailAliasAuditHit>();
+    /// <summary>The <c>mail-aliases-list-item-expires-at</c> text — the shared label over a
+    /// local date; empty for an address with no expiry.</summary>
+    public string ExpiresAt { get; init; } = string.Empty;
+    /// <summary>Whether the row shows <see cref="ExpiresAt"/>.</summary>
+    public bool HasExpiry => ExpiresAt.Length > 0;
+    /// <summary>Whether the row offers <c>mail-aliases-list-item-extend-button</c>: a
+    /// disposable that still accepts mail (the shared <c>alias_is_extendable</c>).</summary>
+    public bool CanExtend { get; init; }
 
-    internal static MailAliasRow From(AliasView a) => new()
+    internal static MailAliasRow From(AliasView a, AliasAuditView? audit, long nowMs) => new()
     {
         AliasIdHex = a.aliasIdHex,
         Address = a.address,
@@ -89,7 +116,19 @@ public sealed class MailAliasRow
         EditLabel = Strings.Get("mail_aliases/edit"),
         RevokeLabel = Strings.Get("mail_aliases/revoke"),
         DeleteLabel = Strings.Get("mail_aliases/delete"),
-        ShowAuditLabel = Strings.Get("mail_aliases/show_audit"),
+        AuditOpen = audit is not null && audit.aliasIdHex == a.aliasIdHex,
+        AuditHits = audit is not null && audit.aliasIdHex == a.aliasIdHex
+            ? audit.hits.Select(MailAliasAuditHit.From).ToList()
+            : Array.Empty<MailAliasAuditHit>(),
+        ShowAuditLabel = Strings.Get(
+            audit is not null && audit.aliasIdHex == a.aliasIdHex
+                ? "mail_aliases/hide_audit"
+                : "mail_aliases/show_audit"),
+        ExpiresAt = FaunaClientMailSettingsMethods.AliasExpiryLabel(
+            a.expiresAtMs, nowMs, a.expiresAtMs is long at ? FormatMillisLocal(at) : string.Empty)
+            is { } label ? Strings.Resolve(label) : string.Empty,
+        CanExtend = FaunaClientMailSettingsMethods.AliasIsExtendable(
+            a.kind, a.expiresAtMs, a.usesRemaining, nowMs),
     };
 
     /// <summary>The <c>mail-aliases-list-item-hits</c> last-hit date — the shared
@@ -114,9 +153,8 @@ public sealed class MailAliasRow
 /// lifts the linux reference apps/fauna-linux/src/settings/mail_aliases.rs.
 ///
 /// The per-row disable toggle is two-way (Revoke + Enable) — disable is no longer a
-/// one-way trap (mail-aliases.md § Disable, a product invariant). One honest gap remains,
-/// mirrored from the lead (surfaced, never faked): the per-row Show-audit disclosure is
-/// inert (list_account_alias_hits is a follow-on slice). The page renders it honestly.
+/// one-way trap (mail-aliases.md § Disable, a product invariant). The per-row Show-audit
+/// disclosure dispatches ShowAudit / HideAudit and renders the snapshot's open history.
 /// </summary>
 public partial class MailAliasesViewModel : ObservableObject
 {
@@ -217,12 +255,28 @@ public partial class MailAliasesViewModel : ObservableObject
     public Task DeleteAsync(string aliasIdHex)
         => DispatchAsync(new MailAliasesAction.Delete(aliasIdHex));
 
+    /// <summary>Push a disposable's expiry out by the disposable default lifetime
+    /// (mail-aliases.md § Don't do these). The clock is read here, the one moment the
+    /// gesture fires; the shared machine refuses a row no longer extendable before any
+    /// round trip and fills the row's pattern and controls itself.</summary>
+    public Task ExtendAsync(string aliasIdHex)
+        => DispatchAsync(new MailAliasesAction.Extend(aliasIdHex, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()));
+
     /// <summary>Bulk-import exact aliases from pasted lines (<c>mail-aliases-import-submit-button</c>
     /// → mail-aliases.md § Bulk import). Best-effort per line; the machine derives one exact
     /// alias per non-blank line, skipping duplicates/invalid addresses. The outcome lands in
     /// <see cref="LastImportResult"/> and the list re-lists.</summary>
     public Task ImportAsync(IReadOnlyList<string> lines)
         => DispatchAsync(new MailAliasesAction.Import(lines.ToArray()));
+
+    /// <summary>Open <paramref name="aliasIdHex"/>'s per-address history (replaces any other
+    /// row's open history); the hits land in the snapshot's <c>audit</c>.</summary>
+    public Task ShowAuditAsync(string aliasIdHex)
+        => DispatchAsync(new MailAliasesAction.ShowAudit(aliasIdHex));
+
+    /// <summary>Close the open history disclosure.</summary>
+    public Task HideAuditAsync()
+        => DispatchAsync(new MailAliasesAction.HideAudit());
 
     /// <summary>Dispatch an action then re-project the snapshot. The machine captures any
     /// user-facing error into <c>snapshot.error</c> (and also throws), so the throw is
@@ -249,9 +303,10 @@ public partial class MailAliasesViewModel : ObservableObject
         LastMintedAddress = snap.lastMintedAddress;
         LastImportResult = snap.lastImportResult is null ? null : MailAliasImportResult.From(snap.lastImportResult);
         Aliases.Clear();
+        var nowMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
         foreach (var a in snap.aliases)
         {
-            Aliases.Add(MailAliasRow.From(a));
+            Aliases.Add(MailAliasRow.From(a, snap.audit, nowMs));
         }
     }
 }

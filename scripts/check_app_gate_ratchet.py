@@ -56,6 +56,29 @@ excluding the `is_<app>` identity family (which is correct-by-design, not debt):
      debt inventory for a human to glance over rather than left invisible.
      Full context: `docs/goal/architecture/testing.md` § convention 7, mode 5.
 
+THE SECOND COUNTER — free-text `skip_unbuilt(` calls (convention 7, *The
+surface registry*, rule "two lints and a second ratchet"). Since 2026-10-25 a
+gate for an unbuilt surface is `require_surface(driver, "<key>")`, its app set
+declared once in `tests/e2e-unified/surfaces.toml`; `skip_unbuilt(surface=…)`
+was the pre-registry form, the app set in the caller's own `if` and the surface
+as free text. The migration closed 2026-10-28: the counter sits at its floor
+(any such call fails, no baseline file) and `skip_unbuilt` is private to
+`helpers/app_surface.py`. What a "call" is comes from
+`surface_survey.unbuilt_calls`, the survey that seeded the registry, so the two
+cannot disagree about what a site is. The walk adds the root `conftest.py`,
+which holds gate sites of its own.
+
+THE THIRD COUNTER — undeclared host-OS skips (convention 7's fourth skip kind,
+ruled 2026-11-01; feature-catalog.md § The ledger, *Stale records*, ruling (i)).
+A witness whose subject exists on one OS alone DECLARES it with
+`@pytest.mark.host_platform(...)`, which the catalog reads without a run; a bare
+`skipif(sys.platform …)` in a feature-tagged module outside the venue tree
+(`tests/platform/<os>/`, declared by its directory) says the same thing in a form
+no static reader can evaluate, so the column's legs cannot see it. Counted per
+file — every `skipif(` call whose condition names `sys.platform`, in a module that
+names `pytest.mark.feature` anywhere — down-only against its own committed
+baseline (`PLATFORM_BASELINE_PATH`), measured at the build.
+
 Usage:
   check_app_gate_ratchet.py                    # run the gate
   check_app_gate_ratchet.py --list             # print every site found, grouped
@@ -74,10 +97,19 @@ import json
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import surface_survey  # noqa: E402
+
 REPO = Path(__file__).resolve().parent.parent
 E2E_ROOT = REPO / "tests" / "e2e-unified"
 SCAN_DIRS = ["tests", "actions", "drivers", "helpers"]
 BASELINE_PATH = E2E_ROOT / "baselines" / "app_gate_ratchet_baseline.json"
+#: The third counter's own baseline (undeclared host-OS skips).
+PLATFORM_BASELINE_PATH = E2E_ROOT / "baselines" / "platform_skipif_ratchet_baseline.json"
+#: The venue tree a `tests/platform/<os>/` module is declared by — outside the count.
+PLATFORM_VENUE_PREFIX = "tests/platform/"
+#: Root-level files the free-text counter walks beside SCAN_DIRS.
+FREE_TEXT_ROOT_FILES = ("conftest.py",)
 DRIVERS_ROOT = E2E_ROOT / "drivers"
 BASE_DRIVER_FILE = DRIVERS_ROOT / "base.py"
 
@@ -96,6 +128,8 @@ BASE_DRIVER_FILE = DRIVERS_ROOT / "base.py"
 FULL_SCAN_TRIGGERS = (
     Path(__file__).resolve().relative_to(REPO).as_posix(),
     BASELINE_PATH.relative_to(REPO).as_posix(),
+    PLATFORM_BASELINE_PATH.relative_to(REPO).as_posix(),
+    (Path(__file__).resolve().parent / "surface_survey.py").relative_to(REPO).as_posix(),
     BASE_DRIVER_FILE.relative_to(REPO).as_posix(),
 )
 
@@ -196,13 +230,29 @@ class _AppGateVisitor(ast.NodeVisitor):
         self.generic_visit(node)
 
 
+#: {(path, mtime_ns, size): tree} — the two counters read the same files, so a
+#: file is parsed once per run, not once per counter (the parse is most of the
+#: gate's cost). Keyed on the file's stat, so an edited file is parsed afresh.
+_PARSE_CACHE: dict = {}
+
+
+def _parsed(path: Path) -> ast.AST | None:
+    try:
+        st = path.stat()
+        key = (str(path), st.st_mtime_ns, st.st_size)
+        if key not in _PARSE_CACHE:
+            _PARSE_CACHE[key] = ast.parse(path.read_text())
+        return _PARSE_CACHE[key]
+    except (OSError, UnicodeDecodeError, SyntaxError):
+        return None
+
+
 def undeclared_app_gates(
     path: Path, gate_predicates: frozenset[str] = APP_PREDICATES
 ) -> list[tuple[int, str]]:
     """(line, why) for every undeclared app-gated skip in `path`."""
-    try:
-        tree = ast.parse(path.read_text())
-    except (OSError, UnicodeDecodeError, SyntaxError):
+    tree = _parsed(path)
+    if tree is None:
         return []
     visitor = _AppGateVisitor(gate_predicates)
     visitor.visit(tree)
@@ -484,6 +534,141 @@ def current_counts(
     return counts
 
 
+def free_text_sites(path: Path) -> list[tuple[int, str]]:
+    """(line, why) for every free-text `skip_unbuilt(` call in `path`."""
+    # A file that never spells the name holds no call: one substring test spares
+    # the walk of the ~90 % of the tree that has none (the walk, not the parse,
+    # is the counter's cost).
+    try:
+        if surface_survey.FREE_TEXT not in path.read_text():
+            return []
+    except (OSError, UnicodeDecodeError):
+        return []
+    tree = _parsed(path)
+    if tree is None:
+        return []
+    return sorted((c.lineno, "skip_unbuilt( on the free-text form — route it through "
+                   "require_surface") for c in surface_survey.unbuilt_calls(tree))
+
+
+def _names_sys_platform(node: ast.AST) -> bool:
+    return any(isinstance(sub, ast.Attribute) and sub.attr == "platform"
+               and isinstance(sub.value, ast.Name) and sub.value.id == "sys"
+               for sub in ast.walk(node))
+
+
+def platform_skipif_sites(path: Path) -> list[tuple[int, str]]:
+    """(line, why) for every `skipif(` whose condition names `sys.platform` in a
+    feature-tagged module — the third counter's sites. A module that never spells
+    `mark.feature` or `sys.platform` holds none (one substring test each)."""
+    try:
+        text = path.read_text()
+    except (OSError, UnicodeDecodeError):
+        return []
+    if "sys.platform" not in text or "mark.feature" not in text:
+        return []
+    tree = _parsed(path)
+    if tree is None:
+        return []
+    tagged = any(isinstance(sub, ast.Attribute) and sub.attr == "feature"
+                 and isinstance(sub.value, ast.Attribute) and sub.value.attr == "mark"
+                 for sub in ast.walk(tree))
+    if not tagged:
+        return []
+    return sorted(
+        (c.lineno, "skipif(sys.platform …) in a feature-tagged module — declare the host "
+         "OS with @pytest.mark.host_platform(...)")
+        for c in ast.walk(tree)
+        if isinstance(c, ast.Call) and _call_name(c) == "skipif"
+        and any(_names_sys_platform(a) for a in [*c.args, *(k.value for k in c.keywords)]))
+
+
+def platform_skipif_counts(
+    scan_root: Path = E2E_ROOT, only: set[str] | None = None
+) -> dict[str, list[tuple[int, str]]]:
+    """{relative-to-scan_root path: third-counter sites}, POSIX-separated keys —
+    the `tests/` tree outside the `tests/platform/` venue."""
+    counts = {}
+    for path in _scan_files(scan_root, only=only):
+        rel = path.relative_to(scan_root).as_posix()
+        if not rel.startswith("tests/") or rel.startswith(PLATFORM_VENUE_PREFIX):
+            continue
+        sites = platform_skipif_sites(path)
+        if sites:
+            counts[rel] = sites
+    return counts
+
+
+def _run_platform_skipif(scan_root: Path, only: set[str] | None,
+                         baseline_path: Path) -> int:
+    """The third counter: down-only per file against its own baseline."""
+    counts = platform_skipif_counts(scan_root, only)
+    risen, improved = _compare(counts, load_baseline(baseline_path), only)
+    if risen:
+        print(
+            "check-app-gate-ratchet: FAIL — undeclared host-OS skips rose past the "
+            "committed baseline (e2e-conventions.md convention 7, the fourth skip kind):",
+            file=sys.stderr,
+        )
+        for file, base_n, n, sites in sorted(risen):
+            print(f"\n  {file}: {base_n} -> {n}", file=sys.stderr)
+            for line_no, why in sites:
+                print(f"    {file}:{line_no}: {why}", file=sys.stderr)
+        print(
+            "\nFix: a witness whose subject exists on one OS alone takes "
+            "`@pytest.mark.host_platform(\"<linux|macos|windows>\")` in place of the "
+            "skipif — conftest skips it elsewhere and the catalog reads it without a run.",
+            file=sys.stderr,
+        )
+        return 1
+    total = sum(len(v) for v in counts.values())
+    print(f"check-app-gate-ratchet: OK — undeclared host-OS skips within their baseline "
+          f"({total} remaining{'' if only is None else ' in the changed paths'}).")
+    if improved:
+        print(f"  {len(improved)} file(s) improved — run `just app-gate-ratchet-update` "
+              "to shrink the ratchet.")
+    return 0
+
+
+def _free_text_files(scan_root: Path, only: set[str] | None) -> list[Path]:
+    # The gate's own proof files exercise the free-text form on purpose; they gate
+    # no surface (`surface_survey.PROOF_FILES`, named by file).
+    files = [f for f in _scan_files(scan_root, only=only)
+             if f.relative_to(scan_root).as_posix() not in surface_survey.PROOF_FILES]
+    for name in FREE_TEXT_ROOT_FILES:
+        if (scan_root / name).is_file() and (only is None or name in only):
+            files.append(scan_root / name)
+    return files
+
+
+def free_text_counts(
+    scan_root: Path = E2E_ROOT, only: set[str] | None = None
+) -> dict[str, list[tuple[int, str]]]:
+    """{relative-to-scan_root path: free-text sites}, POSIX-separated keys."""
+    counts = {}
+    for path in _free_text_files(scan_root, only):
+        sites = free_text_sites(path)
+        if sites:
+            counts[path.relative_to(scan_root).as_posix()] = sites
+    return counts
+
+
+def _compare(counts: dict, baseline: dict, only: set[str] | None) -> tuple[list, list]:
+    risen, improved = [], []
+    for file, sites in counts.items():
+        n, base_n = len(sites), baseline.get(file, 0)
+        if n > base_n:
+            risen.append((file, base_n, n, sites))
+        elif n < base_n:
+            improved.append((file, base_n, n))
+    for file, base_n in baseline.items():
+        if only is not None and file not in only:
+            continue  # not read this run; "absent from counts" says nothing
+        if file not in counts and base_n > 0:
+            improved.append((file, base_n, 0))
+    return risen, improved
+
+
 def load_baseline(baseline_path: Path = BASELINE_PATH) -> dict[str, int]:
     if not baseline_path.exists():
         return {}
@@ -519,6 +704,7 @@ def run_gate(
     baseline_path: Path = BASELINE_PATH,
     changed: list[str] | None = None,
     repo_root: Path = REPO,
+    platform_baseline_path: Path | None = None,
 ) -> int:
     """The gate. `changed` — repo-relative paths, the merge path's own
     `git diff --name-only` — makes it the CHANGED-FILES mode (2026-09-05,
@@ -544,18 +730,11 @@ def run_gate(
         scan_root, base_path=scan_root / "drivers" / "base.py", only=only
     )
 
-    risen, improved = [], []
-    for file, sites in counts.items():
-        n, base_n = len(sites), baseline.get(file, 0)
-        if n > base_n:
-            risen.append((file, base_n, n, sites))
-        elif n < base_n:
-            improved.append((file, base_n, n))
-    for file, base_n in baseline.items():
-        if only is not None and file not in only:
-            continue  # not read this run; "absent from counts" says nothing
-        if file not in counts and base_n > 0:
-            improved.append((file, base_n, 0))
+    risen, improved = _compare(counts, baseline, only)
+    free_rc = _run_free_text(scan_root, only)
+    platform_rc = _run_platform_skipif(
+        scan_root, only,
+        platform_baseline_path or baseline_path.with_name(PLATFORM_BASELINE_PATH.name))
 
     if risen:
         print(
@@ -577,6 +756,10 @@ def run_gate(
             file=sys.stderr,
         )
         return 1
+    if free_rc:
+        return free_rc
+    if platform_rc:
+        return platform_rc
 
     total = sum(len(v) for v in counts.values())
     where = (
@@ -598,6 +781,34 @@ def run_gate(
     return 0
 
 
+def _run_free_text(scan_root: Path, only: set[str] | None) -> int:
+    """The second counter, at its floor: any free-text `skip_unbuilt(` call fails.
+
+    The migration closed (2026-10-28) — no baseline file remains, and
+    `helpers/app_surface.py::skip_unbuilt` is the private `_skip_unbuilt`
+    `require_surface` calls, so a stray call would also be a NameError at run
+    time; this is the parse-time catch."""
+    counts = free_text_counts(scan_root, only)
+    if counts:
+        print(
+            "check-app-gate-ratchet: FAIL — free-text skip_unbuilt( calls "
+            "(e2e-conventions.md convention 7, *The surface registry*):",
+            file=sys.stderr,
+        )
+        for file, sites in sorted(counts.items()):
+            for line_no, why in sites:
+                print(f"    {file}:{line_no}: {why}", file=sys.stderr)
+        print(
+            "\nFix: gate the surface with `require_surface(driver, \"<key>\")` and "
+            "declare the key once in tests/e2e-unified/surfaces.toml (kind, built, "
+            "detail, tracked).",
+            file=sys.stderr,
+        )
+        return 1
+    print("check-app-gate-ratchet: OK — no free-text skip_unbuilt( call remains.")
+    return 0
+
+
 def run_list(scan_root: Path = E2E_ROOT) -> int:
     counts = current_counts(scan_root)
     total = sum(len(v) for v in counts.values())
@@ -612,21 +823,48 @@ def run_list(scan_root: Path = E2E_ROOT) -> int:
 def update_baseline(
     scan_root: Path = E2E_ROOT, baseline_path: Path = BASELINE_PATH
 ) -> int:
-    if baseline_path.exists() and run_gate(scan_root, baseline_path) != 0:
+    # Each counter is guarded against its OWN baseline, so a counter whose
+    # baseline does not exist yet is written from the current tree (the second
+    # counter's first baseline, 2026-10-25) without the other one laundering a rise.
+    if baseline_path.exists():
+        risen, _ = _compare(current_counts(scan_root, base_path=scan_root / "drivers" / "base.py"),
+                            load_baseline(baseline_path), None)
+        if risen:
+            print(
+                "check-app-gate-ratchet: refusing --update-baseline — the gate is "
+                "currently failing against the existing baseline. A down-only ratchet "
+                "never writes a rise; fix the violations first.",
+                file=sys.stderr,
+            )
+            return 1
+    if _run_free_text(scan_root, None) != 0:
         print(
-            "check-app-gate-ratchet: refusing --update-baseline — the gate is "
-            "currently failing against the existing baseline. A down-only ratchet "
-            "never writes a rise; fix the violations first.",
+            "check-app-gate-ratchet: refusing --update-baseline — a free-text "
+            "skip_unbuilt( call stands; route the gate through require_surface first.",
             file=sys.stderr,
         )
         return 1
+    platform_path = baseline_path.with_name(PLATFORM_BASELINE_PATH.name)
+    platform_counts = platform_skipif_counts(scan_root)
+    if platform_path.exists():
+        risen, _ = _compare(platform_counts, load_baseline(platform_path), None)
+        if risen:
+            print(
+                "check-app-gate-ratchet: refusing --update-baseline — undeclared host-OS "
+                "skips rose past their baseline; declare them with host_platform first.",
+                file=sys.stderr,
+            )
+            return 1
     counts = current_counts(scan_root)
     new_baseline = {file: len(v) for file, v in counts.items()}
     baseline_path.parent.mkdir(parents=True, exist_ok=True)
     baseline_path.write_text(json.dumps(new_baseline, indent=2, sort_keys=True) + "\n")
+    new_platform = {file: len(v) for file, v in platform_counts.items()}
+    platform_path.write_text(json.dumps(new_platform, indent=2, sort_keys=True) + "\n")
     print(
         f"check-app-gate-ratchet: wrote {len(new_baseline)} file(s) to "
-        f"{baseline_path} — commit it alongside your fix."
+        f"{baseline_path} and {len(new_platform)} to {platform_path.name} — commit "
+        "them alongside your fix."
     )
     return 0
 

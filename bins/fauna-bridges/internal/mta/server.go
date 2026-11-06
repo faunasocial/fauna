@@ -2427,6 +2427,17 @@ func (d forwardDoor) unauthenticatedLocalFrom(raw []byte) bool {
 	return mailfauna.ForwardUnauthenticatedLocalFrom(raw, d.localDomains, d.primaryDomain, d.verdicts)
 }
 
+// authResults is the source message's verdicts as the forward carries them to
+// nest, where a permanent failure's forwarder NDR reads them for backscatter
+// suppression; nil at the submission door, whose sender authenticated.
+func (d forwardDoor) authResults() *wsrpc.AuthVerdicts {
+	if !d.mx || d.verdicts == nil {
+		return nil
+	}
+	wire := mailfauna.AuthVerdictsToWire(*d.verdicts)
+	return &wire
+}
+
 // forwardDoor is this MX session's door for dispatchForward.
 func (s *inboundSession) forwardDoor() forwardDoor {
 	return forwardDoor{
@@ -2682,7 +2693,7 @@ func dispatchForward(
 
 	rowID, err := wsrpc.ForwardMessage(
 		ctx, caller, forwarderActor, origMsgID, from, target, stamped,
-		ruleID, copyMode,
+		ruleID, copyMode, door.authResults(),
 	)
 	if err != nil {
 		logger.Warn("smtp: forward_message enqueue failed (forward dropped)",

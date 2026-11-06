@@ -46,7 +46,7 @@ use fauna_core::crypto::{AccountStateKeySchedule, BackupKey};
 use fauna_core::custody_grant::{
     CUSTODY_GRANT_ID_LEN, CustodyGrant, CustodyScopeSet, sign_custody_grant,
 };
-use fauna_core::data::{Capability, DeviceAuthorization, ModerationConfig, Timestamp};
+use fauna_core::data::{Capability, DeviceAuthorization, SyncPrefsConfig, Timestamp};
 use fauna_core::encoding::{EmbedAsBytes, sign_envelope};
 use fauna_core::identity::ActorKeypair;
 use fauna_mls::wrapped_blob::GrantWindow;
@@ -58,7 +58,7 @@ use fauna_nest::routes::{AppState, RegistrationConfig};
 use fauna_nest::state::AuthState;
 use fauna_nest::token_store::TokenStore;
 use fauna_protocol::account_state::{ACCOUNT_STATE_SCOPE, ItemClass};
-use fauna_protocol::merge_policy::{KIND_MODERATION, MODERATION_KEY};
+use fauna_protocol::merge_policy::{KIND_SYNC_PREFS, PREFERENCE_KEY};
 use fauna_protocol::segments::{SegmentsListReply, SegmentsListRequest};
 use fauna_protocol::sync::{SyncChangesListReply, SyncChangesListRequest};
 use fauna_sync_engine::account_state_plane::{AccountStatePlane, ItemId};
@@ -393,12 +393,11 @@ async fn hold_an_owner_row() -> HeldRow {
     .unwrap()
     .put(
         &ItemId {
-            kind: KIND_MODERATION.into(),
-            key: MODERATION_KEY.into(),
+            kind: KIND_SYNC_PREFS.into(),
+            key: PREFERENCE_KEY.into(),
         },
-        fauna_core::encoding::canonical_encode(&ModerationConfig {
-            muted_keywords: vec!["read-back-from-the-custodian-nest".into()],
-            ..Default::default()
+        fauna_core::encoding::canonical_encode(&SyncPrefsConfig {
+            default_conflict_policy: Some("read-back-from-the-custodian-nest".into()),
         })
         .unwrap()
         .to_vec(),
@@ -1323,9 +1322,8 @@ async fn a_seed_only_device_keys_a_custodian_restore_from_the_wrap_row_and_opens
     assert_eq!(wraps_on_a.len(), 1, "the mint wrote the wrap row");
     // One row of A's on the DELEGABLE plane too, so the fresh nest below
     // lists both planes: the scope whose puts name the rows they cover.
-    let moderation = fauna_core::encoding::canonical_encode(&ModerationConfig {
-        muted_keywords: vec!["restored-through-the-custodian-nest".into()],
-        ..Default::default()
+    let prefs = fauna_core::encoding::canonical_encode(&SyncPrefsConfig {
+        default_conflict_policy: Some("restored-through-the-custodian-nest".into()),
     })
     .unwrap()
     .to_vec();
@@ -1340,10 +1338,10 @@ async fn a_seed_only_device_keys_a_custodian_restore_from_the_wrap_row_and_opens
     .unwrap()
     .put(
         &ItemId {
-            kind: KIND_MODERATION.into(),
-            key: MODERATION_KEY.into(),
+            kind: KIND_SYNC_PREFS.into(),
+            key: PREFERENCE_KEY.into(),
         },
-        moderation.clone(),
+        prefs.clone(),
         Some(
             LwwStamp {
                 at_ms: 1_000,
@@ -1566,12 +1564,12 @@ async fn a_seed_only_device_keys_a_custodian_restore_from_the_wrap_row_and_opens
     );
     assert_eq!(
         c_store
-            .state(KIND_MODERATION, MODERATION_KEY)
+            .state(KIND_SYNC_PREFS, PREFERENCE_KEY)
             .await
             .unwrap()
             .expect("the gesture restores A's delegable row")
             .value,
-        moderation
+        prefs
     );
 
     // ── D: a fresh home nest; C's first bound pass carries what it restored
@@ -1602,22 +1600,20 @@ async fn a_seed_only_device_keys_a_custodian_restore_from_the_wrap_row_and_opens
     // the bind leg never carries A's row — D lists C's cover of the item, and
     // A's bytes are nowhere on D. The item-level assertion below is what such
     // a restore converges to; a byte-level one would read the cover as loss.
-    let moderation_on_c = fauna_core::encoding::canonical_encode(&ModerationConfig {
-        muted_keywords: vec![
-            "restored-through-the-custodian-nest".into(),
-            "and-written-over-on-the-cold-device".into(),
-        ],
-        ..Default::default()
+    let prefs_on_c = fauna_core::encoding::canonical_encode(&SyncPrefsConfig {
+        default_conflict_policy: Some(
+            "restored-through-the-custodian-nest and-written-over-on-the-cold-device".into(),
+        ),
     })
     .unwrap()
     .to_vec();
     c_planes[0]
         .put(
             &ItemId {
-                kind: KIND_MODERATION.into(),
-                key: MODERATION_KEY.into(),
+                kind: KIND_SYNC_PREFS.into(),
+                key: PREFERENCE_KEY.into(),
             },
-            moderation_on_c.clone(),
+            prefs_on_c.clone(),
             Some(
                 LwwStamp {
                     at_ms: 2_000,
@@ -1709,12 +1705,12 @@ async fn a_seed_only_device_keys_a_custodian_restore_from_the_wrap_row_and_opens
     );
     assert_eq!(
         e_store
-            .state(KIND_MODERATION, MODERATION_KEY)
+            .state(KIND_SYNC_PREFS, PREFERENCE_KEY)
             .await
             .unwrap()
             .expect("E reads the delegable item from D")
             .value,
-        moderation_on_c,
+        prefs_on_c,
         "the item's one row on D is C's cover, the merge's winner"
     );
     assert!(

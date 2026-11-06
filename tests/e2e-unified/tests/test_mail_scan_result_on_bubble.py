@@ -48,6 +48,7 @@ pytestmark = [
     pytest.mark.android,
     pytest.mark.macos,
     pytest.mark.ios,
+    pytest.mark.windows,
     pytest.mark.real_conversations,
 ]
 

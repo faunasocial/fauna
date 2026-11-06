@@ -155,7 +155,13 @@ fn providers_set_handler() -> RpcHandler {
 
             state
                 .db
-                .upsert_payment_provider(&author_id, &req.kind, &req.webhook_secret, &req.tier)
+                .upsert_payment_provider(
+                    &author_id,
+                    &req.kind,
+                    &req.webhook_secret,
+                    &req.tier,
+                    req.product_ref.as_deref().map(str::trim),
+                )
                 .await
                 .map_err(internal)?;
 
@@ -189,6 +195,7 @@ fn providers_list_handler() -> RpcHandler {
                     created_at: Timestamp((p.created_at as u64).saturating_mul(1_000_000)),
                     last_verified_at: p.last_verified_at.map(|s| s as u64),
                     last_rejected_at: p.last_rejected_at.map(|s| s as u64),
+                    product_ref: p.product_ref,
                     extra: Default::default(),
                 })
                 .collect();

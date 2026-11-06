@@ -46,14 +46,14 @@ pub struct ReachPolicy {
     /// Connecting new external feed sources / follows: `allow` | `block`.
     #[serde(default = "default_allow")]
     pub feed_sources: String,
-    /// v1.x content pillar — the guardian's per-category render floor
-    /// (`family-safety.md` § Content policy). Client-enforced post-decrypt, so
-    /// it rides *inside* the reach document but is not a routing knob. `None`
-    /// (absent on the wire) means **leave the content pillar unchanged** on a
-    /// `policy.update`, so a caller saving only the reach knobs never clobbers a
-    /// content policy it does not send (§ Policy-update compatibility). The nest
-    /// validates its floors closed-enum at write; a client renders an unparseable
-    /// floor fail-closed (`ContentFloor::Unknown`).
+    /// v1.x content pillar — the guardian's rule document (`family-safety.md`
+    /// § Content policy; `nest-rules.md` § The shared rule editor (b)).
+    /// Client-enforced post-decrypt, so it rides *inside* the reach document but
+    /// is not a routing knob. `None` (absent on the wire) means **leave the
+    /// content pillar unchanged** on a `policy.update`, so a caller saving only
+    /// the reach knobs never clobbers a content policy it does not send
+    /// (§ Policy-update compatibility). A client renders a document it cannot
+    /// read fail-closed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content_policy: Option<ContentPolicy>,
     /// v1.x screen-time pillar — the guardian's usage window + daily budget
@@ -66,7 +66,7 @@ pub struct ReachPolicy {
     /// counts (`fauna.family.notify_report`) and the guardian is notified with
     /// *category + count, never content*. A single boolean, kept a top-level
     /// field rather than folded into [`Self::content_policy`] so that shared
-    /// render type ([`ContentPolicy`]) stays a pure floor set. `None` (absent on
+    /// render type ([`ContentPolicy`]) stays the guardian's rules alone. `None` (absent on
     /// the wire) means **leave the knob unchanged** on a `policy.update` (same
     /// absent-means-unchanged semantics as the other v1.x pillars); the default
     /// is off (the unsupervised-equivalent). Client-reported, so a modified
@@ -109,6 +109,13 @@ pub struct ReachPolicy {
     pub extra: BTreeMap<String, Value>,
 }
 
+/// The reason every content rule of an age band's defaults carries
+/// ([`ReachPolicy::age_band_defaults`]) — shown to the ward under the family
+/// policy frame until the guardian writes their own in the rule editor
+/// (`nest-rules.md` § The shared rule editor → *The reason is the member's to
+/// read*).
+pub const AGE_BAND_DEFAULT_REASON: &str = "Default for this age group";
+
 impl ReachPolicy {
     /// The guardian-policy **defaults dial** — the policy document a supervised
     /// admission carrying an age band starts from (`family-safety.md` § The
@@ -128,7 +135,18 @@ impl ReachPolicy {
     /// rather than maximal.
     pub fn age_band_defaults(band: crate::age::AgeBand) -> Self {
         use crate::age::AgeBand;
-        use fauna_core::obligation::{ContentFloor, ContentPolicy};
+        use fauna_core::content_policy::ContentVerdict::{Block, Collapse};
+        use fauna_core::obligation::ContentPolicy;
+
+        // The minor bands' content rules: category rules at the standard
+        // trigger, each carrying [`AGE_BAND_DEFAULT_REASON`] until the guardian
+        // rewrites it in the rule editor.
+        let rules = |rules: &[(&str, fauna_core::content_policy::ContentVerdict)]| {
+            Some(ContentPolicy::category_rules_with_reason(
+                rules,
+                AGE_BAND_DEFAULT_REASON,
+            ))
+        };
 
         // The minor bands' feature-tier default: the payments plane denied
         // (`zaps` follows through its declared subset edge in the meet;
@@ -150,13 +168,12 @@ impl ReachPolicy {
                 unknown_sender_mail: "hold".to_string(),
                 federation_contact: false,
                 feed_sources: "block".to_string(),
-                content_policy: Some(ContentPolicy {
-                    nsfw: ContentFloor::Block,
-                    spam: ContentFloor::Block,
-                    phishing: ContentFloor::Block,
-                    commercial: ContentFloor::Collapse,
-                    document: None,
-                }),
+                content_policy: rules(&[
+                    ("nsfw", Block),
+                    ("spam", Block),
+                    ("phishing", Block),
+                    ("commercial", Collapse),
+                ]),
                 screen_time: None,
                 content_notify: Some(true),
                 unknown_peer_dm: Some("hold".to_string()),
@@ -168,13 +185,7 @@ impl ReachPolicy {
                 unknown_sender_mail: "hold".to_string(),
                 federation_contact: true,
                 feed_sources: "allow".to_string(),
-                content_policy: Some(ContentPolicy {
-                    nsfw: ContentFloor::Block,
-                    spam: ContentFloor::Collapse,
-                    phishing: ContentFloor::Block,
-                    commercial: ContentFloor::Inherit,
-                    document: None,
-                }),
+                content_policy: rules(&[("nsfw", Block), ("spam", Collapse), ("phishing", Block)]),
                 screen_time: None,
                 content_notify: None,
                 unknown_peer_dm: Some("hold".to_string()),
@@ -186,13 +197,7 @@ impl ReachPolicy {
                 unknown_sender_mail: "allow".to_string(),
                 federation_contact: true,
                 feed_sources: "allow".to_string(),
-                content_policy: Some(ContentPolicy {
-                    nsfw: ContentFloor::Collapse,
-                    spam: ContentFloor::Inherit,
-                    phishing: ContentFloor::Collapse,
-                    commercial: ContentFloor::Inherit,
-                    document: None,
-                }),
+                content_policy: rules(&[("nsfw", Collapse), ("phishing", Collapse)]),
                 screen_time: None,
                 content_notify: None,
                 unknown_peer_dm: None,
@@ -221,10 +226,9 @@ impl ReachPolicy {
             &self.feed_sources,
             self.unknown_peer_dm.as_deref(),
         );
-        // Content-policy pillar (§ Content policy): append one line per non-inherit
-        // category floor, so the ward sees the guardian's content rules exactly as
-        // the reach knobs. An absent `content_policy` is the all-inherit default →
-        // no content lines (the reach-only summary).
+        // Content-policy pillar (§ Content policy): append the guardian's content
+        // rules, so the ward sees them exactly as the reach knobs. An absent
+        // `content_policy` adds no content lines (the reach-only summary).
         if let Some(policy) = &self.content_policy {
             lines.extend(fauna_core::format::content_policy_summary(policy));
         }
@@ -962,7 +966,7 @@ mod tests {
     use super::*;
     use crate::codec::test_support::assert_round_trips;
     use crate::codec::{decode_strict as decode, encode_canonical};
-    use fauna_core::obligation::{ContentFloor, ContentPolicy};
+    use fauna_core::obligation::ContentPolicy;
     use fauna_core::screen_time::ScreenTimePolicy;
 
     #[test]
@@ -994,10 +998,10 @@ mod tests {
         // in that order (content floors, then notify), only for the non-inherit
         // category and only because notify is on.
         let policy = ReachPolicy {
-            content_policy: Some(ContentPolicy {
-                spam: ContentFloor::Block,
-                ..Default::default()
-            }),
+            content_policy: Some(fauna_core::obligation::ContentPolicy::category_rules(&[(
+                "spam",
+                fauna_core::content_policy::ContentVerdict::Block,
+            )])),
             content_notify: Some(true),
             ..Default::default()
         };
@@ -1275,13 +1279,10 @@ mod tests {
         // set → decode identically on the real dag-cbor wire, inside a policy
         // update (both roles carry the same doc).
         let p = ReachPolicy {
-            content_policy: Some(ContentPolicy {
-                nsfw: ContentFloor::Block,
-                spam: ContentFloor::Collapse,
-                phishing: ContentFloor::Inherit,
-                commercial: ContentFloor::Inherit,
-                document: None,
-            }),
+            content_policy: Some(fauna_core::obligation::ContentPolicy::category_rules(&[
+                ("nsfw", fauna_core::content_policy::ContentVerdict::Block),
+                ("spam", fauna_core::content_policy::ContentVerdict::Collapse),
+            ])),
             screen_time: Some(ScreenTimePolicy {
                 window_start: Some(1260),
                 window_end: Some(420), // wrapping (bedtime) window
@@ -1490,5 +1491,173 @@ mod tests {
         let decoded: FamilyApprovalEntry = crate::decode_strict(&bytes).unwrap();
         assert!(decoded.message_id.is_empty());
         assert_eq!(decoded.peer_address, "");
+    }
+
+    /// The wire bytes of a `fauna.family.status` reply whose guardian rule
+    /// document is `document` (a generic value, so a grammar this build does
+    /// not implement can be spelled).
+    fn status_reply_bytes_with_document(document: Value) -> Vec<u8> {
+        let map = |entries: Vec<(&str, Value)>| {
+            Value::Map(
+                entries
+                    .into_iter()
+                    .map(|(k, v)| (k.to_string(), v))
+                    .collect(),
+            )
+        };
+        let reply = map(vec![(
+            "policy",
+            map(vec![("content_policy", map(vec![("document", document)]))]),
+        )]);
+        encode_canonical(&reply).unwrap().to_vec()
+    }
+
+    fn guardian_rule(verdict: &str) -> Value {
+        Value::Map(
+            [
+                ("factor", Value::String("spam".into())),
+                ("min_permille", Value::Integer(100)),
+                ("verdict", Value::String(verdict.into())),
+                ("reason_code", Value::String("family".into())),
+                (
+                    "reason",
+                    Value::Map(
+                        [("default".to_string(), Value::String("Family rule".into()))].into(),
+                    ),
+                ),
+            ]
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v))
+            .collect(),
+        )
+    }
+
+    fn assert_ward_rules_fail_closed(bytes: &[u8]) {
+        use fauna_core::obligation::{ObligationAction, rules_from_guardian_policy};
+        let reply: FamilyStatusReply =
+            decode(bytes).expect("an unreadable guardian document must not fail the reply");
+        let policy = reply.policy.unwrap().content_policy.unwrap();
+        let document = policy
+            .document
+            .as_ref()
+            .expect("the document is kept, inert");
+        assert!(
+            document
+                .status(&fauna_core::content_policy::Publisher::Guardian)
+                .is_inert()
+        );
+        let rules = rules_from_guardian_policy(&policy);
+        let blocked: Vec<&str> = rules
+            .iter()
+            .filter(|r| r.action == ObligationAction::Block)
+            .map(|r| r.category.as_str())
+            .collect();
+        assert_eq!(
+            blocked,
+            fauna_core::obligation::GUARDIAN_FLOOR_CATEGORIES,
+            "a guardian document this build cannot read renders fail closed"
+        );
+    }
+
+    /// A guardian document carrying a verb this build's closed `ContentVerdict`
+    /// does not know: the family reply still decodes, and the ward's rules come
+    /// out inert-and-fail-closed rather than as a decode error.
+    #[test]
+    fn a_guardian_document_with_an_unknown_verb_renders_fail_closed() {
+        let document = Value::Map(
+            [
+                (
+                    "version".to_string(),
+                    Value::Integer(fauna_core::content_policy::GRAMMAR_VERSION.into()),
+                ),
+                (
+                    "rules".to_string(),
+                    Value::List(vec![guardian_rule("quarantine")]),
+                ),
+            ]
+            .into(),
+        );
+        assert_ward_rules_fail_closed(&status_reply_bytes_with_document(document));
+    }
+
+    /// A guardian document under a newer grammar, bundling a scorer kind this
+    /// build's closed `ScorerKind` does not know: decoded version first, so it
+    /// is inert-and-says-so and renders fail closed.
+    #[test]
+    fn a_guardian_document_with_an_unknown_scorer_kind_renders_fail_closed() {
+        let scorer = Value::Map(
+            [
+                ("name".to_string(), Value::String("m".into())),
+                ("kind".to_string(), Value::String("model".into())),
+                ("bytes".to_string(), Value::Bytes(vec![1, 2, 3])),
+            ]
+            .into(),
+        );
+        let document = Value::Map(
+            [
+                (
+                    "version".to_string(),
+                    Value::Integer((fauna_core::content_policy::GRAMMAR_VERSION + 1).into()),
+                ),
+                (
+                    "rules".to_string(),
+                    Value::List(vec![guardian_rule("block")]),
+                ),
+                ("scorers".to_string(), Value::List(vec![scorer])),
+            ]
+            .into(),
+        );
+        let bytes = status_reply_bytes_with_document(document);
+        assert_ward_rules_fail_closed(&bytes);
+        let reply: FamilyStatusReply = decode(&bytes).unwrap();
+        assert_eq!(
+            reply
+                .policy
+                .unwrap()
+                .content_policy
+                .unwrap()
+                .document
+                .unwrap()
+                .version,
+            fauna_core::content_policy::GRAMMAR_VERSION + 1,
+            "the newer version is kept, so the surface can name it"
+        );
+    }
+
+    /// A readable guardian document — keyword scorer bytes included — still
+    /// round-trips through the version-first field decode unchanged.
+    #[test]
+    fn a_readable_guardian_document_round_trips_through_the_reply() {
+        use fauna_core::content_policy::{
+            BundledScorer, ContentPolicyDocument, ContentRule, ContentVerdict, REASON_DEFAULT_KEY,
+            ScorerKind,
+        };
+        let mut document = ContentPolicyDocument::empty();
+        document.scorers.push(BundledScorer {
+            name: "words".into(),
+            kind: ScorerKind::Keywords,
+            bytes: b"casino\nlottery".to_vec(),
+            extra: Default::default(),
+        });
+        document.rules.push(ContentRule {
+            factor: "guardian.words".into(),
+            min_permille: 1,
+            verdict: ContentVerdict::Block,
+            reason_code: "family".into(),
+            reason: [(REASON_DEFAULT_KEY.to_string(), "Family rule".to_string())].into(),
+            extra: Default::default(),
+        });
+        let policy = ContentPolicy {
+            document: Some(document),
+            ..Default::default()
+        };
+        let back: ContentPolicy = decode(&encode_canonical(&policy).unwrap()).unwrap();
+        assert_eq!(back, policy);
+        let json: ContentPolicy =
+            serde_json::from_str(&serde_json::to_string(&policy).unwrap()).unwrap();
+        assert_eq!(
+            json, policy,
+            "the ward's JSON snapshot slot keeps the document"
+        );
     }
 }

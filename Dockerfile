@@ -35,13 +35,11 @@ ARG BUILD_JOBS=16
 
 # ── Rust toolchain (shared by all Rust stages) ──────────────────────
 FROM rust:bookworm@sha256:82150a52ec202c1b14d7817e14516c392bb7f5cfebd88f1ed531cb37ebd39922 AS rust-base
-# mold: the linker used by the rust-native stage (set via RUSTFLAGS there, NOT in
-# rust-wasm — wasm32 links with wasm-ld and -fuse-ld=mold would break it).
 # util-linux: provides `taskset`, used by the rust-wasm stage to confine the
 # binaryen wasm-opt pass to BUILD_JOBS cores (see that stage). It is
 # Priority:required in Debian so already present in rust:bookworm; named here
 # explicitly so the wasm CPU cap can't silently break under a future slimmer base.
-RUN apt-get update && apt-get install -y --no-install-recommends clang mold util-linux \
+RUN apt-get update && apt-get install -y --no-install-recommends clang util-linux \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
 # Build with the SAME pinned nightly as every dev machine + CI (rust-toolchain.toml)
@@ -56,6 +54,11 @@ RUN rustup show && rustup target add wasm32-unknown-unknown
 # Pinned to the version the Linux development web builds run, so the image's
 # wasm chunks come from the same wasm-pack — and the wasm-opt it fetches — as a
 # development build of one commit; `--locked` builds it from its own lockfile.
+# This line keeps the build network: `cargo install` fetches and compiles in one
+# command, so it cannot be split into a fetch layer and a `--network=none`
+# compile, and the boundary leaves `install` outside (build-compile-cache.md
+# § The boundary's scope and what OFF means, decisions (1) and (5)). Every
+# compile of the image's own graph below runs with no network.
 RUN cargo install wasm-pack --version 0.15.0 --locked
 # Shipped-artifact builds resolve features per-invocation ("selected"), never
 # workspace-unified — the repo .cargo/config.toml turns unification on for the
@@ -92,8 +95,8 @@ ENV CARGO_UNSTABLE_CHECKSUM_FRESHNESS=true
 # (2026-10-19). `--platform` cannot go on `FROM rust-base` — a FROM naming a
 # stage re-platforms nothing — so the base is declared twice, from one digest;
 # the WASM-chunk parity gate holds the two digests equal. Keep the
-# toolchain, wasm-pack and ENV lines below identical to rust-base's. mold and
-# Debian's clang are rust-native's only, so they are not installed here.
+# toolchain, wasm-pack and ENV lines below identical to rust-base's. Debian's
+# clang is rust-native's only, so it is not installed here.
 FROM --platform=$BUILDPLATFORM rust:bookworm@sha256:82150a52ec202c1b14d7817e14516c392bb7f5cfebd88f1ed531cb37ebd39922 AS rust-base-build
 RUN apt-get update && apt-get install -y --no-install-recommends util-linux \
     && rm -rf /var/lib/apt/lists/*
@@ -162,12 +165,24 @@ ENV CARGO_BUILD_JOBS=${BUILD_JOBS}
 #                       Docker build is on the pinned nightly per rust-base). The
 #                       big fauna-nest crate codegen dominates the incremental
 #                       rebuild, so the parallel front-end is the larger lever.
-#   -C link-arg=-fuse-ld=mold  link with mold (much faster relinks) instead of
-#                       GNU ld. Native-only: wasm32 links with wasm-ld, where the
-#                       flag is invalid.
+#   -C link-self-contained=+linker -C linker-features=+lld -Z unstable-options
+#                       link with the pinned toolchain's own lld on both arches
+#                       (owner build-target-layout-linux.md § Linker verdict):
+#                       the repository's spelling, the same flags as the
+#                       `[target.aarch64-unknown-linux-gnu] rustflags` table in
+#                       .cargo/config.toml. amd64 already links with that lld by
+#                       default, so the flags change nothing there.
 # Setting RUSTFLAGS changes cargo's fingerprint, so the first build after a change
-# here is a one-time full recompile.
-ENV RUSTFLAGS="-Z threads=8 -C link-arg=-fuse-ld=mold"
+# here is a one-time full recompile. A set RUSTFLAGS replaces the
+# `[target.aarch64-unknown-linux-gnu] rustflags` table in .cargo/config.toml
+# (the Linux dev machines' `-Zthreads=4` and the lld flags), so this line is the
+# image's own copy, for both arches: edit one of the two and look at the other.
+ENV RUSTFLAGS="-Z threads=8 -C link-self-contained=+linker -C linker-features=+lld -Z unstable-options"
+# The config's other keys are inert in this stage: the ENV lines above override
+# `jobs`, the rustflags table and feature unification, the minimum release age
+# touches only a new resolution (never `--locked`), and the remaining tables
+# name other targets.
+COPY .cargo/ .cargo/
 COPY Cargo.toml Cargo.lock ./
 COPY libs/ libs/
 COPY bins/ bins/
@@ -187,7 +202,7 @@ COPY bins/ bins/
 # graph (fauna-nest / -sandbox / -sni-router / -ffi / -iroh-relay)
 # depends on them — so their source is resolved but never compiled and never
 # reaches the runtime image. Copy just the member trees (fauna-linux + the six
-# apps/fauna-windows service/shell crates + cors-proxy + the additive-evolution lint),
+# apps/fauna-windows service/shell crates + cors-proxy + the additive-evolution lint + the kache launcher),
 # NOT all of apps/ (which holds the multi-GB web/android/apple client sources; those
 # and ios/apple are not cargo members — see .dockerignore). Add a COPY here (and in
 # rust-wasm below) when a new apps/services/tools cargo member lands.
@@ -198,6 +213,7 @@ COPY apps/fauna-windows apps/fauna-windows
 COPY services/fauna-cors-proxy services/fauna-cors-proxy
 COPY services/fauna-front-door services/fauna-front-door
 COPY tools/check-additive-evolution tools/check-additive-evolution
+COPY tools/kache-launcher tools/kache-launcher
 # The target/ cache mount carries compiled deps + crates across builds; cargo's
 # incremental fingerprinting recompiles only what changed. Binaries are cp-ed to
 # /out in the same RUN because a cache-mounted target/ is not kept in the layer.
@@ -223,11 +239,26 @@ COPY tools/check-additive-evolution tools/check-additive-evolution
 # to 35 GB and filled the self-hosted runner's disk (2026-10-19). Capped,
 # cargo dies on SIGXFSZ within minutes; `ulimit -c 0` keeps that signal from
 # dumping a core. No real artifact comes near 8 GiB.
+#
+# Fetch, then compile with no network (build-compile-cache.md § The boundary's
+# scope and what OFF means, decision (5); image-pipeline.md § The Dockerfile's
+# stages compile hermetically): the first RUN downloads the locked graph for
+# this stage's platform into the registry/git cache mounts, and the compile RUN
+# has no network at all (`--network=none`, and `CARGO_NET_OFFLINE` so cargo
+# says so instead of trying), so no third-party build script or proc-macro of
+# the production artifact can reach anything. A compile that fails only here
+# names a dependency whose build script fetches at build time: a finding for
+# the dependency venue, never a reason to give this RUN its network back.
 ARG TARGETARCH
 RUN --mount=type=cache,id=cargo-registry-native,target=/usr/local/cargo/registry \
     --mount=type=cache,id=cargo-git-native,target=/usr/local/cargo/git \
+    cargo fetch --locked --target "$(rustc -vV | sed -n 's/^host: //p')"
+RUN --network=none \
+    --mount=type=cache,id=cargo-registry-native,target=/usr/local/cargo/registry \
+    --mount=type=cache,id=cargo-git-native,target=/usr/local/cargo/git \
     --mount=type=cache,id=rust-target-native-${TARGETARCH},sharing=locked,target=/src/target \
     ulimit -c 0 && ulimit -f 16777216 \
+    && export CARGO_NET_OFFLINE=true \
     && cargo build --locked --release -p fauna-nest -p fauna-sandbox -p fauna-sni-router --features bluesky,nostr,activitypub \
     && cargo build --locked --release -p fauna-ffi --no-default-features --features labeler \
     && cargo build --locked --release -p fauna-iroh-relay --features fauna-iroh-relay/relay \
@@ -303,14 +334,14 @@ ENV CC_wasm32_unknown_unknown=/opt/wasm32-cc/bin/clang \
 # CPU cap explains why affinity, not a job flag, is the only cap that holds).
 ARG BUILD_JOBS
 ENV CARGO_BUILD_JOBS=${BUILD_JOBS}
-# Remap this stage's checkout (/src), CARGO_HOME (/usr/local/cargo) and cargo
-# target (/src/target) roots to the SAME placeholders the justfile's
-# CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUSTFLAGS export uses, so the image's wasm
-# chunks carry no build-environment path and match a `just web` rebuild of the
-# same commit (release-integrity.md § Release signing → Web-app verifiability;
-# the justfile comment owns the rationale). wasm32-only: build scripts and
-# proc-macros compile unchanged.
-ENV CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUSTFLAGS="--remap-path-prefix=/src=/fauna --remap-path-prefix=/usr/local/cargo=/cargo --remap-path-prefix=/src/target=/fauna/target"
+# Trim this stage's paths the way the justfile's wasm recipes do (its
+# `wasm_trim` variable; the justfile comment owns the rationale): cargo's
+# `trim-paths = "all"` maps the checkout, every registry package, the build dir
+# and the sysroot to fixed placeholders, so the image's wasm chunks carry no
+# build-environment path and match a `just web` rebuild of the same commit
+# (release-integrity.md § Release signing → Web-app verifiability). The stage
+# builds nothing but the wasm chunks, so the release profile can carry it here.
+ENV CARGO_PROFILE_RELEASE_TRIM_PATHS=all
 COPY Cargo.toml Cargo.lock ./
 COPY libs/ libs/
 COPY bins/ bins/
@@ -326,6 +357,7 @@ COPY apps/fauna-windows apps/fauna-windows
 COPY services/fauna-cors-proxy services/fauna-cors-proxy
 COPY services/fauna-front-door services/fauna-front-door
 COPY tools/check-additive-evolution tools/check-additive-evolution
+COPY tools/kache-launcher tools/kache-launcher
 # target/ id suffixed with ${BUILDARCH}: the wasm32 OUTPUT is
 # host-arch-independent, but the build-script/proc-macro intermediates in
 # target/ are artifacts of the arch this stage runs as — the build host's, so a
@@ -351,22 +383,65 @@ ARG BUILDARCH
 # build" applies here too, same as the rust-native stage. The `ulimit -f` file
 # cap is the rust-native stage's too, for the same reason: this stage's mount is
 # the one the looping rustc filled.
+#
+# Three RUNs, so the compile has no network (build-compile-cache.md § The
+# boundary's scope and what OFF means, decision (5); image-pipeline.md § The
+# Dockerfile's stages compile hermetically): (1) fetch the locked graph for
+# wasm32 and for the build host (build scripts and proc-macros run there);
+# (2) compile every chunk with `--network=none`, with exactly the cargo
+# arguments wasm-pack passes (`build --lib --release --target
+# wasm32-unknown-unknown --locked`, measured Fresh behind it 2026-11-05);
+# (3) wasm-pack, which keeps the network for the wasm-bindgen and binaryen
+# downloads it makes itself, as a dev machine's wasm-pack does while its cargo
+# compiles behind the boundary. Its cargo finds every unit fresh and compiles
+# nothing; a `Compiling` line in its output means it did — a third-party build
+# script ran with the network — and the RUN fails. Every chunk below needs a
+# line in BOTH (2) and (3): the WASM-chunk parity gate holds the two lists equal.
+RUN --mount=type=cache,id=cargo-registry-wasm,target=/usr/local/cargo/registry \
+    --mount=type=cache,id=cargo-git-wasm,target=/usr/local/cargo/git \
+    cargo fetch --locked --target wasm32-unknown-unknown --target "$(rustc -vV | sed -n 's/^host: //p')"
+RUN --network=none \
+    --mount=type=cache,id=cargo-registry-wasm,target=/usr/local/cargo/registry \
+    --mount=type=cache,id=cargo-git-wasm,target=/usr/local/cargo/git \
+    --mount=type=cache,id=rust-target-wasm-${BUILDARCH},sharing=locked,target=/src/target \
+    ulimit -c 0 && ulimit -f 16777216 \
+    && export CARGO_NET_OFFLINE=true \
+    && CPUSET="0-$((BUILD_JOBS - 1))" \
+    && taskset -c "$CPUSET" cargo build --lib --release --target wasm32-unknown-unknown --locked --manifest-path libs/fauna-wasm/Cargo.toml \
+    && taskset -c "$CPUSET" cargo build --lib --release --target wasm32-unknown-unknown --locked --manifest-path libs/fauna-wasm-onboarding/Cargo.toml \
+    && taskset -c "$CPUSET" cargo build --lib --release --target wasm32-unknown-unknown --locked --manifest-path libs/fauna-wasm-launch/Cargo.toml \
+    && taskset -c "$CPUSET" cargo build --lib --release --target wasm32-unknown-unknown --locked --manifest-path libs/fauna-wasm-folders/Cargo.toml \
+    && taskset -c "$CPUSET" cargo build --lib --release --target wasm32-unknown-unknown --locked --manifest-path libs/fauna-wasm-backups/Cargo.toml \
+    && taskset -c "$CPUSET" cargo build --lib --release --target wasm32-unknown-unknown --locked --manifest-path libs/fauna-wasm-media/Cargo.toml \
+    && taskset -c "$CPUSET" cargo build --lib --release --target wasm32-unknown-unknown --locked --manifest-path libs/fauna-wasm-labeler-catalog/Cargo.toml \
+    && taskset -c "$CPUSET" cargo build --lib --release --target wasm32-unknown-unknown --locked --manifest-path libs/fauna-wasm-share/Cargo.toml \
+    && taskset -c "$CPUSET" cargo build --lib --release --target wasm32-unknown-unknown --locked --manifest-path libs/fauna-wasm-connected-apps/Cargo.toml \
+    && taskset -c "$CPUSET" cargo build --lib --release --target wasm32-unknown-unknown --locked --manifest-path libs/fauna-wasm-atproto-settings/Cargo.toml
 RUN --mount=type=cache,id=cargo-registry-wasm,target=/usr/local/cargo/registry \
     --mount=type=cache,id=cargo-git-wasm,target=/usr/local/cargo/git \
     --mount=type=cache,id=rust-target-wasm-${BUILDARCH},sharing=locked,target=/src/target \
     --mount=type=cache,id=wasm-pack-tool-cache,target=/root/.cache/.wasm-pack \
     ulimit -c 0 && ulimit -f 16777216 \
+    && export CARGO_NET_OFFLINE=true \
     && CPUSET="0-$((BUILD_JOBS - 1))" \
-    && taskset -c "$CPUSET" wasm-pack build libs/fauna-wasm --target web -- --locked \
-    && taskset -c "$CPUSET" wasm-pack build libs/fauna-wasm-onboarding --target web -- --locked \
-    && taskset -c "$CPUSET" wasm-pack build libs/fauna-wasm-launch --target web -- --locked \
-    && taskset -c "$CPUSET" wasm-pack build libs/fauna-wasm-folders --target web -- --locked \
-    && taskset -c "$CPUSET" wasm-pack build libs/fauna-wasm-backups --target web -- --locked \
-    && taskset -c "$CPUSET" wasm-pack build libs/fauna-wasm-media --target web -- --locked \
-    && taskset -c "$CPUSET" wasm-pack build libs/fauna-wasm-labeler-catalog --target web -- --locked \
-    && taskset -c "$CPUSET" wasm-pack build libs/fauna-wasm-share --target web -- --locked \
-    && taskset -c "$CPUSET" wasm-pack build libs/fauna-wasm-connected-apps --target web -- --locked \
-    && taskset -c "$CPUSET" wasm-pack build libs/fauna-wasm-atproto-settings --target web -- --locked
+    && log=/tmp/wasm-pack.log \
+    && taskset -c "$CPUSET" wasm-pack build libs/fauna-wasm --target web -- --locked 2>>"$log" \
+    && taskset -c "$CPUSET" wasm-pack build libs/fauna-wasm-onboarding --target web -- --locked 2>>"$log" \
+    && taskset -c "$CPUSET" wasm-pack build libs/fauna-wasm-launch --target web -- --locked 2>>"$log" \
+    && taskset -c "$CPUSET" wasm-pack build libs/fauna-wasm-folders --target web -- --locked 2>>"$log" \
+    && taskset -c "$CPUSET" wasm-pack build libs/fauna-wasm-backups --target web -- --locked 2>>"$log" \
+    && taskset -c "$CPUSET" wasm-pack build libs/fauna-wasm-media --target web -- --locked 2>>"$log" \
+    && taskset -c "$CPUSET" wasm-pack build libs/fauna-wasm-labeler-catalog --target web -- --locked 2>>"$log" \
+    && taskset -c "$CPUSET" wasm-pack build libs/fauna-wasm-share --target web -- --locked 2>>"$log" \
+    && taskset -c "$CPUSET" wasm-pack build libs/fauna-wasm-connected-apps --target web -- --locked 2>>"$log" \
+    && taskset -c "$CPUSET" wasm-pack build libs/fauna-wasm-atproto-settings --target web -- --locked 2>>"$log" \
+    || { cat /tmp/wasm-pack.log >&2; exit 1; }; \
+    cat /tmp/wasm-pack.log >&2; \
+    if grep -q '^ *Compiling ' /tmp/wasm-pack.log; then \
+      echo 'rust-wasm: wasm-pack compiled a crate with the network on; the --network=none RUN above must build every chunk with the cargo arguments wasm-pack passes' >&2; \
+      exit 1; \
+    fi; \
+    rm -f /tmp/wasm-pack.log
 
 # ── Go mail-bridge (cgo against libfauna_ffi.so) + supervisor sidekick ──
 # The Go mail-bridge links the UniFFI shared library libfauna_ffi.so via cgo.
@@ -421,10 +496,20 @@ COPY bins/fauna-bridges/ bins/fauna-bridges/
 # go-build holds target-arch compiled objects → suffix with ${TARGETARCH} so the
 # amd64 and arm64 builds keep separate caches (see rust-native). go-mod is
 # arch-independent module source, so it stays shared.
+#
+# Fetch, then compile with no network, as the Rust stages do (build-compile-
+# cache.md § The boundary's scope and what OFF means, decision (5)): `go mod
+# download` fills the module cache, and the builds run with `--network=none`,
+# `GOPROXY=off` and `-mod=readonly`, so a module missing from the cache fails
+# by name instead of being fetched mid-compile.
 ARG TARGETARCH
 RUN --mount=type=cache,id=go-mod,target=/go/pkg/mod \
+    go -C bins/fauna-bridges mod download
+RUN --network=none \
+    --mount=type=cache,id=go-mod,target=/go/pkg/mod \
     --mount=type=cache,id=go-build-${TARGETARCH},target=/root/.cache/go-build \
     set -e; \
+    export GOPROXY=off GOFLAGS=-mod=readonly; \
     case "$TARGETARCH" in \
       amd64) CC=x86_64-linux-gnu-gcc ;; \
       arm64) CC=aarch64-linux-gnu-gcc ;; \

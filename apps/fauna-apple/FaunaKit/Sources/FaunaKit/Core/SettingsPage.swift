@@ -62,6 +62,7 @@ public enum SettingsPage: String, CaseIterable, Identifiable {
     case general
     case encryption
     case devices
+    case sessions
     case folders
     #if !FAUNA_KIDS
     case nostr
@@ -71,6 +72,7 @@ public enum SettingsPage: String, CaseIterable, Identifiable {
     case mailSpam
     case mailExport
     case mailImport
+    case archiveImport
     case mailLists
     case mailListMembers
     case web
@@ -100,6 +102,7 @@ public enum SettingsPage: String, CaseIterable, Identifiable {
         case .general: "general"
         case .encryption: "encryption"
         case .devices: "devices"
+        case .sessions: "sessions"
         case .folders: "folders"
         #if !FAUNA_KIDS
         case .nostr: "nostr"
@@ -109,6 +112,7 @@ public enum SettingsPage: String, CaseIterable, Identifiable {
         case .mailSpam: "mail-spam"
         case .mailExport: "mail-export"
         case .mailImport: "mail-import"
+        case .archiveImport: "archive-import"
         case .mailLists: "mail-lists"
         case .mailListMembers: "mail-list-members"
         case .web: "web"
@@ -121,6 +125,30 @@ public enum SettingsPage: String, CaseIterable, Identifiable {
         #endif
         case .logs: "logs"
         }
+    }
+
+    /// The key of this page's Settings rail row (ui.yaml
+    /// `navigation.sub_page_nav_rows`): the ui.yaml page key the row opens, or the
+    /// two-element nav slug for an entry realized from the `settings` page itself
+    /// (`status`, `privacy`, `general`, `encryption`). The same keys tui's
+    /// `settings/root.rs::rail_id` uses.
+    public var pageKey: String {
+        switch self {
+        case .memberReview: "member_review"
+        #if !FAUNA_KIDS
+        case .web: "web-settings"
+        #endif
+        case .linkedNests: "nests"
+        case .logs: "settings-logs"
+        default: navId
+        }
+    }
+
+    /// The rail row's element id, `settings-nav-row[<key>]` — except Account, whose
+    /// row keeps its older `account-settings-link` id (ui.yaml
+    /// `navigation.sub_page_nav_rows.settings.keeps_older_id`), on every app.
+    public var navRowId: String {
+        self == .account ? Ids.accountSettingsLink : "\(Ids.settingsNavRow)[\(pageKey)]"
     }
 
     /// The canonical top-level nav `view` name this sub-page round-trips as, for
@@ -154,6 +182,7 @@ public enum SettingsPage: String, CaseIterable, Identifiable {
         case "general": self = .general
         case "encryption": self = .encryption
         case "devices": self = .devices
+        case "sessions": self = .sessions
         case "folders": self = .folders
         #if !FAUNA_KIDS
         case "nostr": self = .nostr
@@ -163,6 +192,7 @@ public enum SettingsPage: String, CaseIterable, Identifiable {
         case "mail-spam": self = .mailSpam
         case "mail-export": self = .mailExport
         case "mail-import": self = .mailImport
+        case "archive-import": self = .archiveImport
         case "mail-lists": self = .mailLists
         case "mail-list-members": self = .mailListMembers
         case "web": self = .web
@@ -192,6 +222,7 @@ public enum SettingsPage: String, CaseIterable, Identifiable {
         case .general: L.settings.general
         case .encryption: L.settings.encryptionPage.title
         case .devices: L.devices.title
+        case .sessions: L.sessions.title
         case .folders: L.folders.title
         #if !FAUNA_KIDS
         case .nostr: L.nostr.title
@@ -201,6 +232,7 @@ public enum SettingsPage: String, CaseIterable, Identifiable {
         case .mailSpam: L.mailSpam.title
         case .mailExport: L.mailExport.title
         case .mailImport: L.mailImport.title
+        case .archiveImport: L.archiveImport.title
         case .mailLists: L.mailLists.title
         case .mailListMembers: L.mailLists.membersTitle
         case .web: L.webSettings.title
@@ -229,6 +261,7 @@ public enum SettingsPage: String, CaseIterable, Identifiable {
         case .general: "gearshape"
         case .encryption: "lock.shield"
         case .devices: "desktopcomputer"
+        case .sessions: "person.badge.key"
         case .folders: "folder"
         #if !FAUNA_KIDS
         case .nostr: "antenna.radiowaves.left.and.right"
@@ -238,6 +271,7 @@ public enum SettingsPage: String, CaseIterable, Identifiable {
         case .mailSpam: "exclamationmark.shield"
         case .mailExport: "square.and.arrow.up"
         case .mailImport: "square.and.arrow.down"
+        case .archiveImport: "tray.and.arrow.down"
         case .mailLists: "list.bullet.rectangle"
         case .mailListMembers: "person.2"
         case .web: "globe"
@@ -267,7 +301,10 @@ public enum SettingsPage: String, CaseIterable, Identifiable {
     /// (content-moderation-and-ranking.md § Tier-3 community models). `devices`
     /// (the roster — `DevicesContent` roster slice) and `folders` (the
     /// folder control plane — `FoldersContent`) occupy the former single `sync`
-    /// slot, placed after `encryption` (the device/sync administration cluster).
+    /// slot, placed after `encryption` (the device/sync administration cluster);
+    /// `sessions` (`SessionsView` — the sign-ins live now, `ui/sessions.md`)
+    /// sits directly after `devices`, "machines enrolled" beside "sign-ins live
+    /// now" (the 2026-09-25 ruling).
     /// **There is deliberately no `p2p` case:** `p2p.md` § Implementation status
     /// records macOS/iOS as having *no* p2p page surface, and `ui.yaml`'s p2p page
     /// marks both "Not implemented per spec". The unsanctioned WG-era
@@ -280,7 +317,9 @@ public enum SettingsPage: String, CaseIterable, Identifiable {
     /// follows over `fauna.bridges.*`; nostr.md § Page structure); the Mail sub-pages
     /// follow `mail`, as on linux — with `mail-import` (`MailImportView`, the
     /// foreign-mailbox migration wizard, mailbox-migration.md) directly after
-    /// `mail-export`, the same slot the linux/web/windows IA gives it;
+    /// `mail-export`, the same slot the linux/web/windows IA gives it, and
+    /// `archive-import` (`ArchiveImportView`, Import from other services —
+    /// archive-import.md) directly after Mail import, tui's ratified slot;
     /// `subscription-settings` (`SubscriptionSettingsView`
     /// — the consumer "my subscriptions across all creators" page, monetization.md
     /// § Pillar 1, "sibling of mail-settings/web-settings") follows `web`;
@@ -303,12 +342,23 @@ public enum SettingsPage: String, CaseIterable, Identifiable {
         // age band, the kids-app bullet, item (4)): the excised planes' pages do
         // not exist in this build at all.
         [.status, .account, .memberReview, .privacy, .mutedWords, .general, .encryption,
-         .devices, .folders, .subscriptions, .linkedNests, .taskDelegation, .logs]
+         .devices, .sessions, .folders, .subscriptions, .linkedNests, .taskDelegation, .logs]
         #else
         [.status, .account, .memberReview, .privacy, .mutedWords, .personalization, .labelerCatalog, .general, .encryption,
-         .devices, .folders, .nostr, .atproto,
-         .mail, .mailAliases, .mailSpam, .mailExport, .mailImport, .mailLists, .mailListMembers, .web,
+         .devices, .sessions, .folders, .nostr, .atproto,
+         .mail, .mailAliases, .mailSpam, .mailExport, .mailImport, .archiveImport, .mailLists, .mailListMembers, .web,
          .subscriptions, .linkedNests, .taskDelegation, .connectedApps, .logs]
         #endif
+    }
+}
+
+public extension View {
+    /// Tag a Settings rail row with its `navRowId` and register it with the
+    /// in-process driver, which fires `select` — the same selection the tap
+    /// makes. A SwiftUI element carries one identifier, so this replaces the row's
+    /// older `*-settings-link` id (Account's row keeps `account-settings-link`).
+    func settingsNavRow(_ page: SettingsPage, select: @escaping () -> Void) -> some View {
+        accessibilityIdentifier(page.navRowId)
+            .automationActivate(page.navRowId, perform: select)
     }
 }

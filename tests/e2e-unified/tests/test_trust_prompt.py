@@ -47,8 +47,8 @@ if _e2e_dir not in sys.path:
     sys.path.insert(0, _e2e_dir)
 
 from clients.ws_rpc_admin_client import WsRpcAdminClient
-from common.nest import CLAIM_CODE
 from conftest import MAIL_PRIMARY_DOMAIN
+from helpers.app_launch import app_launch_config
 from helpers.authenticated_shell import wait_for_authenticated_shell
 from helpers.budgets import RPC_ROUNDTRIP_S, UI_SETTLE_S
 from helpers.waiting import wait_until
@@ -58,8 +58,14 @@ pytestmark = [pytest.mark.tier_3, pytest.mark.tier1]
 
 @pytest.fixture
 def unclaimed_trust_nest(request, nest_mode, tmp_path_factory):
-    """A fresh, NEVER-claimed nest (claim code = `common.nest.CLAIM_CODE`);
-    the journeys below drive the real UI claim against it.
+    """A fresh, NEVER-claimed nest; the journeys below drive the real UI claim
+    against it.
+
+    The claim code comes off the handle (`nest["claim_code"]`), never the
+    `common.nest.CLAIM_CODE` constant: that constant is a fact about
+    *standalone*, while docker's provider mints a random code per container
+    (typing the constant there fails the claim, and the wait for
+    `nat-mode-confirm-button` times out).
 
     ``unclaimed`` is honoured in every mode (the docker provider declares it),
     so the claim ceremony these journeys drive is the same one in a container.
@@ -93,7 +99,7 @@ def _claim_to_nat_mode(app, nest, secret_hex: str) -> None:
         _json.dumps([nest["url"], "admin@localhost"]),
     )
     app.driver.wait_for("claim-code-input", timeout=RPC_ROUNDTRIP_S)
-    app.driver.clear_and_type("claim-code-input", CLAIM_CODE)
+    app.driver.clear_and_type("claim-code-input", nest["claim_code"])
     app.driver.click("claim-code-submit-button")
     # The claim is a real WS-RPC round trip on a cold nest — RPC_ROUNDTRIP_S
     # is a ceiling, not a target.
@@ -578,8 +584,8 @@ def resume_harness(request, tmp_path, trust_resume_nest):
     else:
         harness = make_launch_harness(
             client, tmp_path=tmp_path,
-            app_path=request.getfixturevalue(f"{client}_app_path"),
             file_backed=True, seed_trust=_trust_seeder(request),
+            **app_launch_config(client, request),
         )
         node_url = trust_resume_nest["url"]
     try:
@@ -677,7 +683,7 @@ def test_the_manual_dns_resume_offers_the_trust_and_survives_a_crash_on_it(
     slot's resume. A build that spent the slot at the claim lands in the app
     instead, which the wait's diagnosis names."""
     from actions import ActionLayer
-    from helpers.app_surface import skip_unbuilt
+    from helpers.app_surface import require_surface
 
     harness, node_url = resume_harness
     secret_hex = bytes(trust_resume_nest["admin"]["signing_key"]).hex()
@@ -685,15 +691,7 @@ def test_the_manual_dns_resume_offers_the_trust_and_survives_a_crash_on_it(
     # web reads no environment, so no trust seed names the nest for it.
     trust = None if harness.client == "web" else trust_resume_nest
     driver = harness.launch(node_url=node_url, trust=trust)
-    if not driver.supports_unclean_kill():
-        skip_unbuilt(
-            driver,
-            surface="the unclean-kill primitive (driver-owned Popen/pty child)",
-            detail="the crash-on-the-offer leg needs a real kill — a graceful "
-            "quit could flush what a crash would lose — see "
-            "PlatformDriver.kill_uncleanly",
-            tracked="testing.md",
-        )
+    require_surface(driver, "unclean-kill")
     app = ActionLayer(driver)
 
     # ── Leg 1: the real exit, then the resume.

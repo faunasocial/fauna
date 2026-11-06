@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import os
 import sqlite3
+import threading
 import time
 from types import SimpleNamespace
 
@@ -77,6 +78,18 @@ REQUIRE_CONFIRM_TOGGLE = "account-require-confirm-toggle"
 REAUTH_PROMPT = "account-activate-reauth-prompt"
 REAUTH_CONFIRM_BUTTON = "account-activate-reauth-confirm-button"
 REAUTH_CANCEL_BUTTON = "account-activate-reauth-cancel-button"
+
+# `fauna_client_accounts::mutation_lock::CONTENDED_LOG_LINE` — the line the shared
+# registry lock logs, before it blocks, when another instance holds it. The
+# outcome-14 witness reads it from the app's own log; the test pins it against the
+# Rust source so a reworded line fails here, not as a silent timeout.
+CONTENDED_LOG_LINE = (
+    "account registry: another instance holds the mutation lock; waiting for it"
+)
+_MUTATION_LOCK_RS = os.path.join(
+    os.path.dirname(__file__), "..", "..", "..",
+    "libs", "fauna-client-accounts", "src", "mutation_lock.rs",
+)
 
 # tests/e2e-unified/ui.yaml § settings (`account-add-button`) + § onboarding — the
 # append-mode "Add account" wizard (the SAME shared onboarding element IDs every
@@ -315,6 +328,106 @@ def test_tui_account_switcher_lists_switches_and_reveals_admin(
             "switching to the admin identity must reveal the admin shell"
         )
     finally:
+        driver.teardown()
+
+
+@pytest.mark.feature("multiple-accounts")
+# The stand-in sibling holds a POSIX flock — windows' LockFileEx has no python twin
+# here, so the subject exists on linux and macOS alone (convention 7, the fourth skip
+# kind; it has passed on both).
+@pytest.mark.host_platform("linux", "macos")
+def test_tui_a_registry_write_queues_behind_a_sibling_instances_mutation_lock(
+    nest_instance, tui_app_path, request
+):
+    """``multiple-accounts`` outcome 14 on tui, whose two windows are two terminal
+    instances: changing the identities at the same time never loses the change —
+    one waits for the other (``account-scoping.md`` § Concurrent instances;
+    ``long-term-store.md`` § Multi-account evolution → *Cross-process mutation
+    lock*). The same shape as linux's witness: the test stands in for the sibling
+    mid-mutation by holding the install-scoped ``flock`` on
+    ``<config>/fauna-tui/account-registry.lock``, then presses
+    ``account-require-confirm-toggle``. The positive observable is the app's own
+    log line ``CONTENDED_LOG_LINE``, which the shared lock writes when it finds
+    the lock held and before it blocks, with the flag still off in the reading
+    that saw it (convention 14). The kernel offers this view only on linux
+    (``/proc/locks``); macOS and windows show no flock waiter. After release the
+    write lands. A registry built without the lock writes straight through,
+    which the poll reports as the first failure it sees."""
+    import fcntl  # POSIX-only: a module-level import breaks collection on windows
+
+    with open(_MUTATION_LOCK_RS, encoding="utf-8") as src:
+        assert f'"{CONTENDED_LOG_LINE}"' in src.read(), (
+            "CONTENDED_LOG_LINE no longer matches "
+            "fauna_client_accounts::mutation_lock::CONTENDED_LOG_LINE"
+        )
+
+    seed, _user_actor, second_actor = _seed_two_accounts(nest_instance, second="user")
+    driver = create_driver("tui")
+    driver.launch({
+        "app_path": tui_app_path,
+        "url": nest_instance["url"],
+        "seed_credentials": seed,
+        "environment": _seeded_environment(request, nest_instance),
+    })
+    held = None
+    try:
+        driver.wait_for_state(
+            lambda s: bool(s.get("session", {}).get("authenticated")), timeout=30
+        )
+        _wait_switcher_count(driver, 2, timeout=30)
+
+        lock_path = os.path.join(str(driver.config_home), "fauna-tui", "account-registry.lock")
+        wait_until(
+            lambda: os.path.isfile(lock_path) or None, 20.0,
+            diagnose=lambda: f"the app never stamped {lock_path}",
+        )
+        def contended_lines() -> int:
+            return (driver.on_device_log_text() or "").count(CONTENDED_LOG_LINE)
+
+        before = contended_lines()
+
+        # (1) The sibling holds the registry lock.
+        held = open(lock_path, "a+")
+        fcntl.flock(held, fcntl.LOCK_EX)
+
+        # (2) The app flips the second row's flag — it must QUEUE behind the hold.
+        _wait_flag(driver, second_actor, False, timeout=10)
+        # The mutator may block the app's UI loop inside the `flock`, so the click
+        # cannot be answered until the sibling lets go: press from a thread, and
+        # watch only the app's log file and the store file meanwhile.
+        pressed = threading.Thread(
+            target=lambda: driver.click(REQUIRE_CONFIRM_TOGGLE, scope=f"{SWITCHER_ITEM}[1]"),
+            daemon=True,
+        )
+        pressed.start()
+        deadline = time.monotonic() + 30.0
+        while True:
+            # Log first, store second: a line seen before the read means the
+            # mutator was already queued when the flag was read off.
+            queued = contended_lines() > before
+            flags = {
+                a["actor_id"]: a.get("require_confirm_to_activate", False)
+                for a in (_read_registry_index(driver) or {}).get("accounts", [])
+            }
+            assert flags.get(second_actor) is not True, (
+                "the registry write LANDED while a sibling held "
+                f"{lock_path} — the mutator never asked for the lock. flags={flags!r}"
+            )
+            if queued:
+                break
+            assert time.monotonic() < deadline, (
+                f"the toggle write never logged {CONTENDED_LOG_LINE!r} while a sibling "
+                f"held {lock_path}; {driver.diagnose('error-message')}"
+            )
+            time.sleep(0.3)  # sleep-ok: bounded poll cadence inside the deadline, not a settle guess
+
+        # (3) The sibling lets go → the queued write lands.
+        fcntl.flock(held, fcntl.LOCK_UN)
+        pressed.join(timeout=60)
+        _wait_flag(driver, second_actor, True, timeout=30)
+    finally:
+        if held is not None:
+            held.close()
         driver.teardown()
 
 
@@ -1464,6 +1577,52 @@ def test_tui_switching_identity_keeps_device_settings_and_moves_drafts(
         assert external_media() == "never", (
             "the device setting must still hold after switching back; reads "
             f"{driver.get_text(EXTERNAL_MEDIA_SELECT)!r}"
+        )
+    finally:
+        driver.teardown()
+
+
+# ── A conversation draft never crosses an identity switch ───────────────────
+# (drafts-survive outcome 16 — `conversation-drafts.md` § Persistence, "A
+# restore the outgoing account started fills nothing after an identity change")
+
+
+@pytest.mark.feature("drafts-survive")
+def test_tui_a_new_message_draft_never_shows_under_another_identity(
+    nest_instance, tui_app_path, request
+):
+    """Each identity's half-written new message stays its own across switches —
+    the shared arc in `helpers/identity_switch_drafts.py`, which every app's
+    switcher module runs."""
+    from helpers.identity_switch_drafts import assert_new_message_draft_never_crosses_identity
+
+    admin_sk = nest_instance["admin"]["signing_key"]
+    admin_actor = bytes(admin_sk.verify_key).hex()
+    user = create_actor_and_register(nest_instance["port"], admin_signing_key=admin_sk)
+    user_actor = user["actor_id_hex"]
+    seed = build_registry_seed(
+        [
+            {"actor_id": user_actor, "secret_hex": bytes(user["signing_key"]).hex(),
+             "nest_url": nest_instance["url"], "device_id": "drafts-user", "handle": "user"},
+            {"actor_id": admin_actor, "secret_hex": bytes(admin_sk).hex(),
+             "nest_url": nest_instance["url"], "device_id": "drafts-admin", "handle": "admin"},
+        ],
+        active=user_actor,
+    )
+    driver = create_driver("tui")
+    driver.launch({
+        "app_path": tui_app_path,
+        "url": nest_instance["url"],
+        "seed_credentials": seed,
+        "environment": _seeded_environment(request, nest_instance),
+    })
+    try:
+        assert_new_message_draft_never_crosses_identity(
+            driver, nest_instance["url"],
+            user=(user_actor, bytes(user["signing_key"])),
+            admin=(admin_actor, bytes(admin_sk)),
+            show_switcher=lambda: _wait_switcher_count(driver, 2, timeout=30),
+            await_session=lambda actor, what: _await_working_session(driver, actor, what),
         )
     finally:
         driver.teardown()

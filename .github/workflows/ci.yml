@@ -65,6 +65,7 @@ jobs:
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
         with:
+          persist-credentials: false
           fetch-depth: 0
       # Not gitleaks/gitleaks-action: for an ORGANIZATION-owned repository the
       # action refuses to run without a GITLEAKS_LICENSE secret (measured on
@@ -146,8 +147,10 @@ jobs:
     #
     # (2) Builds here -- left out deliberately, and the widening is UNPRICED
     #
-    #   * fauna-ffi is the UniFFI cdylib. The go job exercises it via
-    #     uniffi-bindgen-go, so it is covered publicly, just not by this job.
+    #   * fauna-ffi is the UniFFI cdylib, and fauna-ffi-core the rlib holding all
+    #     of its code (the thin package only re-exports it). The go job exercises
+    #     them via uniffi-bindgen-go, so they are covered publicly, just not by
+    #     this job.
     #   * fauna-ipc, fauna-cfapi and fauna-{bridge,nest}-service are the
     #     Windows service/IPC crates BY PURPOSE, not by buildability: each keeps its
     #     platform plumbing behind a `cfg(windows)` dependency table (fauna-ipc
@@ -178,6 +181,7 @@ jobs:
         --exclude fauna-wasm-media
         --exclude fauna-wasm-onboarding
         --exclude fauna-ffi
+        --exclude fauna-ffi-core
         --exclude fauna-ipc
         --exclude fauna-bridge-service
         --exclude fauna-nest-service
@@ -198,6 +202,8 @@ jobs:
       CARGO_PROFILE_DEV_STRIP: debuginfo
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
+        with:
+          persist-credentials: false
 
       # Toolchain (channel/date + components + targets) comes from
       # rust-toolchain.toml. `rustflags: ""` stops -D warnings being injected
@@ -237,7 +243,7 @@ jobs:
       #
       #   after this step                        32 GB free
       #   after `cargo test --workspace`           2 GB free   (-30 GB)
-      #   after deleting target/debug/deps/*      24 GB free   (+22 GB)
+      #   after deleting the test executables    24 GB free   (+22 GB)
       #
       # So the test EXECUTABLES alone are ~22 GB and the rest of the target dir
       # ~8 GB. 32 GB of headroom cannot cover 30 GB of build plus a 2 GiB floor
@@ -385,6 +391,22 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y ffmpeg
 
+      - name: Install uv
+        run: bash scripts/install-uv.sh
+      - name: Install bubblewrap
+        run: |
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+          command -v bwrap || { sudo apt-get update && sudo apt-get install -y bubblewrap; }
+          bwrap --unshare-all --ro-bind / / true
+          ldconfig -p | grep -q 'libseccomp\.so\.2 ' || { echo "libseccomp.so.2 missing (libseccomp2)"; exit 1; }
+      # The cargo boundary (docs/goal/architecture/build-compile-cache.md § The
+      # boundary's scope and what OFF means, decision (6)): puts the shipped cargo
+      # shim first on PATH, so every later cargo of this job — a recipe's, a bare
+      # step's, one a tool spawns — compiles with no network; the job's last step
+      # witnesses it.
+      - name: Put every cargo behind the boundary
+        run: uv run --no-project python scripts/cargo-boundary.py runner-setup
+
       # The first gate, so nothing before it can have failed -- it needs no
       # condition of its own. It runs after the installs above rather than
       # before them (it was first until 2026-08-29) for the ordering reason at
@@ -429,8 +451,9 @@ jobs:
         if: ${{ !cancelled() }}
         run: |
           df -h / | tail -1
-          if [ -d target/debug/deps ]; then
-            find target/debug/deps -maxdepth 1 -type f -executable ! -name '*.so' -delete
+          if [ -d target/debug/build ]; then
+            find target/debug/build -mindepth 4 -maxdepth 4 -regextype posix-basic -type f -executable \
+              ! -name '*.so' -regex '.*/build/[^/]*/\([0-9a-f]\{16\}\)/out/[^/]*-\1' -delete
           fi
           df -h / | tail -1
 
@@ -447,13 +470,22 @@ jobs:
       # first two feature steps consumed all of it.
       #
       # What it deletes is exactly the dead weight: `cargo test --workspace`
-      # links ~640 test executables into target/debug/deps, and NOTHING below
-      # reads one -- the per-feature steps are `-p fauna-nest`, needing only the
-      # dependency rlib/rmeta this leaves untouched. Measured over a local
-      # replay of this same command: 637 executables = 48.9G apparent, against
-      # 6.1G of rlib+rmeta and 0.6G of proc-macro .so. Hence the `! -name
-      # '*.so'`: a proc-macro dylib is executable, is a build input here, and
-      # must survive.
+      # links ~640 test executables, and NOTHING below reads one -- the
+      # per-feature steps are `-p fauna-nest`, needing only the dependency
+      # rlib/rmeta this leaves untouched. Measured over a local replay of this
+      # same command: 637 executables = 48.9G apparent, against 6.1G of
+      # rlib+rmeta and 0.6G of proc-macro .so. Cargo's build-dir layout puts
+      # each unit in `target/debug/build/<pkg>/<hash>/out/`, and a test
+      # executable is the one file there named `<target>-<hash>` after its own
+      # unit's hash -- which is what the `-regex` matches. That leaves alone a
+      # build script's `build_script_build` (deleting it would re-run the script
+      # and rebuild its crate), whatever a build script wrote into its OUT_DIR
+      # (the same `out/`), and a bin (a hard link of the copy in target/debug).
+      # Hence too the `! -name '*.so'`: a proc-macro dylib is executable, is a
+      # build input here, and must survive. `-regextype posix-basic` is
+      # load-bearing: GNU find's default dialect has no `\{16\}` interval, so
+      # without it the regex matches nothing and the step greens over a
+      # reclaim that deleted nothing.
       #
       # Deleting a cargo output is safe by construction -- cargo checks that
       # its outputs still exist, not merely their fingerprints, so anything it
@@ -469,8 +501,9 @@ jobs:
           # `!cancelled()`, i.e. after a red Clippy or Test too: a housekeeping
           # step that reds the job because its own `find` met no directory
           # would be worse than the disk it is here to reclaim.
-          if [ -d target/debug/deps ]; then
-            find target/debug/deps -maxdepth 1 -type f -executable ! -name '*.so' -delete
+          if [ -d target/debug/build ]; then
+            find target/debug/build -mindepth 4 -maxdepth 4 -regextype posix-basic -type f -executable \
+              ! -name '*.so' -regex '.*/build/[^/]*/\([0-9a-f]\{16\}\)/out/[^/]*-\1' -delete
           fi
           df -h / | tail -1
 
@@ -602,6 +635,10 @@ jobs:
         if: ${{ !cancelled() }}
         run: cargo clippy -p fauna-nest --features activitypub --lib --bins -- -D warnings
 
+      - name: Every cargo compiled behind the boundary
+        if: ${{ !cancelled() }}
+        run: uv run --no-project python scripts/cargo-boundary.py runner-witness
+
   go:
     name: Go (mail-bridge build, test, fmt)
     runs-on: ubuntu-latest
@@ -610,6 +647,8 @@ jobs:
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
+        with:
+          persist-credentials: false
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16  # v6.5.0
         with:
           go-version: '1.26'
@@ -666,6 +705,20 @@ jobs:
             echo "Files need formatting:"; echo "$unformatted"; exit 1
           fi
 
+      - name: Install bubblewrap
+        run: |
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+          command -v bwrap || { sudo apt-get update && sudo apt-get install -y bubblewrap; }
+          bwrap --unshare-all --ro-bind / / true
+          ldconfig -p | grep -q 'libseccomp\.so\.2 ' || { echo "libseccomp.so.2 missing (libseccomp2)"; exit 1; }
+      # The cargo boundary (docs/goal/architecture/build-compile-cache.md § The
+      # boundary's scope and what OFF means, decision (6)): puts the shipped cargo
+      # shim first on PATH, so every later cargo of this job — a recipe's, a bare
+      # step's, one a tool spawns — compiles with no network; the job's last step
+      # witnesses it.
+      - name: Put every cargo behind the boundary
+        run: uv run --no-project python scripts/cargo-boundary.py runner-setup
+
       # An independent gate: a `gofmt` nit says nothing about whether the bridge
       # builds or its suite passes, and this step is the job's whole substance
       # (a cold FFI cdylib build plus the Go suite) to the formatter's seconds.
@@ -680,16 +733,27 @@ jobs:
         if: ${{ !cancelled() }}
         run: just mail-bridge-test
 
+      - name: Every cargo compiled behind the boundary
+        if: ${{ !cancelled() }}
+        run: uv run --no-project python scripts/cargo-boundary.py runner-witness
+
   web:
     name: Web (WASM + SPA build)
     runs-on: ubuntu-latest
-    # 90, not 35: a COLD build of every WASM chunk plus the SPA on a 4-core
-    # runner was cancelled at the old ceiling on this repository's first run
-    # (2026-08-28); later runs restore the toolchain action's cache, the first
-    # run and every lockfile change do not.
-    timeout-minutes: 90
+    # 100: derived from the runner, 2026-10-27, by the same rule as `macos`
+    # (about 1.8x the slowest green reading, rounded up to the next 10
+    # minutes). The first ceiling, 35, cancelled this repository's first run
+    # (2026-08-28). Every run here is a COLD build of every WASM chunk plus
+    # the SPA, because the toolchain step carries no cache (`cache: false`,
+    # the house block). The 20 green public runs from 2026-10-06 to
+    # 2026-10-22 took 22.8 to 51.2 min. The weekly means moved
+    # 33 -> 34 -> 44 as chunks grew, so 51.2 x 1.8 = 92 retires the old 90.
+    # Re-derive it when two runs pass 55 % of 100 (55 min).
+    timeout-minutes: 100
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
+        with:
+          persist-credentials: false
       - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659  # v1.17.0, toolchain + wasm32 target from rust-toolchain.toml
         with:
           rustflags: ""
@@ -709,6 +773,10 @@ jobs:
       # apparmor_restrict_unprivileged_userns=1: bwrap dies with "loopback:
       # Failed RTM_NEWADDR: Operation not permitted"), so lift that on this
       # throwaway VM first; the sysctl is absent on older kernels, hence `|| true`.
+      # Reviewed and accepted (docs/goal/architecture/build-system.md § The Deno
+      # build sandbox, (3)): every step here already runs with passwordless sudo,
+      # so the restriction guards no boundary on this VM; the lift is what lets
+      # the build run inside bubblewrap at all.
       # The launcher builds its seccomp filter with the system libseccomp
       # (libseccomp2, on every Ubuntu) and fails closed without it; the second
       # probe names that too.
@@ -718,6 +786,14 @@ jobs:
           command -v bwrap || { sudo apt-get update && sudo apt-get install -y bubblewrap; }
           bwrap --unshare-all --ro-bind / / true
           ldconfig -p | grep -q 'libseccomp\.so\.2 ' || { echo "libseccomp.so.2 missing (libseccomp2)"; exit 1; }
+      # The cargo boundary (docs/goal/architecture/build-compile-cache.md § The
+      # boundary's scope and what OFF means, decision (6)): puts the shipped cargo
+      # shim first on PATH, so every later cargo of this job — a recipe's, a bare
+      # step's, one a tool spawns — compiles with no network; the job's last step
+      # witnesses it.
+      - name: Put every cargo behind the boundary
+        run: uv run --no-project python scripts/cargo-boundary.py runner-setup
+
       # The pinned wasm32 C compiler (supply-chain/wasm32-cc.toml): every wasm
       # chunk build runs `_wasm32-cc-check`, which refuses without it. The pin's
       # own script prints the checksum-verified download and unpack for this
@@ -729,16 +805,22 @@ jobs:
       - name: Build WASM chunks + Svelte SPA
         run: just web
 
+      - name: Every cargo compiled behind the boundary
+        if: ${{ !cancelled() }}
+        run: uv run --no-project python scripts/cargo-boundary.py runner-witness
+
   linux-desktop:
     name: Linux Desktop (build, package, test)
     runs-on: ubuntu-latest
     # 90, not 30: a COLD release build of the desktop app on a 4-core runner was
     # still compiling libs/ at minute 17 and was cancelled at the old ceiling on
-    # this repository's first run (2026-08-28). The toolchain action's cache
-    # shortens later runs, but the first run and every lockfile change are cold.
+    # this repository's first run (2026-08-28). Every run is cold: the
+    # toolchain step carries no cache (`cache: false`, the house block).
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
+        with:
+          persist-credentials: false
       - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659  # v1.17.0, toolchain from rust-toolchain.toml
         with:
           rustflags: ""
@@ -758,11 +840,31 @@ jobs:
       # to gate it.
       - name: Validate .desktop file
         run: desktop-file-validate apps/fauna-linux/packaging/social.fauna.fauna.desktop
+      - name: Install uv
+        run: bash scripts/install-uv.sh
+      - name: Install bubblewrap
+        run: |
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+          command -v bwrap || { sudo apt-get update && sudo apt-get install -y bubblewrap; }
+          bwrap --unshare-all --ro-bind / / true
+          ldconfig -p | grep -q 'libseccomp\.so\.2 ' || { echo "libseccomp.so.2 missing (libseccomp2)"; exit 1; }
+      # The cargo boundary (docs/goal/architecture/build-compile-cache.md § The
+      # boundary's scope and what OFF means, decision (6)): puts the shipped cargo
+      # shim first on PATH, so every later cargo of this job — a recipe's, a bare
+      # step's, one a tool spawns — compiles with no network; the job's last step
+      # witnesses it.
+      - name: Put every cargo behind the boundary
+        run: uv run --no-project python scripts/cargo-boundary.py runner-setup
+
       - name: Build release binary
         run: cargo build -p fauna-linux --release
       # A genuine chain: it runs the binary the step above produces.
       - name: Version smoke test
         run: target/release/fauna-desktop --version
+
+      - name: Every cargo compiled behind the boundary
+        if: ${{ !cancelled() }}
+        run: uv run --no-project python scripts/cargo-boundary.py runner-witness
 
   macos:
     name: macOS (desktop app bundle)
@@ -774,9 +876,25 @@ jobs:
     # resulting skip only while private.
     if: ${{ !github.event.repository.private }}
     runs-on: macos-15
-    timeout-minutes: 120
+    # 180, not 120: derived from the runner, 2026-10-27. The 20 green public
+    # runs from 2026-10-07 to 2026-10-22 took 65.8 to 96.7 min, with nearly
+    # all of it in the one build step below. That is a +-20 % spread on
+    # near-identical trees (two runs a day apart read 69.8 and 96.7), and the
+    # weekly means drifted up only a little (74 -> 81 -> 83). At 120 the
+    # slowest reading was already 81 % of the ceiling, so one slow runner
+    # would have redded the sync PR's public run, and with it
+    # `fauna-publish merge`. The rule shared with `web`: the ceiling is about
+    # 1.8x the slowest green reading, rounded up to the next 10 minutes
+    # (96.7 x 1.8 = 174). Re-derive it when two runs pass 55 % of 180 (99 min).
+    # The rlib + thin-cdylib split of fauna-ffi landed after these runs and
+    # has not been measured here yet. The toolchain step carries no cache
+    # (`cache: false`, the house block), so every run is cold, and raising
+    # the ceiling costs nothing but how long a hung run takes to die.
+    timeout-minutes: 180
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
+        with:
+          persist-credentials: false
       - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659  # v1.17.0, toolchain from rust-toolchain.toml
         with:
           rustflags: ""
@@ -784,6 +902,14 @@ jobs:
       - name: Install uv
         run: bash scripts/install-uv.sh
       - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3  # v4.0.0
+      # The cargo boundary (docs/goal/architecture/build-compile-cache.md § The
+      # boundary's scope and what OFF means, decision (6)): puts the shipped cargo
+      # shim first on PATH, so every later cargo of this job — a recipe's, a bare
+      # step's, one a tool spawns — compiles with no network; the job's last step
+      # witnesses it.
+      - name: Put every cargo behind the boundary
+        run: uv run --no-project python scripts/cargo-boundary.py runner-setup
+
       # `mac-app release` builds the host darwin FFI slice, the SwiftPM
       # FaunaMacOS product and the sync agent, then assembles + ad-hoc signs
       # build/Release/Fauna.app -- the exact bundle release-macos.yml signs and
@@ -801,12 +927,18 @@ jobs:
           path: Fauna.app.zip
           if-no-files-found: error
 
+      - name: Every cargo compiled behind the boundary
+        if: ${{ !cancelled() }}
+        run: uv run --no-project python scripts/cargo-boundary.py runner-witness
+
   ui-lint:
     name: UI Lint (ui.yaml spec + WinUI conventions)
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
+        with:
+          persist-credentials: false
       - name: Install uv
         run: bash scripts/install-uv.sh
       # Three unrelated linters over three unrelated surfaces: a red in one
@@ -856,6 +988,8 @@ jobs:
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
+        with:
+          persist-credentials: false
       # This job compiles Rust — through the recipe, not in a `run:` line, which
       # is exactly why it went so long without this step. Without the action the
       # job re-syncs the pinned nightly on every run (13 s, measured in the run
@@ -911,8 +1045,26 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y ffmpeg
 
+      - name: Install bubblewrap
+        run: |
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+          command -v bwrap || { sudo apt-get update && sudo apt-get install -y bubblewrap; }
+          bwrap --unshare-all --ro-bind / / true
+          ldconfig -p | grep -q 'libseccomp\.so\.2 ' || { echo "libseccomp.so.2 missing (libseccomp2)"; exit 1; }
+      # The cargo boundary (docs/goal/architecture/build-compile-cache.md § The
+      # boundary's scope and what OFF means, decision (6)): puts the shipped cargo
+      # shim first on PATH, so every later cargo of this job — a recipe's, a bare
+      # step's, one a tool spawns — compiles with no network; the job's last step
+      # witnesses it.
+      - name: Put every cargo behind the boundary
+        run: uv run --no-project python scripts/cargo-boundary.py runner-setup
+
       - name: Verify generated files match sources
         run: just check-generated
+
+      - name: Every cargo compiled behind the boundary
+        if: ${{ !cancelled() }}
+        run: uv run --no-project python scripts/cargo-boundary.py runner-witness
 
   protocol-checks:
     name: Protocol (CDDL evolution + L3 mandate)
@@ -921,6 +1073,7 @@ jobs:
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
         with:
+          persist-credentials: false
           fetch-depth: 0  # need merge-base for diff against origin/main
       - name: Install uv
         run: bash scripts/install-uv.sh
@@ -928,6 +1081,20 @@ jobs:
         with:
           rustflags: ""
           cache: false
+      - name: Install bubblewrap
+        run: |
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+          command -v bwrap || { sudo apt-get update && sudo apt-get install -y bubblewrap; }
+          bwrap --unshare-all --ro-bind / / true
+          ldconfig -p | grep -q 'libseccomp\.so\.2 ' || { echo "libseccomp.so.2 missing (libseccomp2)"; exit 1; }
+      # The cargo boundary (docs/goal/architecture/build-compile-cache.md § The
+      # boundary's scope and what OFF means, decision (6)): puts the shipped cargo
+      # shim first on PATH, so every later cargo of this job — a recipe's, a bare
+      # step's, one a tool spawns — compiles with no network; the job's last step
+      # witnesses it.
+      - name: Put every cargo behind the boundary
+        run: uv run --no-project python scripts/cargo-boundary.py runner-setup
+
       # THE MIDDLE BUCKET, and the call is recorded here rather than defaulted.
       #
       # Each gate here runs its own self-test immediately before itself. Those
@@ -969,6 +1136,10 @@ jobs:
         if: ${{ !cancelled() }}
         run: ./scripts/check-protocol-deps.sh
 
+      - name: Every cargo compiled behind the boundary
+        if: ${{ !cancelled() }}
+        run: uv run --no-project python scripts/cargo-boundary.py runner-witness
+
   # The shipped suites nothing else runs. Until 2026-09-08 this repository
   # carried 702 test files and invoked 687 of them: `i18n/generator/tests`
   # (55 tests), four `scripts/` linter + staleness self-tests (57) and
@@ -995,6 +1166,8 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
+        with:
+          persist-credentials: false
       - name: Install uv
         run: bash scripts/install-uv.sh
       - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3  # v4.0.0

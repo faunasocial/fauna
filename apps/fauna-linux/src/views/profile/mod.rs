@@ -141,6 +141,12 @@ pub struct ProfileHandles {
     /// (`profile.md` § The Posts tab: every open reads, no client cache).
     /// `app.rs` runs it when the page becomes visible, beside `refresh_tiers`.
     pub open_posts: Rc<dyn Fn()>,
+    /// Re-read the header's published name and pictures (`profile.md`
+    /// § Persistence: no client cache, fetched on demand). `app.rs` runs it
+    /// when the page becomes visible: the SELF page is built once, and a
+    /// profile written elsewhere (the archive import's Done-step prefill)
+    /// must show on the next visit.
+    pub refresh_header: Rc<dyn Fn()>,
 }
 
 /// Build the Profile page. `target` is the viewed actor: `None` = the viewer's
@@ -435,6 +441,7 @@ pub fn build_profile_view(
         ProfileHandles {
             refresh_tiers,
             open_posts,
+            refresh_header,
         },
     )
 }
@@ -968,6 +975,15 @@ fn refresh_header_name(
     spawn_with_snapshot(
         &client.runtime_handle(),
         move || async move {
+            // The OTHER header holds no handle: re-read the contact roster now, so
+            // a contact accepted a moment ago is named by the roster's handle
+            // rather than the short id until the receive loop's next tick
+            // (`value-formatting.md` § Peer display label → *the roster handle*).
+            if is_other {
+                crate::conversations::manager()
+                    .refresh_contact_roster()
+                    .await;
+            }
             let pc = ProfileClient::new(nest);
             let (body, home) = match pc
                 .profile_header_read(actor_id.clone(), relay_home.as_deref())

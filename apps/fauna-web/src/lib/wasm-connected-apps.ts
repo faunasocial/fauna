@@ -1,5 +1,6 @@
 import type { SharedRpcPort } from '../../static/fauna_wasm_connected_apps.js';
 import { asset } from '$app/paths';
+import { joinChunk } from './chunk-join';
 import type { ConnectedAppsMachine } from '../../static/fauna_wasm_connected_apps.js';
 import { hexToBytes } from './hex';
 import { sharedAccountPort } from './account-runtime';
@@ -35,6 +36,8 @@ export function ensureConnectedAppsWasm(): Promise<void> {
     wasmInit = (async () => {
       const mod = await import('../../static/fauna_wasm_connected_apps.js');
       await mod.default(asset('fauna_wasm_connected_apps_bg.wasm'));
+      // Its tracing to the ring, its identity-store doors (chunk-join.ts).
+      joinChunk(mod);
       wasmModule = mod;
     })().catch((e) => {
       wasmInit = null;
@@ -111,6 +114,8 @@ export function composeRequestCard(card: ConsentCardRow): ComposedText[] {
  *  leaf. */
 export interface InstallSectionText {
   heading: ComposedText;
+  /** The admin framing line under the heading (untagged); null on a bind card. */
+  framing: ComposedText | null;
   form: ComposedText;
   publisher: ComposedText;
   digest: ComposedText;

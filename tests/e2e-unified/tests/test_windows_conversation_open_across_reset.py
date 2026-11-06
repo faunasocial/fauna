@@ -34,7 +34,8 @@ Windows-only: the session-or-host fallback and its bounded await are windows' ow
 
 import pytest
 
-from conftest import _E2E_LOGIN_DEVICE_ID, _login_app_as, _relaunch_trusting_nest
+from conftest import _login_app_as, _relaunch_trusting_nest
+from helpers.e2e_session import e2e_login_device_id
 from helpers.connection import wait_until_online
 from helpers.rpc_hold import arm_rpc_hold, release_rpc_hold, wait_for_held_rpc
 
@@ -57,7 +58,7 @@ def _sign_in_with_the_handshake_held(app, nest_instance, user) -> None:
                 "handle": user.get("handle") or "e2e-user",
                 "secret_hex": user["signing_key"].encode().hex(),
                 "actor_id": user["actor_id_hex"],
-                "device_id": _E2E_LOGIN_DEVICE_ID,
+                "device_id": e2e_login_device_id(app),
             },
             "nav": {"stack": [{"view": "feed"}]},
         })

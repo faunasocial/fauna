@@ -58,7 +58,7 @@ def test_creating_a_recovery_kit_flips_the_status_and_shows_the_secret_once(
     """
     app = ungranted_app
     app.settings.navigate()
-    app.settings.open_recovery_kit_or_skip()
+    app.settings.open_recovery_kit()
 
     # The never-created state: create is the offered action, and replacing
     # something that does not exist is not.
@@ -138,7 +138,7 @@ def test_replacing_the_kit_with_the_one_you_hold_mints_a_different_secret(
     """
     app = ungranted_app
     app.settings.navigate()
-    app.settings.open_recovery_kit_or_skip()
+    app.settings.open_recovery_kit()
 
     # Register the first kit, and keep its phrase — it is the "kit in hand".
     app.settings.create_recovery_kit()

@@ -10,6 +10,7 @@
 package davauth
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -126,15 +127,16 @@ func NewMiddleware(realm string, next http.Handler, client wsrpc.Caller, logger 
 	}
 }
 
-// clientIP returns the host part of the request's TCP RemoteAddr. CalDAV
+// ClientIP returns the host part of the request's TCP RemoteAddr. CalDAV
 // (:443) is fronted by the SNI router; the router now prepends a PROXY-v2
 // header (--send-proxy-to 127.0.0.1:8444) that the listener peels in
 // internal/proxyproto, so RemoteAddr — and therefore this — is the real client
 // IP, giving the lockout key its full cross-account per-IP dimension and a
 // meaningful per-IP report_auth_event audit. A direct headerless dial keeps its
 // genuine peer, so this stays non-empty (report_auth_event rejects an empty
-// source_ip) in every case.
-func clientIP(r *http.Request) string {
+// source_ip) in every case. The bearer door relays it to the nest's admission
+// too, as the failed-credential throttle's source key.
+func ClientIP(r *http.Request) string {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
 		return r.RemoteAddr
@@ -143,7 +145,7 @@ func clientIP(r *http.Request) string {
 }
 
 func (m *authMiddleware) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	sourceIP := clientIP(r)
+	sourceIP := ClientIP(r)
 	username, password, ok := r.BasicAuth()
 	if !ok {
 		m.replyUnauthorized(w, nil, "missing basic auth", sourceIP)
@@ -291,6 +293,22 @@ func (m *authMiddleware) resolve(ctx context.Context, local, domain, credentialI
 	sess.actorMlkemEk = material.mlkemEk
 	sess.actorIndexKey = material.indexKey
 
+	// The calendar and card keys the session seals to are the ones its MSEK
+	// derives (owner-key-material.md § Path B-sibling-5 → Derivation), so
+	// every record it writes is one its own ring opens. The nest's registered
+	// pairs should equal them; a mismatch is a stale registration the client
+	// heals on its next connect, so it is logged, never an AUTH failure.
+	dav, err := cap.DavSealPubkeys()
+	if err != nil {
+		cap.Zeroize()
+		sess.mlsUnwrap = nil
+		return sess, fmt.Errorf("derive dav seal pubkeys: %w", err)
+	}
+	sess.calendarKey = wsrpc.SealKeyPair{Pubkey: dav.CalendarPubkey, MlkemEk: dav.CalendarMlkemEk}
+	sess.cardKey = wsrpc.SealKeyPair{Pubkey: dav.CardPubkey, MlkemEk: dav.CardMlkemEk}
+	m.logRegistrationMismatch("calendar", material.registeredCalendar, sess.calendarKey)
+	m.logRegistrationMismatch("card", material.registeredCard, sess.cardKey)
+
 	// MLS-snapshot blob: AEAD-unwrap under MSEK so the per-request
 	// metadata-unseal path (PROPFIND/REPORT against the lazy-Personal
 	// calendar; the per-event open path in E.3) can hand the plaintext to
@@ -317,7 +335,9 @@ func (m *authMiddleware) resolve(ctx context.Context, local, domain, credentialI
 		// holder of the leaf secrets — the transient plaintext is
 		// zeroized right here, both arms (a session-lifetime raw copy
 		// was dropped 2026-07-13).
-		opener, err := mailfauna.NewMailRecordOpener(plaintext)
+		// The opener dispatches on the envelope kind: the calendar and
+		// card rings ride the session MSEK + the snapshot's grace roots.
+		opener, err := mailfauna.NewRecordOpener(cap, plaintext)
 		for i := range plaintext {
 			plaintext[i] = 0
 		}
@@ -329,6 +349,17 @@ func (m *authMiddleware) resolve(ctx context.Context, local, domain, credentialI
 		sess.recordOpener = opener
 	}
 	return sess, nil
+}
+
+// logRegistrationMismatch warns when the nest's registered `kind` key differs
+// from (or lacks) the one the session MSEK derives. Public keys only — the log
+// names the kind, never key bytes.
+func (m *authMiddleware) logRegistrationMismatch(kind string, registered *wsrpc.SealKeyPair, derived wsrpc.SealKeyPair) {
+	if registered != nil && bytes.Equal(registered.Pubkey, derived.Pubkey) && bytes.Equal(registered.MlkemEk, derived.MlkemEk) {
+		return
+	}
+	m.logger.Warn("davauth: registered seal key differs from the session's derived key; sealing to the derived key",
+		"kind", kind, "registered", registered != nil)
 }
 
 // fetchAuthMaterial performs the nest round-trips that resolve an actor's
@@ -376,12 +407,16 @@ func (m *authMiddleware) fetchAuthMaterial(ctx context.Context, local, domain, c
 	// CalDAV/CardDAV PUT + collection-metadata seals that have no epoch
 	// opener, so it must always resolve the standing key even with the
 	// content-sealing-epochs write gate forced on.
-	pubkey, mlkemEk, _, err := wsrpc.FetchRecipientMLSPubkeyHybrid(ctx, m.client, actorID, false)
+	row, err := wsrpc.FetchRecipientKeyRow(ctx, m.client, actorID, false)
 	if err != nil {
 		return mat, fmt.Errorf("fetch_recipient_mls_pubkey: %w", err)
 	}
-	mat.pubkey = pubkey
-	mat.mlkemEk = mlkemEk
+	if row.Mail != nil {
+		mat.pubkey = row.Mail.Pubkey
+		mat.mlkemEk = row.Mail.MlkemEk
+	}
+	mat.registeredCalendar = row.Calendar
+	mat.registeredCard = row.Card
 
 	indexKey, err := wsrpc.FetchRecipientIndexKey(ctx, m.client, actorID)
 	if err != nil {

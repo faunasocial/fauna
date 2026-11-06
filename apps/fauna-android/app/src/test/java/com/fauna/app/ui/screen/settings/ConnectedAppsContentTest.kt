@@ -307,6 +307,20 @@ class ConnectedAppsContentTest {
     }
 
     @Test
+    fun anInstallCardPaintsTheAdminFramingLineAndABindCardDoesNot() {
+        val framing = "Installing runs this code on your nest"
+        render(snapshot = snapshot(requests = listOf(request(install = installRow()))))
+        composeTestRule.onNodeWithText(framing, substring = true).assertExists()
+    }
+
+    @Test
+    fun aBindCardPaintsNoFramingLine() {
+        val framing = "Installing runs this code on your nest"
+        render(snapshot = snapshot(requests = listOf(request(install = installRow().copy(bind = true)))))
+        composeTestRule.onNodeWithText(framing, substring = true).assertDoesNotExist()
+    }
+
+    @Test
     fun anOrdinaryCardPaintsNoInstallSection() {
         render(snapshot = snapshot(requests = listOf(request())))
         composeTestRule.onNodeWithTag("connected-apps-request-install").assertDoesNotExist()

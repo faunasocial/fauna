@@ -52,6 +52,11 @@ pub struct SignedChange {
     pub change_type: String,
     pub size_bytes: i64,
     pub content_key_version: Option<u64>,
+    /// A **group set**'s content generation id — the stamp's other family
+    /// (`p2p-shared-set-build.md` § Build design — the group set, decision 4),
+    /// at most one of it and `content_key_version` present. Encoded only when
+    /// present, so every folder-family statement is byte-for-byte what it was.
+    pub content_generation: Option<[u8; 32]>,
     /// The sealed-path envelope bytes, verbatim.
     pub path_sealed: Option<Vec<u8>>,
     pub thumbnail_hash: Option<[u8; 32]>,
@@ -65,6 +70,13 @@ pub struct SignedChange {
     /// reporter's fresh edit of the path; encoded only when `true`, so every
     /// ordinary statement is byte-for-byte what it was before the ruling.
     pub is_retention: bool,
+    /// The depositor's writer key, on the change row the owner's device records
+    /// when it adopts a folder deposit (`folder-deposit.md` § The depositor
+    /// signs, the owner's device verifies → *Ruling 3*): the owner's signed
+    /// word to every member that a connected app deposited this version.
+    /// Encoded only when present, so every other statement is byte-for-byte
+    /// what it was before the ruling.
+    pub deposited_by: Option<[u8; 32]>,
 }
 
 /// The canonical dag-cbor wire of [`SignedChange`] — byte strings for every
@@ -100,6 +112,13 @@ struct StatementWire<'a> {
         with = "serde_bytes",
         borrow
     )]
+    content_generation: Option<&'a [u8]>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "serde_bytes",
+        borrow
+    )]
     path_sealed: Option<&'a [u8]>,
     #[serde(
         default,
@@ -113,6 +132,13 @@ struct StatementWire<'a> {
     is_resolution: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     is_retention: bool,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "serde_bytes",
+        borrow
+    )]
+    deposited_by: Option<&'a [u8]>,
 }
 
 /// Why a change row did not verify — each arm a reader counts and warns on,
@@ -191,11 +217,13 @@ impl SignedChange {
             change_type: &self.change_type,
             size_bytes: self.size_bytes,
             content_key_version: self.content_key_version,
+            content_generation: self.content_generation.as_ref().map(|g| &g[..]),
             path_sealed: self.path_sealed.as_deref(),
             thumbnail_hash: self.thumbnail_hash.as_ref().map(|h| &h[..]),
             derived_through: self.derived_through,
             is_resolution: self.is_resolution,
             is_retention: self.is_retention,
+            deposited_by: self.deposited_by.as_ref().map(|d| &d[..]),
         };
         let body =
             fauna_cbor::encode_canonical(&wire).expect("a SignedChange statement always encodes");
@@ -226,11 +254,13 @@ impl SignedChange {
             change_type: req.change_type.clone(),
             size_bytes: req.size_bytes,
             content_key_version: req.content_key_version,
+            content_generation: None,
             path_sealed: req.path_sealed.as_ref().map(|b| b.to_vec()),
             thumbnail_hash: opt_hex32("thumbnail_hash", req.thumbnail_hash.as_deref())?,
             derived_through: req.derived_through,
             is_resolution: req.is_resolution.unwrap_or(false),
             is_retention: false,
+            deposited_by: opt_hex32("deposited_by", req.deposited_by.as_deref())?,
         })
     }
 
@@ -260,11 +290,13 @@ impl SignedChange {
             change_type: "create".to_string(),
             size_bytes,
             content_key_version: None,
+            content_generation: None,
             path_sealed: Some(path_sealed.to_vec()),
             thumbnail_hash: None,
             derived_through: None,
             is_resolution: false,
             is_retention: false,
+            deposited_by: None,
         }
     }
 
@@ -305,11 +337,13 @@ impl SignedChange {
             change_type: row.change_type.clone(),
             size_bytes: row.size_bytes,
             content_key_version: row.content_key_version,
+            content_generation: row.content_generation,
             path_sealed: row.path_sealed.as_ref().map(|b| b.to_vec()),
             thumbnail_hash: opt_hex32("thumbnail_hash", row.thumbnail_hash.as_deref())?,
             derived_through: row.derived_through,
             is_resolution: row.is_resolution.unwrap_or(false),
             is_retention: row.is_retention.unwrap_or(false),
+            deposited_by: opt_hex32("deposited_by", row.deposited_by.as_deref())?,
         })
     }
 
@@ -361,11 +395,13 @@ impl SignedChange {
             change_type: "modify".into(),
             size_bytes,
             content_key_version,
+            content_generation: None,
             path_sealed: req.path_sealed.as_ref().map(|b| b.to_vec()),
             thumbnail_hash: None,
             derived_through: req.winning_derived_through,
             is_resolution: !req.winning_carries_novelty.unwrap_or(false),
             is_retention: false,
+            deposited_by: None,
         }))
     }
 
@@ -411,11 +447,13 @@ impl SignedChange {
             change_type: "modify".into(),
             size_bytes: c.size_bytes,
             content_key_version: c.content_key_version,
+            content_generation: None,
             path_sealed: req.path_sealed.as_ref().map(|b| b.to_vec()),
             thumbnail_hash: None,
             derived_through: req.losing_derived_through,
             is_resolution: false,
             is_retention: true,
+            deposited_by: None,
         }))
     }
 
@@ -451,11 +489,13 @@ impl SignedChange {
             change_type: "modify".into(),
             size_bytes: candidate.size_bytes,
             content_key_version: candidate.content_key_version,
+            content_generation: None,
             path_sealed: conflict.path_sealed.as_ref().map(|b| b.to_vec()),
             thumbnail_hash: None,
             derived_through: None,
             is_resolution: false,
             is_retention: false,
+            deposited_by: None,
         })
     }
 }
@@ -976,11 +1016,13 @@ mod tests {
             change_type: "modify".into(),
             size_bytes: 42,
             content_key_version: Some(1),
+            content_generation: None,
             path_sealed: Some(vec![9, 9]),
             thumbnail_hash: None,
             derived_through: Some(5),
             is_resolution: false,
             is_retention: false,
+            deposited_by: None,
         }
     }
 
@@ -1639,6 +1681,73 @@ mod tests {
             recover_signed_actor(&row, [7; 32], &certs),
             Err(ChangeVerifyError::SignatureInvalid),
             "the flag added to an ordinary row fails the statement"
+        );
+    }
+
+    /// `folder-deposit.md` ruling 3: an adopted deposit's change row carries
+    /// the depositor inside the owner's statement. Absent, the statement is
+    /// byte-identical to the one before the ruling (so every other row
+    /// verifies unchanged); present, the bytes differ, the row verifies with
+    /// it, and stripping or swapping it fails the signature. The record
+    /// request's hex rides into [`SignedChange::for_record`] the same way.
+    #[test]
+    fn the_depositor_is_covered_and_encoded_only_when_present() {
+        let account = ActorKeypair::generate();
+        let actor = account.actor_id().0;
+        let certs = SignerCertCache::new();
+
+        let ordinary = statement(actor);
+        let mut deposited = statement(actor);
+        deposited.deposited_by = Some([0x5d; 32]);
+        assert!(
+            !ordinary
+                .signed_message()
+                .windows(b"deposited_by".len())
+                .any(|w| w == b"deposited_by"),
+            "an absent depositor is not encoded"
+        );
+        assert_ne!(
+            ordinary.signed_message(),
+            deposited.signed_message(),
+            "a present depositor changes the signed bytes"
+        );
+
+        let sig = deposited.sign(account.signing_key());
+        let mut row = row_for(&deposited, sig, actor);
+        row.deposited_by = Some(hex::encode([0x5d; 32]));
+        assert_eq!(
+            recover_signed_actor(&row, [7; 32], &certs)
+                .unwrap()
+                .signed_as,
+            actor,
+            "a signed adoption row verifies with its depositor"
+        );
+        row.deposited_by = None;
+        assert_eq!(
+            recover_signed_actor(&row, [7; 32], &certs),
+            Err(ChangeVerifyError::SignatureInvalid),
+            "the depositor stripped fails the statement"
+        );
+        row.deposited_by = Some(hex::encode([0x5e; 32]));
+        assert_eq!(
+            recover_signed_actor(&row, [7; 32], &certs),
+            Err(ChangeVerifyError::SignatureInvalid),
+            "another depositor fails the statement"
+        );
+
+        let req = SyncChangeRecordRequest {
+            device_id: hex::encode([2; 32]),
+            path: "docs/a.txt".into(),
+            change_type: "create".into(),
+            deposited_by: Some(hex::encode([0x5d; 32])),
+            ..Default::default()
+        };
+        assert_eq!(
+            SignedChange::for_record(&req, actor, [7; 32])
+                .unwrap()
+                .deposited_by,
+            Some([0x5d; 32]),
+            "the record request's depositor is the statement's"
         );
     }
 

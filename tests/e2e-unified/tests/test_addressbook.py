@@ -54,9 +54,9 @@ from helpers.mail_dedicated_nest import (
 # web joined here: its Address Book view
 # (routes/contacts/+page.svelte) and enable-mail-plain path were both already proven
 # elsewhere (test_mail_enable_then_mua_round_trip.py); only the marker was missing.
-# android grows the same shared mail-settings enable path + Address Book view and
-# joins this gate once its enable-mail-plain e2e is confirmed (route-3 follow-on,
-# mirroring `test_events.py`'s per-app enablement).
+# android joined with the same shared mail-settings enable path: its Address Book
+# segment tags every id the journey drives (ContactsScreen.kt), and its enable path
+# is the one test_carddav_roundtrip already marks android.
 pytestmark = [
     pytest.mark.tier1,
     pytest.mark.tier_3,
@@ -66,6 +66,7 @@ pytestmark = [
     pytest.mark.ios,
     pytest.mark.tui,
     pytest.mark.web,
+    pytest.mark.android,
 ]
 
 # The PLAIN bridge credential the client mints and the scripted CardDAV MUA
@@ -204,7 +205,6 @@ def test_a_card_added_from_another_app_appears_while_on_the_address_book(
     converges at any timeout.
     """
     app.contacts.require_address_book_supported()
-    app.contacts.require_address_book_live_refresh()
 
     handle = dedicated_mail_nest
     handle.assert_mta_running()

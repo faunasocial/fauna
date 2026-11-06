@@ -71,25 +71,6 @@ pub struct LabelerCatalogState {
     pub snapshot: Option<LabelerCatalogSnapshot>,
 }
 
-/// tui's observer: deliberately a no-op.
-///
-/// The machine's observer exists for the *reactive* apps — linux re-renders its
-/// widget tree on `on_changed`. ratatui is immediate-mode: there is no persistent
-/// tree to invalidate, and every op's own fold re-reads the snapshot before the
-/// next frame paints (the agent awaits the op before its next read — `tui.md`
-/// § Architecture's one-awaited-op-per-gesture contract). A notifying observer
-/// would therefore be a *second*, racing path to the same paint, not an extra
-/// safety net.
-///
-/// Not the crate's `NullObserver` — that one is `cfg(test, feature =
-/// "test-observer")`, so reaching for it would compile a test-only surface into a
-/// shipped binary.
-struct ImmediateModeObserver;
-
-impl fauna_labeler_catalog_machine::LabelerCatalogObserver for ImmediateModeObserver {
-    fn on_changed(&self) {}
-}
-
 impl LabelerCatalogState {
     /// Build the shared machine from the session's WS handle **with its grant
     /// seams**: subscribing a `wasm` mail labeler mints the per-labeler grant
@@ -111,7 +92,12 @@ impl LabelerCatalogState {
         ledger: Arc<dyn fauna_client_config::SuccessionLedgerStore>,
         mail: Arc<dyn fauna_client_config::MailStore>,
     ) -> Self {
-        let observer = Arc::new(ImmediateModeObserver);
+        // tui's observer is deliberately a no-op: ratatui is immediate-mode, so
+        // there is no persistent widget tree to invalidate, and every op's own
+        // fold re-reads the snapshot before the next frame paints (`tui.md`
+        // § Architecture's one-awaited-op-per-gesture contract). A notifying
+        // observer would be a second, racing path to the same paint.
+        let observer = Arc::new(fauna_labeler_catalog_machine::observer::NullObserver);
         let machine = match fauna_core::identity::ActorKeypair::from_secret_hex(secret_hex) {
             Ok(keypair) => {
                 fauna_labeler_catalog_machine::nest_api::build_labeler_catalog_machine_with_grants(

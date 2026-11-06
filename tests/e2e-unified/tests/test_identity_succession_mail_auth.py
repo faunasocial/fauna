@@ -68,21 +68,9 @@ _PASSWORD = "SuccessionBurnPlainPw0007Kx"  # gitleaks:allow
 
 def _require_mail_settings(app) -> None:
     """Skip, declaring the class, on an app with no mail-settings page."""
-    if app.mail_settings.is_page_visible():
-        return
-    from helpers.app_surface import skip_unbuilt
-
-    skip_unbuilt(
-        app.driver,
-        surface="mail-settings-enabled-toggle",
-        detail=(
-            "mail-settings.md § User actions — the mailbox enable + credential "
-            "list; tui leads and the other six follow in batched trickle-down"
-        ),
-        tracked=(
-            "docs/goal/behavior/mail-credentials.md "
-            "§ Rotation and recovery → Succession"
-        ),
+    assert app.mail_settings.is_page_visible(), (
+        "the mail-settings page is not visible — every app paints "
+        "mail-settings-enabled-toggle (ui.yaml; all seven ui-actual files list it)"
     )
 
 

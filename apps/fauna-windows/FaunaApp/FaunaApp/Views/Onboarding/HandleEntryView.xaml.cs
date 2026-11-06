@@ -35,7 +35,15 @@ public sealed partial class HandleEntryView : UserControl
         // re-runs all x:Bind expressions so HandleCheckMessage,
         // HandleCheckEnabled, HandleControlCheckboxVisible, and
         // HandleCheckContinueEnabled refresh as the snapshot evolves.
-        vm.PropertyChanged += (_, _) => Bindings.Update();
+        vm.PropertyChanged += (_, _) =>
+        {
+            Bindings.Update();
+            // nest-rules.md § Acceptance at joining: the machine answers rules
+            // only while Continue signs in, once its verified read has landed
+            // (that landing ticks the observer too).
+            JoiningRules.Paint(ViewModel.JoiningNestRules);
+        };
+        JoiningRules.Paint(vm.JoiningNestRules);
     }
 
     /// <summary>

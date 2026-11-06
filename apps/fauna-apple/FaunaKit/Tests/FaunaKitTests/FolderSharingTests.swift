@@ -32,4 +32,23 @@ import Testing
     let shared = await vm.shareFolder(name: "docs", recipientInput: "alice@fauna.social")
     #expect(shared == false)
     #expect(vm.sharingError == nil)
+
+    // Grant edit with no `api`: bails before the write AND before the re-read.
+    await vm.setFolderMemberAccess(name: "docs", memberActorIdHex: "ab", access: "writer", byteCap: nil)
+    #expect(vm.folderActors["docs"] == nil)
+    #expect(vm.sharingError == nil)
+}
+
+// The member-access pickers paint the shared catalog, keyed by the wire values
+// the e2e `select` drives.
+@Test func memberAccessPickerOffersTheSharedCatalog() {
+    #expect(memberAccessOptions().map(\.value) == ["reader", "writer"])
+}
+
+// The writer warnings' inputs: a Reader grant reaches nobody outside the set, a
+// Writer grant on a public folder does, and a blank cap parses as uncapped.
+@Test func writerWarningInputsComeFromSharedRust() {
+    #expect(writerGrantReach(access: "reader", audience: "public", paywalled: false) == nil)
+    #expect(writerGrantReach(access: "writer", audience: "public", paywalled: false) != nil)
+    #expect(parseCountI64(input: "") == nil)
 }

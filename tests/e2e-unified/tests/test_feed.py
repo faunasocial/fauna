@@ -118,6 +118,7 @@ def test_post_body_renders_markdown(logged_in_app):
 @pytest.mark.linux
 @pytest.mark.macos
 @pytest.mark.ios
+@pytest.mark.android
 @pytest.mark.feature("feed-read")
 def test_post_detail_opens(logged_in_app):
     """Clicking a post-card opens the post-detail dialog showing the author + the
@@ -127,10 +128,9 @@ def test_post_detail_opens(logged_in_app):
     button there, not just a scope marker, so the click drives the same one-door
     dispatch every other actuation does).
 
-    web+tui+windows+linux+macos+ios today; android carries the same
-    `feed-post-detail-*` testids but its `post-card` open-gesture clickability is
-    unverified in its driver — promoting it (adding its mark) is a follow-on once
-    confirmed there.
+    web+tui+windows+linux+macos+ios+android today; android's `FeedScreen.kt`
+    tags the card `POST_CARD` with a `.clickable` open and `PostDetailScreen.kt`
+    carries `FEED_POST_DETAIL_AUTHOR` / `_BODY`; its device run is not yet recorded.
 
     macos+ios joined 2026-09-20: both already registered the whole-card open with
     the in-process automation registry — `.automationActivate(Ids.postCard,
@@ -614,6 +614,7 @@ LABEL_REPAINT_BUDGET_S = 15.0
 @pytest.mark.linux
 @pytest.mark.tui
 @pytest.mark.windows
+@pytest.mark.android
 @pytest.mark.feature("feed-interactions")
 def test_a_count_shows_no_number_until_the_post_has_activity(logged_in_app):
     """feed.md § Interaction bar: each button is "icon + interaction count … the
@@ -678,6 +679,7 @@ def test_a_count_shows_no_number_until_the_post_has_activity(logged_in_app):
 @pytest.mark.linux
 @pytest.mark.tui
 @pytest.mark.windows
+@pytest.mark.android
 @pytest.mark.feature("feed-interactions")
 def test_a_repost_names_the_reposter_shows_the_original_and_opens_it(
     logged_in_app, nest_instance
@@ -1102,6 +1104,7 @@ def test_create_multiple_posts(logged_in_app):
 RELOAD_PARK_BUDGET_S = 30.0
 
 
+@pytest.mark.android
 @pytest.mark.macos
 @pytest.mark.ios
 @pytest.mark.web
@@ -1179,15 +1182,13 @@ def test_a_refresh_keeps_the_posts_on_screen_and_only_a_switch_clears_them(
     assert feed.post_text_visible(text), "the refreshed page must still hold the post"
 
     # ── A switch — a changed search query — clears the list up front.
-    # Every write to the search field re-queries (an unchanged one as a
-    # refresh), and `clear_and_type` is two writes, so the one-shot hold would
-    # go to the clear and the search would run free. Empty the field first,
-    # unheld, so the ONE write the hold is armed for is the search itself.
-    app.driver.clear_and_type("feed-search-field", "")
+    # The hold is one-shot, and every re-query after it runs free, so the search
+    # has to be exactly one re-query: a second one commits past the parked reload
+    # and `parked` never reads true (`write_search_as_one_edit` says how).
     baseline = feed_reload_baseline(app.driver)
     feed.hold_next_reload_for_test()
     try:
-        app.driver.type_text("feed-search-field", _unique("matches-nothing"))
+        feed.write_search_as_one_edit(_unique("matches-nothing"))
         wait_until(
             parked,
             RELOAD_PARK_BUDGET_S,
@@ -1578,6 +1579,7 @@ C2PA_TEST_IMAGE = FIXTURE_DIR.parent.parent / "fixtures" / "c2pa-signed.png"
 @pytest.mark.macos
 @pytest.mark.ios
 @pytest.mark.windows
+@pytest.mark.android
 @pytest.mark.feature("feed-images-and-video")
 def test_post_image_shows_c2pa_badge_when_uploaded_with_provenance(logged_in_app, nest_instance):
     """Uploading a C2PA-signed image through the app's own composer makes the
@@ -1674,6 +1676,7 @@ def _blob_c2pa_header(nest_url: str, blob_hash: str) -> str:
 @pytest.mark.ios
 @pytest.mark.windows
 @pytest.mark.web
+@pytest.mark.android
 @pytest.mark.feature("feed-images-and-video")
 def test_a_forged_c2pa_assertion_paints_no_provenance_badge(
     logged_in_app, nest_instance, test_user

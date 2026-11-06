@@ -120,8 +120,10 @@ pub struct ScopeNotReady {
     pub reason: NotReadyReason,
 }
 
-/// What a refused read waits for (`account-client-lifecycle.md` § The
-/// client-side lifecycle → *The first listing*, clauses (4) and (5)).
+/// What a refused read — or a refused parked put ([`Self::TipPending`]), or
+/// a refused awaited publish ([`Self::PublishPending`]) — waits for
+/// (`account-client-lifecycle.md` § The client-side lifecycle → *The first
+/// listing*, clauses (4) and (5)).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NotReadyReason {
     /// The replica has never listed the scope from its bound nest
@@ -134,6 +136,20 @@ pub enum NotReadyReason {
     /// The unkeyed hold with a sibling device the only standing source:
     /// opening the app there, or removing that device, ends the wait.
     HeldForSibling,
+    /// Not a read's wait: a tip-sealed door put parked behind a pass found no
+    /// admissible generation tip within [`FIRST_PASS_WAIT`], and is refused
+    /// rather than minted inside the pass (`account-client-lifecycle.md`
+    /// § The client-side lifecycle, the pump bullet → *Commands and passes*,
+    /// the tip wait). The nest is what is missing, as for [`Self::NotListed`].
+    TipPending,
+    /// Not a read's wait: an awaited publish (`Cmd::PublishOwn` — the mail
+    /// rotation's and the grant-mint door's barrier) parked behind a pass
+    /// was not served within [`FIRST_PASS_WAIT`], the pass still in flight
+    /// (`account-client-lifecycle.md` § The client-side lifecycle, the pump
+    /// bullet → *Commands and passes*, the awaited publish's bound). Nothing
+    /// was sent; the rows stay owed to the runtime's next publish. The
+    /// nest's acknowledgement is what is missing, as for [`Self::NotListed`].
+    PublishPending,
 }
 
 impl NotReadyReason {

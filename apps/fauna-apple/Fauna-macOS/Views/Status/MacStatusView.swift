@@ -51,18 +51,6 @@ struct MacStatusView: View {
                         }
                     }
                     .padding(8)
-                    // Page landmark (ui/settings.md § Element IDs — "account-settings-link"
-                    // as page landmark; test_navigation.py's cross-app smoke test). `.contain`
-                    // keeps this container id AND the child ids (account-actor-id, …) queryable
-                    // — the container-clobber rule, mirrors quota-section below. Needs its own
-                    // `.automationValue` too, not just `.accessibilityIdentifier` — the
-                    // in-process `AutomationRegistry` only registers presence off
-                    // `.automationValue`/`.automationActivate`, so an id-only container is
-                    // invisible to `is_visible()`/`wait_for()` even though its children register
-                    // fine (found + fixed on `critical-alerts`, same session).
-                    .accessibilityElement(children: .contain)
-                    .accessibilityIdentifier(Ids.accountSettingsLink)
-                    .automationValue(Ids.accountSettingsLink, text: { "" })
                 }
 
                 // Quota — live-data placement on the Status sub-page (settings.md:20)
@@ -79,13 +67,13 @@ struct MacStatusView: View {
                                      max: quota.inbox.maxBytes)
                                 .accessibilityIdentifier(Ids.quotaInbox)
                                 .automationValue(Ids.quotaInbox,
-                                                 text: { "\(quota.inbox.usedBytes) / \(quota.inbox.maxBytes)" })
+                                                 text: { QuotaBar.usageText(used: quota.inbox.usedBytes, max: quota.inbox.maxBytes) })
                             QuotaBar(label: L.common.storage,
                                      used: quota.storage.usedBytes,
                                      max: quota.storage.maxBytes)
                                 .accessibilityIdentifier(Ids.quotaStorage)
                                 .automationValue(Ids.quotaStorage,
-                                                 text: { "\(quota.storage.usedBytes) / \(quota.storage.maxBytes)" })
+                                                 text: { QuotaBar.usageText(used: quota.storage.usedBytes, max: quota.storage.maxBytes) })
                             LabeledContent(L.common.devices) {
                                 Text("\(quota.devices.used) / \(quota.devices.max)")
                             }
@@ -125,6 +113,12 @@ struct MacStatusView: View {
                 .accessibilityElement(children: .contain)
                 .accessibilityIdentifier(Ids.settingsRegionSection)
                 .automationValue(Ids.settingsRegionSection, text: { L.region.sectionTitle })
+
+                // Nest rules — the rules in force for this session's nest
+                // (nest-rules.md § Acceptance at joining, and a change of
+                // rules → *The rules surface*), beside the region section.
+                // Absent while the nest has published none.
+                NestRulesSettingsSection(nestRules: appState.region.nestRules)
 
                 // Node, Sync, Encryption and Build — the shared snapshot's
                 // legs (`ui/status.md` § Layout & flow sections 5–8), painted

@@ -17,6 +17,17 @@
                        Style="{StaticResource SubtitleTextBlockStyle}"
                        TextWrapping="Wrap"
                        TextAlignment="Center" />
+            <!-- FORK VARIANT (box-recovery.md § Client acceptance): rotation-chain
+                 fork evidence replaces the warning above AND the trust button with
+                 this sentence naming both heads; the fallthrough stays the one way
+                 out. Collapsed (so absent from the UIA tree) unless the launch
+                 snapshot reports identity_fork. -->
+            <TextBlock x:Name="ForkWarningText"
+                       AutomationProperties.AutomationId="{x:Bind ids:Ids.NestIdentityForkWarning}"
+                       Style="{StaticResource SubtitleTextBlockStyle}"
+                       TextWrapping="Wrap"
+                       TextAlignment="Center"
+                       Visibility="Collapsed" />
             <StackPanel Orientation="Horizontal" Spacing="8" HorizontalAlignment="Center">
                 <Button x:Name="TrustButton"
                         AutomationProperties.AutomationId="{x:Bind ids:Ids.NestIdentityChangedTrustButton}"

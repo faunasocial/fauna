@@ -28,6 +28,12 @@
         <TextBlock x:Name="PriceText"
                    AutomationProperties.AutomationId="{x:Bind ids:Ids.GatedPostPrice}"
                    FontSize="10" Opacity="0.7" VerticalAlignment="Center" />
+        <!-- A completed buy awaiting the author's approve (paid-posts outcome 14): shown
+             instead of the buy affordance — no offer, pending, not yet unlocked. -->
+        <TextBlock x:Name="PurchasePendingText"
+                   AutomationProperties.AutomationId="{x:Bind ids:Ids.GatedPostPurchasePending}"
+                   Text="{loc:Localize Key=feed/post/purchase_pending}"
+                   FontSize="10" Opacity="0.7" VerticalAlignment="Center" />
         <!-- The link's https-only guard fires on click (FeedPage; the same check
              the profile's offer checkout link applies), not on
              visibility: a non-https url still shows the button, matching the

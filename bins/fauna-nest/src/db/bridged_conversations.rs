@@ -37,6 +37,18 @@ use super::{CacheDb, now_epoch_millis};
 pub const MAX_BRIDGED_INBOUND_PER_PRINCIPAL: i64 = 50_000;
 /// Store-wide backstop over every account's inbound rows.
 pub const MAX_BRIDGED_INBOUND_TOTAL: i64 = 500_000;
+/// Inbound rows one room may hold — one `(account, bridge, far room)`, which
+/// on a first-party leg is one peer. Well under
+/// [`MAX_BRIDGED_INBOUND_PER_PRINCIPAL`], so one far party's flood fills only
+/// its own room and a second peer's message to the same account is still
+/// stored (`docs/goal/behavior/activitypub.md` § Security posture → *Inbound*,
+/// the bridged-DM bounds). A hard constant.
+pub const MAX_BRIDGED_INBOUND_PER_ROOM: i64 = 10_000;
+/// Inbound rows one bridge principal may hold across every account — a
+/// first-party leg's principal id is the same for every account, so this is
+/// the leg's share of [`MAX_BRIDGED_INBOUND_TOTAL`]: a flood on one leg stops
+/// before it can take the store from the others. A hard constant.
+pub const MAX_BRIDGED_INBOUND_PER_LEG: i64 = MAX_BRIDGED_INBOUND_TOTAL / 2;
 /// Rooms one `(account, bridge principal)` may hold.
 pub const MAX_BRIDGED_ROOMS_PER_PRINCIPAL: i64 = 10_000;
 /// Undrained outbound items one `(account, bridge principal)` may queue — a
@@ -256,6 +268,9 @@ pub struct BridgedRoomRow {
     pub bridge_x25519: Vec<u8>,
     pub created_at: i64,
     pub last_at: i64,
+    /// The room's newest local remove, unix ms; 0 when none
+    /// (`bridged-adapter.md` § Removing bridged rows, rule 5).
+    pub last_removed_at: i64,
 }
 
 /// One stored message row.
@@ -273,6 +288,9 @@ pub struct BridgedMessageRow {
     /// A Sent row whose outbox item the nest deleted when its serving
     /// principal ended — never drained, never deliverable.
     pub undelivered: bool,
+    /// A tombstone: the user removed the nest's copy; `sealed_content` is
+    /// empty and the row stays only to keep the dedup.
+    pub removed: bool,
 }
 
 /// One undrained outbound item.
@@ -325,7 +343,8 @@ pub enum Deposited {
 /// What [`CacheDb::bridged_deposit_precheck`] found would refuse a deposit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DepositPrecheck {
-    /// The far message id is already stored for this principal.
+    /// The far message id is already stored — in the named room, or, when
+    /// the caller cannot name one yet, in any room of this principal's.
     Duplicate,
     /// An inbound cap is reached.
     Full,
@@ -357,7 +376,8 @@ pub fn bridged_room_id(actor_id: &[u8; 32], bridge_id: &str, far_room_id: &str) 
 }
 
 const ROOM_COLUMNS: &str = "room_id, bridge_principal_id, bridge_id, far_room_id, label,
-     participants, self_address, capabilities, bridge_x25519, created_at, last_at";
+     participants, self_address, capabilities, bridge_x25519, created_at, last_at,
+     COALESCE(last_removed_at, 0)";
 
 fn room_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<BridgedRoomRow> {
     let participants: String = r.get(5)?;
@@ -375,12 +395,13 @@ fn room_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<BridgedRoomRow> {
         bridge_x25519: r.get(8)?,
         created_at: r.get(9)?,
         last_at: r.get(10)?,
+        last_removed_at: r.get(11)?,
     })
 }
 
 const MESSAGE_SELECT: &str = "SELECT m.id, m.room_id, r.bridge_id, m.direction, m.sender,
             m.sealed_content, m.created_at, m.received_at, m.receipt,
-            m.undelivered_at IS NOT NULL
+            m.undelivered_at IS NOT NULL, m.removed_at IS NOT NULL
        FROM bridge_conversation_messages m
        JOIN bridge_conversation_rooms r ON r.room_id = m.room_id";
 
@@ -396,6 +417,7 @@ fn message_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<BridgedMessageRow
         received_at: r.get(7)?,
         receipt: r.get(8)?,
         undelivered: r.get(9)?,
+        removed: r.get(10)?,
     })
 }
 
@@ -484,9 +506,136 @@ pub(super) fn rebind_bridged_rooms_in_tx(
     Ok(u32::try_from(rebound).unwrap_or(u32::MAX))
 }
 
-fn count(tx: &rusqlite::Transaction<'_>, sql: &str, params: impl rusqlite::Params) -> Result<i64> {
-    tx.query_row(sql, params, |r| r.get(0))
+fn count(conn: &rusqlite::Connection, sql: &str, params: impl rusqlite::Params) -> Result<i64> {
+    conn.query_row(sql, params, |r| r.get(0))
         .context("count bridged rows")
+}
+
+/// Is any inbound cap reached for a deposit from `principal_id` to `actor_id`
+/// — the room's (when `room_id` names one), the principal's for this
+/// account, the principal's across every account (the leg's share), the
+/// store's? The one test the deposit transaction and the precheck share.
+/// Every arm counts LIVE rows only (`removed_at IS NULL`), so a remove frees
+/// exactly what it removes (`bridged-adapter.md` § Removing bridged rows,
+/// rule 2).
+fn inbound_full(
+    conn: &rusqlite::Connection,
+    actor_id: &[u8; 32],
+    principal_id: &[u8],
+    room_id: Option<&[u8]>,
+) -> Result<bool> {
+    if let Some(room) = room_id
+        && count(
+            conn,
+            "SELECT COUNT(*) FROM bridge_conversation_messages
+              WHERE room_id = ?1 AND direction = 'in' AND removed_at IS NULL",
+            rusqlite::params![room],
+        )? >= MAX_BRIDGED_INBOUND_PER_ROOM
+    {
+        return Ok(true);
+    }
+    let mine = count(
+        conn,
+        "SELECT COUNT(*) FROM bridge_conversation_messages m
+           JOIN bridge_conversation_rooms r ON r.room_id = m.room_id
+          WHERE m.actor_id = ?1 AND r.bridge_principal_id = ?2 AND m.direction = 'in'
+            AND m.removed_at IS NULL",
+        rusqlite::params![&actor_id[..], principal_id],
+    )?;
+    if mine >= MAX_BRIDGED_INBOUND_PER_PRINCIPAL {
+        return Ok(true);
+    }
+    let leg = count(
+        conn,
+        "SELECT COUNT(*) FROM bridge_conversation_messages m
+           JOIN bridge_conversation_rooms r ON r.room_id = m.room_id
+          WHERE r.bridge_principal_id = ?1 AND m.direction = 'in' AND m.removed_at IS NULL",
+        rusqlite::params![principal_id],
+    )?;
+    if leg >= MAX_BRIDGED_INBOUND_PER_LEG {
+        return Ok(true);
+    }
+    let total = count(
+        conn,
+        "SELECT COUNT(*) FROM bridge_conversation_messages
+          WHERE direction = 'in' AND removed_at IS NULL",
+        [],
+    )?;
+    Ok(total >= MAX_BRIDGED_INBOUND_TOTAL)
+}
+
+/// Is `room_id` one of the caller's bridged rooms (removed or not)?
+fn caller_room_exists(
+    conn: &rusqlite::Connection,
+    actor_id: &[u8; 32],
+    room_id: &[u8],
+) -> Result<bool> {
+    conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM bridge_conversation_rooms
+                         WHERE actor_id = ?1 AND room_id = ?2)",
+        rusqlite::params![&actor_id[..], room_id],
+        |r| r.get(0),
+    )
+    .context("read the caller's bridged room")
+}
+
+/// Tombstone the room's live rows `ids` (every live row when `None`), stamp
+/// the room's `last_removed_at` when anything moved, and bound the room's
+/// tombstones (rule 3). Returns how many rows were tombstoned.
+fn tombstone_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    room_id: &[u8],
+    ids: Option<&[i64]>,
+    now: i64,
+) -> Result<u32> {
+    let mut removed = 0u32;
+    match ids {
+        Some(ids) => {
+            for id in ids {
+                removed += u32::try_from(
+                    tx.execute(
+                        "UPDATE bridge_conversation_messages
+                            SET sealed_content = x'', removed_at = ?3
+                          WHERE room_id = ?1 AND id = ?2 AND removed_at IS NULL",
+                        rusqlite::params![room_id, id, now],
+                    )
+                    .context("tombstone bridged row")?,
+                )
+                .unwrap_or(0);
+            }
+        }
+        None => {
+            removed = u32::try_from(
+                tx.execute(
+                    "UPDATE bridge_conversation_messages
+                        SET sealed_content = x'', removed_at = ?2
+                      WHERE room_id = ?1 AND removed_at IS NULL",
+                    rusqlite::params![room_id, now],
+                )
+                .context("tombstone bridged room rows")?,
+            )
+            .unwrap_or(u32::MAX);
+        }
+    }
+    if removed > 0 {
+        tx.execute(
+            "UPDATE bridge_conversation_rooms SET last_removed_at = ?2 WHERE room_id = ?1",
+            rusqlite::params![room_id, now],
+        )
+        .context("stamp bridged room removal")?;
+    }
+    // The oldest tombstones go first: their far ids are the least likely to
+    // be re-served, so a room's rows never exceed twice its cap.
+    tx.execute(
+        "DELETE FROM bridge_conversation_messages
+          WHERE room_id = ?1 AND removed_at IS NOT NULL
+            AND id NOT IN (SELECT id FROM bridge_conversation_messages
+                            WHERE room_id = ?1 AND removed_at IS NOT NULL
+                            ORDER BY id DESC LIMIT ?2)",
+        rusqlite::params![room_id, MAX_BRIDGED_INBOUND_PER_ROOM],
+    )
+    .context("prune bridged tombstones")?;
+    Ok(removed)
 }
 
 impl CacheDb {
@@ -615,24 +764,41 @@ impl CacheDb {
 
     /// Replace a room's far participants — the user's and the bridge's seats
     /// are never written by a report. `false` when the principal serves no
-    /// such room.
+    /// such room. A report on a room the user removed is dropped
+    /// (`bridged-adapter.md` § Removing bridged rows, rule 1): `true`, nothing
+    /// written.
     pub async fn set_bridged_room_participants(
         &self,
         actor_id: &[u8; 32],
         principal_id: &[u8],
+        bridge_id: &str,
         far_room_id: &str,
         participants: &[String],
     ) -> Result<bool> {
         let participants = serde_json::to_string(participants).context("encode participants")?;
         let conn = self.conn.lock().await;
-        let n = conn
-            .execute(
-                "UPDATE bridge_conversation_rooms SET participants = ?4
-                  WHERE actor_id = ?1 AND bridge_principal_id = ?2 AND far_room_id = ?3",
-                rusqlite::params![&actor_id[..], principal_id, far_room_id, participants],
+        let removed: Option<bool> = conn
+            .query_row(
+                "SELECT removed_at IS NOT NULL FROM bridge_conversation_rooms
+                  WHERE actor_id = ?1 AND bridge_principal_id = ?2 AND far_room_id = ?3 AND bridge_id = ?4",
+                rusqlite::params![&actor_id[..], principal_id, far_room_id, bridge_id],
+                |r| r.get(0),
             )
-            .context("set bridged room participants")?;
-        Ok(n > 0)
+            .optional()
+            .context("read bridged room for a members report")?;
+        match removed {
+            None => Ok(false),
+            Some(true) => Ok(true),
+            Some(false) => {
+                conn.execute(
+                    "UPDATE bridge_conversation_rooms SET participants = ?4
+                      WHERE actor_id = ?1 AND bridge_principal_id = ?2 AND far_room_id = ?3 AND bridge_id = ?5",
+                    rusqlite::params![&actor_id[..], principal_id, far_room_id, participants, bridge_id],
+                )
+                .context("set bridged room participants")?;
+                Ok(true)
+            }
+        }
     }
 
     /// One room of the caller's, by its `rooms` id.
@@ -659,28 +825,31 @@ impl CacheDb {
         &self,
         actor_id: &[u8; 32],
         principal_id: &[u8],
+        bridge_id: &str,
         far_room_id: &str,
     ) -> Result<Option<BridgedRoomRow>> {
         let conn = self.conn.lock().await;
         conn.query_row(
             &format!(
                 "SELECT {ROOM_COLUMNS} FROM bridge_conversation_rooms
-                  WHERE actor_id = ?1 AND bridge_principal_id = ?2 AND far_room_id = ?3"
+                  WHERE actor_id = ?1 AND bridge_principal_id = ?2 AND far_room_id = ?3 AND bridge_id = ?4"
             ),
-            rusqlite::params![&actor_id[..], principal_id, far_room_id],
+            rusqlite::params![&actor_id[..], principal_id, far_room_id, bridge_id],
             room_from_row,
         )
         .optional()
         .context("get bridged room by far id")
     }
 
-    /// Every bridged room of the caller's, newest activity first.
+    /// Every bridged room of the caller's, newest activity first — a room the
+    /// user removed omitted until a new live row reopens it (rule 4).
     pub async fn list_bridged_rooms(&self, actor_id: &[u8; 32]) -> Result<Vec<BridgedRoomRow>> {
         let conn = self.conn.lock().await;
         let mut stmt = conn
             .prepare(&format!(
                 "SELECT {ROOM_COLUMNS} FROM bridge_conversation_rooms
-                  WHERE actor_id = ?1 ORDER BY last_at DESC, room_id ASC"
+                  WHERE actor_id = ?1 AND removed_at IS NULL
+                  ORDER BY last_at DESC, room_id ASC"
             ))
             .context("prepare list bridged rooms")?;
         let rows = stmt
@@ -696,13 +865,14 @@ impl CacheDb {
     /// before this is reached.
     ///
     /// # Errors
-    /// [`BridgedRefused::NoSuchRoom`]; [`BridgedRefused::Full`] past either
-    /// inbound cap — nothing is written.
+    /// [`BridgedRefused::NoSuchRoom`]; [`BridgedRefused::Full`] past any
+    /// inbound cap ([`inbound_full`]) — nothing is written.
     #[allow(clippy::too_many_arguments)]
     pub async fn deposit_bridged_message(
         &self,
         actor_id: &[u8; 32],
         principal_id: &[u8],
+        bridge_id: &str,
         far_room_id: &str,
         far_message_id: &str,
         sender: &str,
@@ -715,8 +885,8 @@ impl CacheDb {
         let Some(room_id) = tx
             .query_row(
                 "SELECT room_id FROM bridge_conversation_rooms
-                  WHERE actor_id = ?1 AND bridge_principal_id = ?2 AND far_room_id = ?3",
-                rusqlite::params![&actor_id[..], principal_id, far_room_id],
+                  WHERE actor_id = ?1 AND bridge_principal_id = ?2 AND far_room_id = ?3 AND bridge_id = ?4",
+                rusqlite::params![&actor_id[..], principal_id, far_room_id, bridge_id],
                 |r| r.get::<_, Vec<u8>>(0),
             )
             .optional()
@@ -736,19 +906,7 @@ impl CacheDb {
         {
             return Ok((room_id, Deposited::Duplicate(id)));
         }
-        let mine = count(
-            &tx,
-            "SELECT COUNT(*) FROM bridge_conversation_messages m
-               JOIN bridge_conversation_rooms r ON r.room_id = m.room_id
-              WHERE m.actor_id = ?1 AND r.bridge_principal_id = ?2 AND m.direction = 'in'",
-            rusqlite::params![&actor_id[..], principal_id],
-        )?;
-        let total = count(
-            &tx,
-            "SELECT COUNT(*) FROM bridge_conversation_messages WHERE direction = 'in'",
-            [],
-        )?;
-        if mine >= MAX_BRIDGED_INBOUND_PER_PRINCIPAL || total >= MAX_BRIDGED_INBOUND_TOTAL {
+        if inbound_full(&tx, actor_id, principal_id, Some(&room_id))? {
             return Err(anyhow::anyhow!(BridgedRefused::Full));
         }
         tx.execute(
@@ -769,7 +927,10 @@ impl CacheDb {
         .context("insert bridged deposit")?;
         let id = tx.last_insert_rowid();
         tx.execute(
-            "UPDATE bridge_conversation_rooms SET last_at = ?2 WHERE room_id = ?1",
+            // A new live row reopens a removed room (rule 4); a duplicate
+            // returned above and reopens nothing.
+            "UPDATE bridge_conversation_rooms SET last_at = ?2, removed_at = NULL
+              WHERE room_id = ?1",
             rusqlite::params![room_id, now],
         )
         .context("touch bridged room")?;
@@ -819,6 +980,75 @@ impl CacheDb {
         }
         .context("collect bridged inbox")?;
         Ok(rows)
+    }
+
+    /// The user's local remove of rows of one of their rooms
+    /// (`bridged-adapter.md` § Removing bridged rows): each live row named is
+    /// tombstoned — content emptied, `removed_at` stamped, its far id kept so
+    /// a re-served copy is still a duplicate — the room's `last_removed_at`
+    /// moves, and the room's oldest tombstones past
+    /// [`MAX_BRIDGED_INBOUND_PER_ROOM`] are pruned, in one transaction. An id
+    /// of no live row of this room counts nothing. The outbox is untouched: a
+    /// send already queued stands. Returns how many rows were tombstoned.
+    ///
+    /// # Errors
+    /// [`BridgedRefused::NoSuchRoom`] when the room is not the caller's.
+    pub async fn remove_bridged_messages(
+        &self,
+        actor_id: &[u8; 32],
+        room_id: &[u8],
+        ids: &[i64],
+    ) -> Result<u32> {
+        let now = now_epoch_millis();
+        let mut conn = self.conn.lock().await;
+        let tx = conn.transaction().context("begin bridged remove")?;
+        if !caller_room_exists(&tx, actor_id, room_id)? {
+            return Err(anyhow::anyhow!(BridgedRefused::NoSuchRoom));
+        }
+        let removed = tombstone_in_tx(&tx, room_id, Some(ids), now)?;
+        tx.commit().context("commit bridged remove")?;
+        Ok(removed)
+    }
+
+    /// The user's local remove of a whole room: every live row tombstoned
+    /// (as [`Self::remove_bridged_messages`]) and the room stamped
+    /// `removed_at`, so `rooms.list` omits it until a new live row — a far
+    /// message with an unseen id, a send, the user's `rooms.open` — reopens
+    /// it. The room's own material (key, far id, roster seat) stays.
+    /// Idempotent: a repeat answers 0 and moves nothing.
+    ///
+    /// # Errors
+    /// [`BridgedRefused::NoSuchRoom`] when the room is not the caller's.
+    pub async fn remove_bridged_room(&self, actor_id: &[u8; 32], room_id: &[u8]) -> Result<u32> {
+        let now = now_epoch_millis();
+        let mut conn = self.conn.lock().await;
+        let tx = conn.transaction().context("begin bridged room remove")?;
+        if !caller_room_exists(&tx, actor_id, room_id)? {
+            return Err(anyhow::anyhow!(BridgedRefused::NoSuchRoom));
+        }
+        let removed = tombstone_in_tx(&tx, room_id, None, now)?;
+        tx.execute(
+            "UPDATE bridge_conversation_rooms SET removed_at = ?2, last_removed_at = ?2
+              WHERE room_id = ?1 AND removed_at IS NULL",
+            rusqlite::params![room_id, now],
+        )
+        .context("hide bridged room")?;
+        tx.commit().context("commit bridged room remove")?;
+        Ok(removed)
+    }
+
+    /// Clear a removed room's `removed_at` — the user's own `rooms.open` on
+    /// it (rule 4). `true` when the room was hidden and now lists again.
+    pub async fn reopen_bridged_room(&self, actor_id: &[u8; 32], room_id: &[u8]) -> Result<bool> {
+        let conn = self.conn.lock().await;
+        let n = conn
+            .execute(
+                "UPDATE bridge_conversation_rooms SET removed_at = NULL
+                  WHERE actor_id = ?1 AND room_id = ?2 AND removed_at IS NOT NULL",
+                rusqlite::params![&actor_id[..], room_id],
+            )
+            .context("reopen bridged room")?;
+        Ok(n > 0)
     }
 
     /// Store the caller's Sent copy and queue the item sealed to the bridge,
@@ -875,7 +1105,9 @@ impl CacheDb {
         )
         .context("queue bridged outbound")?;
         tx.execute(
-            "UPDATE bridge_conversation_rooms SET last_at = ?2 WHERE room_id = ?1",
+            // A send is a new live row: it reopens a removed room (rule 4).
+            "UPDATE bridge_conversation_rooms SET last_at = ?2, removed_at = NULL
+              WHERE room_id = ?1",
             rusqlite::params![room.room_id, now],
         )
         .context("touch bridged room")?;
@@ -946,23 +1178,26 @@ impl CacheDb {
 
     /// Record a receipt on one of the principal's Sent rows, never moving it
     /// backwards. The room's id when a row moved, `None` otherwise (unknown
-    /// id, not this principal's, or already at or past `state`).
+    /// id, not this principal's, removed by the user, or already at or past
+    /// `state`).
     pub async fn record_bridged_receipt(
         &self,
         actor_id: &[u8; 32],
         principal_id: &[u8],
+        bridge_id: &str,
         id: i64,
         state: &str,
     ) -> Result<Option<Vec<u8>>> {
         let conn = self.conn.lock().await;
         conn.query_row(
             "UPDATE bridge_conversation_messages SET receipt = ?4
-              WHERE id = ?3 AND actor_id = ?1 AND direction = 'out'
+              WHERE id = ?3 AND actor_id = ?1 AND direction = 'out' AND removed_at IS NULL
                 AND room_id IN (SELECT room_id FROM bridge_conversation_rooms
-                                 WHERE actor_id = ?1 AND bridge_principal_id = ?2)
+                                 WHERE actor_id = ?1 AND bridge_principal_id = ?2
+                                   AND bridge_id = ?5)
                 AND (receipt IS NULL OR (receipt = 'delivered' AND ?4 = 'read'))
               RETURNING room_id",
-            rusqlite::params![&actor_id[..], principal_id, id, state],
+            rusqlite::params![&actor_id[..], principal_id, id, state, bridge_id],
             |r| r.get::<_, Vec<u8>>(0),
         )
         .optional()
@@ -996,54 +1231,110 @@ impl CacheDb {
     }
 
     /// Would an inbound deposit of `far_message_id` from `principal_id` be a
-    /// duplicate, or past either inbound cap? The deposit itself re-checks both
+    /// duplicate, or past an inbound cap? The deposit itself re-checks both
     /// inside its transaction; this is the cheap answer an in-process caller
     /// asks before paying for an unwrap it would then throw away.
+    ///
+    /// `far_room_id` names the room when the caller knows it, and then the
+    /// duplicate test is that room's — the key the deposit's own is on, so a
+    /// sender minting a far id under another peer's path never shadows that
+    /// peer's message — and the room's cap is asked too. `None` (a Nostr wrap,
+    /// whose sender only the unwrap reveals) asks the principal-wide
+    /// duplicate test and every cap but the room's.
     pub async fn bridged_deposit_precheck(
         &self,
         actor_id: &[u8; 32],
         principal_id: &[u8],
+        far_room_id: Option<&str>,
         far_message_id: &str,
     ) -> Result<Option<DepositPrecheck>> {
         let conn = self.conn.lock().await;
-        let seen: bool = conn
-            .query_row(
-                "SELECT EXISTS (SELECT 1 FROM bridge_conversation_messages m
-                                  JOIN bridge_conversation_rooms r ON r.room_id = m.room_id
-                                 WHERE m.actor_id = ?1 AND r.bridge_principal_id = ?2
-                                   AND m.far_message_id = ?3)",
-                rusqlite::params![&actor_id[..], principal_id, far_message_id],
-                |r| r.get(0),
-            )
-            .context("read deposit duplicate")?;
+        let room_id: Option<Vec<u8>> = match far_room_id {
+            Some(far) => conn
+                .query_row(
+                    "SELECT room_id FROM bridge_conversation_rooms
+                      WHERE actor_id = ?1 AND bridge_principal_id = ?2 AND far_room_id = ?3",
+                    rusqlite::params![&actor_id[..], principal_id, far],
+                    |r| r.get(0),
+                )
+                .optional()
+                .context("read precheck room")?,
+            None => None,
+        };
+        let seen: bool = match (far_room_id, &room_id) {
+            // A room not yet minted holds nothing.
+            (Some(_), None) => false,
+            (Some(_), Some(room)) => conn
+                .query_row(
+                    "SELECT EXISTS (SELECT 1 FROM bridge_conversation_messages
+                                     WHERE room_id = ?1 AND far_message_id = ?2)",
+                    rusqlite::params![room, far_message_id],
+                    |r| r.get(0),
+                )
+                .context("read deposit duplicate")?,
+            (None, _) => conn
+                .query_row(
+                    "SELECT EXISTS (SELECT 1 FROM bridge_conversation_messages m
+                                      JOIN bridge_conversation_rooms r ON r.room_id = m.room_id
+                                     WHERE m.actor_id = ?1 AND r.bridge_principal_id = ?2
+                                       AND m.far_message_id = ?3)",
+                    rusqlite::params![&actor_id[..], principal_id, far_message_id],
+                    |r| r.get(0),
+                )
+                .context("read deposit duplicate")?,
+        };
         if seen {
             return Ok(Some(DepositPrecheck::Duplicate));
         }
-        let mine: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM bridge_conversation_messages m
-                   JOIN bridge_conversation_rooms r ON r.room_id = m.room_id
-                  WHERE m.actor_id = ?1 AND r.bridge_principal_id = ?2 AND m.direction = 'in'",
-                rusqlite::params![&actor_id[..], principal_id],
-                |r| r.get(0),
-            )
-            .context("count bridged inbound")?;
-        let total: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM bridge_conversation_messages WHERE direction = 'in'",
-                [],
-                |r| r.get(0),
-            )
-            .context("count bridged inbound")?;
         Ok(
-            (mine >= MAX_BRIDGED_INBOUND_PER_PRINCIPAL || total >= MAX_BRIDGED_INBOUND_TOTAL)
+            inbound_full(&conn, actor_id, principal_id, room_id.as_deref())?
                 .then_some(DepositPrecheck::Full),
         )
     }
 
-    /// The caller's rooms that hold at least one row — every bridge's, or one
-    /// principal's — newest arrival first, each with its newest row: the shape
-    /// the guardian's held-DM queue reads.
+    /// The rooms the guardian's held-DM queue reads for a ward: every room
+    /// that holds a row — live **or tombstoned** — and the room whether or not
+    /// the ward removed it, as `(bridge_id, participants, newest received_at
+    /// in unix ms)`, newest first. The ward's local remove is the user's own
+    /// view and never takes a held peer off the guardian's queue
+    /// (`family-safety.md` § The bridge-DM gate, honest bound (a);
+    /// `bridged-adapter.md` § Removing bridged rows): a removed room keeps its
+    /// row and its participants, so the queue lists it from the room alone.
+    pub async fn guardian_queue_bridged_rooms(
+        &self,
+        actor_id: &[u8; 32],
+    ) -> Result<Vec<(String, Vec<String>, i64)>> {
+        let conn = self.conn.lock().await;
+        let mut stmt = conn
+            .prepare(
+                "SELECT r.bridge_id, r.participants, MAX(m.received_at)
+                   FROM bridge_conversation_rooms r
+                   JOIN bridge_conversation_messages m ON m.room_id = r.room_id
+                  WHERE r.actor_id = ?1
+                  GROUP BY r.room_id
+                  ORDER BY MAX(m.received_at) DESC, r.room_id ASC",
+            )
+            .context("prepare guardian queue rooms")?;
+        let rows = stmt
+            .query_map(rusqlite::params![&actor_id[..]], |r| {
+                let participants: String = r.get(1)?;
+                Ok((
+                    r.get(0)?,
+                    serde_json::from_str(&participants).unwrap_or_default(),
+                    r.get(2)?,
+                ))
+            })
+            .context("query guardian queue rooms")?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .context("collect guardian queue rooms")?;
+        Ok(rows)
+    }
+
+    /// The caller's rooms that hold at least one live row — every bridge's,
+    /// or one principal's — newest arrival first, each with its newest live
+    /// row. Tombstones and removed rooms are not counted (`bridged-adapter.md`
+    /// § Removing bridged rows); the guardian's queue reads
+    /// [`Self::guardian_queue_bridged_rooms`] instead, which counts both.
     pub async fn summarize_bridged_rooms(
         &self,
         actor_id: &[u8; 32],
@@ -1055,14 +1346,16 @@ impl CacheDb {
                 "SELECT r.bridge_id, r.far_room_id, r.participants, COUNT(m.id),
                         MAX(m.received_at),
                         (SELECT l.sealed_content FROM bridge_conversation_messages l
-                          WHERE l.room_id = r.room_id ORDER BY l.received_at DESC, l.id DESC
-                          LIMIT 1),
+                          WHERE l.room_id = r.room_id AND l.removed_at IS NULL
+                          ORDER BY l.received_at DESC, l.id DESC LIMIT 1),
                         (SELECT l.direction FROM bridge_conversation_messages l
-                          WHERE l.room_id = r.room_id ORDER BY l.received_at DESC, l.id DESC
-                          LIMIT 1)
+                          WHERE l.room_id = r.room_id AND l.removed_at IS NULL
+                          ORDER BY l.received_at DESC, l.id DESC LIMIT 1)
                    FROM bridge_conversation_rooms r
-                   JOIN bridge_conversation_messages m ON m.room_id = r.room_id
+                   JOIN bridge_conversation_messages m
+                     ON m.room_id = r.room_id AND m.removed_at IS NULL
                   WHERE r.actor_id = ?1 AND (?2 IS NULL OR r.bridge_principal_id = ?2)
+                    AND r.removed_at IS NULL
                   GROUP BY r.room_id
                   ORDER BY MAX(m.received_at) DESC, r.room_id ASC",
             )
@@ -1093,18 +1386,30 @@ impl CacheDb {
         principal_id: &[u8],
         limit: u32,
     ) -> Result<Vec<(Vec<u8>, BridgedOutboxRow)>> {
+        self.fetch_principal_outbox_after(principal_id, 0, limit)
+            .await
+    }
+
+    /// [`Self::fetch_principal_outbox`] starting after message id `after_id`
+    /// — a drain pages past items it deferred instead of re-reading them.
+    pub async fn fetch_principal_outbox_after(
+        &self,
+        principal_id: &[u8],
+        after_id: i64,
+        limit: u32,
+    ) -> Result<Vec<(Vec<u8>, BridgedOutboxRow)>> {
         let conn = self.conn.lock().await;
         let mut stmt = conn
             .prepare(
                 "SELECT o.actor_id, o.message_id, r.far_room_id, o.ciphertext, o.queued_at
                    FROM bridge_conversation_outbox o
                    JOIN bridge_conversation_rooms r ON r.room_id = o.room_id
-                  WHERE o.bridge_principal_id = ?1
+                  WHERE o.bridge_principal_id = ?1 AND o.message_id > ?3
                   ORDER BY o.message_id ASC LIMIT ?2",
             )
             .context("prepare principal outbox")?;
         let rows = stmt
-            .query_map(rusqlite::params![principal_id, limit], |r| {
+            .query_map(rusqlite::params![principal_id, limit, after_id], |r| {
                 Ok((
                     r.get(0)?,
                     BridgedOutboxRow {
@@ -1281,6 +1586,7 @@ mod tests {
             .deposit_bridged_message(
                 &ALICE,
                 PRINCIPAL,
+                "matrix",
                 "!r:example.org",
                 "$1",
                 "@bob:example.org",
@@ -1293,6 +1599,7 @@ mod tests {
             .deposit_bridged_message(
                 &ALICE,
                 PRINCIPAL,
+                "matrix",
                 "!r:example.org",
                 "$2",
                 "@bob:example.org",
@@ -1305,6 +1612,7 @@ mod tests {
             .deposit_bridged_message(
                 &ALICE,
                 PRINCIPAL,
+                "matrix",
                 "!r:example.org",
                 "$1",
                 "@bob:example.org",
@@ -1349,13 +1657,332 @@ mod tests {
         );
         // A room the principal does not serve refuses.
         let err = db
-            .deposit_bridged_message(&ALICE, PRINCIPAL, "!nope", "$9", "@x", b"x", 0)
+            .deposit_bridged_message(&ALICE, PRINCIPAL, "matrix", "!nope", "$9", "@x", b"x", 0)
             .await
             .unwrap_err();
         assert_eq!(
             err.downcast_ref::<BridgedRefused>(),
             Some(&BridgedRefused::NoSuchRoom)
         );
+    }
+
+    /// `n` inbound rows into a room, far ids `<tag>-0 ..`, written straight to
+    /// the table in one transaction — the caps are tens of thousands of rows.
+    async fn fill(db: &CacheDb, actor: &[u8; 32], room_id: &[u8], tag: &str, n: i64) {
+        let mut conn = db.conn.lock().await;
+        let tx = conn.transaction().unwrap();
+        {
+            let mut stmt = tx
+                .prepare(
+                    "INSERT INTO bridge_conversation_messages
+                        (room_id, actor_id, direction, far_message_id, sender, sealed_content,
+                         created_at, received_at)
+                     VALUES (?1, ?2, 'in', ?3, '@bob:example.org', x'01', 0, 0)",
+                )
+                .unwrap();
+            for i in 0..n {
+                stmt.execute(rusqlite::params![room_id, &actor[..], format!("{tag}-{i}")])
+                    .unwrap();
+            }
+        }
+        tx.commit().unwrap();
+    }
+
+    async fn deposit(
+        db: &CacheDb,
+        actor: &[u8; 32],
+        far_room: &str,
+        far_id: &str,
+    ) -> Result<Deposited> {
+        db.deposit_bridged_message(
+            actor,
+            PRINCIPAL,
+            "matrix",
+            far_room,
+            far_id,
+            "@bob:example.org",
+            b"x",
+            0,
+        )
+        .await
+        .map(|(_, d)| d)
+    }
+
+    fn is_full(r: Result<Deposited>) -> bool {
+        r.err()
+            .and_then(|e| e.downcast_ref::<BridgedRefused>().copied())
+            == Some(BridgedRefused::Full)
+    }
+
+    async fn first_id(db: &CacheDb, room_id: &[u8]) -> i64 {
+        db.conn
+            .lock()
+            .await
+            .query_row(
+                "SELECT MIN(id) FROM bridge_conversation_messages
+                  WHERE room_id = ?1 AND removed_at IS NULL",
+                [room_id],
+                |r| r.get(0),
+            )
+            .unwrap()
+    }
+
+    async fn rows_in(db: &CacheDb, room_id: &[u8]) -> i64 {
+        db.conn
+            .lock()
+            .await
+            .query_row(
+                "SELECT COUNT(*) FROM bridge_conversation_messages WHERE room_id = ?1",
+                [room_id],
+                |r| r.get(0),
+            )
+            .unwrap()
+    }
+
+    /// `bridged-adapter.md` § Removing bridged rows, rule 2: a remove frees
+    /// exactly what it removes — the room's slot, the account's, the leg's —
+    /// and keeps the dedup, so a re-served far message stores nothing.
+    #[tokio::test]
+    async fn a_remove_frees_every_cap_arm_and_keeps_the_dedup() {
+        let db = CacheDb::open_in_memory().unwrap();
+        // The room arm.
+        let r0 = room(&db, &ALICE, "!r0").await;
+        fill(&db, &ALICE, &r0.room_id, "r0", MAX_BRIDGED_INBOUND_PER_ROOM).await;
+        assert!(is_full(deposit(&db, &ALICE, "!r0", "new").await));
+        let oldest = first_id(&db, &r0.room_id).await;
+        assert_eq!(
+            db.remove_bridged_messages(&ALICE, &r0.room_id, &[oldest])
+                .await
+                .unwrap(),
+            1
+        );
+        // A repeat counts nothing.
+        assert_eq!(
+            db.remove_bridged_messages(&ALICE, &r0.room_id, &[oldest, -7])
+                .await
+                .unwrap(),
+            0
+        );
+        let before = rows_in(&db, &r0.room_id).await;
+        assert_eq!(
+            deposit(&db, &ALICE, "!r0", "r0-0").await.unwrap(),
+            Deposited::Duplicate(oldest),
+            "the tombstone keeps the dedup"
+        );
+        assert_eq!(rows_in(&db, &r0.room_id).await, before);
+        assert!(matches!(
+            deposit(&db, &ALICE, "!r0", "new").await.unwrap(),
+            Deposited::Stored(_)
+        ));
+        // The account's arm: four more full rooms make 50,000 live rows.
+        let mut rooms = vec![r0];
+        for i in 1..5 {
+            let far = format!("!r{i}");
+            let r = room(&db, &ALICE, &far).await;
+            fill(&db, &ALICE, &r.room_id, &far, MAX_BRIDGED_INBOUND_PER_ROOM).await;
+            rooms.push(r);
+        }
+        room(&db, &ALICE, "!r5").await;
+        assert!(is_full(deposit(&db, &ALICE, "!r5", "a").await));
+        let id = first_id(&db, &rooms[1].room_id).await;
+        db.remove_bridged_messages(&ALICE, &rooms[1].room_id, &[id])
+            .await
+            .unwrap();
+        assert!(matches!(
+            deposit(&db, &ALICE, "!r5", "a").await.unwrap(),
+            Deposited::Stored(_)
+        ));
+        // The leg's arm: four more accounts at 50,000 make the leg's 250,000.
+        let mut other = Vec::new();
+        for a in 1..5u8 {
+            let actor = [a; 32];
+            for i in 0..5 {
+                let far = format!("!r{i}");
+                let r = room(&db, &actor, &far).await;
+                fill(&db, &actor, &r.room_id, &far, MAX_BRIDGED_INBOUND_PER_ROOM).await;
+                other.push((actor, r));
+            }
+        }
+        room(&db, &BOB, "!b").await;
+        assert!(is_full(deposit(&db, &BOB, "!b", "b").await));
+        let (actor, r) = &other[0];
+        let id = first_id(&db, &r.room_id).await;
+        db.remove_bridged_messages(actor, &r.room_id, &[id])
+            .await
+            .unwrap();
+        assert!(matches!(
+            deposit(&db, &BOB, "!b", "b").await.unwrap(),
+            Deposited::Stored(_)
+        ));
+        // Another account's room is no room of the caller's.
+        let err = db
+            .remove_bridged_messages(&BOB, &rooms[0].room_id, &[1])
+            .await
+            .unwrap_err();
+        assert_eq!(
+            err.downcast_ref::<BridgedRefused>(),
+            Some(&BridgedRefused::NoSuchRoom)
+        );
+    }
+
+    /// Rules 1, 4 and 5: a removed room leaves the list, keeps its material
+    /// and its dedup, serves its tombstones flagged and empty, drops a receipt
+    /// or a members report, and lists again — holding only the new row — on a
+    /// new live row; a duplicate never reopens it.
+    #[tokio::test]
+    async fn a_removed_room_is_hidden_and_a_new_row_reopens_it() {
+        let db = CacheDb::open_in_memory().unwrap();
+        let r = room(&db, &ALICE, "!r:example.org").await;
+        assert_eq!(r.last_removed_at, 0);
+        for far in ["$1", "$2"] {
+            deposit(&db, &ALICE, "!r:example.org", far).await.unwrap();
+        }
+        let sent = db
+            .send_bridged_message(&ALICE, &r, b"to-bridge", b"to-self")
+            .await
+            .unwrap();
+        assert_eq!(db.remove_bridged_room(&ALICE, &r.room_id).await.unwrap(), 3);
+        assert_eq!(db.remove_bridged_room(&ALICE, &r.room_id).await.unwrap(), 0);
+        assert!(db.list_bridged_rooms(&ALICE).await.unwrap().is_empty());
+        assert!(
+            db.summarize_bridged_rooms(&ALICE, None)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        let held = db
+            .get_bridged_room(&ALICE, &r.room_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(held.last_removed_at > 0);
+        assert_eq!(held.bridge_x25519, KEY, "the room's material stays");
+        // The outbox stands: the user removed their copy, not the message.
+        assert_eq!(
+            db.fetch_bridged_outbox(&ALICE, PRINCIPAL, 0, 10)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        // A receipt or a members report naming the removed row is dropped.
+        assert!(
+            db.record_bridged_receipt(&ALICE, PRINCIPAL, "matrix", sent, "delivered")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            db.set_bridged_room_participants(
+                &ALICE,
+                PRINCIPAL,
+                "matrix",
+                "!r:example.org",
+                &["@carol:example.org".into()]
+            )
+            .await
+            .unwrap()
+        );
+        let tombstones = db
+            .fetch_bridged_inbox(&ALICE, Some(&r.room_id), 0, 100)
+            .await
+            .unwrap();
+        assert_eq!(tombstones.len(), 3);
+        assert!(
+            tombstones
+                .iter()
+                .all(|m| m.removed && m.sealed_content.is_empty() && m.receipt.is_none())
+        );
+        // A re-served far message is a duplicate and reopens nothing.
+        assert!(matches!(
+            deposit(&db, &ALICE, "!r:example.org", "$1").await.unwrap(),
+            Deposited::Duplicate(_)
+        ));
+        assert!(db.list_bridged_rooms(&ALICE).await.unwrap().is_empty());
+        // A new far message reopens the room, holding only what arrived since.
+        let Deposited::Stored(new) = deposit(&db, &ALICE, "!r:example.org", "$3").await.unwrap()
+        else {
+            panic!("stored")
+        };
+        let listed = db.list_bridged_rooms(&ALICE).await.unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].participants, vec!["@bob:example.org".to_string()]);
+        let live: Vec<i64> = db
+            .fetch_bridged_inbox(&ALICE, Some(&r.room_id), 0, 100)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|m| !m.removed)
+            .map(|m| m.id)
+            .collect();
+        assert_eq!(live, vec![new]);
+        // The user's own open reopens a removed room too; a send likewise.
+        db.remove_bridged_room(&ALICE, &r.room_id).await.unwrap();
+        assert!(db.reopen_bridged_room(&ALICE, &r.room_id).await.unwrap());
+        assert!(!db.reopen_bridged_room(&ALICE, &r.room_id).await.unwrap());
+        assert_eq!(db.list_bridged_rooms(&ALICE).await.unwrap().len(), 1);
+        db.remove_bridged_room(&ALICE, &r.room_id).await.unwrap();
+        db.send_bridged_message(&ALICE, &r, b"to-bridge", b"to-self")
+            .await
+            .unwrap();
+        assert_eq!(db.list_bridged_rooms(&ALICE).await.unwrap().len(), 1);
+    }
+
+    /// Rule 3: a room keeps at most `MAX_BRIDGED_INBOUND_PER_ROOM`
+    /// tombstones, the oldest pruned first, so its rows never exceed twice
+    /// its cap.
+    #[tokio::test]
+    async fn tombstones_are_bounded_oldest_first() {
+        let db = CacheDb::open_in_memory().unwrap();
+        let r = room(&db, &ALICE, "!r").await;
+        fill(
+            &db,
+            &ALICE,
+            &r.room_id,
+            "first",
+            MAX_BRIDGED_INBOUND_PER_ROOM,
+        )
+        .await;
+        db.remove_bridged_room(&ALICE, &r.room_id).await.unwrap();
+        fill(
+            &db,
+            &ALICE,
+            &r.room_id,
+            "second",
+            MAX_BRIDGED_INBOUND_PER_ROOM,
+        )
+        .await;
+        assert_eq!(
+            rows_in(&db, &r.room_id).await,
+            2 * MAX_BRIDGED_INBOUND_PER_ROOM
+        );
+        // One more remove: twenty thousand tombstones, half of them pruned.
+        let id = first_id(&db, &r.room_id).await;
+        db.remove_bridged_messages(&ALICE, &r.room_id, &[id])
+            .await
+            .unwrap();
+        assert!(rows_in(&db, &r.room_id).await <= 2 * MAX_BRIDGED_INBOUND_PER_ROOM);
+        let tombstones: i64 = db
+            .conn
+            .lock()
+            .await
+            .query_row(
+                "SELECT COUNT(*) FROM bridge_conversation_messages
+                  WHERE room_id = ?1 AND removed_at IS NOT NULL",
+                [&r.room_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(tombstones, MAX_BRIDGED_INBOUND_PER_ROOM);
+        // The oldest far ids went; the newest tombstone still dedups.
+        assert!(matches!(
+            deposit(&db, &ALICE, "!r", "second-0").await.unwrap(),
+            Deposited::Duplicate(_)
+        ));
+        assert!(matches!(
+            deposit(&db, &ALICE, "!r", "first-0").await.unwrap(),
+            Deposited::Stored(_)
+        ));
     }
 
     #[tokio::test]
@@ -1402,13 +2029,13 @@ mod tests {
         );
         // Receipts: read after delivered moves; delivered after read does not.
         assert!(
-            db.record_bridged_receipt(&ALICE, PRINCIPAL, id, "read")
+            db.record_bridged_receipt(&ALICE, PRINCIPAL, "matrix", id, "read")
                 .await
                 .unwrap()
                 .is_some()
         );
         assert!(
-            db.record_bridged_receipt(&ALICE, PRINCIPAL, id, "delivered")
+            db.record_bridged_receipt(&ALICE, PRINCIPAL, "matrix", id, "delivered")
                 .await
                 .unwrap()
                 .is_none()
@@ -1478,6 +2105,7 @@ mod tests {
             db.set_bridged_room_participants(
                 &ALICE,
                 PRINCIPAL,
+                "matrix",
                 "!r:example.org",
                 &["@carol:example.org".into()]
             )
@@ -1491,7 +2119,7 @@ mod tests {
             .unwrap();
         assert_eq!(after.participants, vec!["@carol:example.org".to_string()]);
         assert!(
-            !db.set_bridged_room_participants(&ALICE, PRINCIPAL, "!other", &[])
+            !db.set_bridged_room_participants(&ALICE, PRINCIPAL, "matrix", "!other", &[])
                 .await
                 .unwrap()
         );
@@ -1506,6 +2134,64 @@ mod tests {
             )
             .unwrap();
         assert_eq!(seats, 2);
+    }
+
+    /// `apps/bridges.md` § Phase G → *When the bridge stops serving*, rule 2:
+    /// a room's serving principal is the one declaring the room's `bridge.id`,
+    /// so the same principal reporting under another id — a re-consent that
+    /// moved it — finds, reports on and receipts none of the old id's rooms.
+    #[tokio::test]
+    async fn a_principal_under_another_bridge_id_reaches_none_of_the_old_ids_rooms() {
+        let db = CacheDb::open_in_memory().unwrap();
+        let r = room(&db, &ALICE, "!r:example.org").await;
+        let id = db
+            .send_bridged_message(&ALICE, &r, b"sealed", b"self")
+            .await
+            .unwrap();
+        assert!(
+            db.get_bridged_room_by_far_id(&ALICE, PRINCIPAL, "signal", "!r:example.org")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            !db.set_bridged_room_participants(
+                &ALICE,
+                PRINCIPAL,
+                "signal",
+                "!r:example.org",
+                &["@mallory:example.org".into()]
+            )
+            .await
+            .unwrap()
+        );
+        assert!(
+            db.record_bridged_receipt(&ALICE, PRINCIPAL, "signal", id, "delivered")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let after = db
+            .get_bridged_room(&ALICE, &r.room_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(after.participants, vec!["@bob:example.org".to_string()]);
+        let row = &db.fetch_bridged_inbox(&ALICE, None, 0, 10).await.unwrap()[0];
+        assert_eq!(row.receipt, None);
+        // Under the room's own id the same calls reach it.
+        assert!(
+            db.get_bridged_room_by_far_id(&ALICE, PRINCIPAL, "matrix", "!r:example.org")
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            db.record_bridged_receipt(&ALICE, PRINCIPAL, "matrix", id, "delivered")
+                .await
+                .unwrap()
+                .is_some()
+        );
     }
 
     /// `apps/bridges.md` § Phase G → *When the bridge stops serving*: a
@@ -1604,7 +2290,7 @@ mod tests {
         drop(conn);
         // The old principal's view is empty; a new send queues for the new one.
         assert!(
-            db.get_bridged_room_by_far_id(&ALICE, PRINCIPAL, "!r:example.org")
+            db.get_bridged_room_by_far_id(&ALICE, PRINCIPAL, "matrix", "!r:example.org")
                 .await
                 .unwrap()
                 .is_none()

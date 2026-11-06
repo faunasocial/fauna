@@ -23,6 +23,9 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 
+use fauna_core::data::{Capability, DeviceAuthorization, Timestamp};
+use fauna_core::encoding::{EmbedAsBytes, canonical_encode, sign_envelope};
+use fauna_core::identity::ActorKeypair;
 use fauna_nest::{
     bridge_atproto_handlers::register_bridge_atproto_handlers,
     bridge_method_allowlist::{CallerClass, is_permitted},
@@ -34,10 +37,12 @@ use fauna_protocol::{
     RpcError,
     atproto::IntegrationLevel,
     atproto_pds::{
-        DeletePresenceReply, DeletePresenceRequest, GetIntegrationStatusReply,
-        GetIntegrationStatusRequest, RecordTombstoneReply, RecordTombstoneRequest,
-        RequestTombstoneReply, RequestTombstoneRequest, SetIntegrationLevelReply,
-        SetIntegrationLevelRequest,
+        DeletePresenceReply, DeletePresenceRequest, FetchAuthoringDelegationReply,
+        FetchAuthoringDelegationRequest, FetchAuthoringKeyReply, FetchAuthoringKeyRequest,
+        GetIntegrationStatusReply, GetIntegrationStatusRequest, ProvisionAuthoringDelegationReply,
+        ProvisionAuthoringDelegationRequest, RecordTombstoneReply, RecordTombstoneRequest,
+        RequestTombstoneReply, RequestTombstoneRequest, RevokeAuthoringDelegationReply,
+        RevokeAuthoringDelegationRequest, SetIntegrationLevelReply, SetIntegrationLevelRequest,
     },
     decode_strict, encode_canonical,
 };
@@ -402,6 +407,159 @@ async fn deleting_the_presence_tombstones_the_row_but_retains_the_identity() {
     assert_eq!(
         after.projection_floor_micros, floor_before,
         "the consent floor is the record a later re-enable is measured against, not part of the presence"
+    );
+}
+
+// ── the authoring delegation outlives the level (D10 § Revocation) ──
+
+const FETCH_KEY_KIND: &str = "fauna.bridges.atproto.fetch_authoring_key";
+const PROVISION_KIND: &str = "fauna.bridges.atproto.provision_authoring_delegation";
+const FETCH_DELEGATION_KIND: &str = "fauna.bridges.atproto.fetch_authoring_delegation";
+const REVOKE_KIND: &str = "fauna.bridges.atproto.revoke_authoring_delegation";
+
+/// Read the caller's delegation through the page-load read kind and assert it
+/// is still whole: the same `K_pub`, the provisioned cert verbatim, and that
+/// cert still verifying for this account — the state a Fauna principal's
+/// `post.author` write loads its signer from.
+async fn assert_delegation_live(
+    router: &RpcRouter,
+    state: &Arc<AppState>,
+    actor: [u8; 32],
+    k_pub: &[u8; 32],
+    cert: &[u8],
+    after: &str,
+) {
+    let read: FetchAuthoringDelegationReply = common::call(
+        router,
+        state,
+        actor,
+        FETCH_DELEGATION_KIND,
+        &FetchAuthoringDelegationRequest::default(),
+    )
+    .await
+    .expect("the delegation read answers");
+    assert_eq!(
+        read.k_pub.map(|b| b.into_vec()),
+        Some(k_pub.to_vec()),
+        "the sub-key survives {after}"
+    );
+    let stored = read
+        .cert
+        .unwrap_or_else(|| panic!("the cert survives {after}"));
+    assert_eq!(&stored[..], cert, "the cert is the one provisioned");
+    fauna_nest::atproto_authoring_key::verify_delegation_cert(
+        &stored,
+        &actor,
+        k_pub,
+        Timestamp::now().0,
+    )
+    .unwrap_or_else(|e| panic!("the cert still verifies {after}: {e:?}"));
+}
+
+/// The delegation's lifetime is the account's consent, not the hosting level:
+/// a Fauna principal approved for `post.author` consumes it with no PDS at all,
+/// so neither a step-down from a hosted level nor the delete-presence sweep
+/// ends it. Only the user's explicit revoke does (with its own lapse and the
+/// succession burn, which are not level transitions).
+#[tokio::test]
+async fn the_authoring_delegation_survives_step_downs_and_the_delete_sweep_but_not_a_revoke() {
+    let (router, state) = router_with_db().await;
+    // The sub-key's at-rest KEK derives from the deployment seed, and the cert
+    // is verified under the caller's actor id, so it must be a real pubkey.
+    fauna_nest::test_support::seat_own_deployment_seed(&state).await;
+    let identity = ActorKeypair::from_secret([41u8; 32]);
+    let actor = identity.actor_id().0;
+
+    dispatch(
+        &router,
+        state.clone(),
+        actor,
+        &to(IntegrationLevel::HostedFull),
+    )
+    .await
+    .expect("enter hosted_full");
+    state
+        .db
+        .record_atproto_minted(&actor, "did:plc:delegating", Some("bafygenesis"))
+        .await
+        .expect("record the mint");
+
+    // The D10 ceremony over the wire: fetch (mint) K, sign the cert, provision.
+    let key: FetchAuthoringKeyReply = common::call(
+        &router,
+        &state,
+        actor,
+        FETCH_KEY_KIND,
+        &FetchAuthoringKeyRequest::default(),
+    )
+    .await
+    .expect("fetch mints K");
+    let k_pub: [u8; 32] = key.k_pub.try_into().expect("32-byte K_pub");
+    let (bytes, env) = sign_envelope(
+        &identity,
+        &DeviceAuthorization {
+            actor_id: identity.actor_id(),
+            device_key: k_pub,
+            capabilities: vec![Capability::Post, Capability::UpdateProfile],
+            created_at: Timestamp::now(),
+            expires_at: None,
+        },
+    )
+    .unwrap();
+    let cert = canonical_encode(&EmbedAsBytes::from_signed(bytes, env)).unwrap();
+    let provisioned: ProvisionAuthoringDelegationReply = common::call(
+        &router,
+        &state,
+        actor,
+        PROVISION_KIND,
+        &ProvisionAuthoringDelegationRequest {
+            cert: cert.clone(),
+            extra: Default::default(),
+        },
+    )
+    .await
+    .expect("provision");
+    assert!(provisioned.ok);
+    assert_delegation_live(&router, &state, actor, &k_pub, &cert, "provisioning").await;
+
+    // Down the ladder: full → visible → off (the last one deactivates).
+    for level in [IntegrationLevel::HostedVisible, IntegrationLevel::Off] {
+        dispatch(&router, state.clone(), actor, &to(level))
+            .await
+            .unwrap_or_else(|e| panic!("step down to {}: {e:?}", level.as_str()));
+        let after = format!("a step down to {}", level.as_str());
+        assert_delegation_live(&router, &state, actor, &k_pub, &cert, &after).await;
+    }
+
+    // The delete-presence sweep destroys the presence, not the consent.
+    delete_presence(&router, state.clone(), actor)
+        .await
+        .expect("delete the presence");
+    assert_delegation_live(&router, &state, actor, &k_pub, &cert, "the delete sweep").await;
+
+    // The explicit revoke is still the user's end of it.
+    let revoked: RevokeAuthoringDelegationReply = common::call(
+        &router,
+        &state,
+        actor,
+        REVOKE_KIND,
+        &RevokeAuthoringDelegationRequest::default(),
+    )
+    .await
+    .expect("revoke");
+    assert!(revoked.revoked, "the revoke found a live delegation to end");
+    let read: FetchAuthoringDelegationReply = common::call(
+        &router,
+        &state,
+        actor,
+        FETCH_DELEGATION_KIND,
+        &FetchAuthoringDelegationRequest::default(),
+    )
+    .await
+    .expect("the delegation read answers");
+    assert!(
+        read.k_pub.is_none() && read.cert.is_none(),
+        "a revoke destroys the sub-key and its cert"
     );
 }
 

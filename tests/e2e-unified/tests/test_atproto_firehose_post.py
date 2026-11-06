@@ -146,7 +146,7 @@ POST_BEFORE_ENABLE = "a public post from before alice ever heard of bluesky"
 @pytest.mark.feature("atproto")
 def test_public_post_reaches_the_firehose(nest_binary, atproto_bridge_e2e_binary, tmp_path_factory):
     from clients.ws_rpc_admin_client import WsRpcAdminClient
-    from common.auth import register_handled_actor
+    from helpers.admin_wire import admit_adult
     from conftest import _bridge_admin_post, _make_nest, _repo_root
     from helpers.bridge_enrollment import approve_bridge
     from drivers.port_util import (
@@ -204,9 +204,7 @@ def test_public_post_reaches_the_firehose(nest_binary, atproto_bridge_e2e_binary
         # ── 1. A handled user enters the hosted level (the depth selector's
         # transition kind — the production enable path) and the bridge boots
         # with the XRPC/firehose listener up. ──
-        alice = register_handled_actor(
-            nest["port"], handle="alice", domain=HANDLE_DOMAIN, base_url=nest["url"]
-        )
+        alice = admit_adult(nest, "alice", domain=HANDLE_DOMAIN, token=True)
         alice_secret = bytes(alice["signing_key"])
         alice_ws = WsRpcAdminClient(
             nest["url"], actor_id=alice["actor_id_bytes"], signing_key=alice_secret

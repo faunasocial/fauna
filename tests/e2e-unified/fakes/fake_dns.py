@@ -129,15 +129,8 @@ class FakeDns:
         # read it and the TCP thread writes it.
         self._updates: dict[str, list[str]] = {}
         self._lock = threading.Lock()
-        self._sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self._sock.bind((host, port))
+        self._sock, self._tcp = self._bind_pair(host, port)
         self.host, self.port = self._sock.getsockname()[:2]
-        # TCP on the same port number (RFC 7766): the propagation probe's retry
-        # and the only transport an android venue's reverse carries.
-        self._tcp = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self._tcp.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self._tcp.bind((host, self.port))
         self._tcp.listen(16)
         self._stopped = threading.Event()
         self._thread = threading.Thread(target=self._serve, daemon=True)
@@ -195,6 +188,33 @@ class FakeDns:
                         conn.sendall(struct.pack(">H", len(reply)) + reply)
                 except Exception:
                     continue
+
+    @staticmethod
+    def _bind_pair(host: str, port: int) -> tuple[socket.socket, socket.socket]:
+        """Bind a UDP and a TCP socket on one port number (RFC 7766).
+
+        TCP carries the propagation probe's retry and is the only transport an
+        android venue's reverse carries. With ``port=0`` the kernel picks the
+        UDP port, and that number can already be taken on TCP by an unrelated
+        socket (EADDRINUSE, seen in a full macOS/iOS baseline run). So an
+        ephemeral pick is retried on a fresh pair; a fixed port is not.
+        """
+        attempts = 32 if port == 0 else 1
+        for attempt in range(attempts):
+            udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            udp.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            tcp = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            tcp.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            try:
+                udp.bind((host, port))
+                tcp.bind((host, udp.getsockname()[1]))
+                return udp, tcp
+            except OSError:
+                udp.close()
+                tcp.close()
+                if attempt == attempts - 1:
+                    raise
+        raise AssertionError("unreachable")
 
     @staticmethod
     def _recv_exactly(conn: socket.socket, n: int) -> bytes:
@@ -325,6 +345,8 @@ class FakeDns:
         with self._lock:
             updated = list(self._updates.get(name, ()))
 
+        if not updated:
+            name = self._owner(name)
         if name in self._servfail:
             rcode = _RCODE_SERVFAIL
         elif qclass == _CLASS_IN and qtype == _TYPE_TXT and updated:
@@ -354,6 +376,27 @@ class FakeDns:
         resp_flags = 0x8000 | 0x0400 | rd | rcode
         header = struct.pack(">HHHHHH", txn_id, resp_flags, 1, ancount, 0, 0)
         return header + question + answers
+
+    def _published(self, name: str) -> bool:
+        return (name in self._txt or name in self._a or name in self._mx
+                or name in self._ptr or name in self._servfail)
+
+    def _owner(self, name: str) -> str:
+        """The name whose records answer `name`: itself when published, else the
+        nearest `*.<ancestor>` wildcard (RFC 4592) — stopping at the closest
+        published ancestor, below which no wildcard of a farther one reaches.
+        A mail venue publishes `*.external.test` so its tests' never-seen sender
+        domains resolve; nothing else in the fake publishes a wildcard."""
+        if self._published(name):
+            return name
+        labels = name.split(".")
+        for i in range(1, len(labels)):
+            ancestor = ".".join(labels[i:])
+            if self._published("*." + ancestor):
+                return "*." + ancestor
+            if self._published(ancestor):
+                break
+        return name
 
     @staticmethod
     def _parse_name(msg: bytes, offset: int) -> tuple[str, int]:

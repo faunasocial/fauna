@@ -61,7 +61,8 @@ pub(crate) async fn run_agent_with_store(
     // duplicate in a second concurrent logon session of the same user; that
     // case is caught by the machine-global `FILE_FLAG_FIRST_PIPE_INSTANCE`
     // pipe create failing, which the run-loop tail below observes and turns
-    // into agent termination (see `pipe_server::InstanceLock`'s doc).
+    // into agent termination (see `fauna_ipc::pipe_transport::InstanceLock`'s
+    // doc).
     #[cfg(unix)]
     let _instance_lock = {
         let socket_path = fauna_ipc::unix_transport::default_socket_path()?;
@@ -76,10 +77,18 @@ pub(crate) async fn run_agent_with_store(
     };
 
     #[cfg(windows)]
-    let _instance_lock = match crate::pipe_server::InstanceLock::acquire(pipe_name) {
+    let _instance_lock = match fauna_ipc::pipe_transport::InstanceLock::acquire(
+        &fauna_ipc::sync::mutex_name_for_pipe(pipe_name),
+    ) {
         Ok(lock) => lock,
         Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
-            tracing::info!("{e} — another instance is already serving this user");
+            // The unix lock's wording, which the packaged-duplicate e2e reads
+            // (`test_store_package_registration.py`): the mutex this lost on,
+            // and that it exited as a duplicate.
+            tracing::info!(
+                "another sync-agent instance holds the lock ({e}) — exiting as duplicate; \
+                 another instance is already serving this user"
+            );
             return Ok(());
         }
         Err(e) => return Err(e.into()),
@@ -115,11 +124,8 @@ pub(crate) async fn run_agent_with_store(
         carry_predecessor_scope(&paths, &actor, &cap.predecessor_actor_ids());
     }
 
-    // Load sync config from the resolved (scoped, on macOS) data-root.
-    let config = paths.load_config().unwrap_or_else(|e| {
-        tracing::warn!("config load failed, using defaults: {e}");
-        SyncConfig::default()
-    });
+    // Load the binding store from the resolved, scoped data-root.
+    let config = boot_binding_store(&paths);
 
     // NOTE: device.toml is NOT loaded here. Under the per-user model the WinUI app
     // provisions a SyncCapability over the pipe at login — that capability carries
@@ -190,6 +196,8 @@ pub(crate) async fn run_agent_with_store(
         // record goes back into memory before the slot is published, so the
         // first status reply and the account host's first read both see it.
         crate::renewal::restore_refusal(&state);
+        // An app-dead boot on a dark domain reaches the box as a provision did.
+        crate::reach::adopt(&cap);
         *state.capability.write().await = Some(cap);
         tracing::info!(nest_url = %nest_url, "capability restored from credential store");
         // The principal-support advertisement must be true from the first
@@ -404,6 +412,28 @@ pub(crate) async fn run_agent_with_store(
     content_keys_handle.await?;
 
     Ok(())
+}
+
+/// The binding store an agent boots with: the account's own, or — booting with
+/// no account (no restored capability) — an empty one, never the flat
+/// `config.toml` an earlier build wrote before a provision (`sync-agent.md`
+/// § Control plane split, *the binding store is an account's*). The boot twin
+/// of the un-provision reset (`pipe_server::unprovision_now`): the flat store
+/// is no account's, so listing it would hand one account's leftover binding to
+/// whichever app asks before its own provision.
+pub(crate) fn boot_binding_store(paths: &SyncPaths) -> SyncConfig {
+    if paths.actor_scope().is_none() {
+        if paths.config_path().exists() {
+            tracing::info!(
+                "no account provisioned: the flat binding store is no account's and is not served"
+            );
+        }
+        return SyncConfig::default();
+    }
+    paths.load_config().unwrap_or_else(|e| {
+        tracing::warn!("config load failed, using defaults: {e}");
+        SyncConfig::default()
+    })
 }
 
 /// Scope the shared [`SyncPaths`] to one actor's state subdir (`on-demand-files.md`

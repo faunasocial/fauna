@@ -260,3 +260,85 @@ async fn an_unfetchable_own_covering_tail_re_asserts_local() {
         "the fresh row carries local's bytes, not the lost ones"
     );
 }
+
+/// The gap-3 re-assert reaches the nest when local is ALREADY RECORDED — the
+/// crossed clash interleaving's last step: each seat resolved the other's
+/// concurrent edit latest-wins, adopting its bytes (a download stamps them
+/// recorded), and its own winner row returns as a stale-declined tail. The
+/// re-assert re-drives the upload, and the upload's "already synced and
+/// recorded" skip used to swallow it — `Ok`, no row: both seats sat on the
+/// swapped bodies with nothing left in the log to move either of them
+/// (live in `test_seat_scenarios` at `clash`). The
+/// re-assert's whole point is a fresh log-tail row for bytes the log already
+/// holds, so the skip must not apply to it.
+#[tokio::test]
+async fn a_stale_declined_own_tail_re_asserts_recorded_local() {
+    let server = MockServer::start().await;
+    let store = MockNest::new().mount(&server).await;
+    let watch = tempfile::tempdir().unwrap();
+    let engine = test_engine(
+        &server.uri(),
+        watch.path().to_path_buf(),
+        Some(BackupKey::from_bytes([0x11; 32])),
+    );
+
+    // This seat's own winner, published; then the peer's bytes adopted and
+    // recorded — the state an applied download leaves (`Synced`, the recorded
+    // proof equal to local).
+    let ours = b"clash: from a\n".to_vec();
+    let ours_manifest = seed_file(&engine, &store, watch.path(), REL, &ours).await;
+    let theirs = b"clash: from b!\n".to_vec();
+    let theirs_manifest = seed_file(&engine, &store, watch.path(), REL, &theirs).await;
+    engine.causal().hold(REL, 2, &theirs);
+    engine.causal().advance_frontier(REL, 2);
+    engine.causal().advance_edit_frontier(REL, 4);
+    let base = engine.base_dir_for_test().join(REL);
+    std::fs::create_dir_all(base.parent().unwrap()).unwrap();
+    std::fs::write(&base, &theirs).unwrap();
+    // The row an applied download leaves (`download_and_write_file`): synced
+    // on the incoming manifest, the recorded proof stamped from local. This
+    // engine has no folder, so its seed record never landed to write it.
+    let theirs_hash = ContentHash::of_raw(&theirs);
+    engine
+        .db()
+        .upsert_entry(
+            REL,
+            Some(theirs_hash),
+            Some(theirs_hash),
+            Some(theirs_manifest),
+            crate::db::SyncState::Synced,
+            0,
+            0,
+            theirs.len() as i64,
+            1,
+            None,
+        )
+        .unwrap();
+    engine
+        .db()
+        .stamp_recorded_content_from_local(REL, crate::db::ProofOrigin::Fetched)
+        .unwrap();
+    let posts_before = store.posted_manifests.lock().unwrap().len();
+
+    // The own winner echo: a later log row than local's, stamped below the
+    // edit-frontier — declined stale, so the seat re-asserts.
+    let mut echo = own_echo(5, ours_manifest, ours.len());
+    echo.is_resolution = Some(true);
+    echo.derived_through = Some(2);
+    engine
+        .apply_remote_changes(&[echo], 0)
+        .await
+        .expect("apply_remote_changes");
+
+    assert_eq!(
+        std::fs::read(watch.path().join(REL)).unwrap(),
+        theirs,
+        "a stale-declined tail is not adopted"
+    );
+    assert_eq!(
+        store.posted_manifests.lock().unwrap().len(),
+        posts_before + 1,
+        "the re-assert published local as a fresh log-tail row although its bytes \
+         were already recorded"
+    );
+}

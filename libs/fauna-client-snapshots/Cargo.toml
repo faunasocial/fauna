@@ -26,6 +26,10 @@ fauna-core = { path = "../fauna-core", default-features = false }
 # wasm-clean like this crate (fauna-wasm already builds it).
 fauna-client-sync = { path = "../fauna-client-sync" }
 
+# The localized `backups.restore_kinds_*` labels the restore-kind table names
+# (`RESTORE_KINDS`), so tui and linux share one token-to-label table.
+fauna-i18n = { path = "../fauna-i18n" }
+
 # `entry_reader::download_bytes` speaks the download walk's own `anyhow`
 # result (the `FolderKeyResolver` trait is anyhow-Result typed too; the tag-backfill tests' stub resolver names it).
 anyhow = { workspace = true }

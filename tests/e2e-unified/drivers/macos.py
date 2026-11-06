@@ -11,7 +11,17 @@ import tempfile
 import time
 from pathlib import Path
 
-from .inprocess_agent import InProcessAgentDriver
+from .http_bridge import RESET_TIMEOUT_S
+from .inprocess_agent import AppArtifactMissing, InProcessAgentDriver
+from .local_launch import (
+    ThreadStateSampler,
+    crash_report_naming,
+    local_launch_timeout_report,
+    mark_exit_reported,
+    ps_cpu_reading,
+    read_exit_before_close,
+    read_gone_pid_before_close,
+)
 from .port_util import (
     find_free_port,
     popen_group_kwargs,
@@ -57,6 +67,8 @@ _E2E_BUNDLE_ID_PREFIX = "social.fauna.fauna.e2e"
 # creates the dir 0700, so per-launch isolation is unchanged.
 _LAUNCH_TMP_ROOT = "/tmp"
 _SUN_PATH_MAX = 104
+# Unlocks a real-keychain launch's throwaway file (`_create_keychain_file`).
+E2E_KEYCHAIN_PASSWORD = "fauna-e2e-keychain"
 _AGENT_SOCKET_RELPATH = "Library/Application Support/Fauna/sync-agent.sock"
 
 
@@ -451,6 +463,24 @@ def _pid_runs_bundle(pid: int, app: Path) -> bool:
     return os.path.realpath(comm).startswith(os.path.realpath(str(app)))
 
 
+def _pid_of_bundle(app: Path) -> int | None:
+    """The pid of a process running the staged bundle's executable, found by
+    scanning `ps` — for the launch-timeout report only: a LaunchServices `open`
+    returns no pid and the listener is not up yet, so this is the one way to ask
+    "did the bundle start at all". Read-only; None when nothing runs it."""
+    try:
+        out = subprocess.run(["ps", "-axo", "pid=,comm="], capture_output=True,
+                             text=True, timeout=10).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    root = os.path.realpath(str(app))
+    for line in out.splitlines():
+        pid_text, _, comm = line.strip().partition(" ")
+        if pid_text.isdigit() and os.path.realpath(comm.strip()).startswith(root):
+            return int(pid_text)
+    return None
+
+
 def _sweep_leftover_photo_library_app(app: Path) -> None:
     """End a previous run's photo-library app that outlived its pytest.
 
@@ -551,7 +581,7 @@ class MacosInProcessDriver(InProcessAgentDriver):
     def is_mobile(self) -> bool:
         return False
 
-    def reset(self, timeout: float = 10.0) -> None:
+    def reset(self, timeout: float = RESET_TIMEOUT_S) -> None:
         """Between-tests reset. Also DROPS any credential-dir pin.
 
         The driver is session-scoped (`conftest._driver_cache`), so a pin set by one test's
@@ -634,6 +664,19 @@ class MacosInProcessDriver(InProcessAgentDriver):
         """
         return getattr(self, "_resolved_store_root", None)
 
+    @property
+    def sync_agent_socket(self) -> str | None:
+        """The unix socket THIS launch's agent serves:
+        `<launch HOME>/Library/Application Support/Fauna/sync-agent.sock`
+        (`fauna_ipc::unix_transport::macos_socket_path`, under the HOME `launch`
+        relocated, which the child agent inherits) — `None` before launch, or
+        for a launch that spawns no real agent (no `FAUNA_E2E_REAL_SYNC_AGENT`).
+        linux's twin is `drivers/linux.py`'s; `sync_seats.AppSeatDriver` reads
+        the agent through it."""
+        if not getattr(self, "_real_sync_agent", False) or not self._home:
+            return None
+        return os.path.join(self._home, _AGENT_SOCKET_RELPATH)
+
     def is_macos(self) -> bool:
         return True
 
@@ -676,6 +719,12 @@ class MacosInProcessDriver(InProcessAgentDriver):
         the in-process automation server's `GET /window/visible`."""
         return list(self._get("/window/visible").get("windows", []))
 
+    def top_level_windows(self) -> list[dict]:
+        """`visible_windows()` in the windows driver's shape, the one the
+        launch-routing smoke's auto-start case reads. The server lists only
+        windows AppKit reports on screen, so none is offscreen."""
+        return [{"title": w, "is_offscreen": False} for w in self.visible_windows()]
+
     def quit_app(self) -> None:
         """Quit the app the way ⌘Q does — `NSApp.terminate(nil)`, run on the
         real app's main actor by the in-process automation server, so the real
@@ -690,8 +739,11 @@ class MacosInProcessDriver(InProcessAgentDriver):
 
         Tolerates a dropped connection for the same reason `window_close` does:
         the process can exit before the HTTP reply lands. Assert the outcome via
-        `wait_app_exit()`.
+        `wait_app_exit()`. The exit is read first (convention 6's close rider): an
+        app already dead of a crash is recorded; the quit's own clean exit is read
+        by the next close, and is silent.
         """
+        self._read_exit_before_close("quit_app()")
         try:
             self._post("/app/lifecycle/quit", {})
         except Exception:
@@ -721,9 +773,12 @@ class MacosInProcessDriver(InProcessAgentDriver):
     def _executable(self, config: dict) -> Path:
         """The bare swift-build FaunaMacOS executable. `_build_app_config`
         (conftest) now passes the bare `.build/.../debug/FaunaMacOS` path
-        directly — NOT the ~/Applications .app bundle (that bundle is vestigial
-        XCUITest scaffolding whose fixed bundle ID caused the macOS "render-death";
-        see the conftest macos branch). We launch it directly (not via
+        directly — NOT a ~/Applications .app bundle (the driver's old wrapper was
+        vestigial XCUITest scaffolding whose fixed bundle ID caused the macOS
+        "render-death", since deleted; see the conftest macos branch. The
+        ~/Applications/Fauna.app that does still appear is the File Provider
+        tests' host app, written and removed by `fauna_fp_host_app` in
+        tests/platform/macos/test_file_provider_read_path.py). We launch it directly (not via
         `open`/Launch Services) so the per-instance env (the agent port, the
         isolated HOME) reaches the process and we own its PID for teardown.
 
@@ -817,15 +872,17 @@ class MacosInProcessDriver(InProcessAgentDriver):
                 if launch_mode == "bundle"
                 else "Run 'just mac-debug' to build it"
             )
-            raise RuntimeError(
+            raise AppArtifactMissing(
+                "macos",
                 f"macOS executable not found at {exe}.\n{hint}, then re-run tests."
             )
 
         # Per-app isolation: a fresh HOME so the app's Application Support
         # (SwiftData store, logs) and any UserDefaults land in a throwaway
         # sandbox — concurrent runs never collide, and each starts clean. The
-        # keychain never touches the real one either (the app's KeychainStore
-        # E2E gate, keyed on FAUNA_E2E_AGENT_PORT).
+        # keychain never touches the box's own either (the app's KeychainStore
+        # E2E gate, keyed on FAUNA_E2E_AGENT_PORT; `real_keychain` below is a file
+        # of this launch's).
         #
         # `config["home"]` PINS it instead. That is the HOME-reuse seam: it hands ONE
         # persistent client state root (Application Support — the SwiftData store and
@@ -886,6 +943,18 @@ class MacosInProcessDriver(InProcessAgentDriver):
 
         env = dict(os.environ)
         env.update(config.get("environment", {}))
+        # `config["real_keychain"]`: this one launch runs `KeychainStore` on a keychain
+        # FILE of its own (`KeychainStore.e2eRealKeychain`, `Plane.legacyFile`), so a test
+        # reads the legacy plane every shipping build is on while the box's login keychain
+        # stays out of it (`apps/ios.md` § Credential Storage, the macOS witness seam).
+        # `FAUNA_E2E_CREDENTIAL_DIR` stays set below: it is what keeps shared Rust's native
+        # Keychain arm off the login keychain.
+        self._keychain_path = None
+        if config.get("real_keychain"):
+            self._keychain_path = self._create_keychain_file(tmp)
+            env["FAUNA_E2E_REAL_KEYCHAIN"] = "1"
+            env["FAUNA_E2E_KEYCHAIN_PATH"] = self._keychain_path
+            env["FAUNA_E2E_KEYCHAIN_PASSWORD"] = E2E_KEYCHAIN_PASSWORD
         # The resident engine's full-reconcile cadence
         # (`always_resident::rescan_interval`, the compile-gated
         # `FAUNA_E2E_RESCAN_MS` seam) — linux's and tui's twin of this launch
@@ -897,6 +966,16 @@ class MacosInProcessDriver(InProcessAgentDriver):
         # there post-A4-cutover, never in FaunaMacOS itself. A caller-supplied
         # override in `config["environment"]` (merged above) wins.
         env.setdefault("FAUNA_E2E_RESCAN_MS", "30000")
+        # The agent's e2e custody hold (`content_keys::custody_reread_held`, the
+        # compile-gated `FAUNA_E2E_CUSTODY_HOLD_FILE` seam), as linux/tui/windows
+        # set it: a path in this launch's scratch dir that does not exist, so the
+        # hold is inert until a test creates the file
+        # (`helpers/folder_content.py::hold_custody_reread`). The spawned
+        # `fauna-sync-agent` child inherits it (the e2e arm of
+        # `ChildSpawner::spawn`), and its stderr — the hold's log line
+        # included — lands in this launch's `app.err`. A caller-supplied
+        # override wins. Read back via `custody_hold_file()`.
+        env.setdefault("FAUNA_E2E_CUSTODY_HOLD_FILE", os.path.join(tmp, "custody-hold"))
         env["HOME"] = home
         # macOS resolves `.applicationSupportDirectory` — where the MLS state db
         # (`conv-mls.db`, `mls.db`) and the SwiftData store live — from CoreFoundation's
@@ -913,6 +992,11 @@ class MacosInProcessDriver(InProcessAgentDriver):
         # tests/test_macos_launch_isolation.py).
         env["CFFIXED_USER_HOME"] = home
         self._app_support = os.path.join(home, "Library", "Application Support")
+        # Whether THIS launch's app spawns a real `fauna-sync-agent` child — the
+        # flag `sync_seats.pin_macos_seat_sync_agent` or the `real_sync_agent`
+        # marker sets; read off the merged env so either road counts. Gates
+        # `sync_agent_socket`, which a launch with no agent must not publish.
+        self._real_sync_agent = bool(env.get("FAUNA_E2E_REAL_SYNC_AGENT"))
         # The unified account-store root THIS launch resolved — shared Rust's
         # `platform_state_base()` under the relocated HOME — published after the
         # carry began in `_resolve_credential_store` above, so the harvest there
@@ -932,6 +1016,7 @@ class MacosInProcessDriver(InProcessAgentDriver):
         # Support: local file to copy}. The seed lands under this launch's isolated
         # Application Support (set unconditionally above).
         self._seed_app_support(config)
+        self._mark_log_baseline()
         download_dir = env.get("FAUNA_E2E_DOWNLOAD_DIR") or os.path.join(tmp, "downloads")
         os.makedirs(download_dir, exist_ok=True)
         env["FAUNA_E2E_DOWNLOAD_DIR"] = download_dir
@@ -967,6 +1052,7 @@ class MacosInProcessDriver(InProcessAgentDriver):
         # Before that this app was among the measured orphans (4h31m past its
         # pytest). `track_process` stays — it is the ORDERLY-exit teardown; the
         # kwargs are the guarantee that holds when no cleanup code runs.
+        self._app_launched_at = time.time()
         self._app_proc = subprocess.Popen(
             cmd,
             env=env,
@@ -975,20 +1061,107 @@ class MacosInProcessDriver(InProcessAgentDriver):
             **popen_group_kwargs(),
         )
         track_process(self._app_proc)
+        self._await_spawned_app()
 
-        deadline = time.monotonic() + 30
-        while time.monotonic() < deadline:
-            if self._app_proc.poll() is not None:
-                err = Path(os.path.join(tmp, "app.err")).read_text(errors="replace")
-                raise RuntimeError(
-                    f"FaunaMacOS exited early (rc={self._app_proc.returncode}). "
-                    f"stderr tail: {err[-800:]}"
+    def _await_spawned_app(self) -> None:
+        """The spawned app's readiness gate. Both ends go through convention 6's
+        launch-timeout builder: an early exit is its FAULTED verdict, not a second
+        grammar."""
+        posted_at = time.time()
+        deadline = time.monotonic() + self._LAUNCH_READY_BUDGET_S
+        with ThreadStateSampler(lambda: self._app_proc.pid) as sampler:
+            while time.monotonic() < deadline:
+                if self._app_proc.poll() is not None:
+                    # The FAULTED verdict carries this exit; the close after it is silent.
+                    mark_exit_reported(self._app_proc)
+                    raise RuntimeError(self._launch_timeout_report(posted_at, sampler=sampler))
+                if self._agent_health_ok():
+                    self._bridge_dead = False
+                    return
+                time.sleep(0.3)
+            raise TimeoutError(self._launch_timeout_report(posted_at, sampler=sampler))
+
+    #: The launch gate's budget: the agent's `/health` answering after the spawn (or
+    #: the `open`). 30 s, the figure both loops already carried; a deadline poll, so
+    #: a green run never pays it (convention 14). Never load-aware (convention 6's
+    #: launch-timeout rider, its part (3)).
+    _LAUNCH_READY_BUDGET_S = 30.0
+
+    _log_baseline: dict[str, int] | None = None
+
+    def _log_dir(self) -> Path | None:
+        support = getattr(self, "_app_support", None)
+        return Path(support, "logs") if support else None
+
+    def _mark_log_baseline(self) -> None:
+        """Take a byte floor under the relocated home's rolling log before the app
+        starts: under `preserve_state_across_relaunch()` the home carries over, and
+        a predecessor's `[fauna] FATAL` must not read as THIS launch's."""
+        self._log_baseline = {}
+        logs = self._log_dir()
+        if logs is None:
+            return
+        for path in logs.glob("*"):
+            try:
+                self._log_baseline[str(path)] = path.stat().st_size
+            except OSError:
+                pass
+
+    def app_log_text(self) -> str | None:
+        """This launch's slice of `<home>/Library/Application Support/logs/*` (the
+        rolling `fauna.log.<date>` the shared `fauna_log` writes), None if empty."""
+        logs = self._log_dir()
+        if logs is None:
+            return None
+        baseline = self._log_baseline or {}
+        chunks = []
+        for path in sorted(logs.glob("*")):
+            floor = baseline.get(str(path), 0)
+            try:
+                with open(path, "rb") as fh:
+                    if floor:
+                        fh.seek(floor)
+                    text = fh.read().decode("utf-8", errors="replace")
+            except OSError:
+                continue
+            if text:
+                chunks.append(text)
+        return "\n".join(chunks) if chunks else None
+
+    def _launch_timeout_report(
+        self,
+        posted_at: float,
+        *,
+        app: Path | None = None,
+        sampler: ThreadStateSampler | None = None,
+    ) -> str:
+        """Convention 6's launch-timeout report over this launch's witnesses: the
+        spawned process (or, for a LaunchServices `open`, the staged bundle's process
+        found by `ps`), its CPU from `ps` and its wait from the gate's `sampler`, the
+        launch's `app.err`, the home's log and this machine's agent ledger."""
+        tmp = getattr(self, "_tmp_dir", None)
+        proc = getattr(self, "_app_proc", None) if app is None else None
+        pid, pid_unread = None, ""
+        if proc is None:
+            pid = _pid_of_bundle(app) if app is not None else None
+            if pid is None:
+                pid_unread = (
+                    "`open` returns no pid and no process runs the staged bundle"
+                    if app is not None else "no launched process"
                 )
-            if self._agent_health_ok():
-                self._bridge_dead = False
-                return
-            time.sleep(0.3)
-        raise RuntimeError(f"in-process agent never became healthy on {self._url}")
+        return local_launch_timeout_report(
+            proc=proc,
+            comm="FaunaMacOS",
+            pid=pid,
+            pid_unread=pid_unread,
+            cpu_reader=ps_cpu_reading,
+            wait_sampler=sampler,
+            budget_s=self._LAUNCH_READY_BUDGET_S,
+            posted_at=posted_at,
+            stderr_paths=(os.path.join(tmp, "app.err"),) if tmp else (),
+            log_text=self.app_log_text() or "",
+            apps=("macos",),
+        )
 
     def relaunch_through_launch_services(self) -> None:
         """Bring a QUIT artifact bundle back the way a user does: `open` on the `.app`.
@@ -1015,6 +1188,8 @@ class MacosInProcessDriver(InProcessAgentDriver):
                 "the app is still running: quit it first, or `open` raises the "
                 "running instance instead of relaunching"
             )
+        # The quit this relaunch follows may have been a crash (close rider).
+        self._read_exit_before_close("relaunch_through_launch_services()")
         old = self._app_proc
         for fp in (self._app_stdout, self._app_stderr):
             try:
@@ -1049,6 +1224,7 @@ class MacosInProcessDriver(InProcessAgentDriver):
                        if k.startswith(("FAUNA_", "RUST_")) and k not in wanted})
         out_path = os.path.join(tmp, "app.out")
         err_path = os.path.join(tmp, "app.err")
+        self._mark_log_baseline()
         cmd = ["open", *(["-n", "-F"] if fresh else []),
                "--stdout", out_path, "--stderr", err_path]
         for key, value in sorted(wanted.items()):
@@ -1059,6 +1235,8 @@ class MacosInProcessDriver(InProcessAgentDriver):
             cmd += ["--args", *args]
         self._app_stdout = None
         self._app_stderr = None
+        posted_at = time.time()
+        self._app_launched_at = posted_at
         opened = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
         if opened.returncode != 0:
             raise RuntimeError(
@@ -1066,17 +1244,16 @@ class MacosInProcessDriver(InProcessAgentDriver):
                 f"(rc={opened.returncode}): {(opened.stderr or opened.stdout).strip()[-600:]}"
             )
 
-        deadline = time.monotonic() + 30
-        while time.monotonic() < deadline:
-            if self._agent_health_ok():
-                break
-            time.sleep(0.3)
-        else:
-            err = Path(err_path).read_text(errors="replace") if os.path.exists(err_path) else ""
-            raise RuntimeError(
-                f"the photo-library test bundle never served its in-process agent on "
-                f"{self._url} after `open`. stderr tail: {err[-800:]}"
-            )
+        # `open` hands back no pid and the listener is not up yet, so the sampler
+        # resolves the bundle's process at every tick.
+        deadline = time.monotonic() + self._LAUNCH_READY_BUDGET_S
+        with ThreadStateSampler(lambda: _pid_of_bundle(app)) as sampler:
+            while time.monotonic() < deadline:
+                if self._agent_health_ok():
+                    break
+                time.sleep(0.3)
+            else:
+                raise TimeoutError(self._launch_timeout_report(posted_at, app=app, sampler=sampler))
         pid = _pid_listening_on(self._agent_port)
         if pid is None or not _pid_runs_bundle(pid, app):
             raise RuntimeError(
@@ -1157,6 +1334,33 @@ class MacosInProcessDriver(InProcessAgentDriver):
                 f"(reply {reply!r}); the app's refusal: {refusal!r}"
             )
 
+    @staticmethod
+    def _create_keychain_file(tmp: str) -> str:
+        """A fresh keychain file for one launch: outside the user's search list, no
+        auto-lock (the file's default 300 s would lock it under a long test). The
+        app only opens it — a keychain it created itself refuses its next item call
+        (`KeychainStore.e2eSharedKeychainFile`)."""
+        path = os.path.join(tmp, "e2e.keychain-db")
+        for args in (
+            ["create-keychain", "-p", E2E_KEYCHAIN_PASSWORD, path],
+            ["set-keychain-settings", path],
+        ):
+            subprocess.run(
+                ["/usr/bin/security", *args], check=True, capture_output=True, timeout=30
+            )
+        return path
+
+    @property
+    def keychain_path(self) -> str | None:
+        """This launch's keychain file (`config["real_keychain"]`), or None."""
+        return getattr(self, "_keychain_path", None)
+
+    def custody_hold_file(self) -> str | None:
+        """The file whose existence holds this launch's agent from re-reading
+        custody (`FAUNA_E2E_CUSTODY_HOLD_FILE`, set in `launch()`); None before
+        `launch()`. Driven through `helpers/folder_content.py::hold_custody_reread`."""
+        return (getattr(self, "_launch_env", None) or {}).get("FAUNA_E2E_CUSTODY_HOLD_FILE")
+
     def app_stderr_text(self) -> str:
         """This launch's `app.err` so far ("" if it has none yet).
 
@@ -1174,6 +1378,49 @@ class MacosInProcessDriver(InProcessAgentDriver):
             return Path(os.path.join(tmp, "app.err")).read_text(errors="replace")
         except OSError:
             return ""
+
+    #: The executable's name: `ps`'s comm, and the prefix ReportCrash names its
+    #: report with (`FaunaMacOS-<date>.ips`).
+    _PROC_NAME = "FaunaMacOS"
+
+    def _read_exit_before_close(self, close: str) -> None:
+        """Convention 6's close rider (`docs/goal/architecture/e2e-self-diagnosing-
+        failures.md` § The convention). A spawned app's handle is read for a crash
+        exit — a signal death (`SIGTRAP` is Swift's `fatalError`) or a Rust panic's
+        101 — with its `app.err`, its home's log and the crash report ReportCrash
+        wrote for its pid as the post-mortem
+        (`drivers/local_launch.py::read_exit_before_close`). A Launch Services
+        launch is launchd's child and leaves no exit code: its pid gone is a crash
+        only on a FATAL line or a crash report naming it
+        (`read_gone_pid_before_close`). Never raises."""
+        proc = getattr(self, "_app_proc", None)
+        launched_at = getattr(self, "_app_launched_at", None)
+
+        def report(pid: int) -> str:
+            return crash_report_naming(pid, proc_name=self._PROC_NAME, since=launched_at)
+
+        if isinstance(proc, _LaunchedApp):
+            read_gone_pid_before_close(
+                proc.pid,
+                close=close,
+                comm=self._PROC_NAME,
+                unread="a Launch Services launch is launchd's child, not the harness's",
+                launched_at=launched_at,
+                alive=lambda _pid: proc.poll() is None,
+                stderr_text=self.app_stderr_text,
+                log_text=self.app_log_text,
+                crash_report=report,
+            )
+            return
+        read_exit_before_close(
+            proc,
+            close=close,
+            comm=self._PROC_NAME,
+            launched_at=launched_at,
+            stderr_text=self.app_stderr_text,
+            log_text=self.app_log_text,
+            crash_report=report,
+        )
 
     def _stop_app(self) -> None:
         """Kill the app **and its whole process group**, then close the log files.
@@ -1193,12 +1440,34 @@ class MacosInProcessDriver(InProcessAgentDriver):
         at all**; and it escalated with a single-process `proc.kill()` rather
         than a group SIGKILL sweep, so a grandchild ignoring SIGTERM survived
         too. Regression proofs: `tests/test_harness_self_termination.py` § 3d.
+
+        The exit is read first (convention 6's close rider,
+        `_read_exit_before_close`): the kill below ends a dead app as quietly as a
+        live one.
         """
+        self._read_exit_before_close("teardown")
         proc = getattr(self, "_app_proc", None)
         if proc is not None:
             terminate_tree(proc)
             untrack_process(proc)
             self._app_proc = None
+            if self.keychain_path:
+                # After the kill: the app holds the file open until it is gone.
+                subprocess.run(
+                    ["/usr/bin/security", "delete-keychain", self.keychain_path],
+                    capture_output=True, timeout=30,
+                )
+                self._keychain_path = None
+            if self._launch_mode == "bundle" and self._bundle_path:
+                # The per-instance bundle id leaves ~/Library/Preferences/<id>.plist
+                # behind; nothing else ever reads it again. A killed run never gets
+                # here - Job C2 of apple-ffi-cache-session-startup.sh sweeps those.
+                bid = read_bundle_id(Path(self._bundle_path))
+                if bid.startswith(_E2E_BUNDLE_ID_PREFIX + "."):
+                    try:
+                        (Path.home() / "Library" / "Preferences" / f"{bid}.plist").unlink()
+                    except OSError:
+                        pass
             if isinstance(proc, _LaunchedApp) and self._launch_mode == "photo-library":
                 # The photo-library venue's leftover marker (`_sweep_leftover_…`):
                 # its app is gone, so there is nothing for the next launch to end.

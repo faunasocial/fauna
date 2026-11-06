@@ -19,12 +19,15 @@ namespace FaunaApp.Core.Services;
 /// renders for this session. Revealing a muted message ("show anyway")
 /// un-collapses it for the rest of the session; the mute itself is
 /// unaffected — un-muting the term is the only way to stop future messages
-/// collapsing.
+/// collapsing. The notifications page's collapse reads the same list and keeps
+/// its own reveal set beside the messages' (<c>notifications.md</c> § Muted
+/// words; linux's <c>REVEALED_MUTED_NOTIFICATIONS</c>).
 /// </summary>
 public static class MutedKeywordsCache
 {
     private static MutedKeyword[] _keywords = Array.Empty<MutedKeyword>();
     private static readonly HashSet<string> _revealed = new();
+    private static readonly HashSet<long> _revealedNotifications = new();
 
     /// The current muted-keyword list — each entry's term and weight.
     ///
@@ -61,7 +64,18 @@ public static class MutedKeywordsCache
     public static bool IsMuted(string body, string messageId) =>
         !IsRevealed(messageId) && FaunaFfiMethods.MatchesMutedKeywords(body, _keywords);
 
-    /// Drop the cached word list and this session's reveal set.
+    /// Does a muted word collapse this notification row behind
+    /// <c>notification-muted</c>, and isn't it already revealed this session? The
+    /// shared <c>notification_muted_for</c> decides (the row's relayed text, a word
+    /// muted at Hide, never a security notice); this adds only the reveal.
+    internal static bool IsNotificationMuted(FfiNotifItem item) =>
+        !_revealedNotifications.Contains(item.id) && FaunaFfiMethods.NotificationMutedFor(item, _keywords);
+
+    /// Mark notification row <paramref name="id"/> as revealed for the rest of
+    /// the session.
+    public static void RevealNotification(long id) => _revealedNotifications.Add(id);
+
+    /// Drop the cached word list and this session's reveal sets.
     ///
     /// <para>Called in production by <see cref="ActorScope.DropActorScopedState"/>
     /// on every actor change — process-lifetime static state that no shell
@@ -70,5 +84,6 @@ public static class MutedKeywordsCache
     {
         _keywords = Array.Empty<MutedKeyword>();
         _revealed.Clear();
+        _revealedNotifications.Clear();
     }
 }

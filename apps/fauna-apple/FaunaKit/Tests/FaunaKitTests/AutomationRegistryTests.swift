@@ -944,5 +944,115 @@ private func orderedOutGeo() -> (() -> SentinelGeometry?) {
 
 @Test @MainActor func hideAllIsTolerantOfAnUnknownId() {
     let reg = AutomationRegistry.shared
-    reg.hideAll("test-automation-never-registered-\(UUID().uuidString)")
+    #expect(reg.hideAll("test-automation-never-registered-\(UUID().uuidString)").isEmpty)
+}
+
+// A SECOND presentation of the same alert gets no show signal either: the
+// content keeps its identity, so `.onAppear` does not re-register it, and the
+// confirm stayed hidden while armed (macOS, a second publish of one folder). The host's `isPresented` going true is the show
+// signal, and `reshow` takes back exactly what its own dismissal retired.
+
+@Test @MainActor func reshowBringsBackAPresentationSlotWithNoOnAppear() {
+    let reg = AutomationRegistry.shared
+    let id = "test-automation-confirm-\(UUID().uuidString)"
+    let t0 = UUID()
+    reg.register(id, token: t0, valueEntry("confirm"))
+
+    let retired = reg.hideAll(id)
+    #expect(retired == [t0])
+    #expect(reg.count(id) == 0)
+
+    // The second presentation: no `register` call at all, only the host's flip.
+    reg.reshow(id, tokens: retired)
+    #expect(reg.count(id) == 1)
+    #expect(reg.entry(id, index: 0)?.value?() == "confirm")
+    reg.unregister(id, token: t0)
+}
+
+@Test @MainActor func reshowLeavesAnotherHostsRetiredSlotRetired() {
+    let reg = AutomationRegistry.shared
+    let id = "test-automation-confirm-\(UUID().uuidString)"
+    let (rowA, rowB) = (UUID(), UUID())
+    // Row A's alert was presented and dismissed earlier; row B's is up now.
+    reg.register(id, token: rowA, valueEntry("row-a"))
+    reg.hideAll(id)
+    reg.register(id, token: rowB, valueEntry("row-b"))
+
+    // Row B's dismissal retires only what was still live: its own slot.
+    let retiredB = reg.hideAll(id)
+    #expect(retiredB == [rowB])
+
+    // Row B re-presents: row A's confirm must not come back with it.
+    reg.reshow(id, tokens: retiredB)
+    #expect(reg.count(id) == 1)
+    #expect(reg.entry(id, index: 0)?.value?() == "row-b")
+    reg.unregister(id, token: rowA)
+    reg.unregister(id, token: rowB)
+}
+
+@Test @MainActor func reshowSkipsADeadTokenAndIsTolerantOfAnUnknownId() {
+    let reg = AutomationRegistry.shared
+    let id = "test-automation-confirm-\(UUID().uuidString)"
+    let t0 = UUID()
+    reg.register(id, token: t0, valueEntry("confirm"))
+    let retired = reg.hideAll(id)
+    reg.unregister(id, token: t0) // the content identity died meanwhile
+    reg.reshow(id, tokens: retired)
+    #expect(reg.count(id) == 0)
+    reg.reshow("test-automation-never-registered-\(UUID().uuidString)", tokens: [UUID()])
+}
+
+// MARK: - scroll-to-bottom-fraction placement (`e2e-conventions.md` § Driver
+// primitives → *Placing an element at a measured fraction*)
+//
+// The math linux's `scroll_to_bottom_fraction` does, in the y-down content
+// frame both apple platforms map onto: the element's top lands at
+// `viewport - fraction * height` below the viewport's top, clamped to the
+// content, and the answer is MEASURED from the clamped offset.
+
+@Test func bottomFractionPlacesTheElementsTopAtTheAskedShareAboveTheBottomEdge() {
+    // A 200pt element at content y 1000 in a 600pt viewport, asked for 30%.
+    let placed = AutomationBottomFraction.place(
+        top: 1000, height: 200, viewport: 600, maxOffset: 5000, fraction: 0.3)
+    // top - (viewport - 0.3 * 200) = 1000 - 540
+    #expect(placed?.offset == 460)
+    #expect(abs((placed?.fraction ?? -1) - 0.3) < 1e-9)
+}
+
+@Test func bottomFractionAnswersTheMeasuredShareWhenTheContentClampsTheMove() {
+    // The element sits near the top of the content: no offset can push it
+    // that low, so the clamp at 0 leaves it wholly visible — the reply says 1,
+    // never the 0.3 that was asked.
+    let atTop = AutomationBottomFraction.place(
+        top: 50, height: 200, viewport: 600, maxOffset: 5000, fraction: 0.3)
+    #expect(atTop?.offset == 0)
+    #expect(atTop?.fraction == 1)
+    // The content ends before the wanted offset (460 > 400): the max offset
+    // stops the scroll short, leaving the element just under the bottom edge —
+    // 0 measured, never the 0.3 asked.
+    let atEnd = AutomationBottomFraction.place(
+        top: 1000, height: 200, viewport: 600, maxOffset: 400, fraction: 0.3)
+    #expect(atEnd?.offset == 400)
+    #expect(atEnd?.fraction == 0)
+    // Content shorter than the viewport: a negative max offset clamps to 0.
+    let short = AutomationBottomFraction.place(
+        top: 100, height: 200, viewport: 600, maxOffset: -100, fraction: 0.5)
+    #expect(short?.offset == 0)
+}
+
+@Test func bottomFractionRefusesAnElementWithNoHeight() {
+    #expect(AutomationBottomFraction.place(
+        top: 100, height: 0, viewport: 600, maxOffset: 5000, fraction: 0.5) == nil)
+}
+
+@Test @MainActor func bottomFractionResolverIsAbsentForAnUnknownIdAndDetachedWithoutASentinel() {
+    let reg = AutomationRegistry.shared
+    let id = "test-bottom-fraction-\(UUID().uuidString)"
+    #expect(reg.resolvedScrollToBottomFraction(id, scope: [], leafIndex: 0) == nil)
+    // A slot registered with no placement closure (no sentinel realized)
+    // resolves, and answers detached rather than 404ing a real element.
+    let token = UUID()
+    reg.register(id, token: token, valueEntry("v"))
+    #expect(reg.resolvedScrollToBottomFraction(id, scope: [], leafIndex: 0)?(0.5) == .detached)
+    reg.unregister(id, token: token)
 }

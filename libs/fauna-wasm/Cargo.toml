@@ -75,8 +75,12 @@ payments = [
 # `--no-default-features` drops the JS exports AND the kind strings.
 zaps = ["payments", "fauna-protocol/zaps", "fauna-client-nostr/zaps"]
 test-helpers = [
+  # The archive-import run's one-shot pause/hold anchors (`archive_import.rs`).
+  "fauna-archive-import-machine/test-helpers",
   "fauna-conversations/test-helpers",
   "fauna-feed/test-helpers",
+  # The `fake` payment provider (compiled out of a production build).
+  "fauna-client-payments?/test-helpers",
   "fauna-client-backup/e2e-agent",
   # The Nests trust facet's render clock (`trustSetClockOffsetForTest`, the
   # `trust_facet_advance_clock` command's mechanism) — forwarded, rule (b).
@@ -105,6 +109,11 @@ test-helpers = [
   # `refuse_secret_writes_for_test` fault `fauna-wasm-onboarding`'s door arms
   # in the shared localStorage backing. Forwarded, rule (b).
   "fauna-client-accounts/test-helpers",
+  # The draft-autosave window seam's shared grammar
+  # (`sync::parse_e2e_autosave_debounce`), behind `e2eDraftsAutosaveWindowMs`,
+  # which reads the harness's window from the page origin's localStorage.
+  # Forwarded, rule (b).
+  "fauna-client-drafts/test-helpers",
   "dep:fauna-e2e-contract",
   "dep:tokio",
 ]
@@ -368,6 +377,17 @@ fauna-client-delegation = { path = "../fauna-client-delegation" }
 # high-level call per action and never touches the crypto (priority #2). Lifts the
 # linux lead (apps/fauna-linux/src/views/profile).
 fauna-client-subscriptions = { path = "../fauna-client-subscriptions" }
+# The archive-import page (`archive_import.rs`): the shared machine over its
+# browser plane (`web-plane`), and the `Archive` rail's and the folded comments'
+# read seams (`conversations-sink`, `feed-sink`). `zip` is already in this graph
+# (`fauna-mail`).
+fauna-archive-import-machine = { path = "../fauna-archive-import-machine", features = [
+  "web-plane",
+  "conversations-sink",
+  "feed-sink",
+] }
+# The archive owner seed the page hands the plane, held zeroizing.
+zeroize = { workspace = true }
 # (No fauna-payments dep since 2026-08-10 — the sats→msat conversion moved to
 # its wire twin, `fauna_protocol::subscriptions::TierAskingPrice::from_sats`.)
 # Payment-provider config + claim redemption (fauna.payments.*) — the web

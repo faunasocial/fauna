@@ -10,6 +10,7 @@ import time
 
 from drivers.base import PlatformDriver
 from helpers import budgets
+from helpers.settings_subpage_nav import navigate_settings_subpage, settings_stack
 from helpers.waiting import account_pump_role, await_account_runtime_assembled, wait_until
 
 
@@ -22,9 +23,7 @@ class PersonalizationActions:
     def navigate(self) -> None:
         """Navigate to the Personalization home Settings sub-page (the same
         nav shape as LabelerCatalogActions.navigate_home)."""
-        self.driver.set_state({
-            "nav": {"stack": [{"view": "settings"}, {"view": "settings", "id": "personalization"}]},
-        })
+        navigate_settings_subpage(self.driver, "personalization")
 
     # ── trained-topics facet ─────────────────────────────────────────────
 
@@ -58,6 +57,10 @@ class PersonalizationActions:
         while count != expected and time.monotonic() < deadline:
             time.sleep(0.2)
             count = self.topic_count()
+        if count != expected:
+            # Convention 6: the caller's `assert … == n` names only the count.
+            print(f"[e2e] trained-topic rows {count} != {expected}; "
+                  f"nav stack={settings_stack(self.driver)!r}")
         return count
 
     def wait_for_topic_reopening(self, name: str, predicate=None,

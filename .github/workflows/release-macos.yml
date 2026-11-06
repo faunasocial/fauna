@@ -39,12 +39,14 @@ jobs:
   build:
     name: Build Fauna.app (no credentials)
     runs-on: macos-15
-    # Measured on the 0.1.5 dry run: the app alone took 93 minutes (the whole
-    # serial job, with the terminal app's two darwin builds, 2 h 47 m -- which
-    # is why those build in `build-tui`, beside this job); about 1.5x the app.
-    timeout-minutes: 140
+    # Measured at most 99 min over five 0.1.5 runs (80-99 min); the serial job,
+    # with the terminal app's two darwin builds, took 2 h 47 m -- which is why
+    # those build in `build-tui`, beside this job. About 1.5x the app.
+    timeout-minutes: 150
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
+        with:
+          persist-credentials: false
       - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659  # v1.17.0, toolchain from rust-toolchain.toml
         with:
           rustflags: ""
@@ -52,6 +54,14 @@ jobs:
       - name: Install uv
         run: bash scripts/install-uv.sh
       - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3  # v4.0.0
+      # The cargo boundary (docs/goal/architecture/build-compile-cache.md § The
+      # boundary's scope and what OFF means, decision (6)): puts the shipped cargo
+      # shim first on PATH, so every later cargo of this job — a recipe's, a bare
+      # step's, one a tool spawns — compiles with no network; the job's last step
+      # witnesses it.
+      - name: Put every cargo behind the boundary
+        run: uv run --no-project python scripts/cargo-boundary.py runner-setup
+
       # The same recipe the CI `macos` job runs: host darwin FFI slice, SwiftPM
       # FaunaMacOS product, sync agent, bundle assembly, ad-hoc signature.
       - name: Build Fauna.app (release)
@@ -65,6 +75,10 @@ jobs:
           name: Fauna.app-unsigned
           path: Fauna.app.zip
           if-no-files-found: error
+
+      - name: Every cargo compiled behind the boundary
+        if: ${{ !cancelled() }}
+        run: uv run --no-project python scripts/cargo-boundary.py runner-witness
 
   # The terminal app's macOS archives (installers/tui.md § The ratified
   # channel): fauna-tui + fauna-sync-agent + fauna-cli + install.sh per darwin
@@ -84,12 +98,13 @@ jobs:
           - target: x86_64-apple-darwin
             suffix: x86_64-darwin
     runs-on: macos-15
-    # The serial job spent 74 minutes on both targets after the app (0.1.5 dry
-    # run); one target is at most that. Set back to about 1.5x the first dry
-    # run's figure.
-    timeout-minutes: 90
+    # Measured at most 44 min per target over five 0.1.5 runs (34-44 min);
+    # about 1.5x that.
+    timeout-minutes: 65
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
+        with:
+          persist-credentials: false
       - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659  # v1.17.0, toolchain from rust-toolchain.toml
         with:
           target: ${{ matrix.target }}
@@ -98,6 +113,14 @@ jobs:
       - name: Install uv
         run: bash scripts/install-uv.sh
       - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3  # v4.0.0
+      # The cargo boundary (docs/goal/architecture/build-compile-cache.md § The
+      # boundary's scope and what OFF means, decision (6)): puts the shipped cargo
+      # shim first on PATH, so every later cargo of this job — a recipe's, a bare
+      # step's, one a tool spawns — compiles with no network; the job's last step
+      # witnesses it.
+      - name: Put every cargo behind the boundary
+        run: uv run --no-project python scripts/cargo-boundary.py runner-setup
+
       # The recipe release.yml's Linux legs build the archive with, per target.
       - name: Build fauna-tui + fauna-sync-agent + fauna-cli
         run: just tui-release ${{ matrix.target }}
@@ -110,6 +133,10 @@ jobs:
           name: fauna-tui-unsigned-${{ matrix.suffix }}
           path: tui-unsigned/
           if-no-files-found: error
+
+      - name: Every cargo compiled behind the boundary
+        if: ${{ !cancelled() }}
+        run: uv run --no-project python scripts/cargo-boundary.py runner-witness
 
   sign:
     name: Sign, notarize, attest, publish
@@ -128,6 +155,8 @@ jobs:
       FAUNA_NOTARY_ISSUER: ${{ secrets.FAUNA_NOTARY_ISSUER }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
+        with:
+          persist-credentials: false
       - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3  # v4.0.0
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0
         with:
@@ -198,6 +227,19 @@ jobs:
           security delete-keychain "$RUNNER_TEMP/release.keychain-db" || true
           rm -f "$RUNNER_TEMP/AuthKey.p8"
 
+      # fauna.social/apps links each file in installer/downloads.json at this
+      # release. Refuse to publish a release the table disagrees with, either
+      # way: a linked file missing here, or a file here the table never named.
+      # The files exist only once the recipes above have signed them, so the
+      # check runs here, before attestation and upload.
+      - name: Install uv
+        run: bash scripts/install-uv.sh
+
+      - name: The downloads table matches the release
+        run: |
+          VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          uv run --no-project python installer/check-downloads.py installer/downloads.json release-macos.yml build "$VERSION"
+
       # Build provenance: a signed, transparency-logged statement binding each
       # artifact's digest to this repository, this commit and this workflow.
       - name: Attest build provenance
@@ -246,7 +288,6 @@ jobs:
             The `.dmg` is also Developer-ID-signed and notarized by Apple, which is
             what macOS itself checks on first open.
 
-            The terminal app's `fauna-tui-<arch>-darwin.tar.gz` archives are built,
-            attested, Developer-ID-signed and notarized the same way. Unpack one and
+            The terminal app's `fauna-tui-<arch>-darwin.tar.gz` archives — the terminal app, its sync agent and `fauna-cli`, the program an AI assistant runs to work in Fauna — are built, attested, Developer-ID-signed and notarized the same way. Unpack one and
             run its `install.sh`, or `gh attestation verify` it first.
           # public-text-end: release-body-macos

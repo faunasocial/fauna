@@ -548,25 +548,12 @@ def process_has_exited(pid: int) -> bool:
 
 def request(pipe_path: str, req: dict, *, timeout: float = 20.0) -> object:
     """Send one request to the agent on ``pipe_path`` and return its ``Ok``
-    payload, retrying a busy open inside ``timeout``.
-
-    The agent's accept loop mints each next server instance asynchronously, so an
-    open that races it — right after :func:`sync_agent_ipc.pipe_server_pid` took an
-    instance for an instant, or beside the app's own status polls — finds the pipe
-    busy (measured: the first live on-demand floor run failed exactly there).
-    ``send_request`` itself has no busy retry."""
-    import time
-
-    frame = ipc.encode_frame(req)
-    deadline = time.monotonic() + timeout
-    while True:
-        try:
-            ipc.wait_for_pipe(pipe_path, timeout=max(0.1, deadline - time.monotonic()))
-            return ipc.unwrap_ok(ipc.send_request(pipe_path, frame))
-        except (OSError, TimeoutError):
-            if time.monotonic() >= deadline:
-                raise
-            time.sleep(0.1)  # sleep-ok: poll cadence of a deadline poll, not a settle wait
+    payload. The open waits out a busy or not-yet-listening pipe inside
+    ``timeout`` — the one retry, in :func:`sync_agent_ipc.send_request`'s open
+    (the agent's accept loop mints each next server instance asynchronously, so an
+    open right after :func:`sync_agent_ipc.pipe_server_pid` took an instance, or
+    beside the app's own status polls, can find every instance busy)."""
+    return ipc.unwrap_ok(ipc.send_request(pipe_path, ipc.encode_frame(req), timeout=timeout))
 
 
 def provision(pipe_path: str, **caps) -> None:
@@ -597,23 +584,11 @@ def attached_app(pipe_path: str, identity: str | None = None, *, timeout: float 
     app, as the agent's push arm sees one (`RequestMethod::AttachApp`).
 
     The agent takes the lease before it replies, so the body runs attached; the
-    lease ends when the connection closes on exit. A busy open is retried
-    inside ``timeout``, as :func:`request` does."""
-    import time
-    from contextlib import ExitStack
-
+    lease ends when the connection closes on exit. A busy open is waited out
+    inside ``timeout`` by :func:`sync_agent_ipc.held_request`'s open, as
+    :func:`request`'s is."""
     frame = ipc.encode_frame(_attach_app_request(identity))
-    deadline = time.monotonic() + timeout
-    with ExitStack() as connection:
-        while True:
-            try:
-                ipc.wait_for_pipe(pipe_path, timeout=max(0.1, deadline - time.monotonic()))
-                reply = connection.enter_context(ipc.held_request(pipe_path, frame))
-                break
-            except (OSError, TimeoutError):
-                if time.monotonic() >= deadline:
-                    raise
-                time.sleep(0.1)  # sleep-ok: poll cadence of a deadline poll, not a settle wait
+    with ipc.held_request(pipe_path, frame, timeout=timeout) as reply:
         ipc.unwrap_ok(reply)
         yield
 
@@ -668,6 +643,59 @@ def stop_agent_if_serving(pipe_path: str, *, probe: float = 2.0) -> int | None:
         if process_has_exited(pid):
             return pid
         raise
+
+
+def list_locations(pipe_path: str) -> list[dict]:
+    """The agent's ``ListLocations`` reply — one ``LocationInfo`` map per
+    location in the scope it serves now (``path``, ``mode``, ``folder``,
+    ``folder_id``, …), through :func:`request`'s busy retry. What every app's
+    binding model is rebuilt from at attach (`sync-agent.md` § The per-actor
+    scope follows the account across a succession)."""
+    return request(pipe_path, {"id": 1, "method": "ListLocations"})["Locations"]
+
+
+#: The registry home of shell sync-root registrations — the one surface an
+#: unpackaged process can READ them from (`fauna_cfapi::SYNC_ROOT_MANAGER_KEY`
+#: says why WinRT's getters answer empty here).
+_SYNC_ROOT_MANAGER_KEY = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\SyncRootManager"
+
+
+def shell_sync_root_id_for(path) -> str | None:
+    """The ``Fauna!<SID>!<account>`` Id Explorer's ``SyncRootManager`` holds for
+    ``path``, or ``None`` when no Fauna shell registration covers it — the OS's
+    own record, read the way `fauna_cfapi::shell_registration_for` reads it:
+    each ``Fauna!`` key's ``UserSyncRoots\\<SID>`` value, compared
+    case-insensitively with trailing separators ignored.
+
+    Read-only: nothing here registers or unregisters a root."""
+    import winreg
+
+    def norm(p: str) -> str:
+        return str(p).rstrip("\\/").lower()
+
+    wanted = norm(path)
+    try:
+        root = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, _SYNC_ROOT_MANAGER_KEY)
+    except FileNotFoundError:
+        return None  # no shell registration on this machine at all
+    with root:
+        index = 0
+        while True:
+            try:
+                sync_root_id = winreg.EnumKey(root, index)
+            except OSError:
+                return None  # ERROR_NO_MORE_ITEMS
+            index += 1
+            if not sync_root_id.startswith("Fauna!"):
+                continue
+            sid = sync_root_id.split("!")[1]
+            try:
+                with winreg.OpenKey(root, rf"{sync_root_id}\UserSyncRoots") as user_roots:
+                    registered, _kind = winreg.QueryValueEx(user_roots, sid)
+            except OSError:
+                continue
+            if norm(registered) == wanted:
+                return sync_root_id
 
 
 def file_status(pipe_path: str, abs_path: str) -> str:

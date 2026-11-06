@@ -68,6 +68,12 @@ public func makeFileProviderHost(domainId: String) throws -> FfiFileProviderHost
     let stateDir = try fileProviderStateDir(actorIdHex: identity.actorIdHex)
     let rootDir = try fileProviderRootDir(for: identity)
 
+    // The out-of-process retained-key custody, installed (idempotently — it
+    // replaces any earlier one) before any host is built: a generation this
+    // device holds with no wrap on the plane reaches the extension only
+    // through the app's mirror into this item.
+    try installCapabilityHostCustody(actorId: creds.actorId, custody: KeychainRetainedKeyCustody())
+
     return try FfiFileProviderHost.appDead(
         nestUrl: creds.nestURL,
         actorId: creds.actorId,

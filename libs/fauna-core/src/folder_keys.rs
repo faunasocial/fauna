@@ -139,6 +139,45 @@ impl ContentKeyGeneration {
     }
 }
 
+/// A shared set's content keys, by family (`p2p-shared-set-build.md` § Build
+/// design — the group set, decision 4): a **folder set**'s M2 generations
+/// ([`FolderContentKeys`], keyed by `u64` version) or a **group set**'s ring
+/// ([`GroupContentKeys`](crate::group_content::GroupContentKeys), keyed by
+/// 32-byte generation id). Every consumer that indexes a key by a row's stamp
+/// asks [`Self::keys_for_stamp`], so the family is decided once.
+#[derive(Debug, Clone)]
+pub enum SetContentKeys {
+    /// A folder set bound to an M2 group (or served).
+    Folder(FolderContentKeys),
+    /// A group set bound under a recipient-set group scope.
+    Group(crate::group_content::GroupContentKeys),
+}
+
+impl SetContentKeys {
+    /// Every candidate key a body stamped `stamp` may have sealed under — a
+    /// folder version's same-version pair, or a group generation's one key.
+    /// A stamp of the other family names nothing here: empty, never a guess.
+    #[must_use]
+    pub fn keys_for_stamp(&self, stamp: crate::blob_seal::SealStamp) -> Vec<[u8; 32]> {
+        use crate::blob_seal::SealStamp;
+        match (self, stamp) {
+            (SetContentKeys::Folder(keys), SealStamp::Version(v)) => {
+                keys.keys_for(v).copied().collect()
+            }
+            (SetContentKeys::Group(ring), SealStamp::Generation(g)) => {
+                ring.key(&g).copied().into_iter().collect()
+            }
+            _ => Vec::new(),
+        }
+    }
+}
+
+impl From<FolderContentKeys> for SetContentKeys {
+    fn from(keys: FolderContentKeys) -> Self {
+        SetContentKeys::Folder(keys)
+    }
+}
+
 impl FolderContentKeys {
     /// Create generation 1 for a set at bind time (`fauna.folders.share`).
     pub fn genesis(key: [u8; 32], now: u64) -> Self {
@@ -565,15 +604,27 @@ pub enum FolderRef {
     /// the derived `ChannelId` — per `ForeignFolder::channel_id`, "the stable
     /// identity custody + the federated read kinds are keyed by".
     Foreign([u8; 32]),
+    /// A **group set** — a folder bound under an in-person share's recipient-set
+    /// group scope (`p2p-shared-set-build.md` § Build design — the group set,
+    /// decision 7). The value is the scope's 32-byte content-derived scope id,
+    /// and the wire form `group:<64-hex>` IS the scope string
+    /// (`fauna_protocol::scope::Scope::Group`'s canonical spelling — lowercase
+    /// hex only, so one id never spells two strings). Disjoint from both other
+    /// arms: a group set has no nest row and no custody channel; its path state
+    /// is the scope's plane entries and its keys are the scope's generation
+    /// ring, so no nest or custody seam has a meaning for it.
+    Group([u8; 32]),
 }
 
 impl FolderRef {
-    /// Render the opaque wire string: `local:<id>` or `foreign:<64-hex>`.
+    /// Render the opaque wire string: `local:<id>`, `foreign:<64-hex>` or
+    /// `group:<64-hex>`.
     #[must_use]
     pub fn to_wire(&self) -> String {
         match self {
             FolderRef::Local(id) => format!("local:{id}"),
             FolderRef::Foreign(channel) => format!("foreign:{}", hex::encode(channel)),
+            FolderRef::Group(scope) => format!("group:{}", hex::encode(scope)),
         }
     }
 
@@ -588,6 +639,17 @@ impl FolderRef {
     pub fn parse(wire: &str) -> Option<Self> {
         if let Some(id) = wire.strip_prefix("local:") {
             return id.parse::<i64>().ok().map(FolderRef::Local);
+        }
+        if let Some(scope) = wire.strip_prefix("group:") {
+            // Strict: the scope string's own spelling (lowercase hex), never a
+            // repaired one — an uppercase id is a different string for the
+            // same scope, which equality-compared registries must never meet.
+            if !crate::hex32::is_lowercase_hex64(scope) {
+                return None;
+            }
+            let mut id = [0u8; 32];
+            hex::decode_to_slice(scope, &mut id).ok()?;
+            return Some(Self::Group(id));
         }
         let channel = wire.strip_prefix("foreign:")?;
         let raw = hex::decode(channel).ok()?;
@@ -618,6 +680,18 @@ impl FolderRef {
         match self {
             FolderRef::Local(id) => format!("fsid-local-{id}"),
             FolderRef::Foreign(channel) => format!("fsid-foreign-{}", hex::encode(channel)),
+            FolderRef::Group(scope) => format!("fsid-group-{}", hex::encode(scope)),
+        }
+    }
+
+    /// The group scope id when this ref names a **group set**
+    /// ([`Group`](Self::Group)), else `None` — the one question every seam with
+    /// no meaning for a group set (a nest row, a custody channel) asks first.
+    #[must_use]
+    pub fn group_scope(&self) -> Option<[u8; 32]> {
+        match self {
+            FolderRef::Group(scope) => Some(*scope),
+            FolderRef::Local(_) | FolderRef::Foreign(_) => None,
         }
     }
 
@@ -671,15 +745,7 @@ impl FolderRef {
 /// [`FolderRef::path_component`] applies; kept generic only so its alphabet is
 /// pinned on its own.
 fn percent_encode_component(value: &str) -> String {
-    let mut out = String::with_capacity(value.len());
-    for b in value.bytes() {
-        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b' ') {
-            out.push(char::from(b));
-        } else {
-            out.push_str(&format!("%{b:02X}"));
-        }
-    }
-    out
+    crate::format::percent_encode_except(value, |b| matches!(b, b'-' | b'_' | b'.' | b' '))
 }
 
 /// Undo [`percent_encode_component`]: every `%XX` back to its byte. `None` on
@@ -688,21 +754,7 @@ fn percent_encode_component(value: &str) -> String {
 /// writes — the CALLER re-encodes and compares, which is what makes the
 /// scoped grammar accept exactly what it emits.
 fn percent_decode_component(value: &str) -> Option<String> {
-    let bytes = value.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'%' {
-            let hex = bytes.get(i + 1..i + 3)?;
-            let byte = u8::from_str_radix(std::str::from_utf8(hex).ok()?, 16).ok()?;
-            out.push(byte);
-            i += 3;
-        } else {
-            out.push(bytes[i]);
-            i += 1;
-        }
-    }
-    String::from_utf8(out).ok()
+    crate::web::percent_decode_strict(value)
 }
 
 /// A [`FolderRef`] scoped to the actor whose account holds it on a device —
@@ -966,6 +1018,13 @@ pub struct FolderEngineKeys {
     /// The custody entry's serve-off stamp, beside [`Self::served_at`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unserved_at: Option<u64>,
+    /// A **group set**'s tip generation id (`p2p-shared-set-build.md` § Build
+    /// design — the group set, decision 7) — public routing material, never a
+    /// key: the ring itself is read at the engine's build, and this id is what
+    /// a host compares to rebuild the engine when a new tip arrives. `None` on
+    /// every folder-family entry. `#[serde(default)]`: additive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group_tip: Option<[u8; 32]>,
 }
 
 impl FolderEngineKeys {
@@ -1235,6 +1294,40 @@ pub trait FolderKeyResolver: crate::MaybeSendSync {
         _folder_ref: &FolderRef,
     ) -> anyhow::Result<Option<SetNonceLineage>> {
         Ok(None)
+    }
+
+    /// One **read**'s view of custody: a resolver answering every method from
+    /// a single roster + custody read, made now — `None` when this resolver
+    /// has no cheaper form (the default) or that read failed (the caller then
+    /// keeps this resolver, whose every call fails or answers as before).
+    ///
+    /// A page read asks once per set it lists — the projection judge a set's
+    /// lineage, the sealed-label render a set's custody — and a resolver that
+    /// re-reads the whole roster for each makes one page read cost about
+    /// 2 × N roster reads, each N rows long; on a large account that is what
+    /// kept a read from landing before the next push started another
+    /// (`docs/goal/ui/README.md` § List pages: loading is not empty). The
+    /// scope makes it one.
+    ///
+    /// ⚠ **Reads only, and for one read only.** The scope pins the custody of
+    /// the moment it was made: a seal must resolve fresh (a rotation landing
+    /// mid-scope would otherwise seal under a retired key), and a scope held
+    /// past its read renders stale custody. Open it at the read, drop it with
+    /// the read — [`read_scope`] is the call.
+    async fn read_scope(&self) -> Option<std::sync::Arc<dyn FolderKeyResolver>> {
+        None
+    }
+}
+
+/// `resolver`'s [`FolderKeyResolver::read_scope`] when it has one, else
+/// `resolver` itself — the form a read takes: one call at the read's start,
+/// the result dropped with the read.
+pub async fn read_scope(
+    resolver: &std::sync::Arc<dyn FolderKeyResolver>,
+) -> std::sync::Arc<dyn FolderKeyResolver> {
+    match resolver.read_scope().await {
+        Some(scope) => scope,
+        None => resolver.clone(),
     }
 }
 
@@ -1647,6 +1740,8 @@ mod tests {
             FolderRef::Local(i64::MAX),
             FolderRef::Foreign([0u8; 32]),
             FolderRef::Foreign(k(0xab)),
+            FolderRef::Group([0u8; 32]),
+            FolderRef::Group(k(0x7a)),
         ] {
             assert_eq!(FolderRef::parse(&r.to_wire()), Some(r), "{r:?}");
         }
@@ -1655,6 +1750,14 @@ mod tests {
             FolderRef::Foreign([0xab; 32]).to_wire(),
             format!("foreign:{}", "ab".repeat(32))
         );
+        assert_eq!(
+            FolderRef::Group([0x7a; 32]).to_wire(),
+            format!("group:{}", "7a".repeat(32)),
+            "a group set's ref is its scope string"
+        );
+        assert_eq!(FolderRef::Group([0x7a; 32]).group_scope(), Some([0x7a; 32]));
+        assert_eq!(FolderRef::Foreign([0x7a; 32]).group_scope(), None);
+        assert_eq!(FolderRef::Local(1).group_scope(), None);
     }
 
     /// An unparseable ref must yield `None` (⇒ the caller refuses the binding)
@@ -1675,6 +1778,10 @@ mod tests {
             &format!("foreign:{}", "ab".repeat(33)), // 33 bytes
             "remote:42",                             // an unknown scheme from a newer peer
             "LOCAL:42",                              // schemes are exact, not case-folded
+            "group:",                                // truncated
+            &format!("group:{}", "7A".repeat(32)),   // the scope string is lowercase only
+            &format!("group:{}", "7a".repeat(31)),   // 31 bytes
+            &format!("group:{}:x", "7a".repeat(32)), // trailing segment
         ] {
             assert_eq!(FolderRef::parse(bad), None, "{bad:?} must not parse");
         }
@@ -1693,6 +1800,15 @@ mod tests {
         assert_ne!(
             FolderRef::Local(42).db_component(),
             FolderRef::Foreign([0u8; 32]).db_component()
+        );
+        assert_ne!(
+            FolderRef::Foreign([0u8; 32]).db_component(),
+            FolderRef::Group([0u8; 32]).db_component(),
+            "one 32-byte value under two arms names two sets"
+        );
+        assert_eq!(
+            FolderRef::Group([0xab; 32]).db_component(),
+            format!("fsid-group-{}", "ab".repeat(32))
         );
         // A set literally NAMED "local-42" sanitizes to `fs-local-42.db` under the
         // name-keyed namer — which is why the id namespace is `fsid-`, not `fs-`.

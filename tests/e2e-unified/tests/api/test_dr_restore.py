@@ -41,11 +41,14 @@ hand-pokes the same DB while the nest runs.
 
 from __future__ import annotations
 
+import base64
 import secrets
 import sqlite3
 import time
 
 import pytest
+
+from nacl.public import PrivateKey
 
 from clients.ws_rpc_admin_client import RpcCallError, WsRpcAdminClient
 from common.auth import create_actor_and_register
@@ -109,7 +112,7 @@ def _ws_client(nest: dict, actor: dict) -> WsRpcAdminClient:
 
 
 @pytest.mark.feature("backup-destinations-and-restore")
-def test_mail_snapshot_create_restore_and_caldav_divergence(dr_nest):
+def test_mail_snapshot_create_restore_and_caldav_divergence(dr_nest, run_seal_helper):
     """Mail create→restore→history + CalDAV ahead-token divergence.
 
     Phase A (owner-implicit WS-RPC):
@@ -167,8 +170,15 @@ def test_mail_snapshot_create_restore_and_caldav_divergence(dr_nest):
             {
                 "actor_id": owner["actor_id_bytes"],
                 "calendar_id": calendar_id,
-                # Opaque to nest; just needs to be non-empty.
-                "encrypted_metadata": b"{}",
+                # Must be a genuine calendar-record envelope (the nest
+                # refuses anything else); the recipient key is throwaway.
+                "encrypted_metadata": run_seal_helper("seal-mail-record", {
+                    "plaintext_b64": base64.b64encode(b"{}").decode(),
+                    "recipient_x25519_pubkey_b64": base64.b64encode(
+                        PrivateKey.generate().public_key.encode()
+                    ).decode(),
+                    "kind": "calendar",
+                }),
                 "update_metadata": False,
             },
         )

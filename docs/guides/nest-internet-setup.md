@@ -333,6 +333,8 @@ or at least close its port to the world:
 ufw delete allow 22/tcp
 ```
 
+If you removed the SSH server: on some server images apt also removes a package called `ubuntu-cloud-minimal` — that's expected. If apt then suggests running `apt autoremove`, don't: leave the rest installed.
+
 If you ever need a shell on the server again, your provider's control panel has
 a console that doesn't need SSH: sign in there as `root` with that password.
 
@@ -343,7 +345,7 @@ a console that doesn't need SSH: sign in there as `root` with that password.
 The Fauna software updates itself: the server picks up a new version within the hour on Stable, or within about a minute if you choose Test or Dev builds (below), and installs it. Keeping the operating system patched is up to you — the `unattended-upgrades` package from Step 3 installs Ubuntu's security updates, but some of them take effect only after a restart, so restart the server now and then from your provider's control panel. Beyond that:
 
 - **Back up your data.** Add a backup destination on the app's **Backups** page ([Backup with Fauna](cloud-backup.md)). A snapshot of the whole server from your provider's control panel is yours to add as a second copy; Fauna neither takes nor restores it.
-- **Keep your recovery kit safe** — the code the app showed you once when you created your identity, which the app also calls your recovery phrase. It gets your account back if you lose every device ([Your recovery kit](identity-and-devices.md#your-recovery-kit)); if you skipped it, make one under **Settings → Account → Recovery Kit**. The claim itself leaves no recovery secret for you to keep: the claim code is used up the moment you claim, and your Fauna app keeps a copy of the server's own key for you.
+- **Keep your recovery kit safe** — the code the app showed you once when you created your identity. It gets your account back if you lose every device ([Your recovery kit](identity-and-devices.md#your-recovery-kit)); if you skipped it, make one under **Settings → Account → Recovery Kit**. The claim itself leaves no recovery secret for you to keep: the claim code is used up the moment you claim, and your Fauna app keeps a copy of the server's own key for you.
 - **Leave room on the disk** if you enabled email: mail and its attachments fill it over time, so pick a plan you can resize from your provider's control panel.
 
 To choose which builds the nest installs — **Stable**, the default, or **Test** or **Dev** — use **Updates** under **Admin → Nest** in the app. Don't change the `image:` lines in the setup file: the nest goes on following its update channel whatever they say.

@@ -19,7 +19,7 @@
       gtk::DropDown); lists use non-virtualizing StackPanel item panels with
       AutomationProperties.Name row anchors so the e2e driver can count every
       indexed row. The Users section adds per-row one-click eviction / cancel
-      (mutually exclusive on AdminUserRow's EvictionActive) and prev/next
+      (evict and restore: AdminUserRow's CanEvict / CanRestore) and prev/next
       pagination (page size 50).
     -->
     <Grid>
@@ -262,6 +262,28 @@
                               AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminUsersAdmitTierSelect}"
                               MinWidth="120"
                               SelectionChanged="AdmitTierSelect_SelectionChanged" />
+                    <!-- Supervised admission (family-safety.md § The guardianship link,
+                         Set at admission): the Invite section's guardian + band pair,
+                         lifted. Each is a label over its select, so the vertical form
+                         keeps every control inside the 600-DIP column. The band is
+                         enabled only while a guardian is picked and resets when it
+                         clears (account-age-band.md § Age-band surfaces). -->
+                    <StackPanel Spacing="4">
+                        <TextBlock TextWrapping="Wrap"
+                                   Text="{loc:Localize Key=admin/users_page/guardian_label}" />
+                        <ComboBox x:Name="AdmitGuardianSelect"
+                                  AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminUsersAdmitGuardianSelect}"
+                                  MinWidth="160"
+                                  SelectionChanged="AdmitGuardianSelect_SelectionChanged" />
+                    </StackPanel>
+                    <StackPanel Spacing="4">
+                        <TextBlock TextWrapping="Wrap"
+                                   Text="{loc:Localize Key=family/age_band/label}" />
+                        <ComboBox x:Name="AdmitAgeBandSelect"
+                                  AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminUsersAdmitAgeBandSelect}"
+                                  MinWidth="160" IsEnabled="False"
+                                  SelectionChanged="AdmitAgeBandSelect_SelectionChanged" />
+                    </StackPanel>
                     <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminUsersAdmitButton}"
                             Click="AdmitUser_Click"
                             Content="{loc:Localize Key=admin/users_page/admit_button}" />
@@ -443,7 +465,7 @@
                                                 Loaded="EvictButton_Loaded"
                                                 Click="EvictUser_Click" />
                                         <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminUsersCancelEvictionButton}"
-                                                Visibility="{x:Bind local:AdminUsersPage.BoolToVisibility(EvictionActive)}"
+                                                Visibility="{x:Bind local:AdminUsersPage.BoolToVisibility(CanRestore)}"
                                                 Loaded="CancelEvictionButton_Loaded"
                                                 Click="CancelEviction_Click" />
                                     </StackPanel>

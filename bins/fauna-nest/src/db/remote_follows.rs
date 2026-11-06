@@ -174,9 +174,44 @@ impl CacheDb {
         Ok(rows)
     }
 
+    /// The reader's own leave, on the reader's own nest (§ Decision 2's state
+    /// leg): every `approved` row of `subscriber_id`'s follow of `author_id`
+    /// but the `keep_tier` row — the free follow, which a leave never ends —
+    /// moves to `removed` now, whatever the home later answers, so the feed and
+    /// the delivery gate stop admitting that home's deliveries for this reader.
+    /// Returns the number of rows moved.
+    pub async fn leave_remote_follow(
+        &self,
+        subscriber_id: &[u8; 32],
+        author_id: &[u8; 32],
+        keep_tier: &str,
+    ) -> Result<usize> {
+        let now = now_epoch_secs();
+        let conn = self.conn.lock().await;
+        let moved = conn
+            .execute(
+                "UPDATE remote_follows SET state = 'removed', updated_at = ?4
+                  WHERE subscriber_id = ?1 AND author_id = ?2 AND tier != ?3
+                    AND state = 'approved'",
+                rusqlite::params![
+                    subscriber_id.as_slice(),
+                    author_id.as_slice(),
+                    keep_tier,
+                    now
+                ],
+            )
+            .context("leave remote follow")?;
+        Ok(moved)
+    }
+
     /// Apply a home's `follow.state` push: moves the row only when the pushing
     /// nest is the row's home (`origin_nest_id`, verified by the channel).
-    /// Returns whether a row moved.
+    /// Returns whether the push named such a row. `removed` is terminal for a
+    /// push: no state moves a `removed` row (a `rejected` then `approved` pair
+    /// included), because a follow the reader left, or the home ended,
+    /// re-opens only through the reader's own new subscribe, which rewrites the
+    /// row. A push onto a `removed` row still answers `true` (the row is the
+    /// home's), so a home's retry stays idempotent.
     pub async fn set_remote_follow_state_from(
         &self,
         subscriber_id: &[u8; 32],
@@ -189,7 +224,9 @@ impl CacheDb {
         let conn = self.conn.lock().await;
         let changed = conn
             .execute(
-                "UPDATE remote_follows SET state = ?5, updated_at = ?6
+                "UPDATE remote_follows
+                    SET state = CASE WHEN state = 'removed' THEN state ELSE ?5 END,
+                        updated_at = ?6
                   WHERE subscriber_id = ?1 AND author_id = ?2 AND tier = ?3
                     AND home_nest_id = ?4",
                 rusqlite::params![
@@ -549,36 +586,59 @@ impl CacheDb {
         .context("read the follow gate")
     }
 
-    /// A stored post's delivery custody: `Some(home_url)` iff a federated
-    /// follow delivered it here from that home (`follow_delivered = 1`).
-    pub async fn delivered_post_home(&self, post_id: &[u8; 32]) -> Result<Option<String>> {
-        let conn = self.conn.lock().await;
-        let row: Option<Option<String>> = conn
-            .query_row(
-                "SELECT origin_nest_url FROM content WHERE id = ?1 AND follow_delivered = 1",
-                [post_id.as_slice()],
-                |row| row.get(0),
+    /// The purge's first sweep (§ Decision 3, *Purge*): drop up to `limit`
+    /// custody rows `(post, home)` of a follow-delivered row whose home no
+    /// local reader holds a `pending` or `approved` `remote_follows` row at
+    /// for the row's author — or for an identity the author's succession maps
+    /// it onto — and, where the dropped home was the one the row's
+    /// `content.origin_nest_*` columns named, re-point them to the oldest
+    /// remaining custody. Returns how many custody rows were dropped.
+    pub async fn drop_unfollowed_custody(&self, limit: i64) -> Result<usize> {
+        let mut conn = self.conn.lock().await;
+        let tx = conn.transaction().context("begin the custody sweep")?;
+        let dropped: Vec<(Vec<u8>, Vec<u8>)> = {
+            let mut stmt = tx.prepare(
+                "SELECT h.post_id, h.origin_nest_id FROM follow_delivery_homes h
+                   LEFT JOIN content c ON c.id = h.post_id
+                  WHERE c.id IS NULL OR c.follow_delivered = 0 OR NOT EXISTS (
+                        SELECT 1 FROM remote_follows rf
+                         WHERE rf.home_nest_id = h.origin_nest_id
+                           AND rf.state IN ('pending', 'approved')
+                           AND (rf.author_id = c.author OR rf.author_id IN (
+                                SELECT new_actor_id FROM actor_successions
+                                 WHERE old_actor_id = c.author)))
+                  LIMIT ?1",
+            )?;
+            stmt.query_map([limit], |row| Ok((row.get(0)?, row.get(1)?)))?
+                .collect::<rusqlite::Result<_>>()?
+        };
+        for (post_id, home) in &dropped {
+            tx.execute(
+                "DELETE FROM follow_delivery_homes WHERE post_id = ?1 AND origin_nest_id = ?2",
+                rusqlite::params![post_id, home],
+            )?;
+            tx.execute(
+                "UPDATE content SET (origin_nest_url, origin_nest_id) = (
+                        SELECT origin_nest_url, origin_nest_id FROM follow_delivery_homes
+                         WHERE post_id = ?1 ORDER BY delivered_at, origin_nest_id LIMIT 1)
+                  WHERE id = ?1 AND origin_nest_id = ?2
+                    AND EXISTS (SELECT 1 FROM follow_delivery_homes WHERE post_id = ?1)",
+                rusqlite::params![post_id, home],
             )
-            .optional()
-            .context("read a delivered post's home")?;
-        Ok(row.flatten())
+            .context("re-point the delivered row's origin")?;
+        }
+        tx.commit().context("commit the custody sweep")?;
+        Ok(dropped.len())
     }
 
-    /// On a follower's nest: up to `limit` delivered envelopes no local reader
-    /// follows the author of any more — no `pending` or `approved`
-    /// `remote_follows` row for the author, nor for an identity the author's
-    /// own succession maps it onto (§ Decision 3's purge).
+    /// The purge's second sweep (§ Decision 3, *Purge*): up to `limit`
+    /// follow-delivered rows no home holds custody of any more.
     pub async fn follow_delivered_orphans(&self, limit: i64) -> Result<Vec<[u8; 32]>> {
         let conn = self.conn.lock().await;
         let mut stmt = conn.prepare(
             "SELECT c.id FROM content c
               WHERE c.follow_delivered = 1
-                AND c.author NOT IN (
-                    SELECT author_id FROM remote_follows WHERE state IN ('pending', 'approved'))
-                AND c.author NOT IN (
-                    SELECT s.old_actor_id FROM actor_successions s
-                      JOIN remote_follows rf ON rf.author_id = s.new_actor_id
-                     WHERE rf.state IN ('pending', 'approved'))
+                AND NOT EXISTS (SELECT 1 FROM follow_delivery_homes h WHERE h.post_id = c.id)
               LIMIT ?1",
         )?;
         let ids = stmt

@@ -42,26 +42,26 @@ Stamped 2026-10-01 at d8cb0887cb.
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ⚠ partial | |
-| linux | ⚠ partial | 0.1.2-dev+64866f6d standalone |
-| windows | ⚠ partial | |
-| macos | ⚠ partial | |
-| ios | ⚠ partial | |
+| web | ✅ full | |
+| linux | ✅ full | 0.1.5-dev+74897c5d standalone |
+| windows | ⚠ partial | 0.1.5-dev+2897e015.dirty standalone |
+| macos | ✅ full | |
+| ios | ✅ full | |
 | android |  no run recorded | |
-| tui | ⚠ partial | 0.1.2-dev+831d48ef live |
+| tui | ✅ full | 0.1.5-dev+74897c5d standalone |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
-| 1 | app | `tests/e2e-unified/tests/test_muted_words.py::test_muted_words_settings_crud` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 1 | app | `tests/e2e-unified/tests/test_muted_words.py::test_muted_words_empty_state_marks_a_loaded_page_not_a_loading_one` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 2 | app | `tests/e2e-unified/tests/test_feed_muted_posts.py::test_muted_post_collapses_behind_reveal` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 3 | app | `tests/e2e-unified/tests/test_muted_words.py::test_muted_message_collapses_behind_reveal` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 3 | app | `tests/e2e-unified/tests/test_conversations_real_muted_message.py::test_real_muted_message_collapses_behind_reveal` | web (linux): passed, web (windows): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed, tui (windows): passed |
-| 4 | app | `tests/e2e-unified/tests/test_feed_muted_posts.py::test_a_word_inside_a_longer_word_collapses_and_removing_it_brings_the_post_back` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 5 | app | `tests/e2e-unified/tests/test_muted_words_sync.py::test_words_added_on_two_devices_at_once_are_both_kept_on_both` | tui (linux): failed |
-| 6 | app | `tests/e2e-unified/tests/test_muted_words.py::test_muted_message_collapses_behind_reveal` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 7 | app | `tests/e2e-unified/tests/test_feed_muted_posts.py::test_a_word_inside_a_longer_word_collapses_and_removing_it_brings_the_post_back` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 8 | app | `tests/e2e-unified/tests/test_notifications_muted.py::test_a_muted_word_collapses_the_notification_rows_that_carry_it` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 9 | app | `tests/e2e-unified/tests/test_muted_words.py::test_muted_word_level_show_less_does_not_collapse_a_message` | web (linux): passed, linux (linux): passed, tui (linux): passed |
-| 10 | app | `tests/e2e-unified/tests/test_store_change_notice.py::test_an_open_muted_words_page_shows_another_devices_word_without_a_revisit` | web (linux): passed, linux (linux): passed, tui (linux): passed |
+| 1 | app | `tests/e2e-unified/tests/test_muted_words.py::test_muted_words_settings_crud` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 1 | app | `tests/e2e-unified/tests/test_muted_words.py::test_muted_words_empty_state_marks_a_loaded_page_not_a_loading_one` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 2 | app | `tests/e2e-unified/tests/test_feed_muted_posts.py::test_muted_post_collapses_behind_reveal` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 3 | app | `tests/e2e-unified/tests/test_muted_words.py::test_muted_message_collapses_behind_reveal` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 3 | app | `tests/e2e-unified/tests/test_conversations_real_muted_message.py::test_real_muted_message_collapses_behind_reveal` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 4 | app | `tests/e2e-unified/tests/test_feed_muted_posts.py::test_a_word_inside_a_longer_word_collapses_and_removing_it_brings_the_post_back` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 5 | app | `tests/e2e-unified/tests/test_muted_words_sync.py::test_words_added_on_two_devices_at_once_are_both_kept_on_both` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 6 | app | `tests/e2e-unified/tests/test_muted_words.py::test_muted_message_collapses_behind_reveal` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 7 | app | `tests/e2e-unified/tests/test_feed_muted_posts.py::test_a_word_inside_a_longer_word_collapses_and_removing_it_brings_the_post_back` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 8 | app | `tests/e2e-unified/tests/test_notifications_muted.py::test_a_muted_word_collapses_the_notification_rows_that_carry_it` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 9 | app | `tests/e2e-unified/tests/test_muted_words.py::test_muted_word_level_show_less_does_not_collapse_a_message` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 10 | app | `tests/e2e-unified/tests/test_store_change_notice.py::test_an_open_muted_words_page_shows_another_devices_word_without_a_revisit` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 <!-- features-render:end -->

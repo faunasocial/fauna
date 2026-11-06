@@ -28,6 +28,11 @@ import social.fauna.generated.Ids
  * family reveal, so one reveal set serves both arms. linux's
  * `region::placeholder_box`, web's `RegionPlaceholder.svelte`.
  *
+ * [sealedNote] adds the sealed-item sentence (`region.sealed_note`) on its own
+ * line after the frame, INSIDE `region-blocked-notice` — the shared decision
+ * ([com.fauna.app.core.RegionRenderDecision.sealedNote]), true only on an
+ * end-to-end conversation's bubble.
+ *
  * [witnessKey] names the surface + item for convention 17's painted side
  * ([RegionPlaneHost.witnessPainted]): a `block` placeholder registers while
  * composed.
@@ -38,6 +43,7 @@ fun RegionPlaceholder(
     witnessKey: String,
     onReveal: () -> Unit,
     modifier: Modifier = Modifier,
+    sealedNote: Boolean = false,
 ) {
     val isBlock = placeholder.verb == "block"
     DisposableEffect(witnessKey, isBlock) {
@@ -48,12 +54,13 @@ fun RegionPlaceholder(
         modifier = modifier.padding(vertical = 8.dp),
         verticalArrangement = Arrangement.spacedBy(4.dp),
     ) {
+        val frame = stringResourceFmt(
+            if (isBlock) R.string.region_blocked_notice else R.string.region_collapsed_notice,
+            placeholder.region,
+            placeholder.authorityName,
+        )
         Text(
-            stringResourceFmt(
-                if (isBlock) R.string.region_blocked_notice else R.string.region_collapsed_notice,
-                placeholder.region,
-                placeholder.authorityName,
-            ),
+            if (sealedNote) frame + "\n" + stringResource(R.string.region_sealed_note) else frame,
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier.testTag(Ids.REGION_BLOCKED_NOTICE),

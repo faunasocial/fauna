@@ -12,6 +12,7 @@ import com.fauna.app.R
 import com.fauna.app.ui.util.LocalConnectionState
 import com.fauna.app.ui.viewmodel.OnDemandRow
 import com.fauna.app.ui.viewmodel.OnDemandRowKey
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.SemanticsProperties
 import com.fauna.ffi.FfiConnectionState
 import org.junit.Assert.assertEquals
@@ -22,6 +23,8 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import com.fauna.app.testing.FaunaRobolectricTestRunner
 import org.robolectric.annotation.Config
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
 import com.fauna.ffi.FfiFolderActorMember
 import com.fauna.ffi.FfiFolderDevice
 import com.fauna.ffi.FfiPendingShare
@@ -31,6 +34,7 @@ import uniffi.fauna_devices_machine.ConflictSummary
 import uniffi.fauna_devices_machine.DeviceSummary
 import uniffi.fauna_devices_machine.DevicesSnapshot
 import uniffi.fauna_devices_machine.FolderSummary
+import uniffi.fauna_devices_machine.FollowedFolderSummary
 import uniffi.fauna_folders_machine.DevicePlacesSnapshot
 import uniffi.fauna_folders_machine.FolderWizardSnapshot
 import uniffi.fauna_folders_machine.FolderWizardStep
@@ -267,10 +271,11 @@ class FoldersContentTest {
         conflicts: List<ConflictSummary> = emptyList(),
         wizard: FolderWizardSnapshot? = null,
         error: LocalizedText? = null,
+        followed: List<FollowedFolderSummary> = emptyList(),
     ) = DevicesSnapshot(
         devices = emptyList(),
         folders = folders,
-        followed = emptyList(),
+        followed = followed,
         // `None` = unknown, the documented hedge on the website toggle's
         // tri-state hint — a sibling field-add this fixture had not caught up
         // with (android is not CI-gated, so it landed red).
@@ -311,12 +316,14 @@ class FoldersContentTest {
         nestPlaceEdits: Map<String, NestPlaceEdit> = emptyMap(),
         versionRetentionEdits: Map<String, VersionRetentionEdit> = emptyMap(),
         onDemand: Map<OnDemandRowKey, OnDemandRow> = emptyMap(),
+        unverifiedPublicFolders: Set<String> = emptySet(),
     ) {
         composeTestRule.setContent {
             FoldersContent(
                 snapshot,
                 actions,
                 wizardActions,
+                unverifiedPublicFolders = unverifiedPublicFolders,
                 folderActors = folderActors,
                 folderDeviceActivity = folderDeviceActivity,
                 folderDestinationPlaces = folderDestinationPlaces,
@@ -975,6 +982,133 @@ class FoldersContentTest {
         // A folder has no type (ui/folders.md § Conflicts): every owner row.
         render(snapshot(folders = listOf(folder("photos"))))
         composeTestRule.onNodeWithTag("folder-conflict-policy-select").assertExists()
+    }
+
+    // ── Per-folder audience (`folder-audience-select` / `folder-audience-public-confirm`,
+    // owner rows) — folders.md § Target re-model, phase 4. Options/hint come from
+    // the shared `audienceOptions()`/`audienceHint()` catalog. Picking Public arms
+    // the declassify dialog; nothing is written until it is answered. ──────────
+
+    @Test
+    fun audienceSelectPickingPublicArmsTheConfirmAndWritesNothingUntilAnswered() {
+        var set: Pair<String, String>? = null
+        render(
+            snapshot(folders = listOf(folder("photos"))),
+            actions = FoldersActions(onSetAudience = { n, a -> set = n to a }),
+        )
+        composeTestRule.onNodeWithTag("folder-audience-select").performScrollTo().performClick()
+        composeTestRule.onNodeWithText("Public").performClick()
+        composeTestRule.onNodeWithTag("folder-audience-public-confirm").assertExists()
+        composeTestRule.onNodeWithTag("folder-audience-public-names-warning").assertExists()
+        composeTestRule.onNodeWithTag("folder-audience-public-reseal-warning").assertExists()
+        assertEquals(null, set)
+        composeTestRule.onNodeWithTag("folder-audience-public-confirm").performClick()
+        assertEquals("photos" to "public", set)
+        composeTestRule.onNodeWithTag("folder-audience-public-confirm").assertDoesNotExist()
+    }
+
+    // The bridge's `select(id, token)` / `get_text` round-trip the WIRE value, not
+    // the localized label (the same fault as search 5 and the media selects).
+    @Test
+    fun audienceSelectReadsBackItsWireTokenAndPicksByToken() {
+        var set: Pair<String, String>? = null
+        render(
+            snapshot(folders = listOf(folder("photos", audience = "public"))),
+            actions = FoldersActions(onSetAudience = { n, a -> set = n to a }),
+        )
+        composeTestRule.onNodeWithTag("folder-audience-select").performScrollTo()
+            .assert(hasStateDescription("public"))
+            .assert(SemanticsMatcher.expectValue(SemanticsProperties.Role, Role.DropdownList))
+        composeTestRule.onNodeWithTag("folder-audience-select").performClick()
+        composeTestRule.onNode(hasStateDescription("private") and hasClickAction()).performClick()
+        assertEquals("photos" to "private", set)
+    }
+
+    @Test
+    fun audienceSelectKeepsPerOptionSelectableOnABoundNonPublicFolder() {
+        render(
+            snapshot(folders = listOf(folder("photos", mlsGroupId = "aa".repeat(32), audience = "shared"))),
+        )
+        composeTestRule.onNodeWithTag("folder-audience-select").performScrollTo().performClick()
+        // Two nodes carry the token "shared": the anchor and the menu item for the
+        // current option. The current option stays enabled whatever the catalog's
+        // `selectable` says, so both are enabled.
+        val shared = composeTestRule.onAllNodes(hasStateDescription("shared"))
+        shared.assertCountEquals(2)
+        shared[0].assertIsEnabled()
+        shared[1].assertIsEnabled()
+    }
+
+    @Test
+    fun anUnverifiedPublicFolderPaintsTheNoticeAndReconfirmArmsTheConfirm() {
+        var set: Pair<String, String>? = null
+        render(
+            snapshot(folders = listOf(folder("photos", audience = "public"))),
+            actions = FoldersActions(onSetAudience = { n, a -> set = n to a }),
+            unverifiedPublicFolders = setOf("photos"),
+        )
+        composeTestRule.onNodeWithTag("folder-audience-unattested").performScrollTo().assertExists()
+        composeTestRule.onNodeWithTag("folder-audience-reconfirm-button").performScrollTo().performClick()
+        composeTestRule.onNodeWithTag("folder-audience-public-confirm").assertExists()
+        assertEquals(null, set)
+        composeTestRule.onNodeWithTag("folder-audience-public-confirm").performClick()
+        assertEquals("photos" to "public", set)
+    }
+
+    @Test
+    fun websiteToggleWritesTheFlagAndPaintsTheSharedHint() {
+        var set: Pair<String, Boolean>? = null
+        render(
+            snapshot(folders = listOf(folder("photos"))),
+            actions = FoldersActions(onSetWebsiteEnabled = { n, on -> set = n to on }),
+        )
+        composeTestRule.onNodeWithTag("folder-website-hint").performScrollTo().assertExists()
+        composeTestRule.onNodeWithTag("folder-website-toggle").performScrollTo().performClick()
+        assertEquals("photos" to true, set)
+    }
+
+    @Test
+    fun aVerifiedFolderPaintsNoUnattestedNotice() {
+        render(snapshot(folders = listOf(folder("photos", audience = "public"))))
+        composeTestRule.onNodeWithTag("folder-audience-unattested").assertDoesNotExist()
+        composeTestRule.onNodeWithTag("folder-audience-reconfirm-button").assertDoesNotExist()
+    }
+
+    @Test
+    fun audienceSelectCancelLeavesNothingWritten() {
+        var set: Pair<String, String>? = null
+        render(
+            snapshot(folders = listOf(folder("photos"))),
+            actions = FoldersActions(onSetAudience = { n, a -> set = n to a }),
+        )
+        composeTestRule.onNodeWithTag("folder-audience-select").performScrollTo().performClick()
+        composeTestRule.onNodeWithText("Public").performClick()
+        composeTestRule.onNodeWithText("Cancel").performClick()
+        assertEquals(null, set)
+        composeTestRule.onNodeWithTag("folder-audience-public-confirm").assertDoesNotExist()
+    }
+
+    @Test
+    fun audienceSelectPublicToPrivateCommitsDirectly() {
+        var set: Pair<String, String>? = null
+        render(
+            snapshot(folders = listOf(folder("photos", audience = "public"))),
+            actions = FoldersActions(onSetAudience = { n, a -> set = n to a }),
+        )
+        composeTestRule.onNodeWithTag("folder-audience-select").performScrollTo().performClick()
+        composeTestRule.onNodeWithText("Private").performClick()
+        assertEquals("photos" to "private", set)
+        composeTestRule.onNodeWithTag("folder-audience-public-confirm").assertDoesNotExist()
+    }
+
+    @Test
+    fun audienceHintOnASharedFolderSaysTheSharingMustGoFirst() {
+        render(
+            snapshot(folders = listOf(folder("photos", mlsGroupId = "aa".repeat(32), audience = "shared"))),
+        )
+        composeTestRule.onNodeWithTag("folder-audience-hint").performScrollTo().assertExists()
+        composeTestRule.onNodeWithText("remove the sharing in the section below first", substring = true)
+            .assertExists()
     }
 
     // ── The nest place's content residency (`folder-nest-residency-select` /
@@ -1797,5 +1931,100 @@ class FoldersContentTest {
         // No session or no resolvable set ref → nothing to steer → no control.
         render(snapshot(folders = listOf(folder("photos"))))
         composeTestRule.onNodeWithTag("folder-on-demand-toggle").assertDoesNotExist()
+    }
+
+    // ── Following a public folder (ui/folders.md § Following a public folder) ──
+
+    private fun followed(name: String, available: Boolean = true, folderId: Long = 7L, home: String = "") =
+        FollowedFolderSummary(
+            folderId = folderId,
+            homeNestUrl = home,
+            ownerActorId = "ab".repeat(32),
+            ownerHandle = "alice",
+            ownerDisplay = "alice",
+            displayName = name,
+            available = available,
+        )
+
+    @Test
+    fun followSectionIsOfferedWithNoFollowsAndTheFormIsClosedUntilPressed() {
+        render(snapshot = snapshot(folders = emptyList()))
+        composeTestRule.onNodeWithTag("folder-follow-button").performScrollTo().assertIsDisplayed()
+        composeTestRule.onAllNodesWithTag("folder-follow-name-input").assertCountEquals(0)
+        composeTestRule.onAllNodesWithTag("folder-follow-confirm").assertCountEquals(0)
+        composeTestRule.onAllNodesWithTag("folder-followed-item").assertCountEquals(0)
+    }
+
+    @Test
+    fun followConfirmPassesTheOwnerUnresolvedAndClosesOnlyOnSuccess() {
+        val calls = mutableListOf<Pair<String, String>>()
+        var succeed = false
+        render(
+            actions = FoldersActions(
+                onFollowFolder = { owner, name, cb -> calls += owner to name; cb(succeed) },
+            ),
+        )
+        composeTestRule.onNodeWithTag("folder-follow-button").performScrollTo().performClick()
+        composeTestRule.onNodeWithTag("folder-follow-confirm").performScrollTo().assertIsNotEnabled()
+        composeTestRule.onNodeWithTag("recipient-picker-input").performScrollTo().performTextInput("alice@peer.example")
+        composeTestRule.onNodeWithTag("folder-follow-name-input").performScrollTo().performTextInput("Holiday")
+        // A failure keeps the form open with what the user typed.
+        composeTestRule.onNodeWithTag("folder-follow-confirm").performScrollTo().assertIsEnabled().performClick()
+        assertEquals(listOf("alice@peer.example" to "Holiday"), calls)
+        composeTestRule.onAllNodesWithTag("folder-follow-name-input").assertCountEquals(1)
+        // Success closes it.
+        succeed = true
+        composeTestRule.onNodeWithTag("folder-follow-confirm").performScrollTo().performClick()
+        composeTestRule.onAllNodesWithTag("folder-follow-name-input").assertCountEquals(0)
+    }
+
+    @Test
+    fun followedRowsPaintStatusAndUnfollowByPinnedIdentity() {
+        val unfollows = mutableListOf<Pair<String, Long>>()
+        render(
+            snapshot = snapshot(
+                followed = listOf(
+                    followed("Holiday"),
+                    followed("Gone", available = false, folderId = 9L, home = "https://peer.example"),
+                ),
+            ),
+            actions = FoldersActions(onUnfollowFolder = { home, id -> unfollows += home to id }),
+        )
+        composeTestRule.onAllNodesWithTag("folder-followed-item").assertCountEquals(2)
+        val statuses = composeTestRule.onAllNodesWithTag("folder-followed-status", useUnmergedTree = true)
+        statuses[0].assertTextEquals(context.getString(R.string.devices_followed_status_following))
+        statuses[1].assertTextEquals(context.getString(R.string.devices_followed_status_unavailable))
+        // Never a folder-row: a followed folder has nothing to expand.
+        composeTestRule.onAllNodesWithText("Holiday").assertCountEquals(1)
+        composeTestRule.onAllNodesWithTag("folder-unfollow-button")[1].performScrollTo().performClick()
+        assertEquals(listOf("https://peer.example" to 9L), unfollows)
+    }
+
+    // ── FollowOnBanner: an error leaves the banner when it retires ──
+
+    @Test
+    fun aRetiredErrorLeavesTheBanner() {
+        val messages = com.fauna.app.core.AppMessages()
+        var text by androidx.compose.runtime.mutableStateOf<String?>("nest away")
+        composeTestRule.setContent { FollowOnBanner(text, messages) }
+        composeTestRule.waitForIdle()
+        org.junit.Assert.assertEquals("nest away", messages.error.value)
+
+        text = null
+        composeTestRule.waitForIdle()
+        org.junit.Assert.assertNull(messages.error.value)
+    }
+
+    @Test
+    fun aRetiredErrorLeavesAnotherSourcesTextStanding() {
+        val messages = com.fauna.app.core.AppMessages()
+        var text by androidx.compose.runtime.mutableStateOf<String?>("nest away")
+        composeTestRule.setContent { FollowOnBanner(text, messages) }
+        composeTestRule.waitForIdle()
+
+        messages.showError("a gesture failed")
+        text = null
+        composeTestRule.waitForIdle()
+        org.junit.Assert.assertEquals("a gesture failed", messages.error.value)
     }
 }

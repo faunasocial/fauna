@@ -8,11 +8,12 @@ guide: docs/guides/cloud-sync.md § The idea: folders
 
 ## What a user gets
 
-A folder is a set of files your nest keeps: a syncing folder or a backup. Make
-one in a short wizard, choose which of your devices take part and how, decide how
-many copies the nest keeps and whether the bytes rest on it at all, and see what
-each device changed. Conflicts resolve on their own and land on a review list, with
-a policy you choose per folder.
+A folder holds files your nest looks after; it has no fixed type: you say what
+each of your devices does with it and who can see it. Make one in a short
+wizard, choose which of your devices take part and how, decide how many copies
+the nest keeps and whether it keeps the files' contents at all or only passes
+them between your devices, and see what each device changed. Conflicts resolve
+on their own and land on a review list, with a policy you choose per folder.
 
 ## Coverage contract
 
@@ -54,43 +55,46 @@ Stamped 2026-09-19 at 25eff180d4.
     - `tests/e2e-unified/tests/test_folder_exclusive_editing_control.py::test_exclusive_editing_toggle_and_lease_status`
 13. [app] Binding a location on a computer the folder did not include adds that computer to the folder's devices, doing everything a device does by default, and the folder row shows it straight away — `docs/goal/behavior/file-sync.md` § 4. Delivery (Nest → the other devices)
     - `tests/e2e-unified/tests/test_folder_bind_enrols_place.py::test_binding_a_location_gives_a_placeless_device_its_seat`
+14. [app] An error a folder row's own background read put up while the nest was down clears by itself once the nest answers again, and never takes a failed action's message with it — `docs/goal/ui/folders.md` § Errors & edge cases
+    - `tests/e2e-unified/tests/test_folder_row_read_error_retires.py::test_a_row_read_error_painted_in_a_nest_gap_retires_after_the_nest_returns`
 
 ## Status
 
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ⚠ partial | 0.1.5-dev+110d1248 standalone |
-| linux | ⚠ partial | 0.1.4-dev+ea391d07 standalone |
-| windows | ⚠ partial | 0.1.5-dev+61b844ca standalone |
-| macos | ⚠ partial | 0.1.5-dev+61b844ca standalone |
-| ios | ⚠ partial | 0.1.5-dev+61b844ca standalone |
+| web | ⚠ partial | 0.1.5-dev+3b591c2e standalone |
+| linux | ✅ full | 0.1.5-dev+3b591c2e standalone |
+| windows | ⚠ partial | 0.1.5-dev+3b591c2e standalone |
+| macos | ✅ full | 0.1.5-dev+3f9f2b95 standalone |
+| ios | ⚠ partial | 0.1.5-dev+3b591c2e standalone |
 | android |  no run recorded | |
-| tui | ✅ full | 0.1.2-dev+7663afa6 standalone |
+| tui | ✅ full | 0.1.5-dev+3b591c2e standalone |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
-| 1 | app | `tests/e2e-unified/tests/test_folders.py::test_folders_empty_state` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 1 | app | `tests/e2e-unified/tests/test_folders.py::test_create_folder_via_wizard_sync_mode` | web (linux): failed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 1 | app | `tests/e2e-unified/tests/test_folders.py::test_folders_empty_state` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 1 | app | `tests/e2e-unified/tests/test_folders.py::test_create_folder_via_wizard_sync_mode` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 1 | app | `tests/e2e-unified/tests/test_folder_nest_place.py::test_nest_place_policy_is_reachable_editable_and_clearable` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (windows): passed |
-| 1 | app | `tests/e2e-unified/tests/test_folders.py::test_delete_folder` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 1 | app | `tests/e2e-unified/tests/test_folders.py::test_folders_load_surfaces_no_error` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 2 | app | `tests/e2e-unified/tests/test_folders.py::test_edit_folder_paths` | web (linux): failed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 1 | app | `tests/e2e-unified/tests/test_folders.py::test_delete_folder` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 1 | app | `tests/e2e-unified/tests/test_folders.py::test_folders_load_surfaces_no_error` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 2 | app | `tests/e2e-unified/tests/test_folders.py::test_edit_folder_paths` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 3 | app | `tests/e2e-unified/tests/test_folder_place_editor.py::test_device_place_editor_edits_a_seat_in_place` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 4 | app | `tests/e2e-unified/tests/test_folder_nest_place.py::test_nest_place_policy_is_reachable_editable_and_clearable` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (windows): passed |
-| 4 | app | `tests/e2e-unified/tests/test_folder_nest_place.py::test_a_refresh_keeps_staged_nest_place_edits` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed, tui (windows): passed |
+| 4 | app | `tests/e2e-unified/tests/test_folder_nest_place.py::test_a_refresh_keeps_staged_nest_place_edits` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (windows): passed |
 | 5 | app | `tests/e2e-unified/tests/test_folder_residency_control.py::test_the_residency_control_arms_before_it_evicts` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 5 | app | `tests/e2e-unified/tests/test_folder_residency_control.py::test_the_flip_back_to_full_needs_no_confirm` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 6 | app | `tests/e2e-unified/tests/test_folders.py::test_folder_conflict_policy_round_trip` | web (linux): passed, linux (linux): failed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 6 | app | `tests/e2e-unified/tests/test_folders.py::test_sync_default_conflict_policy_stamps_new_sets` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): failed, tui (linux): passed |
-| 6 | app | `tests/e2e-unified/tests/test_folders.py::test_sync_default_conflict_policy_survives_relaunch` | web (linux): passed, linux (linux): failed, windows (windows): passed, tui (linux): passed |
-| 7 | app | `tests/e2e-unified/tests/test_devices_conflicts.py::TestConflictReviewList::test_resolved_conflict_renders_review_row_and_repoints` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
-| 7 | app | `tests/e2e-unified/tests/test_devices_conflicts.py::TestConflictReviewList::test_unresolved_conflict_row_is_informational` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
-| 8 | app | `tests/e2e-unified/tests/test_folders.py::test_folder_device_activity_reflects_recorded_changes` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 6 | app | `tests/e2e-unified/tests/test_folders.py::test_folder_conflict_policy_round_trip` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 6 | app | `tests/e2e-unified/tests/test_folders.py::test_sync_default_conflict_policy_stamps_new_sets` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 6 | app | `tests/e2e-unified/tests/test_folders.py::test_sync_default_conflict_policy_survives_relaunch` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 7 | app | `tests/e2e-unified/tests/test_devices_conflicts.py::TestConflictReviewList::test_resolved_conflict_renders_review_row_and_repoints` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 7 | app | `tests/e2e-unified/tests/test_devices_conflicts.py::TestConflictReviewList::test_unresolved_conflict_row_is_informational` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 8 | app | `tests/e2e-unified/tests/test_folders.py::test_folder_device_activity_reflects_recorded_changes` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 9 | app | `tests/e2e-unified/tests/test_folder_nest_place.py::test_nest_place_policy_is_reachable_editable_and_clearable` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (windows): passed |
 | 10 | app | `tests/e2e-unified/tests/test_folder_wizard_places.py::test_a_new_folder_starts_with_the_devices_and_places_picked_in_the_wizard` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 11 | nest | `tests/e2e-unified/tests/api/test_folder_residency_serving_refusals.py::test_a_no_rest_folder_refuses_to_be_served_whichever_moves_second` | nest (linux): passed |
 | 11 | nest | `tests/e2e-unified/tests/api/test_folder_residency_serving_refusals.py::test_a_public_folder_is_never_metadata_only_in_either_order` | nest (linux): passed |
-| 12 | app | `tests/e2e-unified/tests/test_folder_exclusive_editing_control.py::test_exclusive_editing_toggle_and_lease_status` | web (linux): passed, linux (linux): passed, tui (linux): passed |
-| 13 | app | `tests/e2e-unified/tests/test_folder_bind_enrols_place.py::test_binding_a_location_gives_a_placeless_device_its_seat` | linux (linux): passed, windows (windows): passed, tui (linux): passed |
+| 12 | app | `tests/e2e-unified/tests/test_folder_exclusive_editing_control.py::test_exclusive_editing_toggle_and_lease_status` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 13 | app | `tests/e2e-unified/tests/test_folder_bind_enrols_place.py::test_binding_a_location_gives_a_placeless_device_its_seat` | linux (linux): passed, windows (windows): passed, macos (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 14 | app | `tests/e2e-unified/tests/test_folder_row_read_error_retires.py::test_a_row_read_error_painted_in_a_nest_gap_retires_after_the_nest_returns` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 <!-- features-render:end -->

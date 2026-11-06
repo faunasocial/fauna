@@ -796,6 +796,41 @@ impl GroupMachinerySchedule {
     }
 }
 
+/// The group **content** branch — the [`GroupMachinerySchedule`] twin rooted
+/// on one group generation's [`GenerationKey`] instead of the scope's
+/// never-rotated machinery root: what a `GenerationTip`-sealed group-plane
+/// entry (`fauna_protocol::group_state::GroupSealing::GenerationTip`) seals
+/// under (`p2p-shared-set-build.md` § Build design — the group set, decision
+/// 3).
+///
+/// **No new context strings:** the two axes are
+/// [`crate::group_content::group_content_key`]'s frozen
+/// `fauna.group.content.{seal,nonce}.v1` pair, so a kind's `entry_key` IS
+/// that kind's group content key — one content branch per generation, not a
+/// second one beside the room kinds'. The entry envelope and the blinded item
+/// key are the same class-2 mechanics as the machinery plane's; only the root
+/// rotates. A different generation is a different key: severance comes from
+/// the key material, as everywhere in R14 (account-data-plane.md § The
+/// ratified decisions).
+pub struct GroupContentSchedule(Branch);
+
+impl GroupContentSchedule {
+    /// Derive the content branch for one group generation's key.
+    pub fn derive(gen_key: &GenerationKey) -> GroupContentSchedule {
+        GroupContentSchedule(Branch::derive(
+            gen_key.as_bytes(),
+            crate::group_content::GROUP_CONTENT_SEAL_CONTEXT,
+            crate::group_content::GROUP_CONTENT_NONCE_CONTEXT,
+        ))
+    }
+
+    /// Fan out both axes for one group content kind — non-delegable, like the
+    /// machinery branch: there is no path from a group's content to a grant.
+    pub fn for_kind(&self, kind: &str) -> AccountStateKindKeys {
+        self.0.for_kind(kind)
+    }
+}
+
 /// 32 fresh CSPRNG bytes — the plain salt mint shared by surfaces that need
 /// a random 32 with no custody semantics (birth salts, admission salts).
 /// The custody-typed siblings ([`GenerationKey::mint`],
@@ -1150,6 +1185,32 @@ pub fn decrypt_backup_chunk(key: &BackupKey, ciphertext: &[u8]) -> Result<Vec<u8
         .map_err(|e| {
             anyhow::anyhow!("backup chunk decryption failed (wrong key or tampered data): {e}")
         })
+}
+
+/// The **group-ring mirror key** — what a device's mirror of its held group
+/// sets' rings rests under where an app-dead capability host reads it
+/// (`group-set.md` § Build design — the group set, decision 12). A sibling of
+/// [`ReplicaSealKey`] under its own domain-separation context: derived from
+/// the account's [`BackupKey`], so it is held exactly where the store's own
+/// at-rest key is held — the app's slot, and the capability the host is built
+/// with — and rests nowhere beside the data. A derivation, not a mint, for the
+/// same reasons the replica seal key is one.
+#[derive(Clone)]
+pub struct GroupRingMirrorKey(Zeroizing<[u8; 32]>);
+
+impl GroupRingMirrorKey {
+    /// The mirror key for the account whose `BackupKey` is `backup`.
+    pub fn derive(backup: &BackupKey) -> GroupRingMirrorKey {
+        GroupRingMirrorKey(Zeroizing::new(blake3::derive_key(
+            "fauna group-ring mirror key 2026-10-30",
+            backup.as_bytes(),
+        )))
+    }
+
+    /// The raw AEAD key — for the mirror's seal and open only.
+    pub fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
 }
 
 /// The app-side account replica's **local seal key** — what the store's opened

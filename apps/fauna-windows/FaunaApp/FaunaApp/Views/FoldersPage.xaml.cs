@@ -57,8 +57,11 @@ public sealed partial class FoldersPage : Page, IAsyncLoadedPage
     /// async <see cref="Page_Loaded"/> so the nav-readiness regression test can
     /// DETERMINISTICALLY widen the load window (set via the <c>folder_load_delay_ms</c>
     /// test command; <see cref="App"/>.HandleTestCommand). Consumed — reset to 0 — by the
-    /// next load. Zero in production.</summary>
+    /// next load. Compiled out of Release with the agent that sets it (convention
+    /// 15).</summary>
+#if DEBUG || FAUNA_E2E_AGENT
     internal static int TestLoadDelayMs;
+#endif
 
     // ── e2e nav-readiness barrier (IAsyncLoadedPage) ──
     // Completed at the END of the async Page_Loaded so the TestAgent can hold ready=false
@@ -81,7 +84,6 @@ public sealed partial class FoldersPage : Page, IAsyncLoadedPage
     // login — the Sharing UI's share/remove actions guard for null rather than
     // failing the whole page load.
     private ConversationsSession? _convSession;
-    private INestHttpClient? _nestHttp;
     private ISessionAccount? _account;
     private ICryptoService? _crypto;
 
@@ -213,6 +215,26 @@ public sealed partial class FoldersPage : Page, IAsyncLoadedPage
         });
     }
 
+    /// <summary>
+    /// A group set's review list moved — the status tick's re-read, or a restore's — so
+    /// repaint the conflict list, which those rows continue (group-set.md § Build design —
+    /// the group set, decision 9). Raised off the UI thread as often as not, so it hops.
+    /// </summary>
+    private void OnSetConflictsChanged()
+    {
+        DispatcherQueue?.TryEnqueue(() =>
+        {
+            try
+            {
+                RerenderConflicts();
+            }
+            catch (Exception ex)
+            {
+                E2eTrace.Write($"[folders] review-list re-render threw: {ex.Message}");
+            }
+        });
+    }
+
     // The localized machine error (snapshot.error) currently displayed, combined with
     // the folder-binding VM error in UpdateErrorBar so both seams share the one
     // canonical error-message surface.
@@ -313,7 +335,6 @@ public sealed partial class FoldersPage : Page, IAsyncLoadedPage
         {
             _rpc = clients.Rpc;
             _convSession = clients.ConvSession;
-            _nestHttp = clients.Nest;
             _account = clients.Account;
             _crypto = clients.Crypto;
             // Per-set device-activity live refresh (fauna.sync.changed). This page
@@ -343,7 +364,7 @@ public sealed partial class FoldersPage : Page, IAsyncLoadedPage
     private bool _storeResyncAgain;
 
     /// <summary>The store-change re-read of the open Folders page: the folder
-    /// machine's refresh (its observer repaints the rows), the webdav serve
+    /// machine's resync (its observer repaints the rows), the webdav serve
     /// capability and the global default conflict policy select. Level-safe: a
     /// failed read keeps the painted capability and policy (the visit's own load
     /// still degrades a failure to disabled / automatic), the select moves only
@@ -365,7 +386,7 @@ public sealed partial class FoldersPage : Page, IAsyncLoadedPage
                 _storeResyncAgain = false;
                 try
                 {
-                    await _machine.Refresh();
+                    await _machine.Resync();
                 }
                 catch (Exception ex)
                 {
@@ -401,7 +422,13 @@ public sealed partial class FoldersPage : Page, IAsyncLoadedPage
         if (_rpc is null) return;
         string? stored;
         try { stored = await _rpc.DefaultConflictPolicyGetAsync(); }
-        catch { return; }
+        catch (Exception ex)
+        {
+            // A refused read says why; any other failed read keeps the painted policy.
+            SetDefaultPolicyRefusal(FirstListingRefusal.Of(ex));
+            return;
+        }
+        SetDefaultPolicyRefusal(null);
         var current = stored ?? "auto";
         if (DefaultConflictPolicyCombo.SelectedItem is ComboBoxItem { Tag: string painted } && painted == current)
             return;
@@ -427,6 +454,7 @@ public sealed partial class FoldersPage : Page, IAsyncLoadedPage
         {
             controller.Changed -= OnBindingsChanged;
             controller.BindConfirmed -= OnBindConfirmed;
+            controller.SetConflictsChanged -= OnSetConflictsChanged;
             _boundController = null;
         }
         if (_rpc is not null)
@@ -447,8 +475,10 @@ public sealed partial class FoldersPage : Page, IAsyncLoadedPage
         // e2e-only one-shot slow-load injection (TestLoadDelayMs): keeps _machine null
         // for `testDelayMs` ms so the nav-readiness regression can prove an immediate
         // post-navigate add-click is honoured (pre-fix it was dropped). Consumed here.
+#if DEBUG || FAUNA_E2E_AGENT
         var testDelayMs = TestLoadDelayMs;
         TestLoadDelayMs = 0;
+#endif
 
         // Signal the nav-readiness barrier even on the early return so the agent's
         // bounded await never hangs a navigation to a not-yet-wired page.
@@ -459,9 +489,13 @@ public sealed partial class FoldersPage : Page, IAsyncLoadedPage
 
         LoadProgress.IsActive = true;
         LoadProgress.Visibility = Visibility.Visible;
+        var locationsLoad = Task.CompletedTask;
         try
         {
+            locationsLoad = LoadLocationBindingsAsync();
+#if DEBUG || FAUNA_E2E_AGENT
             if (testDelayMs > 0) await Task.Delay(testDelayMs);
+#endif
             // The two per-page-visit capability reads that gate row controls: the
             // webdav serve capability (Sync rows) and the creator's own tier list (the
             // website-enabled paywall select's options). Both are best-effort and fail SAFE —
@@ -505,15 +539,50 @@ public sealed partial class FoldersPage : Page, IAsyncLoadedPage
             // was read above, ahead of the nest.
             await LoadNestPendingSharesAsync();
 
-            // The local-folder binding rides a SEPARATE seam (the user-session
-            // fauna-sync helper). Build its VM + load the folder list so each set row
-            // can nest its bound folders. A CollectionChanged re-render keeps the open
-            // set's nested list current after a bind/unbind/mode mutation.
-            // The LOGIN owns the binding control plane (optimistic rows must survive leaving
-            // this page — and must exist before the agent session does), so the production VM
-            // borrows it and subscribes for background repaints. The injected e2e channel is
-            // a pure render fixture and gets its OWN throwaway controller, keeping the
-            // login's — and so the data.sync block — untouched.
+            // Sync defaults (page-level): load the persisted global default conflict
+            // policy for NEW sets (fauna.state.sync-prefs) into the combo. Populated
+            // + pre-selected under the suppress flag so the initial bind never echoes
+            // a save.
+            await LoadSyncDefaultsAsync();
+        }
+        catch (Exception ex)
+        {
+            ErrorBar.Message = Strings.Error(ex);
+            ErrorBar.IsOpen = true;
+        }
+        finally
+        {
+            await locationsLoad;
+            LoadProgress.IsActive = false;
+            LoadProgress.Visibility = Visibility.Collapsed;
+            RenderPage();
+            // The initial load has rendered (success or handled error): release the
+            // nav-readiness barrier. ALWAYS in finally so the agent's bounded await
+            // never hangs a navigation. See IAsyncLoadedPage.
+            _loadComplete.TrySetResult();
+        }
+    }
+
+    /// <summary>The local-folder binding half of the page load, which never throws: it
+    /// rides a SEPARATE seam from the nest (the user-session fauna-sync helper), and the
+    /// bound rows are this device's own state. So its VM is built before the page's first
+    /// await and paints what the model holds at once, and its agent read overlaps the
+    /// nest reads rather than following them: sequenced behind them, a nest that is down
+    /// or slow left an opened row with no bound rows, and so without the switch that keeps
+    /// an unsent change (on-demand-files.md § The free-up-space gesture where the OS
+    /// offers none, <i>Keep on this device is the switch</i>;
+    /// <see cref="LoadGroupSharesAsync"/> names the same trap).
+    ///
+    /// <para>A CollectionChanged re-render keeps the open set's nested list current after
+    /// a bind/unbind/mode mutation. The LOGIN owns the binding control plane (optimistic
+    /// rows must survive leaving this page — and must exist before the agent session
+    /// does), so the production VM borrows it and subscribes for background repaints. The
+    /// injected e2e channel is a pure render fixture and gets its OWN throwaway
+    /// controller, keeping the login's — and so the data.sync block — untouched.</para></summary>
+    private async Task LoadLocationBindingsAsync()
+    {
+        try
+        {
             if (TestLocationChannelOverride is { } injected)
             {
                 _syncVm = new LocationsViewModel(injected, new FfiLocationBindingsModel());
@@ -528,35 +597,25 @@ public sealed partial class FoldersPage : Page, IAsyncLoadedPage
                 {
                     previous.Changed -= OnBindingsChanged;
                     previous.BindConfirmed -= OnBindConfirmed;
+                    previous.SetConflictsChanged -= OnSetConflictsChanged;
                 }
                 _boundController = controller;
                 controller.Changed += OnBindingsChanged;
                 controller.BindConfirmed += OnBindConfirmed;
+                controller.SetConflictsChanged += OnSetConflictsChanged;
+                // The review rows the status tick read before this visit are already in
+                // the login's model: paint them now rather than at the next move.
+                RerenderConflicts();
             }
             _syncVm.PropertyChanged += SyncVm_PropertyChanged;
             _syncVm.Locations.CollectionChanged += (_, _) => RefreshExpandedLocations();
+            _syncVm.Render();
             await _syncVm.LoadCommand.ExecuteAsync(null);
-
-            // Sync defaults (page-level): load the persisted global default conflict
-            // policy for NEW sets (fauna.state.sync-prefs) into the combo. Populated
-            // + pre-selected under the suppress flag so the initial bind never echoes
-            // a save.
-            await LoadSyncDefaultsAsync();
         }
         catch (Exception ex)
         {
             ErrorBar.Message = Strings.Error(ex);
             ErrorBar.IsOpen = true;
-        }
-        finally
-        {
-            LoadProgress.IsActive = false;
-            LoadProgress.Visibility = Visibility.Collapsed;
-            RenderPage();
-            // The initial load has rendered (success or handled error): release the
-            // nav-readiness barrier. ALWAYS in finally so the agent's bounded await
-            // never hangs a navigation. See IAsyncLoadedPage.
-            _loadComplete.TrySetResult();
         }
     }
 
@@ -683,6 +742,17 @@ public sealed partial class FoldersPage : Page, IAsyncLoadedPage
         RenderWizard(snap.wizard);
     }
 
+    // The first-listing refusal of the default-conflict-policy read, shown on the
+    // page's error-message bar (account-client-lifecycle.md § The first listing, (4)).
+    private string? _defaultPolicyRefusal;
+
+    private void SetDefaultPolicyRefusal(string? refusal)
+    {
+        if (_defaultPolicyRefusal == refusal) return;
+        _defaultPolicyRefusal = refusal;
+        UpdateErrorBar();
+    }
+
     private void SyncVm_PropertyChanged(object? sender, PropertyChangedEventArgs e)
     {
         if (e.PropertyName == nameof(LocationsViewModel.ErrorMessage)) UpdateErrorBar();
@@ -691,21 +761,48 @@ public sealed partial class FoldersPage : Page, IAsyncLoadedPage
     // Surface whichever error is live on the one canonical error-message bar — the
     // machine read/gesture error takes priority over the (secondary) folder-binding
     // "helper unavailable" error.
+    //
+    // An open row's background reads (actor members, device activity, place roster,
+    // destination places) each hold their own slot in _rowReads: a failed read puts
+    // its text up through the chain below, and its next good answer retires exactly
+    // that slot (folders.md § Errors & edge cases — a folder row's own reads retire
+    // their own error). A gesture paints the bar directly and owns no slot.
+    private readonly RowReadErrors _rowReads = new();
+    // Remembers the text this chain itself put on the bar: the bar is closed only
+    // while it still shows that text, so a machine tick (a Resync) never wipes a
+    // gesture's direct paint.
+    private readonly ErrorBarOwnership _barOwnership = new();
+
     private void UpdateErrorBar()
     {
         var syncErr = string.IsNullOrEmpty(_syncVm?.ErrorMessage) ? null : _syncVm!.ErrorMessage;
-        var msg = _machineError ?? syncErr;
-        if (msg is not null)
+        var msg = _machineError ?? _rowReads.Text ?? _defaultPolicyRefusal ?? syncErr;
+        switch (_barOwnership.Next(msg, ErrorBar.IsOpen, ErrorBar.Message))
         {
-            ErrorBar.Message = msg;
-            ErrorBar.IsOpen = true;
-            App.CurrentErrorMessage = msg;
+            case BarAction.Show:
+                ErrorBar.Message = msg;
+                ErrorBar.IsOpen = true;
+                App.CurrentErrorMessage = msg;
+                break;
+            case BarAction.Close:
+                ErrorBar.IsOpen = false;
+                App.CurrentErrorMessage = null;
+                break;
         }
-        else
-        {
-            ErrorBar.IsOpen = false;
-            App.CurrentErrorMessage = null;
-        }
+    }
+
+    /// <summary>A row read failed: hold its text in its own slot and show it.</summary>
+    private void FailRowRead(RowRead read, string set, Exception ex)
+    {
+        _rowReads.Set(read, set, Strings.Error(ex));
+        UpdateErrorBar();
+    }
+
+    /// <summary>A row read answered: retire exactly the text it put up.</summary>
+    private void PassRowRead(RowRead read, string set)
+    {
+        _rowReads.Clear(read, set);
+        UpdateErrorBar();
     }
 
     // ── Folders (Expander rows over FolderSummary) ──
@@ -739,6 +836,9 @@ public sealed partial class FoldersPage : Page, IAsyncLoadedPage
         _expandedLocationEmpty = null;
         _expandedLocationInput = null;
         _expandedDeviceActivityContainer = null;
+        // Every row is rebuilt, so the reads of the re-opened one re-fire and
+        // re-fill their own slots; a stale slot must not outlive its row.
+        _rowReads.ClearAll();
         foreach (var fs in folders)
         {
             var row = fs.role == "member" ? BuildSharedWithMeRow(fs) : BuildFolderRow(fs);
@@ -762,40 +862,59 @@ public sealed partial class FoldersPage : Page, IAsyncLoadedPage
         }
         // Landed group scopes (offline co-present ceremony, p2p.md § Offline
         // share initiation): appended AFTER the M2 rows, continuing the same
-        // folder-row id family — a ceremony-born set is a set. No new ids, no
-        // leave button (severance is the authority's mint, not this device's),
-        // no name (v1 sets are nameless — the row shows the short scope id).
+        // folder-row id family — a ceremony-born set is a set — each with the
+        // device-local folder-location-* binding section under the scope's
+        // folderId. No new ids, no leave button (severance is the authority's
+        // mint, not this device's). An open one re-opens like an M2 row, keyed
+        // by its ref (linux's restore_expansion).
         var landedScopes = 0;
 #if P2P_SHARE
         foreach (var scope in _groupShareViews.scopes)
-            FolderContainer.Children.Add(BuildGroupScopeRow(scope));
+        {
+            var row = BuildGroupScopeRow(scope);
+            FolderContainer.Children.Add(row);
+            if (reopen == scope.folderId)
+                row.IsExpanded = true;
+        }
         landedScopes = _groupShareViews.scopes.Length;
 #endif
         EmptyText.Visibility = folders.Count == 0 && landedScopes == 0
             ? Visibility.Visible : Visibility.Collapsed;
-        AppDataSnapshot.SetSyncFiles(folders.Select(f =>
-            new AppDataSnapshot.SyncFileSnapshot(f.name, f.name, "")));
+        AppDataSnapshot.SetSyncFiles(folders);
     }
 
 #if P2P_SHARE
+    /// <summary>A landed group scope's label on this page: its recorded name, else its short
+    /// scope id. One rule for the folder row and the review rows that name the set in
+    /// <c>conflict-file-info</c> (macOS's <c>FfiGroupScope.pageLabel</c>).</summary>
+    private static string GroupScopeLabel(FfiGroupScope scope) =>
+        scope.name ?? S.Get("folders/offline_share_set").Replace("{code}", scope.shortId);
+
     /// <summary>A landed group scope, read from the group plane's store
     /// (<c>FfiGroupShareViews.scopes</c>) rather than the ceremony record — a
     /// recorded-but-never-adopted scope is silently absent, never painted as a
     /// set the device cannot read (p2p.md § Offline share initiation → *Built —
-    /// the affordance, both roles*). Badged with who shared it when this device
-    /// did not mint the scope (<c>sharedBy</c> set); the initiator's own
-    /// minted scope carries no badge, mirroring the ordinary owner row above.</summary>
-    private FrameworkElement BuildGroupScopeRow(FfiGroupScope scope)
+    /// the affordance, both roles*). Labelled by the set's recorded name, else
+    /// its short scope id; its <c>folder-shared-badge</c> reads "Shared by
+    /// ‹them›" on someone else's scope, "Shared · N" on your own — the two
+    /// readings the M2 rows use. Its body is the device-local folder binding and
+    /// nothing else: no rename, no leave — severance is the authority's mint, not
+    /// a self-scoped roster drop. A folder bound here runs an engine with no nest
+    /// leg, its content moving over the group plane (group-set.md § Build design —
+    /// the group set; linux's <c>build_group_scope_row</c>, tui's
+    /// <c>group_scope_row_elements</c>). The binding is keyed by the scope's
+    /// <c>FolderRef::Group</c> wire form, never its label: a name can change and
+    /// can equal an M2 set's, the ref can do neither.</summary>
+    private Expander BuildGroupScopeRow(FfiGroupScope scope)
     {
-        var row = new Grid { Padding = new Thickness(8), ColumnSpacing = 12 };
-        row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-        row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-        Microsoft.UI.Xaml.Automation.AutomationProperties.SetAutomationId(row, Ids.FolderRow);
-        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(row, scope.shortId);
+        var label = GroupScopeLabel(scope);
+        var header = new Grid { ColumnSpacing = 12 };
+        header.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        header.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
 
         var name = new TextBlock
         {
-            Text = scope.shortId,
+            Text = label,
             VerticalAlignment = VerticalAlignment.Center,
             TextTrimming = TextTrimming.CharacterEllipsis,
             TextWrapping = TextWrapping.NoWrap,
@@ -804,7 +923,9 @@ public sealed partial class FoldersPage : Page, IAsyncLoadedPage
 
         var badge = new TextBlock
         {
-            Text = scope.sharedBy is { Length: > 0 } who ? S.Get("devices/shared_by").Replace("{who}", who) : string.Empty,
+            Text = scope.sharedBy is { Length: > 0 } who
+                ? S.Get("devices/shared_by").Replace("{who}", who)
+                : S.Get("devices/shared_badge").Replace("{count}", scope.memberCount.ToString()),
             VerticalAlignment = VerticalAlignment.Center,
             TextTrimming = TextTrimming.CharacterEllipsis,
             TextWrapping = TextWrapping.NoWrap,
@@ -812,9 +933,46 @@ public sealed partial class FoldersPage : Page, IAsyncLoadedPage
         Microsoft.UI.Xaml.Automation.AutomationProperties.SetAutomationId(badge, Ids.FolderSharedBadge);
         Grid.SetColumn(badge, 1);
 
-        row.Children.Add(name);
-        row.Children.Add(badge);
-        return row;
+        header.Children.Add(name);
+        header.Children.Add(badge);
+
+        var exp = new Expander
+        {
+            HorizontalAlignment = HorizontalAlignment.Stretch,
+            HorizontalContentAlignment = HorizontalAlignment.Stretch,
+            Header = header,
+        };
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetAutomationId(exp, Ids.FolderRow);
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(exp, label);
+        // The writer-member row's lazy body + deferred-scroll + Collapsed-reset shape
+        // (BuildWriterMemberFolderRow), over the binding section alone.
+        exp.Expanding += (_, _) =>
+        {
+            _expandedFolder = scope.folderId;
+            var panel = new StackPanel { Spacing = 12, Padding = new Thickness(8, 8, 8, 8) };
+            panel.Children.Add(BuildLocationBindingSection(new LocationBindTarget(scope.folderId, scope.folderId)));
+            exp.Content = panel;
+            void OnLayout(object? s, object le)
+            {
+                if (exp.Content is not FrameworkElement content || content.ActualHeight <= 0)
+                    return;
+                exp.StartBringIntoView();
+                exp.LayoutUpdated -= OnLayout;
+            }
+            exp.LayoutUpdated += OnLayout;
+        };
+        exp.Collapsed += (_, _) =>
+        {
+            exp.Content = null;
+            if (_expandedFolder == scope.folderId)
+            {
+                _expandedFolder = null;
+                _expandedLocationContainer = null;
+                _expandedLocationEmpty = null;
+                _expandedLocationInput = null;
+            }
+        };
+        return exp;
     }
 #endif
 
@@ -900,6 +1058,9 @@ public sealed partial class FoldersPage : Page, IAsyncLoadedPage
                 _expandedLocationEmpty = null;
                 _expandedLocationInput = null;
                 _expandedDeviceActivityContainer = null;
+                // The row's reads can no longer answer: their text goes with it.
+                _rowReads.ClearSet(fs.name);
+                UpdateErrorBar();
             }
         };
         return exp;
@@ -1199,6 +1360,8 @@ public sealed partial class FoldersPage : Page, IAsyncLoadedPage
         catch { _groupShareViews = new FfiGroupShareViews(Array.Empty<FfiPendingGroupShare>(), Array.Empty<FfiGroupScope>()); }
         RenderPendingShares(_pendingShares);
         if (_machine is not null) RenderFolders(_machine.Snapshot().folders);
+        // The scopes name the group sets whose review rows the conflict list carries.
+        RerenderConflicts();
     }
 #endif
 
@@ -1743,14 +1906,56 @@ public sealed partial class FoldersPage : Page, IAsyncLoadedPage
 
         // The hint rides the SAME (bound, current) inputs as the option set, so
         // the copy and the picker can never disagree about what is offered.
-        section.Children.Add(new TextBlock
+        var audienceHint = new TextBlock
         {
             Text = S.Resolve(uniffi.fauna_ffi.FaunaFfiMethods.AudienceHint(bound, current)),
             Opacity = 0.6,
             FontSize = 12,
             TextWrapping = TextWrapping.Wrap,
-        });
+        };
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetAutomationId(audienceHint, Ids.FolderAudienceHint);
+        section.Children.Add(audienceHint);
+
+        // Re-confirm door for a public folder this seat cannot verify
+        // (folders.md § Audience and website serving → *Re-confirming a public
+        // folder this seat cannot verify*). A folder public on the nest's say-so
+        // whose owner attestation does not verify under this seat's own actor id
+        // (one made public before attestations existed) rests sealed on every
+        // upgraded seat until the owner confirms again: say so, and offer the one
+        // gesture that re-mints it. The verdict is the shared predicate — never
+        // re-derive the signature check here. A dedicated button, because
+        // re-picking `public` on a select already at `public` fires no change;
+        // it ARMS the same FolderAudienceDialog the select does and commits
+        // nothing itself. The dialog is modal, so nothing beside it is reachable
+        // while it is armed — the linux AlertDialog shape.
+        if (_crypto is { HasKey: true } crypto
+            && uniffi.fauna_ffi.FaunaFfiMethods.DevicesFolderIsPublicUnverified(fs, crypto.ActorIdHex))
+        {
+            var unattested = new TextBlock
+            {
+                Text = S.Get("devices/folder_audience_unattested"),
+                Opacity = 0.6,
+                FontSize = 12,
+                TextWrapping = TextWrapping.Wrap,
+            };
+            Microsoft.UI.Xaml.Automation.AutomationProperties.SetAutomationId(unattested, Ids.FolderAudienceUnattested);
+            section.Children.Add(unattested);
+            var reconfirm = new Button { Content = S.Get("devices/folder_audience_reconfirm") };
+            Microsoft.UI.Xaml.Automation.AutomationProperties.SetAutomationId(reconfirm, Ids.FolderAudienceReconfirmButton);
+            reconfirm.Click += async (_, _) => await ArmPublicConfirm(name);
+            section.Children.Add(reconfirm);
+        }
         return section;
+    }
+
+    // Arm the declassify confirm for `setName` — the one place `public` is
+    // committed is FolderAudienceConfirm_Click, answering it. Shared by the
+    // select's `public` pick and the re-confirm button.
+    private async Task ArmPublicConfirm(string setName)
+    {
+        FolderAudienceDialog.XamlRoot = this.XamlRoot;
+        await Controls.Dialogs.ShowAsync(FolderAudienceDialog,
+            prepare: () => _pendingAudienceFolder = setName);
     }
 
     private async Task AudienceChanged(object sender, string setName, string currentAudience)
@@ -1785,9 +1990,7 @@ public sealed partial class FoldersPage : Page, IAsyncLoadedPage
                     break;
                 }
             }
-            FolderAudienceDialog.XamlRoot = this.XamlRoot;
-            await Controls.Dialogs.ShowAsync(FolderAudienceDialog,
-                prepare: () => _pendingAudienceFolder = setName);
+            await ArmPublicConfirm(setName);
             return;
         }
 
@@ -2033,7 +2236,7 @@ public sealed partial class FoldersPage : Page, IAsyncLoadedPage
         // was told nothing while the nest served its info page in their site's
         // place. _websiteAddressEnabled is the best-effort second half; UNKNOWN
         // is its own arm and must never claim the site is live.
-        section.Children.Add(new TextBlock
+        var websiteHint = new TextBlock
         {
             Text = S.Resolve(uniffi.fauna_ffi.FaunaFfiMethods.WebsiteServeHint(
                 uniffi.fauna_ffi.FaunaFfiMethods.NormalizeAudience(fs.audience, fs.mlsGroupId is not null),
@@ -2042,7 +2245,9 @@ public sealed partial class FoldersPage : Page, IAsyncLoadedPage
             Opacity = 0.6,
             FontSize = 12,
             TextWrapping = TextWrapping.Wrap,
-        });
+        };
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetAutomationId(websiteHint, Ids.FolderWebsiteHint);
+        section.Children.Add(websiteHint);
         return section;
     }
 
@@ -2244,8 +2449,17 @@ public sealed partial class FoldersPage : Page, IAsyncLoadedPage
     {
         if (_rpc is null) return;
         string? stored = null;
+        string? refusal = null;
         try { stored = await _rpc.DefaultConflictPolicyGetAsync(); }
-        catch { /* best-effort — absent preference renders as auto */ }
+        catch (Exception ex)
+        {
+            // A refused read (the first-listing gate) says why on error-message and
+            // paints no policy as the account's value; any other failed read stays
+            // best-effort — an absent preference renders as auto.
+            refusal = FirstListingRefusal.Of(ex);
+        }
+        SetDefaultPolicyRefusal(refusal);
+        if (refusal is not null) return;
         var current = stored ?? "auto";
 
         _suppressDefaultPolicyEvents = true;
@@ -2467,13 +2681,18 @@ public sealed partial class FoldersPage : Page, IAsyncLoadedPage
 
         // Say WHY it is disabled, inline — a tooltip alone is not discoverable on a
         // control the user cannot focus (same intent as the webdav needs-mail hint).
-        section.Children.Add(new TextBlock
+        var paywallHint = new TextBlock
         {
             Text = S.Get(hasTiers ? "devices/paywall_tier_hint" : "devices/paywall_tier_needs_tier"),
             Opacity = 0.6,
             FontSize = 12,
             TextWrapping = TextWrapping.Wrap,
-        });
+        };
+        // folder-paywall-hint is present exactly while the select is disabled for
+        // want of a tier (folders.md § Element IDs → Web paywall).
+        if (!hasTiers)
+            Microsoft.UI.Xaml.Automation.AutomationProperties.SetAutomationId(paywallHint, Ids.FolderPaywallHint);
+        section.Children.Add(paywallHint);
         return section;
     }
 
@@ -2601,6 +2820,7 @@ public sealed partial class FoldersPage : Page, IAsyncLoadedPage
         try
         {
             var devices = await _rpc.FoldersDevicesAsync(name);
+            PassRowRead(RowRead.DeviceActivity, name);
             container.Children.Clear();
             if (devices.Count == 0)
             {
@@ -2617,8 +2837,7 @@ public sealed partial class FoldersPage : Page, IAsyncLoadedPage
         }
         catch (Exception ex)
         {
-            ErrorBar.Message = Strings.Error(ex);
-            ErrorBar.IsOpen = true;
+            FailRowRead(RowRead.DeviceActivity, name, ex);
         }
     }
 
@@ -2679,6 +2898,7 @@ public sealed partial class FoldersPage : Page, IAsyncLoadedPage
             var devices = (IReadOnlyList<DeviceSummary>?)_machine?.Snapshot().devices
                 ?? new List<DeviceSummary>();
             seats = await _rpc.FoldersPlaceRowsAsync(name, devices);
+            PassRowRead(RowRead.PlaceRoster, name);
         }
         catch (Exception ex)
         {
@@ -2691,9 +2911,7 @@ public sealed partial class FoldersPage : Page, IAsyncLoadedPage
             // from a failing test (measured: the first `--app windows` run of
             // `test_folder_place_editor.py` reported only `count=0`, with the
             // cause swallowed).
-            ErrorBar.Message = Strings.Error(ex);
-            ErrorBar.IsOpen = true;
-            App.CurrentErrorMessage = ErrorBar.Message;
+            FailRowRead(RowRead.PlaceRoster, name, ex);
             seats = System.Array.Empty<FfiFolderMember>();
         }
         // ⚠ The RENDER is inside a try of its own, not left bare after the read's.
@@ -2851,11 +3069,15 @@ public sealed partial class FoldersPage : Page, IAsyncLoadedPage
     /// for a collapsed row, or any other set, is a no-op: re-fetching costs a WS
     /// round trip for nothing the user can see.
     /// </summary>
-    private void OnFolderChangedPushed(string folder)
+    private void OnFolderChangedPushed(string folder, byte[]? folderHash)
     {
-        if (_expandedFolder != folder) return;
+        // A sealed set's push carries a blank `folder` and only its hash, so the
+        // match goes through the shared predicate; the load then keys on the
+        // expanded set's own name, never the pushed one.
+        if (_expandedFolder is not { } expanded
+            || !SyncChangedGate.NamesSet(folder, folderHash, expanded)) return;
         if (_expandedDeviceActivityContainer is not { } container) return;
-        _ = LoadDeviceActivityAsync(folder, container);
+        _ = LoadDeviceActivityAsync(expanded, container);
     }
 
     /// <summary>
@@ -2914,12 +3136,12 @@ public sealed partial class FoldersPage : Page, IAsyncLoadedPage
         try
         {
             var places = await _rpc.FolderDestinationsListAsync(folderId);
+            PassRowRead(RowRead.DestinationPlaces, name);
             RenderDestinationPlaces(name, folderId, section, container, places);
         }
         catch (Exception ex)
         {
-            ErrorBar.Message = Strings.Error(ex);
-            ErrorBar.IsOpen = true;
+            FailRowRead(RowRead.DestinationPlaces, name, ex);
         }
     }
 
@@ -3214,10 +3436,10 @@ public sealed partial class FoldersPage : Page, IAsyncLoadedPage
     /// Commit the <c>folder-share-confirm</c> gesture: classify the picker's typed
     /// input via the shared <c>classify_recipient</c> — the SAME parse
     /// <see cref="ContactsViewModel.ClassifyRecipientInput"/> uses (priority #2,
-    /// never a per-page re-derivation) — then, for a bare handle, resolve it through
-    /// the two-hop federated discovery seam exactly like
-    /// <see cref="ContactsViewModel.LookUpRecipientAsync"/>'s Handle branch
-    /// (resolve_nest → resolve_handle), reusing the picker's own resolve-state
+    /// never a per-page re-derivation) — then, for a handle (a bare localpart
+    /// included), resolve it through the shared find-user lookup
+    /// <see cref="ContactsViewModel.LookUpRecipientAsync"/>'s Handle branch runs
+    /// (<see cref="ContactsViewModel.FindRecipientActorIdAsync"/>), reusing the picker's own resolve-state
     /// strings ("not-found" / "error") rather than inventing new ones. On a
     /// resolved actor: share the set, hide the
     /// share row, and refresh the page (folders.md § Sharing — Where logic lives).
@@ -3252,12 +3474,12 @@ public sealed partial class FoldersPage : Page, IAsyncLoadedPage
             case ContactsViewModel.RecipientKind.Handle:
                 try
                 {
-                    // Two-hop anonymous federated discovery (libs/fauna-ffi/src/resolve.rs):
-                    // this client's own home nest SRV-resolves the handle's domain →
-                    // owning node URL, then that node maps the handle → actor id.
-                    var nodeUrl = await uniffi.fauna_ffi.FaunaFfiMethods.ResolveNest(rpc.HomeUrl, c.Domain);
-                    var resolved = await uniffi.fauna_ffi.FaunaFfiMethods.ResolveHandle(nodeUrl, c.User, c.Domain);
-                    actorIdHex = resolved[0];
+                    // The shared find-user lookup the contacts find runs (FFI
+                    // libs/fauna-ffi/src/resolve.rs): a bare localpart's empty domain
+                    // probes the home nest alone, a qualified handle may resolve on a
+                    // peer. The share itself stays same-nest (memberNestUrl null below),
+                    // as on every app today.
+                    actorIdHex = await ContactsViewModel.FindRecipientActorIdAsync(rpc.HomeUrl, c);
                     picker.UpdateResolveState(ResolveState.Resolved);
                 }
                 catch
@@ -3306,6 +3528,7 @@ public sealed partial class FoldersPage : Page, IAsyncLoadedPage
         try
         {
             var actors = await _rpc.FoldersMembersListActorsAsync(fs.name);
+            PassRowRead(RowRead.ActorMembers, fs.name);
             // Only role == "member" rows are the set's shared-with roster — role ==
             // "owner" is the caller themself, not someone the set is shared WITH.
             var shared = uniffi.fauna_ffi.FaunaFfiMethods.FolderMemberActors(actors.ToArray()).ToList();
@@ -3326,8 +3549,7 @@ public sealed partial class FoldersPage : Page, IAsyncLoadedPage
         }
         catch (Exception ex)
         {
-            ErrorBar.Message = Strings.Error(ex);
-            ErrorBar.IsOpen = true;
+            FailRowRead(RowRead.ActorMembers, fs.name, ex);
         }
     }
 
@@ -3576,9 +3798,20 @@ public sealed partial class FoldersPage : Page, IAsyncLoadedPage
     // records only the folder path, so there is no free-text set-name field and no
     // per-row set-name display (the removed folder-location-fileset-input + folder-location-fileset).
 
+    /// <summary>What <c>folder-location-add-button</c> binds: the binding's set label
+    /// and the set's <c>FolderRef</c> wire form (<c>null</c> when the row yields none —
+    /// refused on the error line, never bound by name). An M2 row binds under its name
+    /// and <c>FolderRefForRow</c>; a group-scope row under its scope's ref, which is
+    /// also its label (tui's <c>location_bind_target</c>).</summary>
+    private sealed record LocationBindTarget(string SetName, string? FolderId);
+
     private FrameworkElement BuildLocationBindingSection(FolderSummary fs)
+        => BuildLocationBindingSection(new LocationBindTarget(
+            fs.name,
+            uniffi.fauna_ffi.FaunaFfiMethods.FolderRefForRow(fs.id, fs.mlsGroupId, fs.homeNestUrl)));
+
+    private FrameworkElement BuildLocationBindingSection(LocationBindTarget target)
     {
-        var setName = fs.name;
         var section = new StackPanel { Spacing = 6 };
         section.Children.Add(new TextBlock
         {
@@ -3612,46 +3845,39 @@ public sealed partial class FoldersPage : Page, IAsyncLoadedPage
         Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(listBorder, S.Get("folders/synced_locations"));
 
         // Add area: type (or Choose to fill) the local folder path, then Bind — the
-        // folder binds to THIS set's context (setName), not a typed name. A Grid
-        // with a single `*` column for the path input, NOT a horizontal StackPanel
-        // — the same fix BuildPendingShareRow/BuildMemberHeaderGrid already needed:
-        // a StackPanel gives an unconstrained TextBox all the width it asks for,
-        // pushing the LAST child (bind, the only way to commit the gesture) past
-        // the page's clip edge — present in the UIA tree (count=1) but IsOffscreen
-        // (measured: on the writer-member row, where this section is the ENTIRE
-        // expanded body with nothing else establishing a bounding width,
-        // folder-location-add-button read visible=False while its sibling
-        // folder-location-path-input, right next to it, read visible=True).
-        var addRow = new Grid { ColumnSpacing = 8 };
-        addRow.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-        addRow.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-        addRow.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        // folder binds to THIS set's context (target), not a typed name. The input
+        // takes a line of its own above the two buttons, as linux's entry row does.
+        // Beside them it cannot work at every width: in a horizontal StackPanel an
+        // unconstrained TextBox pushes the LAST child (bind, the only way to commit
+        // the gesture) past the page's clip edge, and in a Grid's `*` column the two
+        // `Auto` buttons can take the whole row and leave the input 0 px wide. That
+        // input is in the UIA tree (count=1) with nothing to click or type into
+        // (measured in the 600-DIP e2e window: a 184 px row, 81 + 87 of buttons and
+        // two 8 px gaps), and a driver probing it for "is this row open?" shuts the
+        // open row.
         var pathInput = new TextBox
         {
             PlaceholderText = S.Get("folders/location_path_placeholder"),
-            MinWidth = 280,
         };
         Microsoft.UI.Xaml.Automation.AutomationProperties.SetAutomationId(pathInput, Ids.FolderLocationPathInput);
-        Grid.SetColumn(pathInput, 0);
         var browse = new Button { Content = S.Get("folders/choose") };
         Microsoft.UI.Xaml.Automation.AutomationProperties.SetAutomationId(browse, Ids.FolderLocationBrowseButton);
         browse.Click += (_, _) => BrowseFolder(pathInput);
-        Grid.SetColumn(browse, 1);
         var bind = new Button
         {
             Content = S.Get("folders/bind_location"),
             Style = (Style)Application.Current.Resources["AccentButtonStyle"],
-            Tag = fs,
+            Tag = target,
         };
         Microsoft.UI.Xaml.Automation.AutomationProperties.SetAutomationId(bind, Ids.FolderLocationAddButton);
         bind.Click += BindLocation_Click;
-        Grid.SetColumn(bind, 2);
-        addRow.Children.Add(pathInput);
-        addRow.Children.Add(browse);
-        addRow.Children.Add(bind);
+        var addButtons = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
+        addButtons.Children.Add(browse);
+        addButtons.Children.Add(bind);
 
         section.Children.Add(listBorder);
-        section.Children.Add(addRow);
+        section.Children.Add(pathInput);
+        section.Children.Add(addButtons);
 
         _expandedLocationContainer = rows;
         _expandedLocationEmpty = empty;
@@ -3683,6 +3909,9 @@ public sealed partial class FoldersPage : Page, IAsyncLoadedPage
         var grid = new Grid { ColumnSpacing = 8, RowSpacing = 8 };
         grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
         grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        grid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+        grid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+        grid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
         grid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
         grid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
         grid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
@@ -3772,6 +4001,62 @@ public sealed partial class FoldersPage : Page, IAsyncLoadedPage
             grid.Children.Add(unreadableText);
         }
 
+        // *Free up space* (on-demand-files.md § The free-up-space gesture where the OS offers
+        // none): Explorer offers the same verb on the folder, and the row carries it too so one
+        // rule holds on every app — the switch is on and the root stands → the verb is present
+        // (the shared `free_space_verb`, which also resolves the texts). The button's `state`
+        // and both lines are the agent's reading: a press repaints nothing until the agent says
+        // what the sweep did. HelpText carries the state, as on the mode toggle
+        // (reference_windows_flaui_state_attr_helptext). Never disabled while a sweep runs: a
+        // press then joins it, and a disabled button cannot be invoked. Each element takes a
+        // full-width row spanning both columns, as the held-deletes line does: beside the
+        // Auto column (switch + remove) the `*` column can measure 0 px, and a line there is
+        // in the UIA tree yet offscreen (reference_windows_e2e_is_visible_offscreen).
+        if (row.FreeSpace is { } verb)
+        {
+            var onDevice = new TextBlock
+            {
+                Text = verb.OnDeviceLine,
+                TextWrapping = TextWrapping.Wrap,
+                Opacity = 0.8,
+            };
+            Microsoft.UI.Xaml.Automation.AutomationProperties.SetAutomationId(onDevice, Ids.FolderLocationOnDevice);
+            Grid.SetRow(onDevice, 3);
+            Grid.SetColumn(onDevice, 0);
+            Grid.SetColumnSpan(onDevice, 2);
+            grid.Children.Add(onDevice);
+
+            var freeButton = new Button
+            {
+                Content = verb.ButtonLabel,
+                Tag = row.Path,
+                HorizontalAlignment = HorizontalAlignment.Left,
+            };
+            Microsoft.UI.Xaml.Automation.AutomationProperties.SetAutomationId(freeButton, Ids.FolderLocationFreeSpaceButton);
+            Microsoft.UI.Xaml.Automation.AutomationProperties.SetHelpText(freeButton, verb.State);
+            freeButton.Click += FreeLocationSpace_Click;
+            Grid.SetRow(freeButton, 4);
+            Grid.SetColumn(freeButton, 0);
+            Grid.SetColumnSpan(freeButton, 2);
+            grid.Children.Add(freeButton);
+
+            if (verb.ResultLine is { } result)
+            {
+                var resultText = new TextBlock
+                {
+                    Text = result,
+                    TextWrapping = TextWrapping.Wrap,
+                    Opacity = 0.7,
+                    FontSize = 12,
+                };
+                Microsoft.UI.Xaml.Automation.AutomationProperties.SetAutomationId(resultText, Ids.FolderLocationFreeSpaceResult);
+                Grid.SetRow(resultText, 5);
+                Grid.SetColumn(resultText, 0);
+                Grid.SetColumnSpan(resultText, 2);
+                grid.Children.Add(resultText);
+            }
+        }
+
         var border = new Border
         {
             BorderBrush = (Microsoft.UI.Xaml.Media.Brush)Application.Current.Resources["CardStrokeColorDefaultBrush"],
@@ -3809,18 +4094,28 @@ public sealed partial class FoldersPage : Page, IAsyncLoadedPage
     }
 
     /// <summary>Bind the typed folder to THIS set (the set is contextual — no typed name).
-    /// Resolves the set's <c>FolderRef</c> wire identity from the row already rendered
-    /// (on-demand-files.md § Hosting multiple on-demand folders — a name alone can't say
-    /// which of two same-named sets a folder belongs to); a row that yields none is refused
-    /// on the error line, never bound by name. AddLocationAsync re-lists Locations →
-    /// CollectionChanged → RefreshExpandedLocations.</summary>
+    /// The set's <c>FolderRef</c> wire identity was resolved from the row already rendered
+    /// (<see cref="LocationBindTarget"/>; on-demand-files.md § Hosting multiple on-demand
+    /// folders — a name alone can't say which of two same-named sets a folder belongs to);
+    /// a row that yields none is refused on the error line, never bound by name.
+    /// AddLocationAsync re-lists Locations → CollectionChanged → RefreshExpandedLocations.</summary>
     private async void BindLocation_Click(object sender, RoutedEventArgs e)
     {
-        if (_syncVm is null || sender is not Button b || b.Tag is not FolderSummary fs) return;
+        if (sender is not Button b || b.Tag is not LocationBindTarget target) return;
         var path = _expandedLocationInput?.Text?.Trim();
         if (string.IsNullOrEmpty(path)) return;
-        var folderId = uniffi.fauna_ffi.FaunaFfiMethods.FolderRefForRow(fs.id, fs.mlsGroupId, fs.homeNestUrl);
-        await _syncVm.AddLocationAsync(path, fs.name, folderId);
+        // The VM is built ahead of the page's first await, so a null here is a build
+        // that failed: nothing can record this bind, and a bind the user pressed is
+        // refused on the error line, never dropped.
+        if (_syncVm is null)
+        {
+            var refusal = S.Get("devices/sync_locations/helper_unavailable");
+            ErrorBar.Message = refusal;
+            ErrorBar.IsOpen = true;
+            App.CurrentErrorMessage = refusal;
+            return;
+        }
+        await _syncVm.AddLocationAsync(path, target.SetName, target.FolderId);
         if (_expandedLocationInput is not null) _expandedLocationInput.Text = string.Empty;
     }
 
@@ -3851,6 +4146,16 @@ public sealed partial class FoldersPage : Page, IAsyncLoadedPage
         await _syncVm.ApplyHeldDeletesAsync(folder);
     }
 
+    /// <summary><i>Free up space</i> on the row's on-demand folder (Tag = the local path, the
+    /// key the agent's <c>FreeLocationSpace</c> takes). The agent answers once it has accepted
+    /// the sweep; the VM re-reads the row from <c>ListLocations</c>, and the status tick
+    /// carries the outcome.</summary>
+    private async void FreeLocationSpace_Click(object sender, RoutedEventArgs e)
+    {
+        if (_syncVm is null || sender is not Button b || b.Tag is not string path) return;
+        await _syncVm.FreeLocationSpaceAsync(path);
+    }
+
     // ── Conflicts (REVIEW LIST — auto-resolve, file-sync.md § Conflicts) ──
     //
     // Conflicts auto-resolve on the detecting device (clean text three-way merge,
@@ -3862,17 +4167,58 @@ public sealed partial class FoldersPage : Page, IAsyncLoadedPage
     // File-Versions restore record — itself reversible). A still-unresolved row
     // (the sync engine's report when its local-version upload fails) renders informationally —
     // the detecting device resolves it; no blocking chooser here.
+    //
+    // A group set's review rows (group-set.md § Build design — the group set, decision 9)
+    // continue the SAME flat conflict-* list, no new ids: no nest holds a group set's
+    // conflicts, so the rows are the sync agent's, read on the status tick
+    // (LocationBindingsController.PollSetConflictsAsync) and mapped by the shared
+    // ConflictSummary::of_retained, conflict-file-info naming the set. Their button is keyed
+    // by (the set's FolderRef, the row id) and runs on the agent — the nest machine's
+    // UseOtherVersion reports these rows as unknown. linux's devices_folders/conflicts.rs,
+    // tui's group_conflict_elements, macOS's FoldersContent.groupReviewRows.
+
+    /// <summary>A group set's review row, carried on its button: the set whose agent engine
+    /// holds the row, and the row's id there.</summary>
+    private sealed record GroupReviewTag(string FolderId, long ConflictId);
+
+    /// <summary>Repaint the conflict list from the machine's last snapshot plus the group
+    /// sets' rows as last read — for the paths that move only the latter.</summary>
+    private void RerenderConflicts()
+    {
+        if (_machine is not null) RenderConflicts(_machine.Snapshot().conflicts);
+    }
 
     private void RenderConflicts(IReadOnlyList<ConflictSummary> conflicts)
     {
         ConflictsContainer.Children.Clear();
         foreach (var c in conflicts)
-            ConflictsContainer.Children.Add(BuildConflictRow(c));
-        ConflictsContainer.Visibility = conflicts.Count == 0 ? Visibility.Collapsed : Visibility.Visible;
-        NoConflictsText.Visibility = conflicts.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+            ConflictsContainer.Children.Add(BuildConflictRow(c, c.id, UseOtherVersion_Click));
+        var groupRows = 0;
+#if P2P_SHARE
+        if (_boundController is { } bindings)
+        {
+            foreach (var scope in _groupShareViews.scopes)
+            {
+                foreach (var row in bindings.SetReviewRows(scope.folderId, GroupScopeLabel(scope)))
+                {
+                    ConflictsContainer.Children.Add(BuildConflictRow(
+                        row, new GroupReviewTag(scope.folderId, row.id), UseRetainedVersion_Click));
+                    groupRows++;
+                }
+            }
+        }
+#endif
+        var empty = conflicts.Count == 0 && groupRows == 0;
+        ConflictsContainer.Visibility = empty ? Visibility.Collapsed : Visibility.Visible;
+        NoConflictsText.Visibility = empty ? Visibility.Visible : Visibility.Collapsed;
     }
 
-    private FrameworkElement BuildConflictRow(ConflictSummary c)
+    /// <summary>One row of the conflict list. <paramref name="tag"/> and
+    /// <paramref name="onUse"/> are its <c>conflict-resolve-button</c>'s: the nest row's id
+    /// and the machine's re-point, or a group set's <see cref="GroupReviewTag"/> and the
+    /// agent's restore. The button's gate is <c>hasOtherVersion</c> alone — a group row whose
+    /// winner is a delete has no winning head and still retains the edit.</summary>
+    private FrameworkElement BuildConflictRow(ConflictSummary c, object tag, RoutedEventHandler onUse)
     {
         // AutomationProperties.Name keeps the row in the UIA content view so FlaUI's
         // ByAutomationId resolves the child IDs (same trick as device-card).
@@ -3895,9 +4241,9 @@ public sealed partial class FoldersPage : Page, IAsyncLoadedPage
         if (c.hasOtherVersion)
         {
             // Auto-resolved with a retained loser: the one-tap re-point.
-            var btn = new Button { Content = S.Get("devices/conflicts/use_other_version"), Tag = c.id };
+            var btn = new Button { Content = S.Get("devices/conflicts/use_other_version"), Tag = tag };
             Microsoft.UI.Xaml.Automation.AutomationProperties.SetAutomationId(btn, Ids.ConflictResolveButton);
-            btn.Click += UseOtherVersion_Click;
+            btn.Click += onUse;
             panel.Children.Add(btn);
         }
         else if (!resolved)
@@ -3925,6 +4271,39 @@ public sealed partial class FoldersPage : Page, IAsyncLoadedPage
         if (string.IsNullOrEmpty(deviceId)) return;
         await _machine.UseOtherVersion(id, deviceId!);
     }
+
+    /// <summary><i>Use the other version</i> on a group set's review row: the agent's restore
+    /// on the set's own engine, never the machine's. A refusal goes on the page's
+    /// error-message (<c>devices/error_use_other_version</c>) and the row stays — the agent
+    /// wrote nothing; a success re-reads the lists, and the used row leaves on that
+    /// signal. A new press first retires the refusal the last one put up, as linux's
+    /// <c>GestureErrorSlot</c> and macOS's <c>setRetainedRestoreError(nil)</c> do.</summary>
+    private async void UseRetainedVersion_Click(object sender, RoutedEventArgs e)
+    {
+        if (_boundController is not { } bindings || sender is not Button b
+            || b.Tag is not GroupReviewTag row) return;
+        if (_retainedRestoreRefusal is { } prior)
+        {
+            _retainedRestoreRefusal = null;
+            if (ErrorBar.IsOpen && ErrorBar.Message == prior)
+            {
+                ErrorBar.IsOpen = false;
+                App.CurrentErrorMessage = null;
+                UpdateErrorBar();
+            }
+        }
+        var refusal = await bindings.RestoreRetainedVersionAsync(row.FolderId, row.ConflictId);
+        if (refusal is null) return;
+        E2eTrace.Write($"[folders] retained-version restore refused: {refusal.Message}");
+        _retainedRestoreRefusal = S.Get("devices/error_use_other_version").Replace("{message}", S.Error(refusal));
+        ErrorBar.Message = _retainedRestoreRefusal;
+        ErrorBar.IsOpen = true;
+        App.CurrentErrorMessage = ErrorBar.Message;
+    }
+
+    /// <summary>The refusal the last group-row restore painted on the error bar, so the next
+    /// press retires exactly that text and nothing another surface put up.</summary>
+    private string? _retainedRestoreRefusal;
 
     // ── Folder creation wizard (embedded FolderWizardMachine) ──
     //

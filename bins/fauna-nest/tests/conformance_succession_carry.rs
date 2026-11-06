@@ -37,7 +37,7 @@ use bytes::Bytes;
 use ed25519_dalek::SigningKey;
 use fauna_account_store::{sqlite::SqliteBackend, store::AccountStore, types::WriterId};
 use fauna_core::crypto::{AccountStateKeySchedule, BackupKey, DelegableSchedule, GenerationKey};
-use fauna_core::data::ModerationConfig;
+use fauna_core::data::SyncPrefsConfig;
 use fauna_core::encoding::canonical_encode;
 use fauna_core::generation::{GenerationMintRecord, MintCore, generation_id, sign_mint_as_minter};
 use fauna_core::identity::ActorKeypair;
@@ -47,7 +47,7 @@ use fauna_nest::{
 };
 use fauna_protocol::account_state::{ACCOUNT_STATE_FLEET_SCOPE, ACCOUNT_STATE_SCOPE};
 use fauna_protocol::merge_policy::{
-    AdmittedKinds, KIND_GENERATION_MINT, KIND_MODERATION, KIND_READ_MARKER, KIND_SEEN_SET,
+    AdmittedKinds, KIND_GENERATION_MINT, KIND_READ_MARKER, KIND_SEEN_SET, KIND_SYNC_PREFS,
     LwwStamp, MergePolicy, PREFERENCE_KEY,
 };
 use fauna_protocol::{RpcError, RpcErrorClass, RpcRequester, encode_canonical};
@@ -241,35 +241,34 @@ fn succ_plane<'a>(
     AccountStatePlane::new(store, rpc, keys, device, &SUCC_TRUST, ACCOUNT_STATE_SCOPE).unwrap()
 }
 
-fn moderation_bytes(words: &[&str]) -> Vec<u8> {
-    canonical_encode(&ModerationConfig {
-        muted_keywords: words.iter().map(|w| (*w).into()).collect(),
-        ..Default::default()
+fn sync_prefs_bytes(words: &[&str]) -> Vec<u8> {
+    canonical_encode(&SyncPrefsConfig {
+        default_conflict_policy: Some(words.join(" ")),
     })
     .unwrap()
 }
 
-fn moderation_item() -> ItemId {
+fn prefs_item() -> ItemId {
     ItemId {
-        kind: KIND_MODERATION.into(),
+        kind: KIND_SYNC_PREFS.into(),
         key: PREFERENCE_KEY.into(),
     }
 }
 
-/// The predecessor writes its muted words the way a preference page does —
+/// The predecessor writes its sync prefs the way a preference page does —
 /// the plane's local put, then the runtime's publish step — and no blob.
 /// Returns the stamp bytes the row carries.
-async fn predecessor_writes_moderation(rpc: &Arc<RouterRequester>, words: &[&str]) -> Vec<u8> {
+async fn predecessor_writes_prefs(rpc: &Arc<RouterRequester>, words: &[&str]) -> Vec<u8> {
     let keys = schedule(PRED_SEED);
     let store = replica(PRED_DEVICE).await;
     let device = signing_key(PRED_DEVICE);
     let plane = pred_plane(&store, rpc, &keys, &device, ACCOUNT_STATE_SCOPE);
-    put_preference_local(&store, &plane, KIND_MODERATION, moderation_bytes(words))
+    put_preference_local(&store, &plane, KIND_SYNC_PREFS, sync_prefs_bytes(words))
         .await
         .expect("the predecessor's local put");
     assert_eq!(plane.publish_pending().await.expect("publish"), 1);
     store
-        .state(KIND_MODERATION, PREFERENCE_KEY)
+        .state(KIND_SYNC_PREFS, PREFERENCE_KEY)
         .await
         .unwrap()
         .expect("the predecessor holds its own entry")
@@ -290,13 +289,13 @@ async fn own_rows(store: &AccountStore<SqliteBackend>, device: u8) -> usize {
 // ── (a) the carry, and the floor returning to the seed alone ────────────────
 
 /// A successor whose device holds the predecessor's seed carries the
-/// predecessor's muted words in one walk, stamp untouched, and re-publishes
+/// predecessor's sync prefs in one walk, stamp untouched, and re-publishes
 /// them sealed under its own schedule; a device holding ONLY the successor's
 /// seed then reads them. No blob-rail leg exists in this file to do it.
 #[tokio::test]
 async fn a_successors_fresh_replica_reads_the_e1_value_its_predecessor_wrote() {
     let rpc = nest();
-    let pred_stamp = predecessor_writes_moderation(&rpc, &["witness"]).await;
+    let pred_stamp = predecessor_writes_prefs(&rpc, &["witness"]).await;
 
     let succ_keys = schedule(SUCC_SEED);
     let inherited = predecessor_schedules();
@@ -312,11 +311,11 @@ async fn a_successors_fresh_replica_reads_the_e1_value_its_predecessor_wrote() {
         "the predecessor's row is carried, not left unopened and not ingested: {walk:?}"
     );
     let entry = s
-        .state(KIND_MODERATION, PREFERENCE_KEY)
+        .state(KIND_SYNC_PREFS, PREFERENCE_KEY)
         .await
         .unwrap()
-        .expect("the successor holds the moderation record");
-    assert_eq!(entry.value, moderation_bytes(&["witness"]));
+        .expect("the successor holds the sync-prefs record");
+    assert_eq!(entry.value, sync_prefs_bytes(&["witness"]));
     assert_eq!(
         entry.merge_meta.as_deref(),
         Some(pred_stamp.as_slice()),
@@ -348,11 +347,11 @@ async fn a_successors_fresh_replica_reads_the_e1_value_its_predecessor_wrote() {
         "it adopts the re-authored row, and no predecessor row is served: {walk:?}"
     );
     let entry = f
-        .state(KIND_MODERATION, PREFERENCE_KEY)
+        .state(KIND_SYNC_PREFS, PREFERENCE_KEY)
         .await
         .unwrap()
-        .expect("the seed-only device holds the moderation record");
-    assert_eq!(entry.value, moderation_bytes(&["witness"]));
+        .expect("the seed-only device holds the sync-prefs record");
+    assert_eq!(entry.value, sync_prefs_bytes(&["witness"]));
 }
 
 // ── (a′) the seed-only floor across a succession, the whole cluster ─────────
@@ -364,14 +363,14 @@ async fn a_successors_fresh_replica_reads_the_e1_value_its_predecessor_wrote() {
 ///
 /// The predecessor stores a record of every kind in the cluster. One device of
 /// the successor holds the predecessor's seed and walks once. A fresh device
-/// holding the successor's seed ALONE then reads all four records — with no
+/// holding the successor's seed ALONE then reads all three records — with no
 /// blob-rail handler on the nest, so nothing but the walk can have carried
 /// them. The tip-sealed kinds are not in this leg: their crossing is the
 /// succession rider's (step (4)), not built on a successor with its own
 /// schedule.
 ///
 /// Red-verified: with `S` built without `with_predecessor_schedules` (and its
-/// walk's own assertion lifted), `F`'s walk leaves all four rows unopened and
+/// walk's own assertion lifted), `F`'s walk leaves all three rows unopened and
 /// it holds none of the records.
 #[tokio::test]
 async fn a_device_holding_only_the_successors_seed_reads_the_whole_inherited_preference_cluster() {
@@ -431,7 +430,7 @@ async fn a_device_holding_only_the_successors_seed_reads_the_whole_inherited_pre
 #[tokio::test]
 async fn a_successor_handed_no_predecessor_schedule_carries_nothing() {
     let rpc = nest();
-    predecessor_writes_moderation(&rpc, &["witness"]).await;
+    predecessor_writes_prefs(&rpc, &["witness"]).await;
 
     let succ_keys = schedule(SUCC_SEED);
     let s = replica(S_DEVICE).await;
@@ -445,7 +444,7 @@ async fn a_successor_handed_no_predecessor_schedule_carries_nothing() {
         "the successor opens none of the predecessor's delegable rows: {walk:?}"
     );
     assert!(
-        s.state(KIND_MODERATION, PREFERENCE_KEY)
+        s.state(KIND_SYNC_PREFS, PREFERENCE_KEY)
             .await
             .unwrap()
             .is_none()
@@ -462,7 +461,7 @@ async fn a_successor_handed_no_predecessor_schedule_carries_nothing() {
 #[tokio::test]
 async fn a_value_the_successor_wrote_since_is_not_overwritten() {
     let rpc = nest();
-    let pred_stamp = predecessor_writes_moderation(&rpc, &["witness"]).await;
+    let pred_stamp = predecessor_writes_prefs(&rpc, &["witness"]).await;
     let pred_stamp = LwwStamp::decode(&pred_stamp).unwrap();
 
     let succ_keys = schedule(SUCC_SEED);
@@ -479,8 +478,8 @@ async fn a_value_the_successor_wrote_since_is_not_overwritten() {
     };
     s_plane
         .put(
-            &moderation_item(),
-            moderation_bytes(&["mine"]),
+            &prefs_item(),
+            sync_prefs_bytes(&["mine"]),
             Some(own.encode().unwrap()),
         )
         .await
@@ -494,11 +493,11 @@ async fn a_value_the_successor_wrote_since_is_not_overwritten() {
         "the predecessor's row opened and lost: {walk:?}"
     );
     let entry = s
-        .state(KIND_MODERATION, PREFERENCE_KEY)
+        .state(KIND_SYNC_PREFS, PREFERENCE_KEY)
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(entry.value, moderation_bytes(&["mine"]));
+    assert_eq!(entry.value, sync_prefs_bytes(&["mine"]));
     assert_eq!(
         own_rows(&s, S_DEVICE).await,
         1,
@@ -511,7 +510,7 @@ async fn a_value_the_successor_wrote_since_is_not_overwritten() {
 #[tokio::test]
 async fn a_second_walk_writes_nothing_and_a_second_device_converges() {
     let rpc = nest();
-    predecessor_writes_moderation(&rpc, &["witness"]).await;
+    predecessor_writes_prefs(&rpc, &["witness"]).await;
 
     let succ_keys = schedule(SUCC_SEED);
     let inherited = predecessor_schedules();
@@ -548,11 +547,11 @@ async fn a_second_walk_writes_nothing_and_a_second_device_converges() {
         succ_plane(&s2, &rpc, &succ_keys, &s2_device).with_predecessor_schedules(&inherited);
     s2_plane.walk().await.expect("the second device's walk");
     let entry = s2
-        .state(KIND_MODERATION, PREFERENCE_KEY)
+        .state(KIND_SYNC_PREFS, PREFERENCE_KEY)
         .await
         .unwrap()
         .expect("the second device holds the record");
-    assert_eq!(entry.value, moderation_bytes(&["witness"]));
+    assert_eq!(entry.value, sync_prefs_bytes(&["witness"]));
     let settled = own_rows(&s2, S2_DEVICE).await;
     assert!(settled <= 1, "at most one equal row per device per item");
     s2_plane.reconcile().await.expect("the second device again");
@@ -994,7 +993,7 @@ async fn settle(
 /// item, and a seed-only device reads every item with nothing unopened.
 ///
 /// Red-verified: with the retire step answering `None`/nothing retired, the
-/// predecessor's 6 rows stay live at every pass.
+/// predecessor's 5 rows stay live at every pass.
 #[tokio::test]
 async fn a_carried_predecessors_rows_are_retired_and_the_seed_only_device_reads_every_item() {
     let rpc = nest();
@@ -1032,9 +1031,9 @@ async fn a_carried_predecessors_rows_are_retired_and_the_seed_only_device_reads_
                 .await
                 .expect("the predecessor's local put");
         }
-        assert_eq!(plane.publish_pending().await.expect("publish"), 6);
+        assert_eq!(plane.publish_pending().await.expect("publish"), 5);
     }
-    assert_eq!(live_rows_of(&census(&rpc).await, PRED_DEVICE), 6);
+    assert_eq!(live_rows_of(&census(&rpc).await, PRED_DEVICE), 5);
 
     let succ_keys = schedule(SUCC_SEED);
     let inherited = predecessor_schedules();
@@ -1048,7 +1047,7 @@ async fn a_carried_predecessors_rows_are_retired_and_the_seed_only_device_reads_
             live_rows_of(&settled, PRED_DEVICE),
             live_rows_of(&settled, S_DEVICE)
         ),
-        (0, 6),
+        (0, 5),
         "every predecessor row retired, one own row per item: {settled:?}"
     );
     // Settled: a later pass meets no candidate and retires nothing.
@@ -1086,7 +1085,7 @@ async fn a_carried_predecessors_rows_are_retired_and_the_seed_only_device_reads_
 #[tokio::test]
 async fn a_predecessors_row_that_lost_the_merge_is_retired_behind_the_newer_value() {
     let rpc = nest();
-    let pred_stamp = predecessor_writes_moderation(&rpc, &["witness"]).await;
+    let pred_stamp = predecessor_writes_prefs(&rpc, &["witness"]).await;
     let pred_stamp = LwwStamp::decode(&pred_stamp).unwrap();
 
     let succ_keys = schedule(SUCC_SEED);
@@ -1101,8 +1100,8 @@ async fn a_predecessors_row_that_lost_the_merge_is_retired_behind_the_newer_valu
     };
     s_plane
         .put(
-            &moderation_item(),
-            moderation_bytes(&["mine"]),
+            &prefs_item(),
+            sync_prefs_bytes(&["mine"]),
             Some(own.encode().unwrap()),
         )
         .await
@@ -1118,11 +1117,11 @@ async fn a_predecessors_row_that_lost_the_merge_is_retired_behind_the_newer_valu
         "{settled:?}"
     );
     let entry = s
-        .state(KIND_MODERATION, PREFERENCE_KEY)
+        .state(KIND_SYNC_PREFS, PREFERENCE_KEY)
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(entry.value, moderation_bytes(&["mine"]));
+    assert_eq!(entry.value, sync_prefs_bytes(&["mine"]));
     assert_eq!(
         own_rows(&s, S_DEVICE).await,
         1,

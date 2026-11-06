@@ -167,7 +167,7 @@ def test_a_running_loop_is_not_a_violation():
     assert _violations(frame) == []
 
 
-@pytest.mark.parametrize("designed", ["closed", "retired"])
+@pytest.mark.parametrize("designed", ["closed", "retired", "identity-changed"])
 def test_a_designed_exit_is_not_a_violation(designed):
     """⚠ Load-bearing: a loop legitimately leaves when its session closes or its
     engine is handed over. A checker that fired on any exit — the phrasing

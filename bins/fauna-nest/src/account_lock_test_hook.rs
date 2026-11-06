@@ -19,12 +19,29 @@
 //! own scheduled refresh comes due inside the run — no app-side hook, no app
 //! clock moved, the same code path on all seven apps.
 //!
-//! `POST /api/v1/test/account_lock/{actor}?in_secs=N` writes
-//! `locked_until = now + N` on the nest's clock, through the very setter the
-//! production lock uses. A test sets it **while the app's sign-in is parked**
-//! (`rpc_hold_test_hook` on `fauna.auth.verify`), so the window starts when the
-//! app is provably at the gate rather than when a relaunch happened to finish —
-//! latency-independent, `e2e-conventions.md` point 14.
+//! # Why the lock is ARMED, and written at the gate
+//!
+//! `POST /api/v1/test/account_lock/{actor}/at_next_verify?in_secs=N` arms a lock
+//! that the actor's next `fauna.auth.verify` — the silent challenge's mint, the
+//! sign-in every app launch makes — writes at the mint gate itself, just before
+//! the gate reads it: `locked_until = now + N` on the nest's clock, through the
+//! very setter the production lock uses. So the window starts at the moment the
+//! app is provably at the gate, however long the relaunch that brought it there
+//! took — latency-independent, `e2e-conventions.md` point 14.
+//!
+//! What it replaced: the test parked the app's verify (`rpc_hold_test_hook`),
+//! wrote the lock, and released the park. That only worked while the park was
+//! released inside the verify's own 5-second client deadline
+//! (`fauna_protocol::kind::register_auth_kinds`), so its result depended on how
+//! fast the app's relaunch handed control back to the test: on windows, where
+//! the relaunch returns after the app has already sent its verify, the app's
+//! launch timed out into its transient-offline surface before the lock existed.
+//!
+//! Only the verify gate consumes an arm: a sync agent's device-key handshake on
+//! the same actor would otherwise start the window before the app's launch
+//! reaches the nest. The arm is held under an async lock **across** the write, so
+//! an app that sends two verifies at once (the launch machine's and a client's
+//! bearer mint) cannot have the second read the lock before the first wrote it.
 //!
 //! # Why a refusal counter
 //!
@@ -57,16 +74,18 @@ use serde_json::json;
 use crate::api_error::ApiError;
 use crate::routes::AppState;
 
-/// Cumulative `fauna.auth.account_locked` refusals per actor on this nest.
-///
-/// Monotonic per actor, which is what lets a caller read it at one observable
-/// point and compare at a later one.
+/// The hook's state on one nest: the locks armed for an actor's next verify,
+/// and the cumulative `fauna.auth.account_locked` refusals per actor.
 #[derive(Debug, Default)]
-pub struct AccountLockRefusals {
+pub struct AccountLockHook {
     refused: Mutex<HashMap<[u8; 32], u64>>,
+    /// `in_secs` per actor, written as `now + in_secs` by that actor's next
+    /// verify. An async mutex because it is held across the database write
+    /// (the module doc, *Why the lock is ARMED*).
+    armed: tokio::sync::Mutex<HashMap<[u8; 32], u64>>,
 }
 
-impl AccountLockRefusals {
+impl AccountLockHook {
     /// Record one sign-in refused as locked.
     ///
     /// ⚠ Call this at the gate, synchronously, before the refusal is returned
@@ -76,7 +95,8 @@ impl AccountLockRefusals {
         *self.refused.lock().unwrap().entry(*actor).or_default() += 1;
     }
 
-    /// Refusals of `actor` so far.
+    /// Refusals of `actor` so far. Monotonic per actor, which is what lets a
+    /// caller read it at one observable point and compare at a later one.
     pub fn count(&self, actor: &[u8; 32]) -> u64 {
         self.refused
             .lock()
@@ -84,6 +104,28 @@ impl AccountLockRefusals {
             .get(actor)
             .copied()
             .unwrap_or(0)
+    }
+
+    /// Arm a lock of `in_secs` for `actor`'s next verify, replacing any arm
+    /// still pending for it.
+    pub async fn arm(&self, actor: [u8; 32], in_secs: u64) {
+        self.armed.lock().await.insert(actor, in_secs);
+    }
+
+    /// The verify gate's call, made just before it reads `actor`'s lock: write
+    /// the lock armed for `actor`, if one is, and disarm it. Holds the arm
+    /// table across the write, so a concurrent verify of the same actor waits
+    /// here and then reads the written lock. A failed write leaves no lock and
+    /// is logged; the run's assertions report the rest.
+    pub async fn write_armed_lock(&self, db: &crate::db::CacheDb, actor: &[u8; 32]) {
+        let mut armed = self.armed.lock().await;
+        let Some(in_secs) = armed.remove(actor) else {
+            return;
+        };
+        let locked_until = (fauna_core::data::Timestamp::now_secs() as u64 + in_secs) as i64;
+        if let Err(e) = db.set_locked_until(actor, Some(locked_until)).await {
+            tracing::warn!("account_lock test hook: the armed lock was not written: {e:#}");
+        }
     }
 }
 
@@ -97,11 +139,12 @@ struct LockQuery {
     in_secs: u64,
 }
 
-/// `POST /api/v1/test/account_lock/{actor}?in_secs=N` — lock `actor` until
-/// `now + N` on the nest's clock. `N` must lie in `1..=EMERGENCY_LOCKOUT_SECS`:
-/// this shortens a lock, it never lengthens one past what the product can set.
-/// Returns `{"ok": true, "locked_until": <unix secs>}`.
-async fn handle_lock(
+/// `POST /api/v1/test/account_lock/{actor}/at_next_verify?in_secs=N` — arm a
+/// lock of `actor` until `now + N`, `now` being the moment `actor`'s next
+/// `fauna.auth.verify` reaches the mint gate. `N` must lie in
+/// `1..=EMERGENCY_LOCKOUT_SECS`: this shortens a lock, it never lengthens one
+/// past what the product can set. Returns `{"ok": true}`.
+async fn handle_arm(
     State(state): State<Arc<AppState>>,
     Path(actor): Path<String>,
     Query(q): Query<LockQuery>,
@@ -113,11 +156,8 @@ async fn handle_lock(
     if q.in_secs == 0 || q.in_secs > crate::account_core::EMERGENCY_LOCKOUT_SECS {
         return ApiError::bad_request("in_secs must be 1..=EMERGENCY_LOCKOUT_SECS").into_response();
     }
-    let locked_until = (fauna_core::data::Timestamp::now_secs() as u64 + q.in_secs) as i64;
-    match state.db.set_locked_until(&actor, Some(locked_until)).await {
-        Ok(()) => Json(json!({ "ok": true, "locked_until": locked_until })).into_response(),
-        Err(e) => ApiError::internal(format!("account_lock set: {e:#}")).into_response(),
-    }
+    state.account_lock_hook.arm(actor, q.in_secs).await;
+    Json(json!({ "ok": true })).into_response()
 }
 
 /// `GET /api/v1/test/account_lock/{actor}/refusals` — `{"refused": <n>}`, the
@@ -127,7 +167,7 @@ async fn handle_refusals(
     Path(actor): Path<String>,
 ) -> impl IntoResponse {
     match parse_actor(&actor) {
-        Ok(a) => Json(json!({ "refused": state.account_lock_refusals.count(&a) })).into_response(),
+        Ok(a) => Json(json!({ "refused": state.account_lock_hook.count(&a) })).into_response(),
         Err(e) => e.into_response(),
     }
 }
@@ -135,7 +175,10 @@ async fn handle_refusals(
 /// Mount the `/api/v1/test/account_lock/*` routes.
 pub fn routes() -> axum::Router<Arc<AppState>> {
     axum::Router::new()
-        .route("/api/v1/test/account_lock/{actor}", post(handle_lock))
+        .route(
+            "/api/v1/test/account_lock/{actor}/at_next_verify",
+            post(handle_arm),
+        )
         .route(
             "/api/v1/test/account_lock/{actor}/refusals",
             get(handle_refusals),
@@ -150,7 +193,7 @@ mod tests {
     /// snapshots, and another actor's refusals never move them.
     #[test]
     fn refusals_count_per_actor() {
-        let c = AccountLockRefusals::default();
+        let c = AccountLockHook::default();
         let (a, b) = ([1u8; 32], [2u8; 32]);
         assert_eq!(c.count(&a), 0);
         c.note(&a);
@@ -158,5 +201,51 @@ mod tests {
         c.note(&b);
         assert_eq!(c.count(&a), 1);
         assert_eq!(c.count(&b), 2);
+    }
+
+    /// An armed lock is written by its own actor's next verify gate, once:
+    /// another actor's gate leaves it armed, the actor's first gate writes
+    /// `now + N`, and a later gate of the actor writes nothing again.
+    #[tokio::test]
+    async fn an_armed_lock_is_written_once_by_its_actors_next_verify() {
+        let db = crate::db::CacheDb::open_in_memory().unwrap();
+        let (a, b) = ([1u8; 32], [2u8; 32]);
+        db.create_user(&a, "free", "a").await.unwrap();
+        db.create_user(&b, "free", "b").await.unwrap();
+        let hook = AccountLockHook::default();
+        hook.arm(a, 45).await;
+
+        hook.write_armed_lock(&db, &b).await;
+        assert_eq!(
+            db.get_locked_until(&a).await.unwrap(),
+            None,
+            "b's gate spent a's arm"
+        );
+        assert_eq!(
+            db.get_locked_until(&b).await.unwrap(),
+            None,
+            "b was never armed"
+        );
+
+        let before = fauna_core::data::Timestamp::now_secs();
+        hook.write_armed_lock(&db, &a).await;
+        let after = fauna_core::data::Timestamp::now_secs();
+        let locked = db
+            .get_locked_until(&a)
+            .await
+            .unwrap()
+            .expect("a's gate wrote the lock");
+        assert!(
+            (before + 45..=after + 45).contains(&locked),
+            "locked_until {locked} is not now + 45 (now {before}..={after})"
+        );
+
+        db.set_locked_until(&a, None).await.unwrap();
+        hook.write_armed_lock(&db, &a).await;
+        assert_eq!(
+            db.get_locked_until(&a).await.unwrap(),
+            None,
+            "the arm was spent once"
+        );
     }
 }

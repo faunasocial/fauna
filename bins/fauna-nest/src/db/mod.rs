@@ -162,6 +162,13 @@ pub(crate) struct PostMetadata {
     /// indexed lookup — `ui/feed.md` § Interaction bar → Repost, ratified
     /// 2026-08-10). `None` for non-reposting posts.
     reposted_post_id: Option<[u8; 32]>,
+    /// 32-byte content id and emoji of the first `Reference::React` target
+    /// (`Post::react_reference`), projected into an **actor-keyed**
+    /// `content_links link_type='react'` row, the emoji in its `status`
+    /// column — the per-emoji tally's source (`ui/feed.md` § Layout & flow →
+    /// *Reaction posts count and paint*, ruling 2). `None` for non-reacting
+    /// posts.
+    react: Option<([u8; 32], String)>,
     /// Tier name of a gated-to-tier post (`Post.gated.tier` — plaintext-floor
     /// attribute, `ui/feed.md` § Encryption at rest), projected into
     /// `content_meta.gated_tier` so the feed read model serves the
@@ -218,6 +225,9 @@ pub(crate) fn extract_post_metadata(post: &fauna_core::data::Post) -> PostMetada
         source: post.source_token(),
         quoted_post_id: post.quoted_post_id(),
         reposted_post_id: post.reposted_post_id(),
+        react: post
+            .react_reference()
+            .map(|(target, emoji)| (target, emoji.to_owned())),
         gated_tier: post.gated.as_ref().map(|g| g.tier.clone()),
         // The room arm's channel id, by the one accessor every reader of a
         // room post shares (`fauna_core::room_post`), so the index and the
@@ -323,6 +333,28 @@ pub(crate) fn write_post_index(
             Some(target.as_slice()),
             Some(meta_data.author.as_slice()),
             None,
+            None,
+            now,
+        );
+    }
+
+    // Reaction projection — the repost row's twin: actor-keyed (actor = the
+    // `React` post's author), the emoji in the `status` text column the `tag`
+    // arm uses, so the per-emoji tally and the per-viewer `viewer_react_id`
+    // are each one indexed read on `(target_id, link_type)` (`feed.md` §
+    // Layout & flow → *Reaction posts count and paint*, ruling 2). A deleted
+    // `React` post leaves the tally by `delete_post_projection`'s
+    // `content_links` purge.
+    links::delete_links_by_source(conn, post_id.as_slice(), "react")
+        .context("delete old react link")?;
+    if let Some((target, emoji)) = &meta_data.react {
+        let _ = links::insert_link(
+            conn,
+            "react",
+            Some(post_id.as_slice()),
+            Some(target.as_slice()),
+            Some(meta_data.author.as_slice()),
+            Some(emoji.as_str()),
             None,
             now,
         );
@@ -686,6 +718,10 @@ pub struct FileVersionRow {
     /// its reporter's statement (ruling (10)(d)), projected so the reader
     /// judges the version by that signature (ruling (10)(e)).
     pub is_retention: Option<bool>,
+    /// The depositor on an adopted deposit's version (`SyncChange::deposited_by`)
+    /// — a covered field, projected so the version verifies and its author reads
+    /// the depositor.
+    pub deposited_by: Option<Vec<u8>>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -757,6 +793,10 @@ pub struct SyncChangeRow {
     /// 2026-08-05): set only by the nest itself, on the resolved report's
     /// loser-retention row. Echoed on list; receivers account-and-skip.
     pub is_retention: Option<bool>,
+    /// The depositor's 32-byte writer key on an adopted folder deposit's row
+    /// (`SyncChange::deposited_by`, `folder-deposit.md` ruling 3) — covered by
+    /// the row's signature, stored and echoed verbatim. `None` on every other row.
+    pub deposited_by: Option<Vec<u8>>,
     /// W2.3 (account-data-plane.md § Workstreams) item-class discriminator (`fauna_protocol::account_state::
     /// ItemClass`); `None` = the shipped file-row semantics.
     pub item_class: Option<String>,
@@ -776,41 +816,6 @@ pub struct SyncChangeRow {
     /// The key [`Self::signature`] verifies under — the device principal key,
     /// or the actor id itself for a direct signature.
     pub signer_key: Option<Vec<u8>>,
-}
-
-impl SyncChangeRow {
-    /// The row's variable-length wire footprint, for the serve page's frame
-    /// budget (`crate::segments::take_page_within_budget`).
-    ///
-    /// Sums **every** variable-length field rather than naming two of them, so
-    /// the budget cannot silently under-count as the row grows — which matters
-    /// most as the sealed-names expand phase proceeds: `path_sealed` will carry
-    /// the bytes that `path` carries today (`docs/goal/behavior/file-sync.md`
-    /// § Sealed names & paths), and a budget hard-coded to `path.len()` would
-    /// read a sealed-only row as nearly free and overflow the frame. The
-    /// fixed-width scalars are covered by
-    /// [`crate::segments::RECORD_WIRE_OVERHEAD`], which the caller adds.
-    pub fn wire_len(&self) -> usize {
-        self.path_hash.len()
-            + self.manifest_hash.as_ref().map_or(0, |h| h.len())
-            + self.change_type.len()
-            + self.path.as_ref().map_or(0, |p| p.len())
-            + self.device_id.as_ref().map_or(0, |d| d.len())
-            + self.thumbnail_hash.as_ref().map_or(0, |t| t.len())
-            + self.actor_id.len()
-            // Both sealed envelopes ride the row verbatim, so both are part of
-            // its wire footprint. `entry_sealed` is the load-bearing one: a
-            // class-2 entry is bounded by `MAX_STATE_ENTRY_BYTES` (64 KiB), so
-            // omitting it would let a page of state entries overrun the frame
-            // budget the paging helper exists to respect. `path_sealed` was
-            // already missing here and is the same one-line class — a few
-            // hundred bytes per row, only ever making a page more conservative.
-            + self.path_sealed.as_ref().map_or(0, |p| p.len())
-            + self.entry_sealed.as_ref().map_or(0, |e| e.len())
-            // The writer signature (64) + key (32) ride every signed row.
-            + self.signature.as_ref().map_or(0, |s| s.len())
-            + self.signer_key.as_ref().map_or(0, |k| k.len())
-    }
 }
 
 pub struct SyncFileInfo {
@@ -857,6 +862,8 @@ pub struct SyncFileInfo {
     pub change_type: String,
     pub derived_through: Option<i64>,
     pub is_resolution: Option<bool>,
+    /// The head row's depositor (`SyncChange::deposited_by`) — covered.
+    pub deposited_by: Option<Vec<u8>>,
     pub signature: Option<Vec<u8>>,
     pub signer_key: Option<Vec<u8>>,
 }
@@ -1282,9 +1289,19 @@ pub enum ResolveWinner {
     /// The chosen `winning_manifest_hash` is not one of the conflict's
     /// recorded candidates.
     BadCandidate,
+    /// The chosen candidate names one of the chooser's own devices, but
+    /// nothing attests that device wrote it — neither the conflict's own
+    /// reporting device nor a change row it recorded for that (path,
+    /// manifest). Minting it would make the named device take the version as
+    /// its own echo: nothing written, the conflict stays open.
+    UnattestedCandidate,
     /// Winner recorded + propagated; `change_seq` is the `sync_changes` row
     /// that carries the winner to every device via catch-up.
     Resolved { change_seq: i64 },
+    /// The head row the choose would mint encodes to `len` bytes, past the
+    /// serve-page cap (`sync_handlers::unservable_change_len`): nothing was
+    /// written and the conflict stays open.
+    TooLarge { len: usize },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -1393,6 +1410,12 @@ pub struct FeedPostRow {
     /// `augment_viewer_state`. Drives `FeedPostItem.viewer_liked`.
     #[serde(default)]
     pub viewer_liked: bool,
+    /// The post's per-emoji reaction tally (with the viewer's own
+    /// `viewer_react_id` per emoji), filled by `augment_viewer_state` from the
+    /// `content_links link_type='react'` rows; empty on a `bluesky` row.
+    /// Drives `FeedPostItem.reactions`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub reactions: Vec<fauna_protocol::feed::PostReactionGroup>,
     /// Composite score from `content_meta.score`. Populated by `query_feed_scored`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub score: Option<f64>,
@@ -1742,6 +1765,10 @@ pub struct PaymentProviderRow {
     /// last_rejected_at}` on the wire.
     pub last_verified_at: Option<i64>,
     pub last_rejected_at: Option<i64>,
+    /// The product the tier is sold as (Stripe: the Payment Link id);
+    /// `None` maps every verified payment (monetization.md § Pillar 3 →
+    /// *Configuration*).
+    pub product_ref: Option<String>,
 }
 
 /// One membership designation (monetization.md § Pillar 4 — paid nest access):
@@ -1774,6 +1801,24 @@ pub struct PaymentClaimRow {
     pub redeemed_by: Option<Vec<u8>>,
     pub redeemed_at: Option<i64>,
     pub voided_at: Option<i64>,
+}
+
+/// One `payment_purchases` row: what a provider purchase reference is bound
+/// to (monetization.md § Expiry & revocation).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PaymentPurchaseRow {
+    pub purchase_ref: String,
+    pub tier_name: String,
+    /// The buyer bound at checkout (`client_reference_id`), if any.
+    pub buyer_actor_id: Option<Vec<u8>>,
+    /// The `external_ref` of the claim minted for an unbound purchase.
+    pub claim_external_ref: Option<String>,
+    pub voided_at: Option<i64>,
+    /// The product the purchase was sold as (Stripe: the Payment Link id a
+    /// checkout named); `None` when no payment of it named one. A renewal is
+    /// covered by the purchase only while the mapping names this product
+    /// (monetization.md § Pillar 3 → *Configuration*).
+    pub product_ref: Option<String>,
 }
 
 /// One of a subscriber's own subscriptions across all creators — the
@@ -2290,19 +2335,26 @@ impl CacheDb {
     /// whose author the nest attested — `conv_record_authors`; a restore keeps
     /// the historical row) and the permanent audit row commit in ONE SQLite
     /// transaction — the conv twin of [`Self::post_legal_takedown_txn`]
-    /// (`moderation.md` § Legal takedown → *Conversations*). A record no
-    /// attestation names writes no queue row; its appeal stays any holder's.
-    /// The flag write must match exactly one conv record, else the transaction
-    /// rolls back with an error — never a silent no-op that still audits
-    /// (review 2026-07-06 §§ F1/F4; `nest/common.md` § single atomic decision
-    /// point).
+    /// (`takedown-and-block.md` § Legal takedown → *Conversations*). A record
+    /// no attestation names writes no queue row; its appeal stays any holder's.
+    ///
+    /// **Every copy (2026-11-03).** The channel is not in a conv record's hash, so
+    /// one `record_cid` can name copies in several channels (or a re-send into
+    /// one channel after a delete). A legal order names the content, and every
+    /// copy is the same sealed bytes: the flag lands on every copy, one audit
+    /// row per channel holding one (`audit_detail` is given each channel's
+    /// hex), and the queue row goes to the earliest copy's attested author.
+    /// The flag write must match at least one conv record, else the
+    /// transaction rolls back with an error — never a silent no-op that still
+    /// audits (review 2026-07-06 §§ F1/F4; `nest/common.md` § single atomic
+    /// decision point).
     pub async fn conv_legal_takedown_txn(
         &self,
         record_cid: &fauna_cbor::Cid,
         content_id_hex: &str,
         reference: Option<&str>,
         admin_actor: &[u8],
-        audit_detail: &str,
+        audit_detail: &(dyn Fn(&str) -> String + Send + Sync),
         timestamp_us: i64,
     ) -> anyhow::Result<Option<i64>> {
         use anyhow::Context;
@@ -2312,13 +2364,14 @@ impl CacheDb {
             .context("begin conv legal-takedown tx")?;
         let mut queued = None;
         let n = crate::segments::records_db::set_conv_legal_takedown(&tx, record_cid, reference)?;
-        if n != 1 {
+        if n == 0 {
             anyhow::bail!(
-                "legal-takedown flag write matched {n} conv records for content {content_id_hex} (want exactly 1); rolled back"
+                "legal-takedown flag write matched no conv record for content {content_id_hex}; rolled back"
             );
         }
         if reference.is_some()
-            && let Some(author) = crate::segments::records_db::conv_record_author(&tx, record_cid)?
+            && let Some(author) =
+                crate::segments::records_db::conv_record_author(&tx, record_cid, None)?
         {
             queued = Some(moderation::insert_enforcement_row(
                 &tx,
@@ -2336,13 +2389,15 @@ impl CacheDb {
         } else {
             "moderation:legal-takedown-restore"
         };
-        admin::audit_on_conn(
-            &tx,
-            None,
-            audit_action,
-            Some(content_id_hex),
-            Some(audit_detail),
-        )?;
+        for channel in crate::segments::records_db::conv_record_scopes(&tx, record_cid)? {
+            admin::audit_on_conn(
+                &tx,
+                None,
+                audit_action,
+                Some(content_id_hex),
+                Some(&audit_detail(&hex::encode(channel))),
+            )?;
+        }
         tx.commit().context("commit conv legal-takedown tx")?;
         Ok(queued)
     }
@@ -2372,6 +2427,27 @@ impl CacheDb {
     ) -> anyhow::Result<Option<([u8; 32], Option<String>)>> {
         let conn = self.conn.lock().await;
         crate::segments::records_db::conv_record_scope_and_takedown(&conn, record_cid)
+    }
+
+    /// Does `channel` hold a copy of the conv record `record_cid`?
+    pub async fn conv_record_in_scope(
+        &self,
+        channel: &[u8; 32],
+        record_cid: &fauna_cbor::Cid,
+    ) -> anyhow::Result<bool> {
+        let conn = self.conn.lock().await;
+        crate::segments::records_db::conv_record_in_scope(&conn, channel, record_cid)
+    }
+
+    /// The channel holding a copy of `record_cid` that `author` is attested
+    /// to have sent, if any.
+    pub async fn conv_record_scope_of_author(
+        &self,
+        record_cid: &fauna_cbor::Cid,
+        author: &[u8; 32],
+    ) -> anyhow::Result<Option<[u8; 32]>> {
+        let conn = self.conn.lock().await;
+        crate::segments::records_db::conv_record_scope_of_author(&conn, record_cid, author)
     }
 
     /// Tombstone every live conv record with `seq <= up_to_seq` across the

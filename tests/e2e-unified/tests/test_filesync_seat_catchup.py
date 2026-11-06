@@ -11,8 +11,9 @@ These three behaviours were pinned until 2026-10-01 only on the legacy headless
 daemon as a reader (``tests/platform/sync/test_catchup_permanent_skip.py`` and
 ``test_orchestrator.py``), which has since been removed
 (``architecture/apps/sync-agent.md`` § Headless deployment). The engine under
-test is the same ``fauna-sync-engine``; the seat that runs it is now the tui
-app's own ``fauna-sync-agent``, the lead app (``helpers/sync_seats.py``).
+test is the same ``fauna-sync-engine``; the seat that runs it is now an app's
+own ``fauna-sync-agent``: tui, the lead app, and macOS through the ``native``
+seat (``helpers/sync_seats.py``).
 
 The flow every test here asserts::
 
@@ -35,6 +36,7 @@ from __future__ import annotations
 import contextlib
 import secrets
 import shutil
+import sys
 import tempfile
 from pathlib import Path
 
@@ -55,6 +57,7 @@ from common.auth import (
 )
 from helpers import sync_seats
 from helpers.harness_writer import HarnessWriter
+from helpers.set_names import addressed
 from helpers.waiting import wait_until
 from i18n.strings import S
 
@@ -63,6 +66,20 @@ pytestmark = [
     # tui leads (the shared engine runs in every app's agent); the other
     # desktops join through the same `make_seat("native")` seam.
     pytest.mark.tui,
+    pytest.mark.macos,
+    pytest.mark.linux,
+]
+
+# This journey's own owed legs, in `sync_seats.UNBUILT_MODES`' shape: tui,
+# macOS and linux run it; the windows native leg below lands with its app's
+# trickle-down, and landing deletes its entry.
+OWED_SEATS: dict = {
+    "win32": {"native": "the windows leg of `local-folder-sync` has not landed"},
+}
+
+_SEAT_PAIRS = [
+    pytest.param(pair, id=sync_seats.seat_set_param_id(pair))
+    for pair in sync_seats.seat_sets_for_platform(sys.platform, unbuilt=OWED_SEATS)
 ]
 
 # Ceilings a green run never pays (convention 14).
@@ -71,9 +88,10 @@ WINDOW = 180.0
 
 
 @contextlib.contextmanager
-def _writer_and_seat(nest, request, folder: str):
-    """A custody-first set, the harness's signed writer, and one tui seat bound
-    to it as the same account's second device. Yields ``(writer, seat, secret_key)``.
+def _writer_and_seat(nest, request, folder: str, seat_pair):
+    """A custody-first set, the harness's signed writer, and one app seat of
+    ``seat_pair``'s mode bound to it as the same account's second device. Yields
+    ``(writer, seat, secret_key)``.
     """
     # The seat signs in through the fixture-setup carve-out every harness-nest
     # seat uses; one owner, imported rather than copied.
@@ -99,7 +117,7 @@ def _writer_and_seat(nest, request, folder: str):
             tmp / "writer",
         )
         seat = sync_seats.make_seat(
-            "tui",
+            seat_pair[0],
             name="b",
             run_token=sync_seats.new_run_token(seats=1),
             root=tmp / "b",
@@ -147,11 +165,12 @@ def _await_log(seat, needle: str, what: str, *, after: int = 0) -> int:
 
 
 @pytest.mark.timeout(int(2 * STARTUP_WINDOW + 3 * WINDOW + 120))
+@pytest.mark.parametrize("seat_pair", _SEAT_PAIRS)
 @pytest.mark.feature("local-folder-sync")
-def test_a_restarted_seat_receives_what_it_missed(nest_instance, request):
+def test_a_restarted_seat_receives_what_it_missed(nest_instance, request, seat_pair):
     """The seat is stopped, misses a write, and receives it on restart — catch-up
     from a non-zero anchor, the same device, its state kept."""
-    with _writer_and_seat(nest_instance, request, "replay-docs") as (writer, seat, _):
+    with _writer_and_seat(nest_instance, request, "replay-docs", seat_pair) as (writer, seat, _):
         # Baseline through the live path: the seat's anchor is demonstrably
         # past zero, so what the restart does is catch-up, not first sync.
         writer.write("file1.txt", "first file")
@@ -223,9 +242,10 @@ def _upload_chunk_and_manifest(base: str, token: str, data: bytes, *,
 
 
 @pytest.mark.timeout(int(2 * STARTUP_WINDOW + 3 * WINDOW + 120))
+@pytest.mark.parametrize("seat_pair", _SEAT_PAIRS)
 @pytest.mark.feature("local-folder-sync")
 def test_a_permanently_unappliable_change_is_recorded_and_never_blocks_the_rest(
-    nest_instance, request
+    nest_instance, request, seat_pair
 ):
     """Two stuck changes ahead of a good one in the catch-up sequence: the good
     one lands, the stuck ones never reach the disk, and each is REPORTED — on
@@ -245,7 +265,7 @@ def test_a_permanently_unappliable_change_is_recorded_and_never_blocks_the_rest(
     later_body = b"the changes after the stuck one keep arriving"
     port, base = nest_instance["port"], nest_instance["url"]
 
-    with _writer_and_seat(nest_instance, request, folder) as (writer, seat, secret_key):
+    with _writer_and_seat(nest_instance, request, folder, seat_pair) as (writer, seat, secret_key):
         writer.write("first.txt", "baseline")
         writer.sync(expect=["first.txt"])
         _await_bytes(seat, "first.txt", b"baseline", "baseline")
@@ -410,22 +430,23 @@ def _await_not_applied_rows(seat, folder: str, count: int) -> list:
 
 
 @pytest.mark.timeout(int(STARTUP_WINDOW + 4 * WINDOW + 120))
+@pytest.mark.parametrize("seat_pair", _SEAT_PAIRS)
 @pytest.mark.feature("local-folder-sync")
-def test_a_backup_seat_keeps_a_file_the_source_deleted(nest_instance, request):
+def test_a_backup_seat_keeps_a_file_the_source_deleted(nest_instance, request, seat_pair):
     """A seat whose place does not apply deletes keeps the file after the source
     deletes it — whatever rail delivered the delete (`file-sync.md` § 4)."""
     from clients.ws_rpc_admin_client import WsRpcAdminClient
     from nacl.signing import SigningKey
 
     folder = "backup-docs"
-    with _writer_and_seat(nest_instance, request, folder) as (writer, seat, secret_key):
+    with _writer_and_seat(nest_instance, request, folder, seat_pair) as (writer, seat, secret_key):
         sk = SigningKey(bytes.fromhex(secret_key))
         client = WsRpcAdminClient(nest_instance["url"], actor_id=bytes(sk.verify_key),
                                   signing_key=bytes(sk))
 
         def my_place() -> tuple[int, dict]:
             with client:
-                members = client.call("fauna.folders.members.list", {"name": folder})["members"]
+                members = client.call("fauna.folders.members.list", addressed(folder))["members"]
             # The writer's pass seats no place; the bind seated this one.
             return next((i, m) for i, m in enumerate(members)
                         if m["device_id"] != writer.device_id.hex())

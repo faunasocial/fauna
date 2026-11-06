@@ -77,119 +77,6 @@ class SubscriptionsActions:
     # --- e2e convention 7: app-gate declarations (the platform check lives
     # here, not the test body) ---
 
-    def require_sell_post_authoring_supported(self) -> None:
-        """Skip unless this app can author a sell-this-post unlock tier.
-
-        Landed on tui (the lead app) + linux + web + android (monetization.md
-        § Per-post pay-to-unlock). macos/ios joined 2026-08-02: the composer's
-        gate select gained "Sell this post…" as its third answer, sharing the
-        ordinary gate's teaser field and finishing through the identical
-        upload + `submitGatedPost` pair. windows joined 2026-08-03 — the last
-        of the 7 apps, closing the trickle-down."""
-        if not (
-            self.driver.is_tui()
-            or self.driver.is_linux()
-            or self.driver.is_web()
-            or self.driver.is_android()
-            or self.driver.is_macos()
-            or self.driver.is_ios()
-            or self.driver.is_windows()
-        ):
-            from helpers.app_surface import skip_unbuilt
-
-            skip_unbuilt(
-                self.driver,
-                surface="sell-this-post unlock-tier authoring",
-                detail="landed on all 7 apps",
-                tracked="monetization.md § Per-post pay-to-unlock",
-            )
-
-    def require_sell_post_buyer_leg_supported(self) -> None:
-        """Skip unless this app has a §5 claim surface to prove the sell-post
-        buyer leg (mint → redeem → unseal).
-
-        Proven on linux + android + web + tui. web was previously blocked on the
-        e2e test-agent actor-switch bug (a second `set_state` login within one
-        test silently reverted to the FIRST actor, so the feed read through a
-        retired WS client and came back empty); that bug is FIXED — the patch
-        now moves the account registry with the legacy slot, so the registry's
-        `mirrorActiveToLegacy()` can no longer heal the switch away.
-
-        tui joined 2026-08-02: it already had the §5 MINT surface
-        (the tui Tiers author track), and the consumer-side REDEEM input arrived with the
-        `subscription-settings` page — this leg is mint → **redeem** → unseal, so
-        it needed both halves.
-
-        macos/ios joined 2026-08-02: both already had the full §1/§2/§3/§5
-        profile Tiers-tab surface (`SubscriptionsVM`) and the consumer
-        `subscription-settings` page — the only missing piece was the
-        sell-post authoring leg above, which this widening rides.
-
-        windows joined 2026-08-03 — the last of the 7 apps, closing the
-        trickle-down: same shape as
-        linux/android, composed off windows' existing full §1/§2/§3/§5
-        profile Tiers-tab surface."""
-        if not (
-            self.driver.is_linux()
-            or self.driver.is_android()
-            or self.driver.is_web()
-            or self.driver.is_tui()
-            or self.driver.is_macos()
-            or self.driver.is_ios()
-            or self.driver.is_windows()
-        ):
-            from helpers.app_surface import skip_unbuilt
-
-            skip_unbuilt(
-                self.driver,
-                surface="the §5 claim surface (sell-post buyer leg)",
-                detail="proven on all 7 apps",
-                tracked="",
-            )
-
-    def require_teaser_buy_supported(self) -> None:
-        """Skip unless this app renders the self-serve teaser purchase
-        affordance (`gated-post-price` / `gated-post-payment-link` /
-        `gated-post-buy-button`, gap (2c), `monetization.md` § Per-post
-        pay-to-unlock → the buyer's price read is post-addressed).
-
-        Landed on tui (lead) + linux + web (2026-07-30) — the
-        `FeedManager::resolve_post_unlock_offer` / `buy_unlock_offer` shared
-        seam plus the per-app render. windows joined 2026-08-03
-. macos + ios joined
- — new shared FaunaKit
-        `PostUnlockOfferTeaser`, wired into both targets' feed list card.
-        android joined last — the same shared
-        `FeedManager` seam, a new `PostUnlockOfferTeaser` composable shared
-        between the feed list card and `post_detail`. All 7 apps now render
-        this affordance; the android arm is compile-verified only (the
-        real e2e run rides the standing host-emulator gap, like every
-        other android journey in this suite).
-
-        ⚠ web's render is built and e2e-verified as the SELLER; the BUYER leg
-        (`test_sell_post_teaser_price_and_self_serve_buy[web]`) is red on a
-        pre-existing, separate actor-switch fragility this track did not
-        introduce and has not root-caused — see the "web
-        teaser-price buyer leg: gated-post-price never resolves" finding
-        before assuming this gate means the buyer leg is proven there too."""
-        if not (
-            self.driver.is_tui()
-            or self.driver.is_linux()
-            or self.driver.is_web()
-            or self.driver.is_windows()
-            or self.driver.is_macos()
-            or self.driver.is_ios()
-            or self.driver.is_android()
-        ):
-            from helpers.app_surface import skip_unbuilt
-
-            skip_unbuilt(
-                self.driver,
-                surface="the self-serve teaser buy affordance (gap (2c))",
-                detail="landed on all 7 apps",
-                tracked="monetization.md § Per-post pay-to-unlock",
-            )
-
     def require_sell_post_seller_fanout_leg_supported(self) -> None:
         """Skip unless this app has both the §1 tier-create and §2 approve
         surfaces needed to prove the sell-post seller fan-out/reconcile leg.
@@ -201,56 +88,11 @@ class SubscriptionsActions:
         tab's create form, §2 approve and roster surfaces are all built. Web
         joined 2026-10-09 on the same terms: its Tiers tab carries the same
         three surfaces, and the leg's witnesses ran there once the gate let
-        them."""
-        if not (
-            self.driver.is_linux()
-            or self.driver.is_tui()
-            or self.driver.is_windows()
-            or self.driver.is_web()
-        ):
-            from helpers.app_surface import skip_unbuilt
+        them. macos and ios (shared FaunaKit ProfileView's Tiers tab, the same
+        three surfaces) joined 2026-10-24 on the same terms."""
+        from helpers.app_surface import require_surface
 
-            skip_unbuilt(
-                self.driver,
-                surface="the §1 tier-create + §2 approve surfaces (sell-post "
-                        "seller fan-out leg)",
-                detail="linux + tui + windows + web today",
-                tracked="",
-            )
-
-    def require_consumer_subscriptions_page(self) -> None:
-        """Skip unless this app builds the CONSUMER `subscription-settings`
-        page — `subscription-mine-*` (My Subscriptions) and
-        `subscription-claim-redeem-*`.
-
-        Built on **all 7 apps** — linux (lead), web, android, apple, windows, and
-        tui (2026-08-02, `apps/fauna-tui/src/settings/subscriptions.rs`), which
-        closed the last declared gap `monetization.md` § Pillar 1 carried.
-
-        The predicate is kept rather than deleted, and deliberately stays
-        distinct from the Tiers-tab gates above: it names a different PAGE, not a
-        different section of the profile, and folding the two together is exactly
-        the conflation that kept three provider/mint tests skipped on tui after
-        it had built the surfaces they exercise. An eighth surface (or an app
-        that regresses the page) has one honest place to declare itself."""
-        if not (
-            self.driver.is_linux()
-            or self.driver.is_web()
-            or self.driver.is_android()
-            or self.driver.is_macos()
-            or self.driver.is_ios()
-            or self.driver.is_windows()
-            or self.driver.is_tui()
-        ):
-            from helpers.app_surface import skip_unbuilt
-
-            skip_unbuilt(
-                self.driver,
-                surface="the consumer subscription-settings page "
-                        "(subscription-mine-* / subscription-claim-redeem-*)",
-                detail="built on all 7 apps as of 2026-08-02",
-                tracked="monetization.md",
-            )
+        require_surface(self.driver, "sell-post-seller-surfaces")
 
     def refresh(self) -> None:
         """Force a fresh read of all three sections.
@@ -411,6 +253,33 @@ class SubscriptionsActions:
         (the roster, or `wait_for_pending_request_count`) before switching
         account, or the switch can drop the in-flight approve."""
         self.driver.click("subscription-request-approve-button")
+
+    def approve_until(self, done, timeout: float = 90.0) -> bool:
+        """Drive §2 until ``done()``, approving whatever is pending when observed.
+
+        The app's own drain races every click: it grants `auto_approve` and
+        `payment_entitled` rows with no judgment, on connect and then on a poll
+        backstop whose cadence differs per app (30 s native, 2 s on web under the
+        e2e agent — `apps/fauna-web/src/lib/subscriptionsAuthor.ts`). A row can
+        therefore leave §2 before it is seen, or between being counted and being
+        clicked. So ``done`` must read the OUTCOME (the grant landing, read from
+        the nest), never the row, and a click that lost its row to the drain is
+        not a failure: the next pass reads ``done`` again (convention 14)."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if done():
+                return True
+            self.refresh()
+            if self.pending_request_count() >= 1:
+                try:
+                    self.approve_first_request()
+                except RuntimeError:
+                    # A row still standing means the click really failed; a row
+                    # gone means the drain took it.
+                    if self.pending_request_count() >= 1:
+                        raise
+            time.sleep(1)  # sleep-ok: poll interval of a deadline loop
+        return bool(done())
 
     def reject_request(self, index: int = 0) -> None:
         """Turn pending request ``index`` down (`subscription-request-reject-button`,

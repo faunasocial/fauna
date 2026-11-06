@@ -584,6 +584,15 @@ func uniffiCheckChecksums() {
 	}
 	{
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_fauna_conversations_checksum_func_room_search_result_kind_attr_token()
+		})
+		if checksum != 21291 {
+			// If this happens try cleaning and rebuilding your project
+			panic("fauna_conversations: uniffi_fauna_conversations_checksum_func_room_search_result_kind_attr_token: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_fauna_conversations_checksum_func_room_may_name_labeler_kind()
 		})
 		if checksum != 48734 {
@@ -775,7 +784,7 @@ func uniffiCheckChecksums() {
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_fauna_conversations_checksum_method_conversationsmanager_accept_suggestion()
 		})
-		if checksum != 27196 {
+		if checksum != 48436 {
 			// If this happens try cleaning and rebuilding your project
 			panic("fauna_conversations: uniffi_fauna_conversations_checksum_method_conversationsmanager_accept_suggestion: UniFFI API checksum mismatch")
 		}
@@ -1682,6 +1691,15 @@ func uniffiCheckChecksums() {
 	}
 	{
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_fauna_conversations_checksum_method_conversationssession_mls_bound_channels_json()
+		})
+		if checksum != 56376 {
+			// If this happens try cleaning and rebuilding your project
+			panic("fauna_conversations: uniffi_fauna_conversations_checksum_method_conversationssession_mls_bound_channels_json: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_fauna_conversations_checksum_method_conversationssession_mls_folded_commits_json()
 		})
 		if checksum != 42529 {
@@ -2077,6 +2095,11 @@ type ConversationsManagerInterface interface {
 	// packages ran out, or whose nest stopped answering, reads `not-found` /
 	// `error` and commits nothing. Returns whether a chip was pushed; an
 	// index past the list is a no-op `false`.
+	//
+	// ⚠ Lives in this `async_runtime = "tokio"` block, not beside the sync
+	// picker methods: it awaits [`Self::resolve_recipient`], whose backend probe
+	// needs a tokio context — in the plain `uniffi::export` block the native
+	// apps panicked "there is no reactor running".
 	AcceptSuggestion(index uint32) bool
 	// Stage `bytes` as an attachment on `id`'s compose draft. Returns the
 	// `blob_hash` the bytes were cached under (the handle the client renders /
@@ -3077,6 +3100,11 @@ func (_self *ConversationsManager) AcceptRoomInvitation(id int64) *ThreadId {
 // packages ran out, or whose nest stopped answering, reads `not-found` /
 // `error` and commits nothing. Returns whether a chip was pushed; an
 // index past the list is a no-op `false`.
+//
+// ⚠ Lives in this `async_runtime = "tokio"` block, not beside the sync
+// picker methods: it awaits [`Self::resolve_recipient`], whose backend probe
+// needs a tokio context — in the plain `uniffi::export` block the native
+// apps panicked "there is no reactor running".
 func (_self *ConversationsManager) AcceptSuggestion(index uint32) bool {
 	_pointer := _self.ffiObject.incrementPointer("*ConversationsManager")
 	defer _self.ffiObject.decrementPointer()
@@ -5476,6 +5504,11 @@ type ConversationsSessionInterface interface {
 	// for snapshot / send / rename / membership / recipient resolution. The
 	// FaunaMls backend is already registered on it.
 	Manager() *ConversationsManager
+	// This session's `mls_bound_channels` observable, JSON-encoded (a sorted
+	// array of channel hex ids) — the UniFFI twin of
+	// [`crate::state_json::mls_bound_channels_json`], the same passthrough
+	// shape as [`Self::mls_folded_commits_json`].
+	MlsBoundChannelsJson() string
 	// This session's `mls_folded_commits` observable, JSON-encoded
 	// (`{channel_hex: count}`) — the UniFFI twin of
 	// [`crate::state_json::mls_folded_commits_json`], which this delegates to
@@ -5679,6 +5712,21 @@ func (_self *ConversationsSession) Manager() *ConversationsManager {
 	return FfiConverterConversationsManagerINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint64_t {
 		return C.uniffi_fauna_conversations_fn_method_conversationssession_manager(
 			_pointer, _uniffiStatus)
+	}))
+}
+
+// This session's `mls_bound_channels` observable, JSON-encoded (a sorted
+// array of channel hex ids) — the UniFFI twin of
+// [`crate::state_json::mls_bound_channels_json`], the same passthrough
+// shape as [`Self::mls_folded_commits_json`].
+func (_self *ConversationsSession) MlsBoundChannelsJson() string {
+	_pointer := _self.ffiObject.incrementPointer("*ConversationsSession")
+	defer _self.ffiObject.decrementPointer()
+	return FfiConverterStringINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) RustBufferI {
+		return GoRustBuffer{
+			inner: C.uniffi_fauna_conversations_fn_method_conversationssession_mls_bound_channels_json(
+				_pointer, _uniffiStatus),
+		}
 	}))
 }
 
@@ -7478,7 +7526,8 @@ func (_ FfiDestroyerReplyPreview) Destroy(value ReplyPreview) {
 }
 
 // The `recipient-resolve-status` element's render-ready view: the kebab-case
-// state `token` (`idle` / `resolving` / `resolved` / `not-found` / `error` —
+// state `token` (`idle` / `resolving` / `resolved` / `not-found` /
+// `not-reachable` / `error` —
 // the vocabulary `docs/goal/ui/conversations.md` § Errors & edge cases
 // ratifies, driving the element's `state` automation attribute) plus the
 // status `label` each app resolves through its own i18n pipeline
@@ -9349,6 +9398,14 @@ const (
 	// [`crate::snapshot::ThreadSummary::bridge`] — and the address —
 	// [`TypedAddress::Bridged`] — never the rail.
 	RailBridged Rail = 3
+	// The read-only threads of an imported export archive (Facebook
+	// Messenger, Instagram direct messages) — a **client-local projection**
+	// the manager builds from the archive folder's `model/threads.cbor` and
+	// `model/messages.cbor` through [`crate::backend::ArchiveThreadSource`],
+	// never written to the thread store or to `__conv`, and never on the
+	// wire (`behavior/archive-import.md` § What each category becomes).
+	// Nothing sends on it: it has no backend, no send kind and no compose.
+	RailArchive Rail = 4
 )
 
 type FfiConverterRail struct{}
@@ -9392,9 +9449,16 @@ const (
 	// recipient that isn't reachable (e.g. a Fauna actor id with no key
 	// package on the nest). Distinct from `Error` (a transport/probe failure)
 	// per `docs/goal/ui/conversations.md` § Errors & edge cases
-	// (`recipient-resolve-status`: resolving / resolved / error / not-found).
+	// (`recipient-resolve-status`: idle / resolving / resolved / not-found /
+	// not-reachable / error).
 	ResolveStateNotFound ResolveState = 4
 	ResolveStateError    ResolveState = 5
+	// The home nest FOUND the handle as one of its own accounts, but it is not
+	// addressable yet (no key package — its app has never signed in, or its
+	// supply lapsed). Terminal like `Error`: nothing resolved, no chip, never
+	// a mail fall-through (`conversations.md` § Errors & edge cases → *The
+	// picker tells the truth*, rule 2).
+	ResolveStateNotReachable ResolveState = 6
 )
 
 type FfiConverterResolveState struct{}
@@ -10197,6 +10261,24 @@ func (e TypedAddressBridged) Destroy() {
 	FfiDestroyerString{}.Destroy(e.Address)
 }
 
+// A person as an imported export archive names them — `platform` is the
+// archive's platform token (`facebook`, `instagram`; `fauna_core::source`),
+// `name` their display name there (`behavior/archive-import.md` § What
+// each category becomes, the message-threads row). Only ever built by the
+// [`Rail::Archive`] projection, which is never stored or sent, so no
+// history slice or drafts blob carries one. It names nobody on Fauna
+// (no shadow profile — § Architectural rules there): nothing resolves,
+// dials or sends to it.
+type TypedAddressArchive struct {
+	Platform string
+	Name     string
+}
+
+func (e TypedAddressArchive) Destroy() {
+	FfiDestroyerString{}.Destroy(e.Platform)
+	FfiDestroyerString{}.Destroy(e.Name)
+}
+
 // An address of a kind a newer build writes and this one does not name —
 // a participant or sender of a rail this build lacks, read out of a
 // history slice or drafts blob another device wrote. Carried whole as
@@ -10250,6 +10332,11 @@ func (FfiConverterTypedAddress) Read(reader io.Reader) TypedAddress {
 			FfiConverterStringINSTANCE.Read(reader),
 		}
 	case 4:
+		return TypedAddressArchive{
+			FfiConverterStringINSTANCE.Read(reader),
+			FfiConverterStringINSTANCE.Read(reader),
+		}
+	case 5:
 		return TypedAddressUnknown{
 			FfiConverterBytesINSTANCE.Read(reader),
 		}
@@ -10271,8 +10358,12 @@ func (FfiConverterTypedAddress) Write(writer io.Writer, value TypedAddress) {
 		writeInt32(writer, 3)
 		FfiConverterStringINSTANCE.Write(writer, variant_value.BridgeId)
 		FfiConverterStringINSTANCE.Write(writer, variant_value.Address)
-	case TypedAddressUnknown:
+	case TypedAddressArchive:
 		writeInt32(writer, 4)
+		FfiConverterStringINSTANCE.Write(writer, variant_value.Platform)
+		FfiConverterStringINSTANCE.Write(writer, variant_value.Name)
+	case TypedAddressUnknown:
+		writeInt32(writer, 5)
 		FfiConverterBytesINSTANCE.Write(writer, variant_value.Canonical)
 	default:
 		_ = variant_value
@@ -13024,6 +13115,17 @@ func RoomRoleAttrToken(role RoomRole) string {
 	return FfiConverterStringINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) RustBufferI {
 		return GoRustBuffer{
 			inner: C.uniffi_fauna_conversations_fn_func_room_role_attr_token(FfiConverterRoomRoleINSTANCE.Lower(role), _uniffiStatus),
+		}
+	}))
+}
+
+// FFI-exported twin of [`RoomSearchResultKind::attr_token`] — the `kind`
+// attribute of `room-search-result-item[i]` (`message` or `post`), so a
+// native app reads it from the shared mapping instead of spelling it.
+func RoomSearchResultKindAttrToken(kind RoomSearchResultKind) string {
+	return FfiConverterStringINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) RustBufferI {
+		return GoRustBuffer{
+			inner: C.uniffi_fauna_conversations_fn_func_room_search_result_kind_attr_token(FfiConverterRoomSearchResultKindINSTANCE.Lower(kind), _uniffiStatus),
 		}
 	}))
 }

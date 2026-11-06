@@ -62,13 +62,29 @@ final class FileProviderEnumerator: NSObject, NSFileProviderEnumerator {
         // pairing — re-signal iff something new landed, so the OS re-lists
         // reflecting the now-updated engine rows. Self-terminating: a second
         // refresh() with nothing new returns `false` and no further signal fires.
+        //
+        // The working set's feed also reports the items whose kept bit a refresh
+        // flipped (`FileProviderWorkingSetFeed`), the one signal that makes the OS
+        // re-read an item it already lists — so a folder flipped between full and
+        // metadata-only reaches each item's keep policy (`on-demand-files-apple.md`
+        // § Apple File Provider binding). Every other container reports nothing.
         let host = self.host
         let domain = self.domain
+        let container = self.container
         Task {
-            if (try? await host.refresh()) == true {
-                try? await NSFileProviderManager(for: domain)?.signalEnumerator(for: .rootContainer)
+            let changed = (try? await host.refresh()) == true
+            for signalled in FileProviderWorkingSetFeed.containersToSignal(changed: changed) {
+                try? await NSFileProviderManager(for: domain)?.signalEnumerator(for: signalled)
             }
-            observer.finishEnumeratingChanges(upTo: anchor, moreComing: false)
+            guard container == .workingSet else {
+                observer.finishEnumeratingChanges(upTo: anchor, moreComing: false)
+                return
+            }
+            let readOnly = await FileProviderItemCapabilities.isReadOnly(host)
+            await FileProviderWorkingSetFeed.reportChanges(
+                to: observer, upTo: anchor,
+                takeKeptFlips: { try await host.takeKeptFlips() },
+                item: { FileProviderItem(ffi: $0, readOnly: readOnly) })
         }
     }
 

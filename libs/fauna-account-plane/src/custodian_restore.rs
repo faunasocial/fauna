@@ -347,7 +347,9 @@ pub async fn nest_custodian_arm<B: StoreBackend, D: CustodianDial>(
 ///   content scopes walk with the keys in hand;
 /// - **(c)** after the walk, a custody row for this origin must name the
 ///   identity the connection was bound to; a mismatch is its own outcome and
-///   the rows stand;
+///   the rows stand — and so is an identity the connection left unread while
+///   such a row is on record ([`check_bound_identity`]): the check could not
+///   run, and the user is told so, never a plain *Restored*;
 /// - **(e)** rows held after the walk under a generation no key this device
 ///   holds opens are counted as sealed, never as restored.
 ///
@@ -388,19 +390,8 @@ pub async fn restore_at_address<B: StoreBackend, D: CustodianDial>(
             return Ok(CustodianRestoreOutcome::NotAdmitted);
         }
     };
-    if let Some(got) = walked.bound {
-        let after = on_record(&custodian_nest_targets(store).await?);
-        if let Some(row) = after.iter().find(|t| t.custodian_key != got) {
-            tracing::warn!(
-                "custodian nest restore: {url} answered as {} but the custody row names {}",
-                hex::encode(got),
-                hex::encode(row.custodian_key)
-            );
-            return Ok(CustodianRestoreOutcome::IdentityMismatch {
-                expected: row.custodian_key,
-                got,
-            });
-        }
+    if let Some(told) = check_bound_identity(store, url, &walked.bound).await? {
+        return Ok(told);
     }
     if walked.applied == 0 {
         return Ok(CustodianRestoreOutcome::NothingNew);
@@ -412,6 +403,68 @@ pub async fn restore_at_address<B: StoreBackend, D: CustodianDial>(
     })
 }
 
+/// Bound (c) after the walk: the custody rows now on record whose
+/// `custodian_nest_url` has `url`'s origin (the policy's canonical reading,
+/// so every spelling that dials the same nest matches) must name the identity
+/// the connection was bound to. `Some` is the outcome the user is told in
+/// place of the walk's count: a row naming another key is
+/// [`CustodianRestoreOutcome::IdentityMismatch`]; an identity the connection
+/// left unread while such a row is on record is
+/// [`CustodianRestoreOutcome::IdentityUnchecked`] — the check could not run,
+/// which the gesture states rather than reporting a plain *Restored*. No row
+/// on record has nothing to check against: `None`.
+async fn check_bound_identity<B: StoreBackend>(
+    store: &AccountStore<B>,
+    url: &str,
+    bound: &BoundIdentity,
+) -> Result<Option<CustodianRestoreOutcome>> {
+    if matches!(bound, BoundIdentity::NotAsked) {
+        return Ok(None);
+    }
+    let origin = fauna_core::counterparty_url::counterparty_origin(url);
+    let after: Vec<CustodianNestTarget> = custodian_nest_targets(store)
+        .await?
+        .into_iter()
+        .filter(|t| fauna_core::counterparty_url::counterparty_origin(&t.url) == origin)
+        .collect();
+    let Some(first) = after.first() else {
+        return Ok(None);
+    };
+    Ok(match bound {
+        BoundIdentity::NotAsked => None,
+        BoundIdentity::Unread => {
+            tracing::warn!(
+                "custodian nest restore: {url} left its bound identity unread, so the custody \
+                 row naming {} could not be checked",
+                hex::encode(first.custodian_key)
+            );
+            Some(CustodianRestoreOutcome::IdentityUnchecked)
+        }
+        BoundIdentity::Read(got) => after.iter().find(|t| t.custodian_key != *got).map(|row| {
+            tracing::warn!(
+                "custodian nest restore: {url} answered as {} but the custody row names {}",
+                hex::encode(got),
+                hex::encode(row.custodian_key)
+            );
+            CustodianRestoreOutcome::IdentityMismatch {
+                expected: row.custodian_key,
+                got: *got,
+            }
+        }),
+    })
+}
+
+/// The identity a walk's connection was bound to, as the walk read it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BoundIdentity {
+    /// The caller did not ask (the registry arm: its target is the row).
+    NotAsked,
+    /// Read on the walk's own connection, never the nest's own claim.
+    Read([u8; 32]),
+    /// Asked for, and the read failed: the custody-row check cannot run.
+    Unread,
+}
+
 /// What one admitted dial-and-walk came to.
 struct Walked {
     /// Account-state rows applied.
@@ -419,9 +472,8 @@ struct Walked {
     /// Every scope the walk read: the two account-state planes, then the
     /// content scopes derived after them.
     scopes: Vec<String>,
-    /// The identity the connection was bound to, when asked for — read on
-    /// the walk's own connection, never the nest's own claim.
-    bound: Option<[u8; 32]>,
+    /// The identity the connection was bound to, when asked for.
+    bound: BoundIdentity,
 }
 
 /// One custodian nest: handshake, then the reading walk — THE per-target
@@ -448,14 +500,18 @@ async fn dial_and_walk<B: StoreBackend, D: CustodianDial>(
             )
             .await
             {
-                Ok(bound) => walked.bound = Some(bound),
+                Ok(bound) => walked.bound = BoundIdentity::Read(bound),
                 // The rows walked are verified by their own in-seal
                 // signatures; an unreadable binding leaves only the check
-                // undone, and says so.
-                Err(e) => tracing::warn!(
-                    "custodian nest restore: the connection's bound identity is unreadable \
-                     ({e}) — the custody-row check is skipped"
-                ),
+                // undone — and the gesture says so to the user when a row
+                // on record wanted it (`check_bound_identity`).
+                Err(e) => {
+                    tracing::warn!(
+                        "custodian nest restore: the connection's bound identity is unreadable \
+                         ({e})"
+                    );
+                    walked.bound = BoundIdentity::Unread;
+                }
             }
         }
         Ok(walked)
@@ -489,7 +545,7 @@ where
     let mut walked = Walked {
         applied: 0,
         scopes: Vec::new(),
-        bound: None,
+        bound: BoundIdentity::NotAsked,
     };
     let rpc = &session.rpc;
     let mut planes = Vec::with_capacity(2);
@@ -710,9 +766,17 @@ mod tests {
     }
 
     async fn record_nest_custodian(f: &Fixture, grant: u8, url: &str) {
+        record_nest_custodian_keyed(f, grant, url, [0; 32]).await;
+    }
+
+    async fn record_nest_custodian_keyed(f: &Fixture, grant: u8, url: &str, key: [u8; 32]) {
         let row = fauna_core::custodian_endpoints::CustodianEndpoints {
             grant_id: vec![grant; 16],
             custodian_nest_url: Some(url.into()),
+            endpoints: fauna_core::device_endpoints::DeviceEndpoints {
+                node_id: key,
+                ..Default::default()
+            },
             ..Default::default()
         };
         f.put(fauna_account_store::types::StateEntry {
@@ -786,6 +850,87 @@ mod tests {
         .unwrap();
         assert_eq!(outcome, CustodianRestoreOutcome::NotAdmitted);
         assert_eq!(dial.connects.get(), 1, "the one dial path ran once");
+    }
+
+    /// Bound (b) at every spelling that dials the same nest: a row recorded as `https://c.example` under a withdrawn
+    /// grant withholds the typed default-port, trailing-dot and `wss`
+    /// spellings alike, undialed.
+    #[tokio::test]
+    async fn custodian_restore_withholds_a_withdrawn_grant_at_a_variant_spelling() {
+        let f = fixture().await;
+        record_nest_custodian(&f, 0xD1, "https://c.example").await;
+        let auth = no_authorization();
+        let dial = Refusing::default();
+        let withdrawn = |g: &[u8]| g == [0xD1; 16].as_slice();
+        for typed in [
+            "https://c.example:443",
+            "https://c.example.",
+            "wss://c.example",
+            "WSS://C.EXAMPLE.:443/",
+        ] {
+            let outcome = restore_at_address(
+                &f.store,
+                &dial,
+                typed,
+                id(&f, &auth),
+                &withdrawn,
+                &mut Vec::new,
+            )
+            .await
+            .unwrap();
+            assert_eq!(outcome, CustodianRestoreOutcome::Revoked, "{typed}");
+        }
+        assert_eq!(dial.connects.get(), 0, "no spelling was dialed");
+    }
+
+    /// Bound (c) after the walk, at a variant spelling:
+    /// a row naming another key is a mismatch, a row naming the bound key
+    /// passes, an unread identity with a row on record is stated
+    /// (*IdentityUnchecked*), and no row on record has nothing to check.
+    #[tokio::test]
+    async fn custodian_restore_checks_the_bound_identity_at_a_variant_spelling() {
+        let f = fixture().await;
+        record_nest_custodian_keyed(&f, 0xE1, "https://c.example/", [0xEE; 32]).await;
+        let typed = "wss://c.example.:443";
+        assert_eq!(
+            check_bound_identity(&f.store, typed, &BoundIdentity::Read([0x11; 32]))
+                .await
+                .unwrap(),
+            Some(CustodianRestoreOutcome::IdentityMismatch {
+                expected: [0xEE; 32],
+                got: [0x11; 32],
+            })
+        );
+        assert_eq!(
+            check_bound_identity(&f.store, typed, &BoundIdentity::Read([0xEE; 32]))
+                .await
+                .unwrap(),
+            None,
+            "the row names the identity that answered"
+        );
+        assert_eq!(
+            check_bound_identity(&f.store, typed, &BoundIdentity::Unread)
+                .await
+                .unwrap(),
+            Some(CustodianRestoreOutcome::IdentityUnchecked),
+            "an unread identity with a row on record is told, never a plain Restored"
+        );
+        assert_eq!(
+            check_bound_identity(&f.store, typed, &BoundIdentity::NotAsked)
+                .await
+                .unwrap(),
+            None
+        );
+        // Another nest's address: nothing on record to check against.
+        for bound in [BoundIdentity::Unread, BoundIdentity::Read([0x11; 32])] {
+            assert_eq!(
+                check_bound_identity(&f.store, "https://c.example:8443", &bound)
+                    .await
+                    .unwrap(),
+                None,
+                "{bound:?}"
+            );
+        }
     }
 
     /// The registry arm runs the same per-target sequence: a withdrawn grant

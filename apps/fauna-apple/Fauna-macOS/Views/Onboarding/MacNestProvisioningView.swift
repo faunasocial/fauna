@@ -15,7 +15,7 @@ struct MacNestProvisioningView: View {
     @State private var nowMs: UInt64 = Date.nowEpochMillis
 
     var body: some View {
-        let snap = vm.machine.provisioningSnapshot()
+        let snap = vm.provisioningSnapshot
 
         VStack(alignment: .leading, spacing: 16) {
             automationText(Ids.pageHeading, L.onboarding.nestProvisioning.title)
@@ -55,6 +55,12 @@ struct MacNestProvisioningView: View {
                 automationText(Ids.provisioningElapsed, renderLocalizedText(elapsed))
                     .font(.caption)
                     .foregroundStyle(.secondary)
+            }
+
+            // The SSH door after a door run (onboarding-provisioning.md § 5):
+            // the command with the key this app wrote to `~/.ssh`.
+            if snap.overall == .succeeded, let door = vm.machine.sshDoorReadout() {
+                ProvisioningSshDoorSection(machine: vm.machine, door: door)
             }
 
             if let msg = snap.finalError ?? vm.errorMessage {
@@ -110,7 +116,7 @@ struct MacNestProvisioningView: View {
                 .accessibilityIdentifier(Ids.provisioningContinueButton)
                 .automationActivate(
                     Ids.provisioningContinueButton,
-                    isEnabled: { snap.overall == .succeeded }
+                    isEnabled: { vm.machine.canContinueProvisioning() }
                 ) {
                     _ = vm.machine.continueFromProvisioning()
                 }

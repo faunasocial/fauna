@@ -1148,7 +1148,9 @@ pub(crate) async fn process_gift_wrap_inbound(
     // while DM rows rightly persist).
     // Asked here too, before the nsec decrypt — no unwrap cost for a wrap the
     // deposit would refuse.
-    match crate::bridge_legs::precheck(db, &crate::bridge_legs::NOSTR, &actor_id, &event.id).await {
+    match crate::bridge_legs::precheck(db, &crate::bridge_legs::NOSTR, &actor_id, None, &event.id)
+        .await
+    {
         Ok(Some(crate::db::bridged_conversations::DepositPrecheck::Duplicate)) => {
             tracing::debug!("nostr sync: gift wrap {} already sealed — skip", event.id);
             return;

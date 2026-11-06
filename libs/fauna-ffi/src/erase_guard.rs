@@ -179,6 +179,7 @@ fn all_accounts_erase_blocked(
     own_lock: Option<&FfiAccountInstanceLock>,
 ) -> Option<Vec<String>> {
     let roots: Vec<&Path> = std::iter::once(base_dir).chain(store_root).collect();
+    let own = own_lock.and_then(FfiAccountInstanceLock::serving_actor);
     let blocked = with_own_lock_down(own_lock, || {
         fauna_client_accounts::sign_out_blocked(
             registry.registry(),
@@ -186,6 +187,13 @@ fn all_accounts_erase_blocked(
             &roots,
         )
     })?;
+    // Which accounts refused, beside the one whose lock this seat put down:
+    // the line names none, so this is the only place a refusal says why.
+    tracing::warn!(
+        refused = ?blocked.accounts,
+        own_lock = ?own,
+        "erase refused: another instance serves an account it reaches"
+    );
     Some(blocked.accounts)
 }
 
@@ -348,6 +356,35 @@ mod tests {
         assert_eq!(blocked.accounts, vec![device.actor.clone()]);
         assert_eq!(blocked.line, fauna_client_accounts::sign_out_blocked_copy());
         assert!(own.is_held(), "the refusal path restores the lock too");
+    }
+
+    /// One window, the same account signed in, out and in again: the first
+    /// session's lock object outlives its sign-out (a view still holds it), and
+    /// without the release it is the "sibling" above — the next sign-out of
+    /// that account refused. `release` lets go of both locks whoever still
+    /// holds the object.
+    #[test]
+    fn a_released_lock_a_view_still_holds_does_not_refuse_the_next_sessions_sign_out() {
+        let device = Device::new('a');
+        let earlier = device.raw_lock(&device.actor);
+        earlier.release();
+        assert!(!earlier.is_held(), "nothing is held after the release");
+        assert!(
+            !device.served_at_root(&device.actor),
+            "nor declared at the shared root"
+        );
+
+        let own = device.raw_lock(&device.actor);
+        assert_eq!(
+            device.sign_out(Some(&own)),
+            None,
+            "the earlier session's object, still alive, serves nothing"
+        );
+        earlier.release();
+        assert!(
+            own.is_held(),
+            "a second release of the earlier object leaves ours alone"
+        );
     }
 
     /// A sibling **app** declared only at the shared store root — tui or linux on

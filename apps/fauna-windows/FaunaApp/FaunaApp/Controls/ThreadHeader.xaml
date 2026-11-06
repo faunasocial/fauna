@@ -53,6 +53,7 @@
             <ColumnDefinition Width="Auto" />
             <ColumnDefinition Width="Auto" />
             <ColumnDefinition Width="Auto" />
+            <ColumnDefinition Width="Auto" />
         </Grid.ColumnDefinitions>
 
         <!-- thread-header id lives on the always-present label TextBlock (a realized
@@ -81,19 +82,29 @@
              GREYED when the viewer's role may not set policy — never hidden
              (`ui/conversations.md` § Architectural rules 5; a policy-less room greys
              it too, having no policy to edit). -->
-        <Button Grid.Row="0" Grid.Column="2" x:Name="RoomSettingsButton"
+        <!-- The community room's search door (`room-search-button`, room-search.md § The
+             surface): beside the settings button, painted AND LIVE iff the shared
+             `capabilities.can_search_room` — absent (Collapsed, no UIA peer) on every other
+             thread; no app branches on the room class. -->
+        <Button Grid.Row="0" Grid.Column="2" x:Name="RoomSearchButton"
+                AutomationProperties.AutomationId="{x:Bind ids:Ids.RoomSearchButton}"
+                Content="&#xE721;" FontFamily="Segoe MDL2 Assets"
+                Visibility="Collapsed"
+                ToolTipService.ToolTip="{loc:Localize Key=conversations/unified/room_search}"
+                Click="OnRoomSearchClicked" />
+        <Button Grid.Row="0" Grid.Column="3" x:Name="RoomSettingsButton"
                 AutomationProperties.AutomationId="{x:Bind ids:Ids.ThreadRoomSettingsButton}"
                 Content="&#xE713;" FontFamily="Segoe MDL2 Assets"
                 Visibility="Collapsed"
                 ToolTipService.ToolTip="{loc:Localize Key=conversations/unified/thread_room_settings}"
                 Click="OnRoomSettingsClicked" />
-        <Button Grid.Row="0" Grid.Column="3" x:Name="RenameButton"
+        <Button Grid.Row="0" Grid.Column="4" x:Name="RenameButton"
                 AutomationProperties.AutomationId="{x:Bind ids:Ids.ThreadRenameButton}"
                 Content="&#xE8AC;" FontFamily="Segoe MDL2 Assets"
                 Visibility="Collapsed"
                 ToolTipService.ToolTip="{loc:Localize Key=conversations/unified/thread_rename}"
                 Click="OnRenameClicked" />
-        <Button Grid.Row="0" Grid.Column="4" x:Name="OverflowButton"
+        <Button Grid.Row="0" Grid.Column="5" x:Name="OverflowButton"
                 Content="&#xE712;" FontFamily="Segoe MDL2 Assets" />
         </Grid>
 

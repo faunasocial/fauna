@@ -150,7 +150,8 @@ public struct FaunaMacApp: App {
     /// A **reference-type box** (`MachineMethodResultBox`), not a plain
     /// `@State` value — see the type's own doc comment for why a bare `@State
     /// private var machineMethodResult: Any?` silently drops every write made
-    /// through `startInProcessAgentIfNeeded()`'s init-time-captured `self`.
+    /// through an init-time-captured `self` (the legacy `startTestAgentIfNeeded()`;
+    /// the in-process agent binds from the scene's first `.task` instead).
     @State private var machineMethodResultBox = MachineMethodResultBox()
 
     public init() {
@@ -162,6 +163,11 @@ public struct FaunaMacApp: App {
             for: .applicationSupportDirectory, in: .userDomainMask,
             appropriateFor: nil, create: true))?.path ?? NSTemporaryDirectory()
         installLogging(dataDir: logDir)
+        // A launch broken or parked on purpose, for convention 6's forced launch
+        // failures. Compiled out of release artifacts (testing.md convention 15).
+        #if DEBUG
+        TestAgentBootstrap.faultAtLaunchIfAsked()
+        #endif
 
         // `SyncFile` + `SyncAnchor` retired with the B2 engine cutover. Both were
         // pure *derived projections* of nest state — `SyncFile` mirrored the
@@ -193,8 +199,11 @@ public struct FaunaMacApp: App {
             // the state the crash-recovery journeys assert survives a crash (gaps CR-1 /
             // CR-2 — the pending-factory-reset slot). Without a dir the store is a
             // process-static dict, so there is nothing to preserve and the wipe still
-            // earns its keep.
-            if !KeychainStore.e2eHarnessOwnsStore {
+            // earns its keep. A real-keychain launch (`KeychainStore.e2eRealKeychain`)
+            // runs on the harness's keychain file: sweep the service, as FaunaApp does.
+            if KeychainStore.e2eRealKeychain {
+                KeychainStore().deleteAll()
+            } else if !KeychainStore.e2eHarnessOwnsStore {
                 _ = FaunaAccounts.registry(keychain: KeychainStore()).clearAll()
             }
             appState.session.clearAuthenticatedOverride()
@@ -235,10 +244,7 @@ public struct FaunaMacApp: App {
             stateProvider: { [self] in self.serializeState() },
             commandHandler: { [self] command in await self.handleTestCommand(command) }
         )
-        TestAgentBootstrap.startInProcessAgentIfNeeded(
-            stateProvider: { [self] in self.serializeState() },
-            commandHandler: { [self] command in await self.handleTestCommand(command) }
-        )
+        TestAgentBootstrap.startInProcessAgentIfNeeded()
         #endif
     }
 
@@ -252,8 +258,10 @@ public struct FaunaMacApp: App {
                 // and re-runs the CR-2 reconcile, so a retry can't be stranded by state
                 // that changed while the retry surface was up.
                 onRetryLaunch: { Task { @MainActor in runLaunch() } },
-                loadLaunchRecoverableBoxes: { await loadLaunchRecoverableBoxes() },
+                loadLaunchRecoverableBoxes: { await RecoverableBoxes.loadForServedAccount() },
                 onRecoverFromLaunch: { boxes in Task { @MainActor in recoverFromLaunch(boxes: boxes) } },
+                onRetireFromLaunch: { Task { @MainActor in openRetire(.launch) } },
+                onRetireDroppedSession: { Task { @MainActor in await retireDroppedSession() } },
                 onUseDifferentNest: { Task { @MainActor in useADifferentNest() } },
                 onRetrySignIn: { Task { @MainActor in retrySignIn() } },
                 onTrustNestIdentity: { Task { @MainActor in trustNestIdentity() } },
@@ -316,6 +324,13 @@ public struct FaunaMacApp: App {
                 .modelContainer(liveModelContainer)
                 .frame(minWidth: 800, minHeight: 500)
                 .task {
+                    // Compiled out of release artifacts (testing.md convention 15).
+                    #if DEBUG
+                    TestAgentBootstrap.bindInProcessAgent(
+                        stateProvider: { [self] in self.serializeState() },
+                        commandHandler: { [self] command in await self.handleTestCommand(command) }
+                    )
+                    #endif
                     // An `--autostart` login launch holds this window out of
                     // sight until the launch settles (`AutoStartWindow`).
                     AutoStartWindow.armIfAutostartLaunch()
@@ -357,6 +372,9 @@ public struct FaunaMacApp: App {
                     appState.onFactoryReset = { claimCode in
                         Task { @MainActor in await factoryResetReonboard(claimCode: claimCode) }
                     }
+                    // The admin-nest `admin-nest-retire-button` entry: opens the
+                    // `nest_retire` page over the live session.
+                    appState.onRetire = { Task { @MainActor in openRetire(.admin) } }
                     // Post-onboarding launch hook: the fresh-onboarding `.feed`
                     // exit calls this to build the authed FaunaClient via the same
                     // launch gate a returning user hits (the identity is already
@@ -400,6 +418,12 @@ public struct FaunaMacApp: App {
                     appState.onAddAccount = {
                         Task { @MainActor in beginAddAccount() }
                     }
+                    // A lock landed on Settings → Sessions: the session is already
+                    // dead (every bearer revoked), so leave for the launch surface,
+                    // which meets the lock and paints its notice.
+                    appState.onAccountLocked = {
+                        Task { @MainActor in await escalateToLaunchSurface() }
+                    }
                     // Sign-out / delete-account (`SignOutSection`, `AccountSettingsView`'s
                     // `onAccountReset`). Set here for the same reason as `onFactoryReset` —
                     // and, unlike those two call sites' own `{ appState.isOnboarded = false }`
@@ -416,6 +440,11 @@ public struct FaunaMacApp: App {
                         // machine transition that would clear it
                         // (`OnboardingVM.signOutResidue`'s doc).
                         onboardingVM.takeSignOutResidue(from: appState.session)
+                        // The erase already ran (`StatusVM.signOut` released the
+                        // account's stores first), so this window serves nothing
+                        // now. Synchronous, so a sign-in that follows takes a fresh
+                        // lock instead of reusing — or racing — this one.
+                        appState.releaseInstanceLock()
                         Task { @MainActor in
                             await tearDownSessionForSwitch()
                             if !FaunaE2E.isActive {
@@ -558,7 +587,13 @@ public struct FaunaMacApp: App {
                 message: "[launch] superseded before its machine was built — dropping it")
             return
         }
-        let machine = LaunchMachine(observer: NullLaunchObserver(), persistence: persistence)
+        let ticks = LaunchTicks()
+        let machine = LaunchMachine(observer: ticks, persistence: persistence)
+        // The one change no app call starts: the machine's own refresh at a
+        // lock's unlock time, which the locked surface follows out.
+        ticks.onTick = { [weak machine] in
+            if let machine { followLockedLaunch(machine) }
+        }
         // Hold it. `trustNestIdentity()` reads the secret + nest_url off the machine's
         // OWN `IdentityChanged` state, so the trust button must call the instance that
         // produced the verdict — a fresh machine re-challenges from `Boot`, never
@@ -597,10 +632,29 @@ public struct FaunaMacApp: App {
         exit(1)
     }
 
+    /// The locked surface following the launch machine out (`ui/sessions.md`
+    /// § The locked surface): on each tick of the HELD machine while the lock is
+    /// up, re-dispatch the snapshot once the shared rule says the notice no longer
+    /// stands — the machine's own refresh at the unlock time signed back in, or
+    /// met a different lock. No timer of this app's own.
+    @MainActor
+    private func followLockedLaunch(_ machine: LaunchMachine) {
+        guard launchMachineBox.machine === machine,
+              case .accountLocked = appState.launchGate,
+              let model = appState.lockedLaunch else { return }
+        let snap = machine.snapshot()
+        guard !model.noticeHolds(snap) else { return }
+        logMessage(level: .info, target: "fauna.app",
+                   message: "[locked] the lock no longer stands (\(snap.phase.diagnosticName)) — re-dispatching")
+        Task { @MainActor in await dispatchLaunch(snap, keychain: KeychainStore()) }
+    }
+
     /// Project one `LaunchSnapshot` onto the macOS launch gate. The machine has already
     /// decided; nothing here re-classifies an error or re-reads a routing input.
     @MainActor
     private func dispatchLaunch(_ snap: LaunchSnapshot, keychain: KeychainStore) async {
+        // Any verdict but the lock retires the locked surface's state.
+        if snap.lockedUntilSecs == nil { appState.lockedLaunch = nil }
         switch snap.phase {
         case .online:
             await completeAuthenticatedLaunch(keychain: keychain)
@@ -634,7 +688,8 @@ public struct FaunaMacApp: App {
             // verdict and must never silently re-pin (security.md). The
             // bearer the machine minted is already dropped.
             appState.isOnboarded = false
-            appState.launchGate = .identityChanged(pinnedHex: pinnedHex, seenHex: seenHex)
+            appState.launchGate = .identityChanged(
+                pinnedHex: pinnedHex, seenHex: seenHex, isFork: snap.identityFork)
 
         case .offline(let transient):
             appState.isOnboarded = false
@@ -649,6 +704,21 @@ public struct FaunaMacApp: App {
             // misstates the problem, since the nest is fine.
             if let refusal = snap.accountIndexRefusal {
                 appState.launchGate = .accountIndexUnreadable(refusal: refusal, confirming: false)
+            } else if let lockedUntil = snap.lockedUntilSecs {
+                // The account is locked (`devices.md` § The locked state): the
+                // machine parks here with the unlock time on its side channel and
+                // runs the one refresh at that time itself. Ahead of the generic
+                // split, which would paint a dead-end "update your nest" over it —
+                // the order tui's `route()` takes. The same lock keeps its surface
+                // (and an open stolen-identity step); a new one gets a fresh one.
+                if appState.lockedLaunch?.lockedUntilSecs != lockedUntil {
+                    let model = LockedLaunchModel(lockedUntilSecs: lockedUntil)
+                    model.refollow = {
+                        if let machine = launchMachineBox.machine { followLockedLaunch(machine) }
+                    }
+                    appState.lockedLaunch = model
+                }
+                appState.launchGate = .accountLocked(lockedUntilSecs: lockedUntil)
             } else if let claimed = snap.supersededSuccessor {
                 // The identity was succeeded: route to the import flow
                 // (`SupersededLaunchRoute` owns the why). Also ahead of the
@@ -696,25 +766,56 @@ public struct FaunaMacApp: App {
         }
     }
 
-    /// The launch-retry surface's box read (`box-recovery.md` § Recovery UI,
-    /// surviving-device entry): the served account's custodied boxes, off the saved
-    /// nest when it answers and off the device's own store when it does not — so a
-    /// dead saved nest still offers recovery. Empty with no served account.
+    /// Open the `nest_retire` page (`nest-retirement.md` § Layout & flow) from the
+    /// launch retry surface or the live admin session. The VM takes the saved
+    /// nest's host as an attribution candidate, the e2e provider overrides the
+    /// wizard machine holds (`nil` in a release build), and — on the admin entry —
+    /// reads the nest's active local domains through the session client.
     @MainActor
-    private func loadLaunchRecoverableBoxes() async -> [String] {
-        guard let material = FaunaAccounts.sessionMaterial() else { return [] }
-        return await RecoverableBoxes.load(
-            nestUrl: material.nestUrl ?? "", ownerSecret: hex_to_data(material.secretHex))
+    private func openRetire(_ entry: RetireEntry) {
+        let nestUrl = (entry == .admin ? appState.session.nodeUrl : nil)
+            ?? FaunaAccounts.sessionMaterial()?.nestUrl
+            ?? onboardingVM.machine.nestUrl()
+        let api = entry == .admin ? liveFaunaClient?.api : nil
+        let retireVM = NestRetireVM()
+        retireVM.open(
+            entry: entry,
+            nestUrl: nestUrl,
+            vpsBaseUrl: NestRetireVM.providerOverride("vps", from: onboardingVM.machine),
+            dohBaseUrl: NestRetireVM.providerOverride("doh", from: onboardingVM.machine),
+            activeLocalDomains: {
+                guard let api else { return [] }
+                return await NestRetireVM.activeLocalDomains(api: api)
+            })
+        appState.retireVM = retireVM
+        appState.retiring = entry
+    }
+
+    /// The retire page was left after retiring THIS session's own nest from
+    /// `admin-nest`: the session this device holds is for a nest that no longer
+    /// exists, so drop it keeping the credentials (the factory-reset teardown
+    /// without its re-onboard) and re-run launch routing on the kept identity, as
+    /// tui/linux/web/android do: against the gone box that lands on `launch_retry`
+    /// (recovery entry + retire entry), not the wizard's first page
+    /// (`nest-retirement.md` § Where logic lives). Nothing stored is erased.
+    @MainActor
+    private func retireDroppedSession() async {
+        SessionGeneration.recordTeardown()
+        await liveFaunaClient?.shutdown()
+        await unprovisionSyncAgent()
+        dropActorScopedState()
+        appState.session.clearAuthenticatedOverride()
+        self.client = nil
+        appState.liveClient = nil
+        appState.isOnboarded = false
+        runLaunch()
     }
 
     /// `launch-recover-button`: seed the wizard straight into `nest_recovery` with
     /// the already-read box list (the shared machine entry, as tui/linux/windows).
     @MainActor
     private func recoverFromLaunch(boxes: [String]) {
-        guard let secret = FaunaAccounts.sessionMaterial()?.secretHex else { return }
-        onboardingVM.machine.reset()
-        onboardingVM.machine.seedIdentityForRecovery(secret: secret)
-        onboardingVM.machine.setRecoveryBoxes(boxes: boxes)
+        guard RecoverableBoxes.seedLaunchRecovery(onboardingVM.machine, boxes: boxes) else { return }
         appState.isOnboarded = false
         appState.launchGate = .ready
     }
@@ -1016,6 +1117,10 @@ public struct FaunaMacApp: App {
             syncAgentHealthModel.onLocationsTick = { locations in
                 await locationsModel.foldParks(locations)
             }
+            // A group set's review list rides it too: no gesture produces a row.
+            syncAgentHealthModel.onSetConflictsTick = {
+                await locationsModel.refreshSetConflicts()
+            }
             syncAgentHealthModel.start(channel: provisioner)
 
             try await provisioner.start()
@@ -1035,22 +1140,6 @@ public struct FaunaMacApp: App {
         }
     }
 
-    /// Forwards to the shared `FaunaKit.performPostAuthSilentSignIn` (`security.md`
-    /// § Post-auth surfacing) — see there for the full rationale. Also the target
-    /// of the `#if DEBUG` `silent_sign_in` test command, which awaits this
-    /// directly rather than waiting for the one-shot boot-time call.
-    ///
-    /// Deliberately reads `appState.session` — a stable class instance, `let
-    /// session = SessionState()` on `AppState` — rather than the `@State private
-    /// var client`: `startInProcessAgentIfNeeded()`'s test-command dispatch runs
-    /// through its **init-time-captured `self`**, and `@State` vars *reassigned*
-    /// after init (like `client`) read back stale/nil through that detached copy
-    /// (the same trap `MachineMethodResultBox`'s doc comment records — a bare
-    /// `@State` silently drops what a live `self` wrote). The shared function's
-    /// `tearDown`/`runLaunch` closures still work from the detached self because
-    /// their OBSERVABLE effect is entirely through `appState` mutations (also
-    /// stable), matching `resetToFactory()`'s existing precedent for this same
-    /// test-command path.
     /// Push notifications (settings.md § Push notifications; common.md § Push
     /// Notifications → Transports), run by every sign-in path — the launch and
     /// the e2e agent's session patch alike, so the patch exercises the same
@@ -1074,6 +1163,23 @@ public struct FaunaMacApp: App {
         }
     }
 
+    /// Forwards to the shared `FaunaKit.performPostAuthSilentSignIn` — the
+    /// forced identity re-check (`transport-trust.md` § Post-auth surfacing,
+    /// channel 3) — see there for the full rationale. Its one caller is the
+    /// `#if DEBUG` `silent_sign_in` test command: an authenticated launch runs
+    /// no challenge of its own (`FaunaClient.startSelfIdentityFollow`).
+    ///
+    /// Deliberately reads `appState.session` — a stable class instance, `let
+    /// session = SessionState()` on `AppState` — rather than the `@State private
+    /// var client`: `startInProcessAgentIfNeeded()`'s test-command dispatch runs
+    /// through its **init-time-captured `self`**, and `@State` vars *reassigned*
+    /// after init (like `client`) read back stale/nil through that detached copy
+    /// (the same trap `MachineMethodResultBox`'s doc comment records — a bare
+    /// `@State` silently drops what a live `self` wrote). The shared function's
+    /// `tearDown`/`runLaunch` closures still work from the detached self because
+    /// their OBSERVABLE effect is entirely through `appState` mutations (also
+    /// stable), matching `resetToFactory()`'s existing precedent for this same
+    /// test-command path.
     @MainActor
     private func performPostAuthSilentSignIn() async {
         await FaunaKit.performPostAuthSilentSignIn(
@@ -1179,6 +1285,9 @@ public struct FaunaMacApp: App {
                     message:
                         "[instance-lock] degraded acquire for \(actorId) — proceeding unguarded")
             }
+            // Acquire-new-then-release-old: the outgoing account's lock goes down
+            // explicitly, not by replacement alone (`releaseInstanceLock`'s doc).
+            appState.releaseInstanceLock()
             appState.instanceLock = lock
             appState.instanceLockActorId = actorId
         }
@@ -1233,6 +1342,7 @@ public struct FaunaMacApp: App {
         appState.session.nodeUrl = nodeUrl
         appState.session.deviceId = deviceId
         appState.session.handle = handle
+        appState.session.domain = domain
         // `isOnboarded = true` IS the authenticated flip now: `session.isAuthenticated`
         // derives from it live (`MacAppState.init`'s mounted-shell probe), so there is
         // no second flag to keep in step here or on any teardown path.
@@ -1263,13 +1373,14 @@ public struct FaunaMacApp: App {
         // The once-per-sign-in newer-version look (`installers/README.md`
         // § Knowing a newer version is out): notify-only, silent unless a newer
         // release is out. `applySessionPatch` makes the same call.
-        appState.updates.lookOnceAtSignIn()
+        appState.updates.lookOnceAtSignIn(client: faunaClient)
 
         startPushSession(faunaClient, deviceId: deviceId)
 
-        // Post-auth identity re-check (security.md § Post-auth surfacing): one-shot,
-        // best-effort, non-blocking — see `performPostAuthSilentSignIn` below.
-        Task { @MainActor in await performPostAuthSilentSignIn() }
+        // The session mint's identity watch keeps the account's cached
+        // handle/domain/tier current — no second challenge at sign-in
+        // (`transport-connection.md` § The dial budget).
+        faunaClient.startSelfIdentityFollow(session: appState.session)
 
         // Always configure photo backup so its sub-page can drive it (Sync Now, live
         // status) even before the first observe pass; the engine host it uploads
@@ -1285,14 +1396,20 @@ public struct FaunaMacApp: App {
         // Activate the dual-rail conversations session so the Conversations page
         // Send (`dm-send-button`) issues a real RPC — mail via the SMTP rail
         // (`fauna.email.send`), DMs/groups via FaunaMls. Best-effort: a failure
-        // leaves Send disabled (NotSupported), never crashes the launch.
+        // leaves Send disabled (NotSupported), never crashes the launch. The
+        // real-rail verdict for a launch that reaches no e2e gate goes first —
+        // shared wording, `FaunaE2E.productionLaunchRailVerdict`; nil outside e2e.
+        if let verdict = FaunaE2E.productionLaunchRailVerdict {
+            logMessage(level: .info, target: "fauna.app", message: verdict)
+        }
         Task { @MainActor in
             do {
                 try await conversationsVM.rebuild(
                     api: faunaClient.api,
                     selfAddress: selfAddress, selfSecretHex: secret,
                     deviceIdHex: faunaClient.deviceId,
-                    predecessorBackupKeys: faunaClient.resolvedPredecessorBackupKeys()
+                    predecessorBackupKeys: faunaClient.resolvedPredecessorBackupKeys(),
+                    archiveLinks: faunaClient.archiveLinks
                 )
                 // Install the conversations session as the feed's room-post key
                 // seam (`ui/feed.md` § Encryption at rest → *Room-restricted —
@@ -1350,8 +1467,9 @@ public struct FaunaMacApp: App {
             //
             // WHICH spawner is the whole e2e story here, mirroring linux's
             // `SystemdUserUnitSpawner::new(e2e)` production/e2e branch:
-            //   * production      → `LaunchdSyncAgentSpawner` (installs + kicks
-            //     the `social.fauna.sync-agent` LaunchAgent).
+            //   * production      → `FfiLaunchdAgentSpawner`, the shared Rust
+            //     launchd writer fauna-tui uses too (installs/heals + kicks the
+            //     `social.fauna.sync-agent` LaunchAgent).
             //   * e2e + opt-in    → `FfiChildAgentSpawner`, a private child on
             //     THIS launch's socket. The plist + launchctl domain stay
             //     untouched (testing.md § point 10) because the child inherits
@@ -1379,9 +1497,9 @@ public struct FaunaMacApp: App {
             let agentSpawner: FfiAgentSpawner? =
                 FaunaE2E.isActive
                     ? (FaunaE2E.realSyncAgent ? FfiChildAgentSpawner() : nil)
-                    : LaunchdSyncAgentSpawner()
+                    : FfiLaunchdAgentSpawner()
             #else
-            let agentSpawner: FfiAgentSpawner? = LaunchdSyncAgentSpawner()
+            let agentSpawner: FfiAgentSpawner? = FfiLaunchdAgentSpawner()
             #endif
             if let agentSpawner {
                 await startSyncAgentProvisioner(faunaClient: faunaClient, spawner: agentSpawner)
@@ -1406,7 +1524,7 @@ public struct FaunaMacApp: App {
             // the agent). Photo backup's ingress uploads through it.
             guard let host = faunaClient.syncHost else { return }
             photoBackupEngine.host = host
-            if UserDefaults.standard.bool(forKey: "fauna.photoBackupEnabled") {
+            if AppDefaults.store.bool(forKey: "fauna.photoBackupEnabled") {
                 photoBackupEngine.startObserving()
                 _ = try? await photoBackupEngine.syncNewPhotos()
             }
@@ -1445,7 +1563,7 @@ public struct FaunaMacApp: App {
                             nestUrl: nodeUrl,
                             secretHex: secret,
                             deviceIdHex: deviceId,
-                            deviceLabel: Host.current().localizedName ?? "Mac"
+                            deviceLabel: FaunaClient.deviceLabel
                         )
                     )
                 } catch {
@@ -1607,13 +1725,29 @@ public struct FaunaMacApp: App {
             "passes_completed": photoBackupEngine.passesCompleted,
             "completed_total": photoBackupEngine.completedCount,
             "last_backup_at": photoBackupEngine.lastBackupDate?.timeIntervalSince1970 as Any,
-            "enabled": UserDefaults.standard.bool(forKey: PhotoBackupControlsView.enabledKey),
+            "enabled": AppDefaults.store.bool(forKey: PhotoBackupControlsView.enabledKey),
         ]
 
         // Concurrent instances: what this instance has spawned (each record
         // carries the child's own agent_port under e2e, so the harness can
         // observe the child directly — the parent's port is never shared).
         state["spawned_instances"] = InstanceSpawner.stateRecords()
+
+        // This launch's window decision, absent until `AutoStartWindow` has
+        // taken it — the same key and shape as windows.
+        if let decision = AutoStartWindow.decision {
+            state["launch"] = [
+                "autostart": decision.autostart,
+                "window_shown": decision.windowShown,
+            ]
+        }
+
+        // The held launch machine's phase (`AppStateObservables.launchPhaseLabel`),
+        // absent while no launch is held — the same key on iOS, kept out of the
+        // `launch` dict above.
+        if let machine = launchMachineBox.machine {
+            state["launch_phase"] = AppStateObservables.launchPhaseLabel(machine.snapshot().phase)
+        }
 
         // Navigation — macOS uses sidebar directly, no "more" tab indirection.
         // Admin and Settings are sub-paged sidebar-swap shells, so reflect the
@@ -1641,6 +1775,12 @@ public struct FaunaMacApp: App {
         if let reply = TestAgentReplies.webdavServeReply {
             state["webdav_serve_reply"] = reply
         }
+
+        #if DEBUG && !FAUNA_EXCISE_P2P_SHARE
+        // The share plane's serve tally (`fauna_e2e_agent::SHARE_SERVE_TALLY_KEY`):
+        // what this process's serving seat answered, and the hold's state.
+        state["share_serve_tally"] = OfflineShareTestCommand.serveTallyState()
+        #endif
 
         // Data
         let context = liveModelContainer.mainContext
@@ -1726,6 +1866,17 @@ public struct FaunaMacApp: App {
                 // card calls — so a harness read of the card's author compares
                 // with the painted `feed-post-detail-author`.
                 "author_label": conversationsVM.postAuthorLabel(p),
+                // The nest-resolved byline face (`feed-read-model.md` § The
+                // remote author's byline): NSNull until a remote author's
+                // resolve has answered, then `{handle, display_name}`. Lets a
+                // test wait for that answer before it reads the card's id
+                // fallback as final. tui's, web's and linux's key.
+                "author_display": p.authorDisplay.map { a in
+                    [
+                        "handle": a.handle as Any? ?? NSNull(),
+                        "display_name": a.displayName as Any? ?? NSNull(),
+                    ] as [String: Any]
+                } as Any? ?? NSNull(),
                 // Painted document plaintext (markdown markers stripped), NOT the
                 // raw `body` — the in-process `feed-post-text` element doesn't
                 // register in the macOS lazy feed list, so the harness reads the
@@ -1896,10 +2047,65 @@ public struct FaunaMacApp: App {
                 case .refused(let reason):
                     testAgentFailure(reason)
                 }
+            case "escrow_wrap_coordinates":
+                // The recovery-kit let-go journey's staging read — this app's own
+                // account-level escrow wrap coordinates (`fleet-scope-reclamation.md`
+                // clause (3)(j)). Shared FaunaKit handler (macOS + iOS, one
+                // implementation); slot cleared FIRST and written only on success,
+                // exactly as `read_marker_state` above.
+                machineMethodResultBox.value = nil
+                switch await EscrowWrapCoordinatesTestCommand.apply(api: appState.liveClient?.api) {
+                case .report(let json):
+                    machineMethodResultBox.value = json
+                case .refused(let reason):
+                    testAgentFailure(reason)
+                }
+            case "keychain_item_attributes":
+                // Shared FaunaKit handler (macOS + iOS, one implementation). On macOS a
+                // real keychain is the harness's own file (`KeychainStore.e2eRealKeychain`);
+                // any other launch answers with its loud refusal, naming why.
+                machineMethodResultBox.value = nil
+                switch KeychainItemAttributesTestCommand.apply(command) {
+                case .report(let json):
+                    machineMethodResultBox.value = json
+                case .refused(let reason):
+                    testAgentFailure(reason)
+                }
+            case "keychain_drop_device_bound_copies":
+                // Shared FaunaKit handler (macOS + iOS, one implementation); any launch
+                // that is not on a real keychain answers with its loud refusal.
+                machineMethodResultBox.value = nil
+                switch KeychainDropDeviceBoundCopiesTestCommand.apply() {
+                case .report(let json):
+                    machineMethodResultBox.value = json
+                case .refused(let reason):
+                    testAgentFailure(reason)
+                }
+            case "file_provider_share_entries":
+                // Finder's Share eligibility, read off the File Provider appex's own
+                // host built in-process (no domain touched, convention 10) — the
+                // `faunaShare` entry each listed item hands the OS (`macos.md` §
+                // Sync → *Finder's Share entry*). Shared FaunaKit handler; slot
+                // cleared FIRST and written only on success.
+                machineMethodResultBox.value = nil
+                switch await FileProviderShareEntriesTestCommand.apply(command, session: appState.session) {
+                case .report(let json):
+                    machineMethodResultBox.value = json
+                case .refused(let reason):
+                    testAgentFailure(reason)
+                }
             case "conversations_inject_inbound":
                 handleConversationsInjectInbound(command)
             case "conversations_evict_attachment":
                 ConversationsTestInject.evictAttachment(command, in: conversationsVM.manager)
+            case "conversations_mark_receive_stopped":
+                // Cleared first, so a stale reply never reads as this answer;
+                // `"pending"` until the real receive loop has begun.
+                machineMethodResultBox.value = nil
+                machineMethodResultBox.value = ConversationsTestInject.markReceiveStopped(
+                    in: conversationsVM.manager)
+            case "conversations_begin_receive_loop":
+                ConversationsTestInject.beginReceiveLoop(in: conversationsVM.manager)
             case "conversations_seed_resolved_link_preview":
                 ConversationsTestInject.seedResolvedLinkPreview(
                     command, into: conversationsVM.manager)
@@ -1972,12 +2178,27 @@ public struct FaunaMacApp: App {
                 FeedInjectPostsTestCommand.apply(command, feedVM: feedVM, client: appState.liveClient, session: appState.session)
             case "feed_inject_error":
                 FeedInjectErrorTestCommand.apply(command, feedVM: feedVM, client: appState.liveClient, session: appState.session)
+            case "auto_renew_wake":
+                // The certificate auto-renew tick's poke
+                // (`fauna_e2e_agent::AUTO_RENEW_WAKE`): end the shared FaunaKit
+                // cadence's wait so its own loop runs the next pass (macOS + iOS,
+                // one implementation). Convention 11: a refusal is LOUD.
+                if let reason = DnsAutoRenewCadence.shared.wakeForTest() {
+                    testAgentFailure(reason)
+                }
             case "alert_sweep_wake", "reconnect_backoff":
                 // The loud surfaces' e2e seams (`fauna_e2e_agent::ALERT_SWEEP_WAKE`
                 // / `RECONNECT_BACKOFF`). Shared FaunaKit handler (macOS + iOS, one
                 // implementation) over fauna-ffi's test-helpers exports.
                 // Convention 11: a refusal is LOUD.
                 if let reason = E2eLoudSurfaces.apply(action, command, api: appState.liveClient?.api) {
+                    testAgentFailure(reason)
+                }
+            case "archive_import_pause_after", "archive_import_hold_after":
+                // The archive-import run's one-shot pause/hold anchors
+                // (convention 14). Shared FaunaKit handler (macOS + iOS, one
+                // implementation). Convention 11: a refusal is LOUD.
+                if let reason = ArchiveImportTestCommand.apply(action, command) {
                     testAgentFailure(reason)
                 }
             case "feed_hold_next_reload", "feed_release_held_reload":
@@ -1987,6 +2208,29 @@ public struct FaunaMacApp: App {
                 if let reason = FeedReloadHoldTestCommand.apply(action, feedVM: feedVM) {
                     testAgentFailure(reason)
                 }
+            case "feed_cue_clock_freeze", "feed_cue_clock_thaw", "feed_cue_clock_advance",
+                 "feed_cue_probe", "feed_cue_scroll_by":
+                // The engagement-cue test clock (convention 14; the shared
+                // tracker's frozen clock over `FfiCueTracker`). Shared FaunaKit
+                // handler (macOS + iOS, one implementation); the reply rides the
+                // result slot `call_command` reads back, cleared FIRST so a
+                // refusal never leaves the previous command's reply standing.
+                // AWAITED — each step acks only once its records are done.
+                // Convention 11: a refusal is LOUD.
+                machineMethodResultBox.value = nil
+                switch await FeedCueClockTestCommand.apply(action, command, feedVM: feedVM) {
+                case .reply(let reply):
+                    machineMethodResultBox.value = reply
+                case .refused(let reason):
+                    machineMethodResultBox.value = ["error": reason]
+                    testAgentFailure(reason)
+                }
+            case "feed_cue_verdict_for_test":
+                // The live cue engine's `{hydrated, verdict}` for a content id,
+                // read-only — how a second seat witnesses the first's rollup.
+                // Shared FaunaKit handler (macOS + iOS, one implementation)
+                // over the same Rust seam tui/linux drive.
+                machineMethodResultBox.value = FeedCueVerdictTestCommand.apply(command, feedVM: feedVM)
             case "feed_seed_cue_rollup_for_test":
                 // Seeds a real `cues:v1` nest row for "Clear activity data" to
                 // delete. Shared FaunaKit handler (macOS + iOS, one
@@ -2012,7 +2256,7 @@ public struct FaunaMacApp: App {
                 // Shared FaunaKit handler (macOS + iOS, one implementation).
                 // Convention 11: a refusal is LOUD.
                 if let reason = await OpenRouteTestCommand.apply(
-                    command, authenticated: appState.isOnboarded, navigate: { showConnectedApps() })
+                    command, authenticated: appState.isOnboarded, navigate: { land($0) })
                 {
                     testAgentFailure(reason)
                 }
@@ -2023,6 +2267,25 @@ public struct FaunaMacApp: App {
                 // handler (macOS + iOS, one implementation) over the same
                 // Rust seam tui/linux drive. Never refuses.
                 OfflineShareTestCommand.applyAdvanceClock(command)
+            case "offline_share_hold_serves":
+                // The share plane's SERVE hold (convention 14's barrier for the
+                // interrupted-transfer journey). Shared FaunaKit handler over
+                // the FFI's process-wide recorder; `share_serve_tally` reads it.
+                OfflineShareTestCommand.applyHoldServes(command)
+            case "offline_share_probe_set":
+                // The stranger probe: read one shared set off another seat's
+                // share plane as THIS seat's identity. Slot cleared FIRST so a
+                // refusal never leaves the PREVIOUS report behind. Convention
+                // 11: a refusal is LOUD.
+                machineMethodResultBox.value = nil
+                switch await OfflineShareTestCommand.applyProbeSet(
+                    command, api: appState.liveClient?.api)
+                {
+                case .report(let json):
+                    machineMethodResultBox.value = json
+                case .refused(let reason):
+                    testAgentFailure(reason)
+                }
             case "offline_share_drop_connections":
                 // Drop every connection a counterpart has open to this
                 // session's bound ceremony seat (outcome 5). Shared FaunaKit
@@ -2045,6 +2308,16 @@ public struct FaunaMacApp: App {
                 // implementation) over the same Rust seam tui/linux/android
                 // drive. Convention 11: a refusal is LOUD.
                 if let reason = await TrustFacetClockTestCommand.apply(command) {
+                    testAgentFailure(reason)
+                }
+            case "mail_token_refresh_advance_clock":
+                // The submission-token refresh's fake clock (the 7-day re-mint
+                // cadence and each re-minted token's `issued_at` — never the
+                // bearer clock). Shared FaunaKit handler (macOS + iOS, one
+                // implementation) over the same Rust seam tui/linux/web/android
+                // drive; the shared connect-time loop reads it on its next pass.
+                // Convention 11: a refusal is LOUD.
+                if let reason = MailTokenRefreshClockTestCommand.apply(command) {
                     testAgentFailure(reason)
                 }
             case "backup_audit_run_now":
@@ -2098,9 +2371,9 @@ public struct FaunaMacApp: App {
                 // same `FoldersAuthor::serve_set` seam linux drives.
                 await ServeEnableFolderTestCommand.apply(command, client: appState.liveClient)
             case "silent_sign_in":
-                // `test_nest_identity_pin_post_auth.py`: trigger the same
-                // production post-auth refresh on demand rather than waiting
-                // for the one-shot boot-time call.
+                // `test_nest_identity_pin_post_auth.py`: the forced identity
+                // re-check (`transport-trust.md` § Post-auth surfacing, channel
+                // 3) — the one challenge apple still runs on demand.
                 await performPostAuthSilentSignIn()
             case "launch_refresh_token":
                 // Force the held session bearer's refresh NOW, awaited so the ack
@@ -2176,6 +2449,10 @@ public struct FaunaMacApp: App {
                         level: .info, target: "fauna.app",
                         message: "[e2e] account_pump_now: no client yet (pre-auth)")
                 }
+            case "custody_owner_resend_now":
+                // Devices outcome 15's owner send-again poke — shared FaunaKit
+                // handler, fire-and-forget (`fauna_e2e_agent::CUSTODY_OWNER_RESEND_NOW`).
+                CustodyOwnerResendTestCommand.apply(client: appState.liveClient)
             case BarrierTestCommand.barrierAction, BarrierTestCommand.probeAction:
                 // Convention 14's causal anchor + its self-test probe. Shared
                 // FaunaKit handler (macOS + iOS, one implementation) — the
@@ -2213,7 +2490,7 @@ public struct FaunaMacApp: App {
         }
 
         if let session = command["session"] as? [String: Any] {
-            applySessionPatch(session)
+            await applySessionPatch(session)
         }
         if let nav = command["nav"] as? [String: Any] {
             applyNavPatch(nav)
@@ -2227,7 +2504,14 @@ public struct FaunaMacApp: App {
     }
 
     @MainActor
-    private func applySessionPatch(_ session: [String: Any]) {
+    private func applySessionPatch(_ session: [String: Any]) async {
+        // An authenticating patch builds a NEW client below, so the outgoing one
+        // is retired first, whether the patch names another actor (the agent's
+        // in-place switch, which never calls `reset`) or the same one again.
+        if (session["authenticated"] as? Bool) == true {
+            await retireClientForSessionPatch()
+        }
+
         let keychain = KeychainStore()
         let s = appState.session
 
@@ -2360,8 +2644,11 @@ public struct FaunaMacApp: App {
                 // This patch is a sign-in too: the same once-per-sign-in
                 // newer-version look `completeAuthenticatedLaunch` makes, and
                 // the same push session start (the presence announce).
-                appState.updates.lookOnceAtSignIn()
+                appState.updates.lookOnceAtSignIn(client: faunaClient)
                 startPushSession(faunaClient, deviceId: deviceId)
+                // And the same identity follow, so the patch's cached
+                // handle/domain/tier come from the session mint's one verify.
+                faunaClient.startSelfIdentityFollow(session: appState.session)
                 let isE2E = FaunaE2E.isActive
                 if isE2E {
                     // Authenticate only — no WebSocket/sync/backup (too heavy for
@@ -2384,6 +2671,17 @@ public struct FaunaMacApp: App {
                     // Both the session and the drafts handle lazily open the WS via
                     // `ensureNestConnected` (the same lazy path every e2e API read
                     // uses), so neither needs `start()`; best-effort throughout.
+                    //
+                    // The default sub-mode must also FIND the mocks: after a
+                    // pinned-store relaunch (the production launch path) the manager
+                    // holds the real rails instead. Synchronous, so it lands before
+                    // the patch's ack; the doc on `restoreMockBackendsForTest` owns
+                    // why. Twin of iOS's.
+                    #if DEBUG
+                    if !FaunaE2E.realConversations {
+                        conversationsVM.restoreMockBackendsForTest()
+                    }
+                    #endif
                     Task { @MainActor in
                         try? await faunaClient.api.authenticate(secret: secret)
                         // Same reasoning as the observers below, and it is the leg
@@ -2397,6 +2695,16 @@ public struct FaunaMacApp: App {
                         // inside this Task, after `authenticate`, so the assembly
                         // reads the primed secret rather than racing it.
                         await faunaClient.startAccountRuntime()
+                        // The admin session's host-address report — the one
+                        // universal post-auth hook of `runPostAuthGlue` this path
+                        // can fire without the rest of `start()`'s weight: an e2e
+                        // login arrives as a session PATCH and never reaches that
+                        // glue, so without this the report never ran under test
+                        // (the never-publish-a-LAN-address witness reads its log
+                        // line). Best-effort and fire-and-forget, as in production.
+                        Task { @MainActor in
+                            await MailEnableGlue.reportHostAddress(api: faunaClient.api)
+                        }
                         // Same reasoning again for the in-process sync engine
                         // host: `start()` is what builds it, so without this an
                         // e2e launch's Media badges (`SyncStatesStore`) have no
@@ -2479,7 +2787,8 @@ public struct FaunaMacApp: App {
                                     api: faunaClient.api,
                                     selfAddress: selfAddress, selfSecretHex: secret,
                                     deviceIdHex: faunaClient.deviceId,
-                                    predecessorBackupKeys: faunaClient.resolvedPredecessorBackupKeys()
+                                    predecessorBackupKeys: faunaClient.resolvedPredecessorBackupKeys(),
+                                    archiveLinks: faunaClient.archiveLinks
                                 )
                                 // Same seam install as the production login path
                                 // above — the e2e `real_conversations` path is how
@@ -2491,8 +2800,15 @@ public struct FaunaMacApp: App {
                             } catch {
                                 logMessage(level: .error, target: "fauna.app", message: "[e2e] real conversations session activation failed (non-fatal): \(error)")
                             }
-                        } else if let drafts = try? await faunaClient.api.draftsSync(rail: "conversations") {
-                            conversationsVM.attachDraftsSync(drafts)
+                        } else {
+                            if let drafts = try? await faunaClient.api.draftsSync(rail: "conversations") {
+                                conversationsVM.attachDraftsSync(drafts)
+                            }
+                            // The contact roster the real session registers in
+                            // production, so the OTHER Profile header names a
+                            // contact by the roster's handle (the header's
+                            // refresh loads it). Twin of iOS's.
+                            try? await faunaClient.api.registerContactRoster(on: conversationsVM.manager)
                         }
                     }
                     // …but the global `connection-status` indicator must still be
@@ -2512,6 +2828,9 @@ public struct FaunaMacApp: App {
                     // only `startReconnectObserver()` does — this was the one
                     // sibling observer left un-wired here (found running row 165).
                     faunaClient.startReconnectObserver()
+                    // Same reasoning for the shared mail connect-time refresh
+                    // (now and after every reconnect): `start()` normally spawns it.
+                    faunaClient.startMailEpochRefreshOnEveryConnect()
                     // Same reasoning for the dedicated knock pump: the mounted-contacts
                     // live-refresh test (`test_knock_live_refresh.py`) needs it wired
                     // explicitly here off the same skipped `start()`.
@@ -2563,9 +2882,7 @@ public struct FaunaMacApp: App {
               let view = first["view"] as? String else { return }
 
         // Clear messages on navigation — errors belong to the page that raised them
-        AppMessages.error = nil
-        AppMessages.warning = nil
-        AppMessages.info = nil
+        AppMessages.clearForNavigation()
 
         // Bump on every patch so admin pages keyed on `navGeneration` re-fetch on
         // re-navigation (the e2e poll-by-re-navigate pattern), not just first mount.
@@ -2588,6 +2905,12 @@ public struct FaunaMacApp: App {
                     profileNavTarget(entryActorId: $0, selfActorId: appState.session.actorId)
                 }
                 : nil
+            // The entry's optional `home_nest_url` is the open target's routing
+            // hint, passed into the same opener (`testing.md` convention 11;
+            // `profile.md` § Layout & flow → *Reaching another actor's profile*);
+            // only another actor's entry carries one (SELF normalized to nil above).
+            appState.profileHome = appState.profileActorId == nil
+                ? nil : first["home_nest_url"] as? String
             // Admin is a sub-paged shell: the cross-app state protocol carries
             // the sub-page in the second stack entry's `id` (admin.md
             // § Navigation model; mirrors linux `nav.stack[1].id`). Absent ⇒
@@ -2790,7 +3113,7 @@ public struct FaunaMacApp: App {
     // MARK: - Conversations TestAgent commands
     //
     // Flat-shape commands (rail / sender / subject / body at the top level of
-    // the command dict) — mirrors apps/fauna-linux/src/main.rs's
+    // the command dict) — mirrors apps/fauna-linux/src/lib.rs's
     // handle_conversations_* and Windows TestAgent.cs. The string forms for
     // `rail` / `flavor` are the Rust enum Debug spellings the cross-app
     // action layer (tests/e2e-unified/actions/conversations.py) expects.
@@ -2956,27 +3279,27 @@ public struct FaunaMacApp: App {
     /// succeeded — then the activation goes through `setActiveConfirmed`. Plain `setActive`
     /// refuses a flagged account (`ConfirmationRequired`), so a path that skipped the
     /// prompt fails loudly here and keeps the current session.
-    /// Route one `fauna://` deep link (`FaunaDeepLink` — the FP context-action
-    /// vocabulary). Share lands on Settings → Folders (the share affordance's
-    /// home — `folder-share-button`); Version history stages the `(set, rel)`
-    /// target for the Media explorer (`MediaDeepOpen`) and navigates there — the
-    /// explorer opens the item's `media-item-detail` once its snapshot holds it.
-    /// Pre-auth links are dropped: an FP domain only exists for a signed-in
-    /// session, so a link arriving before auth is stale by construction.
+    /// Route one `fauna://` URL. The shared in-app routes (`ios.md` § App
+    /// Entry → *In-app routes*: consent, and Finder's two share routes) take
+    /// the one FaunaKit door first; signed out, it holds the route and
+    /// `applyHeldRoute` applies it after sign-in. Anything else is the FP
+    /// context actions' `FaunaDeepLink` (the Version history leaf), which
+    /// stages the `(set, rel)` target for the Media explorer (`MediaDeepOpen`)
+    /// and navigates there; pre-auth, it is dropped — an FP domain only exists
+    /// for a signed-in session, so such a link is stale by construction.
     @MainActor
     private func handleDeepLink(_ url: URL) {
-        // The same-device handoff's consent route (`ios.md` § App Entry →
-        // *In-app routes*) takes the one shared FaunaKit door first; signed out,
-        // the door holds it and `applyHeldRoute` applies it after sign-in.
-        if ConsentHandoff.shared.receive(url, authenticated: appState.isOnboarded) {
-            if appState.isOnboarded { showConnectedApps() }
+        switch ConsentHandoff.shared.receive(url, authenticated: appState.isOnboarded) {
+        case .apply(let landing):
+            land(landing)
             return
+        case .held:
+            return
+        case .notARoute:
+            break
         }
         guard let link = FaunaDeepLink.parse(url), appState.isOnboarded else { return }
         switch link {
-        case .folderShare:
-            appState.selectedSidebar = .settings
-            appState.selectedSettingsPage = .folders
         case .fileVersions(let set, let rel):
             MediaDeepOpen.shared.stage(set: set, rel: rel)
             appState.selectedSidebar = .media
@@ -2984,21 +3307,29 @@ public struct FaunaMacApp: App {
         appState.navGeneration += 1
     }
 
-    /// Land on Settings → Connected apps for a consent route. The bumped
-    /// `navGeneration` restarts the page's visit, which opens the staged request
-    /// through the shared machine whether or not the page was already on screen.
+    /// Land on a route's page. The bumped `navGeneration` restarts the page's
+    /// visit, which opens what the door staged whether or not the page was
+    /// already on screen.
     @MainActor
-    private func showConnectedApps() {
-        appState.selectedSidebar = .settings
-        appState.selectedSettingsPage = .connectedApps
+    private func land(_ landing: ConsentHandoff.Landing) {
+        switch landing {
+        case .connectedApps:
+            appState.selectedSidebar = .settings
+            appState.selectedSettingsPage = .connectedApps
+        case .media:
+            appState.selectedSidebar = .media
+        case .folders:
+            appState.selectedSidebar = .settings
+            appState.selectedSettingsPage = .folders
+        }
         appState.navGeneration += 1
     }
 
-    /// Apply a consent route that arrived signed out, now the session is
+    /// Apply a route that arrived signed out, now the session is
     /// authenticated (`ConsentHandoff.takeHeld`).
     @MainActor
     private func applyHeldRoute() {
-        if ConsentHandoff.shared.takeHeld() { showConnectedApps() }
+        if let landing = ConsentHandoff.shared.takeHeld() { land(landing) }
     }
 
     /// Throws the registry's refusal (`FfiError.General` carrying the shared
@@ -3038,6 +3369,18 @@ public struct FaunaMacApp: App {
         // `PushManager.onSessionStart`), while the install's bit is set.
         await appState.pushManager?.dropActorRow()
 
+        // A switch is a leave door (`reserved-folders.md` § The leave-flush promise):
+        // the rails flush while the client still has its transport. Here and not in
+        // the teardown, which the identity-changed verdict shares, and a nest that
+        // refused the identity is no place to save a draft.
+        await appState.flushDraftRails()
+
+        // A wizard this process finished must not outlive the switch: the teardown
+        // mounts the onboarding container, and a stale `.done` would sign the outgoing
+        // account straight back in, retiring the launch and spending the incoming
+        // account's pending-reset slot as its claim terminal. Here and not in the
+        // teardown, whose sign-out caller has already put its residue on the wizard.
+        onboardingVM.machine.reset()
         await tearDownSessionForSwitch()
         Task { @MainActor in
             // FP teardown must COMPLETE before the incoming session starts
@@ -3135,6 +3478,30 @@ public struct FaunaMacApp: App {
         )
     }
 
+    /// Shut down the client an authenticating session patch is about to replace.
+    ///
+    /// The patch overwrote `client` / `appState.liveClient` and nothing else, and
+    /// a dropped `FaunaClient` stops none of its loops. The outgoing actor's WS-RPC
+    /// supervisor kept redialling with that actor's secret for the life of the
+    /// process, and after a nest restart each leaked supervisor spent the actor's
+    /// failed-credential bucket (`transport-connection.md` § Abuse posture → *The
+    /// failed-credential throttle*). `account-scoping.md` § The scoping taxonomy,
+    /// corollary 2: the loops that write a scope's state are retired by the same
+    /// drop. It reads `appState.liveClient` alone: this runs on the `self` the test
+    /// agent captured at `init()`, where the `@State` `client` reads back stale
+    /// (`check_apple_state_capture`), and the patch writes both slots from one
+    /// client anyway. It is AWAITED before the new client is built, because
+    /// `shutdown()` stops the PROCESS-global account runtime, which the incoming
+    /// client starts again. The witness is `test_session_patch_switch_teardown.py`.
+    /// Twin of iOS's.
+    @MainActor
+    private func retireClientForSessionPatch() async {
+        let outgoing = appState.liveClient
+        await outgoing?.shutdown()
+        appState.liveClient = nil
+        appDelegate.menuBarController.client = nil
+    }
+
     @MainActor
     private func tearDownSessionForSwitch() async {
         // Convention 14's teardown counter, bumped HERE rather than at the three
@@ -3173,6 +3540,7 @@ public struct FaunaMacApp: App {
         appState.selectedSidebar = .conversations
         appState.selectedSettingsPage = .status
         appState.profileActorId = nil
+        appState.profileHome = nil
 
         appState.session.clearAuthenticatedOverride()
         appState.session.secretHex = nil
@@ -3180,6 +3548,7 @@ public struct FaunaMacApp: App {
         appState.session.nodeUrl = nil
         appState.session.deviceId = nil
         appState.session.handle = nil
+        appState.session.domain = nil
         // Onboarding-only provisioning intents. An appended identity must not re-provision
         // the nest it is joining (linux skips this glue on append by never passing it on),
         // and a plain switch must not replay the previous identity's claim-time intents.
@@ -3302,9 +3671,12 @@ public struct FaunaMacApp: App {
         appState.session.nodeUrl = nil
         appState.session.deviceId = nil
         appState.session.handle = nil
+        appState.session.domain = nil
         appState.isOnboarded = false
         self.client = nil
         appState.liveClient = nil
+        // Every account was just erased, so this window serves none.
+        appState.releaseInstanceLock()
         // Not overwritten by ordinary settings nav (only the mail-lists Members
         // button sets it) — must be cleared explicitly or it leaks into the next
         // test's direct mail-list-members navigation.
@@ -3314,8 +3686,9 @@ public struct FaunaMacApp: App {
         // Same canonical drop the production paths run — a reset is a teardown, and
         // the next test in the module does not relaunch the app, so anything left
         // here leaks into it. (This site used to reach the `_for_test` conversations
-        // seam; `clear_for_test` is a thin alias for the production
-        // `clear_for_identity_change` the canonical drop calls, so no wipe is lost.)
+        // seam; the production `clear_for_identity_change` the canonical drop calls
+        // runs the same wipe and also retires the outgoing session's receive loop,
+        // which a reset — the end of that session — wants too.)
         dropActorScopedState()
         // The succession hand-off's ONE clear point, and deliberately not part of
         // the canonical drop above: those four fields exist to *survive* a switch
@@ -3398,6 +3771,7 @@ public struct FaunaMacApp: App {
         appState.session.nodeUrl = nil
         appState.session.deviceId = nil
         appState.session.handle = nil
+        appState.session.domain = nil
         appState.isOnboarded = false
         self.client = nil
         appState.liveClient = nil
@@ -3409,8 +3783,7 @@ public struct FaunaMacApp: App {
         // switcher's remove does — not on a wizard that would mint a fresh
         // identity beside the remaining ones. With no account left, this is
         // the classic signed-out end state (wizard root, unchanged).
-        appState.instanceLock = nil
-        appState.instanceLockActorId = nil
+        appState.releaseInstanceLock()
         if registry.active() != nil {
             runLaunch()
         }

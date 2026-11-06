@@ -1,11 +1,11 @@
 package com.fauna.app.ui.util
 
 import android.content.Context
-import uniffi.fauna_client_connected_apps.ComposedText
+import uniffi.fauna_core.ComposedText
 import uniffi.fauna_core.LocalizedText
 
 /**
- * Resolve a shared-Rust [ComposedText] (`fauna_client_connected_apps::compose`):
+ * Resolve a shared-Rust [ComposedText] (`fauna_core::localized::ComposedText`):
  * an i18n key plus arguments, some of which are themselves translatable. Each
  * `nested` entry is resolved first and fills the argument of its name (winning
  * over a plain arg of the same name), then the outer template resolves — the

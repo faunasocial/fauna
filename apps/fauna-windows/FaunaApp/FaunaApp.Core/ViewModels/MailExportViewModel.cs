@@ -93,6 +93,9 @@ public partial class MailExportViewModel : ObservableObject
 
     // ── Confirm / Progress / Done summaries (presentation glue, matching the linux lead) ──
     [ObservableProperty] private string _confirmSummary = string.Empty;
+    /// <summary>The confirm step's <c>mail_export.confirm_estimate_unavailable</c> note:
+    /// shown only when the selection holds messages the nest reports no sizes for.</summary>
+    [ObservableProperty] private bool _confirmEstimateUnavailable;
     [ObservableProperty] private string _progressSummary = string.Empty;
     [ObservableProperty] private double _progressFraction;
     [ObservableProperty] private string _errorLog = string.Empty;
@@ -102,6 +105,12 @@ public partial class MailExportViewModel : ObservableObject
     [ObservableProperty] private bool _canPause;
     /// <summary>Resume is offered only while the session is paused.</summary>
     [ObservableProperty] private bool _canResume;
+    /// <summary>The session failed (<c>ExportSessionState.Errored</c>): the Progress step
+    /// is a record, not a run — Dismiss (<c>mail-export-discard-button</c> under
+    /// <c>mail_export.dismiss_failed_button</c>) in place of Pause / Resume / Cancel
+    /// (mail-export.md § A failed export is a record the wizard shows until the user
+    /// moves on).</summary>
+    [ObservableProperty] private bool _isFailed;
 
     /// <summary>True once a <c>Start</c>/<c>Resume</c> came back with the session really
     /// <c>Running</c>; the panel reads it to spawn <see cref="DriveExportAsync"/> exactly
@@ -263,13 +272,21 @@ public partial class MailExportViewModel : ObservableObject
             Mailboxes.Add(new MailExportMailboxRow { Name = m.name, Selected = m.selected });
         }
 
-        // Step 3's total is the selected mailboxes' counts summed; the size and wall-clock
-        // estimates have no source, so the confirm row's note says so (confirm_estimate_unavailable).
-        var selected = snap.mailboxes.Where(m => m.selected).ToList();
-        ulong selectedMessages = 0;
-        foreach (var m in selected) selectedMessages += m.messageCount;
-        ConfirmSummary = Strings.Format(
-            "mail_export/confirm_summary_count_fmt", FormatLabel(snap.format), selected.Count, selectedMessages);
+        // Step 3's three figures — total messages, estimated bytes, estimated time — come
+        // from the ONE shared computation (export_confirm_estimate); this VM sums nothing.
+        // They fold into mail-export-confirm-summary exactly as tui's confirm_step_elements
+        // does. A nest that reports no sizes (selected messages, zero bytes) gets the bare
+        // counts plus confirm_estimate_unavailable, never an invented figure.
+        var estimate = FaunaClientMailSettingsMethods.ExportConfirmEstimate(snap.mailboxes);
+        var counts = Strings.Format(
+            "mail_export/confirm_summary_count_fmt",
+            FormatLabel(snap.format), snap.mailboxes.Count(m => m.selected), estimate.messages);
+        ConfirmSummary = estimate.sealedBytes == 0
+            ? counts
+            : Strings.Format(
+                "mail_export/confirm_summary_estimated_fmt",
+                counts, ValueFormat.ByteSize(estimate.sealedBytes), ValueFormat.DurationSecs(estimate.secs));
+        ConfirmEstimateUnavailable = estimate.sealedBytes == 0 && estimate.messages > 0;
         var timing = TransferTimingText.Of(
             snap.startedAt, snap.lastProgressAt,
             snap.sessionState == ExportSessionState.Running,
@@ -302,6 +319,7 @@ public partial class MailExportViewModel : ObservableObject
         DownloadUrl = snap.downloadUrl;
         CanPause = snap.sessionState == ExportSessionState.Running;
         CanResume = snap.sessionState == ExportSessionState.Paused;
+        IsFailed = snap.sessionState == ExportSessionState.Errored;
 
         MailboxProgress.Clear();
         foreach (var mp in snap.mailboxProgress)

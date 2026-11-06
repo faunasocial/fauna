@@ -127,7 +127,7 @@ fun AdminNestRulesSection(vm: RuleEditorHostVM = hiltViewModel()) {
 
 /**
  * `family-policy-rules-section` — the guardian's mounting in the per-ward policy
- * editor, where the four content-floor selects stood (`family-safety.md` § App
+ * editor, the guardian's content-rules surface (`family-safety.md` § App
  * surface → *Content rules*): loaded from the selected ward's policy
  * (`FfiRuleEditor.forGuardian`) and saved by its own button through the shared
  * `FfiFamilyClient.saveContentRules`; [onSaved] re-reads the page, so what

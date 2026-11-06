@@ -61,7 +61,6 @@ import pytest
 
 from clients.ws_rpc_admin_client import WsRpcAdminClient
 from helpers import enrollment
-from helpers.app_surface import app_name, skip_unbuilt
 from helpers.fleet import (
     FLEET_MEMBER_VISIBLE_S,
     SiblingSeats,
@@ -132,25 +131,6 @@ def _error_text(driver) -> str:
     if not driver.is_visible("error-message"):
         return ""
     return driver.get_text("error-message") or ""
-
-
-def _require_member_group(driver) -> None:
-    """Convention 7: built on tui (lead app, 2026-09-25), macOS + iOS (shared
-    FaunaKit, trickle-down leg, 2026-09-25), web (2026-09-30, its Devices
-    machine reaching the runtime through the account port) and linux
-    (2026-10-09), windows (2026-10-10) and android (2026-10-10, compile- and
-    Robolectric-verified; its e2e run venue is the emulator on the emulator host)."""
-    if app_name(driver) not in ("tui", "macos", "ios", "web", "linux", "windows", "android"):
-        skip_unbuilt(
-            driver,
-            surface="device-member-card (signed-in devices without a matching entry)",
-            detail=(
-                "the member group and device-own-fingerprint are built on tui, "
-                "macOS, iOS, web, linux, windows and android; this app's leg renders DevicesSnapshot.members / "
-                "own_fingerprint from the shared machine (no re-derivation owed)"
-            ),
-            tracked="docs/goal/ui/devices.md § Implementation status today",
-        )
 
 
 def _delete_row_as_the_user(nest_url: str, user: dict, row: str) -> None:
@@ -251,7 +231,6 @@ def _arrange_two_seats(app, request, nest_instance, sibling_seats, *, sibling_en
     url = nest_instance["url"]
     user = _make_user(nest_instance)
     enrollment.sign_in(app, request, nest_instance, user)
-    _require_member_group(driver)
     require_device_set_reader(driver)
 
     writer_one, row_one, _ = enrollment.await_enrollment(app, url, user)

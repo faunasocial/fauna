@@ -25,8 +25,10 @@ is a minute with no wake for a new follow (convention 14); the test polls for
 the post, re-poking as it goes. Every act of the user's — the link, the
 setting, the follow — is the app's.
 
-tier_3: a locally-built nest and the real app — tui, the lead app; the Nostr
-network is a fake.
+tier_3: a locally-built nest and the real app — tui, the lead app, then linux
+and web (web through a proxy onto this nest), the apple apps, windows and
+android (android's witness is recorded NOT RUN until the device venue exists).
+The Nostr network is a fake.
 """
 
 from __future__ import annotations
@@ -82,6 +84,13 @@ def nostr_inbound_nest(nest_binary, tmp_path_factory, far_relay):
     cleanup()
 
 
+@pytest.fixture
+def nostr_inbound_spa_url(spa_proxy_for, nostr_inbound_nest):
+    """The SPA proxy a web seat dials this nest through (a browser cannot reach a
+    raw nest — no CORS); native apps take the nest URL and never resolve it."""
+    return spa_proxy_for(nostr_inbound_nest["url"])
+
+
 def _poke(nest) -> None:
     resp = requests.post(
         f"{nest['url']}/api/v1/test/nostr/inbound/poll-now", timeout=30, verify=False,
@@ -104,6 +113,12 @@ def _local_nostr_posts(nest, text: str) -> list[dict]:
 
 
 @pytest.mark.tui
+@pytest.mark.linux
+@pytest.mark.web
+@pytest.mark.macos
+@pytest.mark.ios
+@pytest.mark.android
+@pytest.mark.windows
 @pytest.mark.standalone_only
 @pytest.mark.feature("nostr")
 def test_posts_from_someone_you_follow_on_nostr_arrive_in_your_feed(
@@ -120,7 +135,10 @@ def test_posts_from_someone_you_follow_on_nostr_arrive_in_your_feed(
         "kind": 1, "created_at": int(time.time()) - 60, "tags": [], "content": text,
     }))
 
-    _login_app_as(app, request, nest, nest["user"], verify_live_actor=True)
+    _login_app_as(
+        app, request, nest, nest["user"],
+        spa_url_fixture="nostr_inbound_spa_url", verify_live_actor=True,
+    )
     app.nostr.navigate()
     assert app.nostr.is_page_visible(), (
         f"the Nostr page should be reachable; error={app.error_text()!r}"

@@ -425,13 +425,17 @@ fn map_summary(s: fauna_client_folders::folders::FolderSummary) -> FfiFolder {
 /// which differ only in whose custody they read. The member-visible folder
 /// list, this device's place on each OWN folder (never asked for a member
 /// row: the roster read resolves a folder by name among the caller's own),
-/// then [`fauna_folders_machine::on_demand_presence::held_sets`]'s rules.
+/// the `groups` the door's own source lists — the store, read strictly, in
+/// the app process; the app's mirror beside the capability hosts
+/// (`group-set.md` § Build design — the group set, decisions 11 (a) and 12)
+/// — then [`fauna_folders_machine::on_demand_presence::held_sets`]'s rules.
 /// Any failed read is an error, never an empty answer.
 #[cfg(feature = "folders")]
 pub(crate) async fn presence_sets_over<R>(
     client: &FoldersClient<Arc<NestClient>>,
     device_id_hex: &str,
     custody: &R,
+    groups: &[fauna_folders_machine::on_demand_presence::HeldGroupScope],
 ) -> Result<Vec<fauna_folders_machine::on_demand_presence::PresenceSet>, FfiError>
 where
     R: fauna_client_folders::FolderKeyReader + ?Sized,
@@ -460,7 +464,50 @@ where
         &rows,
         &custody,
         &own_place_accepts,
+        groups,
     ))
+}
+
+/// The app-process door's group source: the held group sets off the mounted
+/// store, through the strict reader the mirror shares
+/// (`fauna_sync_engine::offline_share::held_group_scope_views`) — so the sets
+/// this door lists and the sets the app-dead door reads off the mirror come
+/// from one reader. No runtime, or a scope that will not read, is an error:
+/// a door that answered fewer sets on a hiccup would tear their presences
+/// down. A build with no share plane holds no group set: empty.
+#[cfg(all(feature = "folders", feature = "account-runtime"))]
+async fn held_group_sets_in_process(
+    own: fauna_core::identity::ActorId,
+) -> Result<Vec<fauna_folders_machine::on_demand_presence::HeldGroupScope>, FfiError> {
+    #[cfg(feature = "offline-share")]
+    {
+        let Some(store) = crate::account_runtime::handle() else {
+            return Err(FfiError::General {
+                msg: "the account runtime is not running — the held group sets cannot be listed"
+                    .into(),
+            });
+        };
+        let views = fauna_sync_engine::offline_share::held_group_scope_views(&store, &own)
+            .await
+            .map_err(|e| FfiError::General {
+                msg: format!("the held group sets did not read: {e:#}"),
+            })?;
+        Ok(views
+            .into_iter()
+            .map(
+                |view| fauna_folders_machine::on_demand_presence::HeldGroupScope {
+                    scope_id: view.scope_id,
+                    name: view.name,
+                    short_id: view.short_id,
+                },
+            )
+            .collect())
+    }
+    #[cfg(not(feature = "offline-share"))]
+    {
+        let _ = own;
+        Ok(Vec::new())
+    }
 }
 
 #[cfg(all(feature = "folders", feature = "account-runtime"))]
@@ -478,10 +525,13 @@ impl FfiFoldersClient {
         &self,
         device_id: String,
     ) -> Result<Vec<fauna_folders_machine::on_demand_presence::PresenceSet>, FfiError> {
+        let own = fauna_core::identity::ActorId(self.nest.auth().actor_id());
+        let groups = held_group_sets_in_process(own).await?;
         presence_sets_over(
             &self.client(),
             &device_id.to_ascii_lowercase(),
             &*crate::account_runtime::folder_key_store(),
+            &groups,
         )
         .await
     }
@@ -738,18 +788,18 @@ impl FfiFoldersClient {
     /// shared folder: who the set is shared with (the owner-side "Shared with"
     /// list). Each entry carries the actor's hex id, its nest-resolved `handle`
     /// (empty when unknown), and a `role` of `"owner"` | `"member"`. Distinct
-    /// from `members_list`, which is the enrolled *device* roster.
+    /// from `members_list`, which is the enrolled *device* roster. An owner-only
+    /// set answers an empty roster, never `fauna.folders.not_shared`.
     pub async fn members_list_actors(
         &self,
         name: String,
     ) -> Result<Vec<FfiFolderActorMember>, FfiError> {
-        let reply = self
+        let members = self
             .client()
-            .actor_members_list(name)
+            .row_actor_members(name)
             .await
             .map_err(stringify)?;
-        Ok(reply
-            .members
+        Ok(members
             .into_iter()
             .map(FfiFolderActorMember::from)
             .collect())
@@ -927,7 +977,7 @@ mod tests {
     ///
     /// Mutation: revert `client()` to `LabelCustody::owner_only(..)` →
     /// `has_resolver()` is false → exactly this pin reds
-    /// (`cargo test -p fauna-ffi --lib`, same crate as the production change).
+    /// (`cargo test -p fauna-ffi-core --lib`, same crate as the production change).
     /// The real resolver's *semantics* stay covered where they are testable:
     /// `NestFolderKeyResolver::resolve` is an RPC read needing a live nest, so
     /// the custody-shape consequences are pinned in fauna-core

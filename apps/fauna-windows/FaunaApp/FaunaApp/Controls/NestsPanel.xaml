@@ -75,6 +75,43 @@
             </StackPanel>
         </StackPanel>
 
+        <!-- Restore from a custodian nest (nests.md § Trust facet — restore from a
+             custodian nest): page-level, after the forward queue and before the nest
+             rows; the opener renders on every signed-in visit, custody rows or none
+             (the cold device has none). The inline form is the nests-add-* shape.
+             The notice is Collapsed (absent to UIA) until a restore ran this
+             session. State + rules live in NestsCustodyView (Core); the copy is
+             shared Rust's notice_parts. No FaunaGate on submit: the restore dials
+             the custodian, never this session's own nest. -->
+        <StackPanel Spacing="8">
+            <Button x:Name="CustodyRestoreButton"
+                    AutomationProperties.AutomationId="{x:Bind ids:Ids.NestsCustodyRestoreButton}"
+                    Content="{loc:Localize Key=nests/custody_restore_button}"
+                    Click="CustodyRestoreReveal_Click" />
+            <StackPanel x:Name="CustodyRestoreForm" Spacing="8" Visibility="Collapsed">
+                <TextBox x:Name="CustodyRestoreInput"
+                         AutomationProperties.AutomationId="{x:Bind ids:Ids.NestsCustodyRestoreInput}"
+                         Header="{loc:Localize Key=nests/custody_restore_input_label}"
+                         TextChanged="CustodyRestoreInput_TextChanged" />
+                <StackPanel Orientation="Horizontal" Spacing="8">
+                    <Button x:Name="CustodyRestoreSubmitButton"
+                            AutomationProperties.AutomationId="{x:Bind ids:Ids.NestsCustodyRestoreSubmitButton}"
+                            Style="{StaticResource AccentButtonStyle}"
+                            Content="{loc:Localize Key=nests/custody_restore_submit}"
+                            IsEnabled="False"
+                            Click="CustodyRestoreSubmit_Click" />
+                    <Button x:Name="CustodyRestoreCancelButton"
+                            AutomationProperties.AutomationId="{x:Bind ids:Ids.NestsCustodyRestoreCancelButton}"
+                            Content="{loc:Localize Key=nests/custody_restore_cancel}"
+                            Click="CustodyRestoreCancel_Click" />
+                </StackPanel>
+            </StackPanel>
+            <TextBlock x:Name="CustodyRestoreNotice"
+                       AutomationProperties.AutomationId="{x:Bind ids:Ids.NestsCustodyRestoreNotice}"
+                       TextWrapping="Wrap"
+                       Visibility="Collapsed" />
+        </StackPanel>
+
         <ProgressRing x:Name="LoadingRing"
                       IsActive="False"
                       Visibility="Collapsed"
@@ -163,6 +200,14 @@
                             <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.NestTrustEmpty}"
                                        Text="{x:Bind TrustEmptyText}"
                                        Visibility="{x:Bind EmptyVisibility}"
+                                       TextWrapping="Wrap" Opacity="0.7" />
+
+                            <!-- nest-trust-holders-status: home row + Now lens; the
+                                 unreachable copy when the holder roster read failed,
+                                 EMPTY otherwise (registered either way). -->
+                            <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.NestTrustHoldersStatus}"
+                                       Text="{x:Bind HoldersStatusText}"
+                                       Visibility="{x:Bind HoldersStatusVisibility}"
                                        TextWrapping="Wrap" Opacity="0.7" />
 
                             <!-- nest-trust-grant-list: Now lens + grants present. Border-
@@ -472,6 +517,15 @@
                                             IsEnabled="{x:Bind RevokeEnabled}"
                                             Margin="0,2,0,0"
                                             Click="RevokeCustody_Click" />
+                                    <!-- The warm explicit restore gesture (nests.md § Trust
+                                         facet — restore from a custodian nest): the same
+                                         command as the page-level form, the row's own
+                                         address pre-filled. -->
+                                    <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.NestTrustCustodyRestoreButton}"
+                                            Content="{x:Bind RestoreLabel}"
+                                            Tag="{x:Bind}"
+                                            Margin="0,2,0,0"
+                                            Click="RestoreFromCustodyRow_Click" />
                                 </StackPanel>
                             </Border>
                         </StackPanel>

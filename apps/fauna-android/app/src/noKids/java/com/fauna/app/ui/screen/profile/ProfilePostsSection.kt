@@ -102,7 +102,7 @@ fun ProfilePostsSection(
     }
     // The card's verb failures, exactly as on the feed page.
     FeedVerbFailureEffects(vm)
-    // Guardian Notify counts every rendered post's floor enforcement, as the
+    // Guardian Notify counts every rendered post's guardian-rule enforcement, as the
     // feed page does (family-safety.md § Guardian Notify).
     LaunchedEffect(posts) { posts.forEach { vm.noteContentEnforcement(it.postId, it.labels) } }
 

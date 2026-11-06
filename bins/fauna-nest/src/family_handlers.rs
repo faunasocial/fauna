@@ -21,7 +21,7 @@ use bytes::Bytes;
 
 use fauna_core::data::{DmPeerVerdict, FeedSourceOperation, FeedSources, UnknownPeerDm};
 use fauna_core::day_bucket::clamp_utc_offset;
-use fauna_core::obligation::{ContentFloor, GUARDIAN_FLOOR_CATEGORIES};
+use fauna_core::obligation::GUARDIAN_FLOOR_CATEGORIES;
 use fauna_protocol::family::{
     FamilyAgeBandInfo, FamilyApprovalDecideRequest, FamilyApprovalEntry, FamilyApprovalsListReply,
     FamilyApprovalsListRequest, FamilyBlockedPeerInfo, FamilyContactAddRequest,
@@ -335,25 +335,23 @@ fn validate_policy(p: &ReachPolicy) -> Result<(), RpcError> {
     {
         return Err(invalid_params("unknown_peer_dm must be one of allow|hold"));
     }
-    // A *present* content sub-document must name only floors the nest can store
-    // (family-safety.md § Policy-update compatibility:97 — "the nest refuses
-    // what it cannot name"). A floor value the caller's build cannot parse
-    // decodes to `ContentFloor::Unknown`; refusing it at write keeps an
-    // unnameable value out of the store. An **absent** sub-document is left
-    // unchanged and carries nothing to validate.
+    // An **absent** content sub-document is left unchanged and carries
+    // nothing to validate.
     if let Some(cp) = &p.content_policy {
-        for (category, floor) in [
-            ("nsfw", cp.nsfw),
-            ("spam", cp.spam),
-            ("phishing", cp.phishing),
-            ("commercial", cp.commercial),
-        ] {
-            if floor == ContentFloor::Unknown {
-                return Err(invalid_params(&format!(
-                    "content_policy.{category} is not a recognized floor \
-                     (expected inherit|collapse|block)"
-                )));
-            }
+        // A *present* content sub-document IS the guardian's rule document;
+        // one carrying none is refused, never stored-as-nothing and answered
+        // ok. An app built before the four content floors retired
+        // sends `{ nsfw: "block" }` for "block nsfw", which decodes to a
+        // document-less policy: success there would tell the guardian the
+        // ward is protected when nothing was stored (§ Policy-update
+        // compatibility — the nest refuses what it cannot honestly store).
+        // Clearing the rules is an empty document, never an empty pillar.
+        if cp.document.is_none() {
+            return Err(invalid_params(
+                "content_policy must carry the guardian's rule document \
+                 (content_policy.document); send no content_policy to leave \
+                 the content rules unchanged",
+            ));
         }
         // A present rule document is the guardian's, validated by the one
         // shared validator for publisher `guardian` (`nest-rules.md` § The
@@ -1710,8 +1708,11 @@ fn transfer_cancel_handler() -> RpcHandler {
 /// Every inbound bridge-DM write path lands in the bridged-conversation family
 /// — a third-party bridge's deposit and the in-process Nostr leg's alike — so
 /// the queue reads every bridged room that holds a row, each far participant a
-/// peer (§ Enforcement points' standing rule, met by construction).
-/// `created_at` is the room's newest arrival, unix seconds.
+/// peer (§ Enforcement points' standing rule, met by construction). The ward's
+/// local remove of a room or of its rows is not a verdict and takes no entry
+/// off this queue (§ The bridge-DM gate, honest bound (a)): the read counts
+/// removed rooms and tombstoned rows alike.
+/// `created_at` is the room's newest arrival, tombstones included, unix seconds.
 async fn held_dm_conversations(
     state: &AppState,
     ward: &[u8; 32],
@@ -1726,15 +1727,14 @@ async fn held_dm_conversations(
         .collect();
     let rooms = state
         .db
-        .summarize_bridged_rooms(ward, None)
+        .guardian_queue_bridged_rooms(ward)
         .await
         .map_err(internal)?;
     Ok(rooms
         .into_iter()
-        .flat_map(|room| {
-            let at = room.last_received_at / 1000;
-            let bridge_id = room.bridge_id;
-            room.participants
+        .flat_map(|(bridge_id, participants, last_received_at)| {
+            let at = last_received_at / 1000;
+            participants
                 .into_iter()
                 .map(move |peer| (bridge_id.clone(), peer, at))
         })

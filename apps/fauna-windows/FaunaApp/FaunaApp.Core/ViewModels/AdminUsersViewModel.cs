@@ -76,6 +76,25 @@ public partial class AdminUsersViewModel : ObservableObject
     [ObservableProperty] private string _admitActorInput = string.Empty;
     [ObservableProperty] private string _admitHandleInput = string.Empty;
     [ObservableProperty] private string _admitTierDraft = string.Empty;
+    /// <summary>The admitted account's guardian (<c>admin-users-admit-guardian-select</c>,
+    /// family-safety.md § The guardianship link, <i>Set at admission</i>), default none;
+    /// <c>null</c> admits an ordinary account. The Invite section's pair, lifted.</summary>
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(AdmitAgeBandEnabled))]
+    private byte[]? _admitGuardianActor;
+    /// <summary>The admission's band (<c>admin-users-admit-age-band-select</c>) as a shared
+    /// <c>age_band_options()</c> VALUE — sent only beside a guardian, reset to not-set when
+    /// the guardian clears (account-age-band.md § Age-band surfaces).</summary>
+    [ObservableProperty] private string _admitAgeBand = FaunaFfiMethods.AgeBandNotSetValue();
+
+    /// <summary>The Admit band select is enabled only while a guardian is picked; the nest
+    /// refusing a band without one stays the authority.</summary>
+    public bool AdmitAgeBandEnabled => AdmitGuardianActor is not null;
+
+    partial void OnAdmitGuardianActorChanged(byte[]? value)
+    {
+        if (value is null) AdmitAgeBand = FaunaFfiMethods.AgeBandNotSetValue();
+    }
 
     // Invite section: mint form + the just-minted token (copyable).
     [ObservableProperty] private bool _isCreatingCode;
@@ -522,7 +541,11 @@ public partial class AdminUsersViewModel : ObservableObject
             var actorId = Convert.FromHexString(trimmed);
             var handle = AdmitHandleInput.Trim();
             var tier = AdmitTierDraft.Length == 0 ? (Tiers.Count > 0 ? Tiers[0] : "free") : AdmitTierDraft;
-            await _rpc.AdminUsersCreateAsync(actorId, tier, handle.Length == 0 ? null : handle);
+            // The band rides only beside a guardian; a guardian on a handle-less admit is
+            // the nest's refusal to make, shown on admin-users-action-error below.
+            await _rpc.AdminUsersCreateAsync(
+                actorId, tier, handle.Length == 0 ? null : handle,
+                AdmitGuardianActor, AdmitGuardianActor is null ? null : AdmitAgeBand);
             await ReloadUsersAsync();
         }
         catch (Exception ex)
@@ -647,12 +670,16 @@ public sealed class AdminUserRow
     /// editable, non-unique <see cref="Label"/> above.</summary>
     public required string PickerOption { get; init; }
     public required bool Suspended { get; init; }
-    /// <summary>A pending eviction OR an active suspension exists (both ride the
-    /// same eviction row — suspension is its <c>suspended</c> status) → the row
-    /// shows the restore control. Equivalent to the shared decision's
-    /// <c>restore</c> (lifecycle != Active), since <c>Active</c> is exactly
-    /// "no eviction row".</summary>
+    /// <summary>An eviction row exists (a pending eviction OR an active suspension —
+    /// both ride the same row, suspension is its <c>suspended</c> status). NOT the
+    /// restore decision: a row whose deletion has begun (<c>deleting</c>) still has
+    /// an eviction row but offers no restore — use <see cref="CanRestore"/> for the
+    /// control.</summary>
     public required bool EvictionActive { get; init; }
+    /// <summary><c>admin-users-cancel-eviction-button</c> — restore. From the shared
+    /// decision's <c>restore</c> (false for Active and for a row whose deletion has
+    /// begun), never re-derived from <see cref="EvictionActive"/>.</summary>
+    public required bool CanRestore { get; init; }
     /// <summary>Whether this actor holds the admin role — withholds the entry
     /// controls (an admin can be neither suspended nor evicted,
     /// <c>fauna.admin.conflict</c>) but never the restore control.</summary>
@@ -704,6 +731,7 @@ public sealed class AdminUserRow
             EvictionActive = u.eviction is not null,
             IsAdmin = u.isAdmin,
             MailServingEnabled = u.mailServingEnabled,
+            CanRestore = controls.restore,
             CanSuspend = controls.suspend,
             CanEvict = controls.evict,
             CanMakeAdmin = controls.makeAdmin,

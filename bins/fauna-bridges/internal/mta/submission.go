@@ -1203,6 +1203,12 @@ func (s *submissionSession) Data(r io.Reader) error {
 						EnhancedCode: gosmtp.EnhancedCode{5, 7, 1},
 						Message:      "Sender not authorized for this address",
 					}
+				case wsrpc.CodeMailDisabledByUser:
+					return &gosmtp.SMTPError{
+						Code:         550,
+						EnhancedCode: gosmtp.EnhancedCode{5, 7, 1},
+						Message:      "Mail is turned off for this account; turn it back on in Fauna's mail settings to send",
+					}
 				case wsrpc.CodeProtocolMalformed:
 					return &gosmtp.SMTPError{
 						Code:         554,

@@ -33,9 +33,9 @@ public enum CaldavMailboxTestCommand {
         do {
             let machine = try await api.mailSettingsMachine()
             if let password {
-                try await machine.enableCaldavMailboxWithPassword(displayName: "Default", password: password)
+                try await machine.enableDavMailboxWithPassword(displayName: "Default", password: password)
             } else {
-                _ = try await machine.enableCaldavMailboxWithGeneratedPassword(displayName: "Default")
+                _ = try await machine.enableDavMailboxWithGeneratedPassword(displayName: "Default")
             }
             TestAgentReplies.caldavMailboxReply = ["ok": true]
         } catch {

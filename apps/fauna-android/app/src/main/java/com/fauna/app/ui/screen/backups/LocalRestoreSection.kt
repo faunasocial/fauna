@@ -65,7 +65,18 @@ fun LocalRestoreSection(
     )
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
+/** The `restore-kind-checkbox` set in paint order, `KIND_ENTRIES` order: the
+ *  wire kind token and the checkbox label a snapshot of that kind is named by
+ *  (never the raw token — `card`/`conv` mean nothing to the reader). */
+private val RESTORE_KINDS = listOf(
+    "mail" to R.string.backups_restore_kinds_mail,
+    "calendar" to R.string.backups_restore_kinds_calendar,
+    "card" to R.string.backups_restore_kinds_contacts,
+    "post" to R.string.backups_restore_kinds_posts,
+    "conv" to R.string.backups_restore_kinds_conversations,
+)
+
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 fun LocalRestoreContent(
     snapshots: List<FfiSnapshotSummary>,
@@ -76,18 +87,18 @@ fun LocalRestoreContent(
 ) {
     var selectedIndex by remember(snapshots) { mutableStateOf(0) }
     var confirm by remember { mutableStateOf(TextFieldValue("")) }
-    // Per-kind checkboxes — both default-checked. They do not gate the local
-    // single-kind-per-snapshot restore (the mail+calendar pair-restore they drive
-    // is the destination flow, blocked above); they render for parity with the
-    // spec + linux (backups.md § Impl-status "Known Linux glue follow-ups").
-    var mailChecked by remember { mutableStateOf(true) }
-    var calendarChecked by remember { mutableStateOf(true) }
+    // Five per-kind checkboxes, all default-checked; an unticked kind disarms
+    // `restore-confirm-button` for a picked snapshot of that kind.
+    val kindChecked = remember { mutableStateListOf(*BooleanArray(RESTORE_KINDS.size) { true }.toTypedArray()) }
 
     val selected = snapshots.getOrNull(selectedIndex)
     val matchTarget = selected?.id?.toString().orEmpty()
+    val selectedKindIndex = RESTORE_KINDS.indexOfFirst { it.first == selected?.messageKind }
+    val kindTicked = selectedKindIndex < 0 || kindChecked[selectedKindIndex]
     val confirmEnabled = selected != null &&
         confirm.text.isNotEmpty() &&
-        confirm.text == matchTarget
+        confirm.text == matchTarget &&
+        kindTicked
 
     Column(
         modifier = Modifier
@@ -121,21 +132,18 @@ fun LocalRestoreContent(
         )
 
         // ── restore-kinds-checkboxes ──
-        Row(
+        FlowRow(
             modifier = Modifier.testTag(Ids.RESTORE_KINDS_CHECKBOXES),
-            verticalAlignment = Alignment.CenterVertically,
+            verticalArrangement = Arrangement.Center,
             horizontalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            KindCheckbox(
-                checked = mailChecked,
-                onChecked = { mailChecked = it },
-                label = stringResource(R.string.backups_restore_kinds_mail),
-            )
-            KindCheckbox(
-                checked = calendarChecked,
-                onChecked = { calendarChecked = it },
-                label = stringResource(R.string.backups_restore_kinds_calendar),
-            )
+            RESTORE_KINDS.forEachIndexed { index, (_, labelRes) ->
+                KindCheckbox(
+                    checked = kindChecked[index],
+                    onChecked = { kindChecked[index] = it },
+                    label = stringResource(labelRes),
+                )
+            }
         }
 
         // ── restore-confirm-input — friction bar (re-type the snapshot id) ──
@@ -253,5 +261,8 @@ private fun KindCheckbox(
     }
 }
 
-private fun snapshotLabel(snap: FfiSnapshotSummary): String =
-    snapshotRestoreOptionLabel(snap.messageKind, snap.id)
+@Composable
+private fun snapshotLabel(snap: FfiSnapshotSummary): String {
+    val labelRes = RESTORE_KINDS.firstOrNull { it.first == snap.messageKind }?.second
+    return snapshotRestoreOptionLabel(labelRes?.let { stringResource(it) } ?: snap.messageKind, snap.id)
+}

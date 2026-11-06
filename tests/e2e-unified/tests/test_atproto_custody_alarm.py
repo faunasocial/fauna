@@ -58,7 +58,6 @@ import pytest
 
 from conftest import get_available_apps
 from drivers import create_driver
-from helpers.app_surface import skip_unbuilt
 from helpers.atproto_hosted_world import hosted_world
 from i18n.strings import S
 
@@ -373,14 +372,6 @@ def test_a_forged_seizure_alarms_but_is_never_signed(
     genesis too, which is honestly `not-contestable` (there is no earlier state
     to return to).
     """
-    if custody_app not in CONTEST_APPS:
-        driver = create_driver(custody_app)
-        skip_unbuilt(
-            driver,
-            surface="atproto-contest-card",
-            detail="the recovery-fork ceremony landed on tui (lead app) 2026-08-02",
-            tracked="ui/atproto.md § Implementation status today; ",
-        )
 
     with _minted_identity(
         custody_app, request, nest_binary, atproto_bridge_e2e_binary, tmp_path_factory
@@ -480,14 +471,6 @@ def test_recovery_fork_contest_end_to_end(
     to return to). `inject_forged_rotation` produces a log no key ever signed,
     which the client must refuse — that is the test above.
     """
-    if custody_app not in CONTEST_APPS:
-        driver = create_driver(custody_app)
-        skip_unbuilt(
-            driver,
-            surface="atproto-contest-card",
-            detail="the recovery-fork ceremony landed on tui (lead app) 2026-08-02",
-            tracked="ui/atproto.md § Implementation status today; ",
-        )
 
     with _minted_identity(
         custody_app, request, nest_binary, atproto_bridge_e2e_binary, tmp_path_factory
@@ -624,13 +607,6 @@ def test_a_seizure_past_its_window_says_so_and_offers_no_button(
         )
 
 
-# The apps that render `atproto-delete-tombstone` today: tui leads (2026-09-26),
-# macos + ios follow through the shared FaunaKit `AtprotoSettingsView`; linux,
-# web and android landed in the batched trickle-down, and windows is the last
-# app, so all seven render it.
-RETIRE_APPS = ("tui", "macos", "ios", "linux", "web", "android", "windows")
-
-
 @pytest.mark.parametrize("custody_app", _apps(*CUSTODY_APPS))
 @pytest.mark.feature("atproto")
 def test_retire_identity_opt_in_rides_the_delete_ceremony(
@@ -654,14 +630,6 @@ def test_retire_identity_opt_in_rides_the_delete_ceremony(
     hostname as its PDS, which this box cannot reach, so the probe answers
     quiet-retry here by design.
     """
-    if custody_app not in RETIRE_APPS:
-        driver = create_driver(custody_app)
-        skip_unbuilt(
-            driver,
-            surface="atproto-delete-tombstone",
-            detail="the retire opt-in landed on tui (lead app) 2026-09-26, then macos + ios, linux, web and android",
-            tracked="ui/atproto.md § Implementation status today; ",
-        )
 
     with _minted_identity(
         custody_app, request, nest_binary, atproto_bridge_e2e_binary, tmp_path_factory

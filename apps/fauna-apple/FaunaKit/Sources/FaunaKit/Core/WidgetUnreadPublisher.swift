@@ -5,13 +5,13 @@ import WidgetKit
 /// priority #2): the apple half of `apps/common.md` § Home-screen widget, mechanism
 /// in `apps/ios.md` § Home-screen widget.
 ///
-/// **The number is the conversations list's own number.** `ConversationsVM`'s
+/// **The number is the account's total, not the list's.** `ConversationsVM`'s
 /// manager observer — the one place every render of the list reads through —
-/// calls ``publish(unread:)`` with ``total(of:)`` over the shared
-/// `fauna_conversations` snapshot's threads, the per-thread `unreadCount` the list
-/// renders, summed. That is linux's `sum_unread` feeding its launcher badge on each
-/// snapshot tick: one computation, so the widget can never show a number the app
-/// would not, and never a second count query.
+/// calls ``publish(unread:)`` with the shared `fauna_conversations`
+/// `unreadTotal()`, summed over every thread of the account. It is deliberately NOT
+/// summed over the snapshot's threads: that list is narrowed by the live search, and a
+/// search must never move the badge. The same shared getter feeds linux, windows and
+/// android, so there is one computation across the apps.
 ///
 /// **Why a snapshot and not a fetch in the widget.** The widget is a sandboxed
 /// extension that must never reach the identity seed, so it holds no credential and
@@ -45,11 +45,6 @@ public final class WidgetUnreadPublisher {
         self.store = store
         self.reload = reload
         self.now = now
-    }
-
-    /// The conversations list's unread total — the number the widget shows.
-    public nonisolated static func total(of threads: [ThreadSummary]) -> Int {
-        threads.reduce(0) { $0 + Int($1.unreadCount) }
     }
 
     /// Write `unread` for the widget and ask WidgetKit to redraw, unless it is

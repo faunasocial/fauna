@@ -2,7 +2,8 @@
 # witness of `docs/goal/architecture/nest/update-channel.md` § Tests
 # (`test_update_channel_updater.py`). NEVER shipped: built only by that test, on
 # top of the image the tier_4 suite already built, and tagged
-# `fauna-updater-e2e:local`.
+# `fauna-updater-e2e:<hash of the base image's tag>`, so each checkout's build
+# keeps its own tag on a shared engine.
 #
 # Why a second build at all: the shipped updater follows exactly one repository,
 # `ghcr.io/faunasocial/nest`, and nothing it reads can name another
@@ -14,13 +15,14 @@
 # image, the engine — is the shipped artifact.
 #
 # Only the updater's own crate graph compiles here (a few minutes cold), on the
-# same pinned toolchain image and linker setup as the root `Dockerfile`'s
-# `rust-base`; nothing new is pulled.
+# same pinned toolchain image as the root `Dockerfile`'s `rust-base`, linking
+# through the repository's own `.cargo/config.toml` (copied with the tree) as
+# its `rust-native` stage does; nothing new is pulled.
 
 ARG BASE_IMAGE=fauna-nest-test:local
 
 FROM rust:bookworm@sha256:82150a52ec202c1b14d7817e14516c392bb7f5cfebd88f1ed531cb37ebd39922 AS build
-RUN apt-get update && apt-get install -y --no-install-recommends clang mold \
+RUN apt-get update && apt-get install -y --no-install-recommends clang \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
 COPY rust-toolchain.toml ./

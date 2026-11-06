@@ -102,6 +102,79 @@ def add_exact_alias_as(member: WsRpcAdminClient, domain: str, local_part: str) -
     return f"{local_part}@{domain}"
 
 
+def _holds_exact(rows, domain: str, local_part: str) -> dict | None:
+    return next(
+        (
+            row
+            for row in rows
+            if row["kind"] == "exact"
+            and row["local_domain"].lower() == domain.lower()
+            and row["pattern"].lower() == local_part.lower()
+        ),
+        None,
+    )
+
+
+# The addresses `add_test_scoped_exact_alias` minted during the running test,
+# released by conftest's autouse `_release_test_scoped_mail_aliases` at its
+# teardown. Why: the session `test_user` is shared by every mail test, the nest
+# caps a member at `exact_aliases_max` (20 by default) exact aliases, and each
+# test routes inbound mail to an address of its own — so a module of more than
+# about twenty such tests (test_mail_export.py alone has 22) failed its later
+# tests with `alias_cap_exceeded` in a whole-file run while each passed alone
+# (convention 10: a test's outcome must not depend on what ran before it).
+_TEST_SCOPED: list[tuple[str, object, str, str]] = []
+
+
+def add_test_scoped_exact_alias(nest_url: str, signing_key, domain: str, local_part: str) -> str:
+    """:func:`add_exact_alias` for an address one test owns: if this call mints
+    it, it is deleted again when the test ends, leaving the session-scoped
+    member as found. An address the member already held (its canonical row, or
+    one a fixture seeded) is returned and left alone. Call it only from a test
+    body or a helper a test body calls — never from a fixture wider than one
+    test, whose address must outlive the test that set it up."""
+    with WsRpcAdminClient(
+        nest_url,
+        actor_id=bytes(signing_key.verify_key),
+        signing_key=bytes(signing_key),
+    ) as member:
+        rows = member.call("fauna.bridges.list_account_aliases", {})["aliases"]
+        held_before = _holds_exact(rows, domain, local_part) is not None
+        address = add_exact_alias_as(member, domain, local_part)
+    if not held_before:
+        _TEST_SCOPED.append((nest_url, signing_key, domain, local_part))
+    return address
+
+
+def release_test_scoped_aliases() -> None:
+    """Delete every address :func:`add_test_scoped_exact_alias` minted since the
+    last call. A failure is reported as a warning naming the address, never
+    raised: the test it belongs to has already been graded, and a leftover
+    alias costs a later test only the cap headroom it would have had."""
+    import warnings
+
+    pending = list(_TEST_SCOPED)
+    _TEST_SCOPED.clear()
+    for nest_url, signing_key, domain, local_part in pending:
+        try:
+            with WsRpcAdminClient(
+                nest_url,
+                actor_id=bytes(signing_key.verify_key),
+                signing_key=bytes(signing_key),
+            ) as member:
+                rows = member.call("fauna.bridges.list_account_aliases", {})["aliases"]
+                row = _holds_exact(rows, domain, local_part)
+                if row is not None and not row.get("is_canonical"):
+                    member.call(
+                        "fauna.bridges.delete_account_alias", {"alias_id": row["alias_id"]}
+                    )
+        except Exception as err:  # noqa: BLE001 — reported, see the docstring
+            warnings.warn(
+                f"could not release the test-scoped alias {local_part}@{domain}: {err!r}",
+                stacklevel=2,
+            )
+
+
 def default_alias_domain(api) -> str:
     """The domain the page's localpart-only gestures will mint on.
 

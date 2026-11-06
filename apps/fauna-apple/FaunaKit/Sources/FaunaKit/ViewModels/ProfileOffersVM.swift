@@ -91,10 +91,11 @@ public final class ProfileOffersVM {
 #if !FAUNA_KIDS
     /// Subscribe to `tier`: plaintext + auto-approve grants inline → status flips
     /// to active; encrypted mode enqueues → pending. Re-reads to confirm.
-    public func subscribe(_ tier: String) async {
+    public func subscribe(_ tier: String, home: String? = nil) async {
         guard let api, let authorIdHex else { return }
         do {
-            let reply = try await api.subscriptionSubscribe(authorIdHex: authorIdHex, tier: tier)
+            let reply = try await api.subscriptionSubscribe(
+                authorIdHex: authorIdHex, tier: tier, homeNestUrl: home)
             switch reply {
             case .approved(let granted, _):
                 statusTier = granted
@@ -115,8 +116,12 @@ public final class ProfileOffersVM {
     /// ⚠ Nest-gated until the nest auto-provisions the "followers" tier
     /// (`monetization.md` § Pillar 1 — currently returns `tier_not_found`); wired
     /// for parity with the other apps.
-    public func follow() async {
-        await subscribe(Self.followersTier)
+    ///
+    /// `home` is the profile page's actor-home slot (`actor_home`): the follow
+    /// carries it so an author homed on another nest is followed across nests
+    /// (`federated-follow.md` § Decision 2); `nil` = today's local follow.
+    public func follow(home: String? = nil) async {
+        await subscribe(Self.followersTier, home: home)
         // Optimistic on-success flip (the button reads "Following"); `subscribe`
         // clears `errorMessage` on success and sets it on failure.
         if errorMessage == nil { isFollowing = true }

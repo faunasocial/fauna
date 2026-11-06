@@ -197,6 +197,40 @@ pub fn build_sidebar(on_select: impl Fn(SidebarItem) + 'static) -> gtk::ListBox 
     list_box
 }
 
+/// Bring the sidebar's selection in step with the content stack's `page`.
+///
+/// The list navigates on `row-selected`, and a press on a row that is already
+/// selected selects nothing — so a page reached by any door other than the
+/// sidebar (the quick switcher, a sub-page's deep link out, a notification
+/// tap-through, the test agent's nav) used to leave the row of the page the user
+/// left still selected, and pressing that row again went nowhere. Called from the
+/// content stack's visible-child notify, the one place every door passes
+/// through, so each door no longer owes its own `select_row`.
+///
+/// The page's own row is selected when it is showing; selecting it re-runs
+/// `on_select` with the page the stack already shows, which GTK's stack ignores.
+/// The Profile row is the exception: its `on_select` reopens the viewer's OWN
+/// profile, so a profile page reached by a tap-through onto another actor only
+/// clears the selection — a later Profile press then still selects, and
+/// navigates. Any page without a showing row clears it the same way.
+pub fn sync_selection_to_page(list_box: &gtk::ListBox, page: &str) {
+    let selected = list_box
+        .selected_row()
+        .and_then(|row| SidebarItem::from_index(row.index() as usize));
+    if selected.is_some_and(|item| item.stack_name() == page) {
+        return;
+    }
+    let target = (0..=SidebarItem::ALL.len() + 1)
+        .filter_map(|i| SidebarItem::from_index(i).map(|item| (i, item)))
+        .find(|(_, item)| item.stack_name() == page && *item != SidebarItem::Profile)
+        .and_then(|(i, _)| list_box.row_at_index(i as i32))
+        .filter(|row| row.is_visible());
+    match target {
+        Some(row) => list_box.select_row(Some(&row)),
+        None => list_box.unselect_all(),
+    }
+}
+
 /// Show the Admin sidebar row. Call this when admin status is confirmed.
 pub fn show_admin_sidebar_row(list_box: &gtk::ListBox) {
     let admin_index = SidebarItem::ALL.len() as i32; // index 11 (after the 11 standard items)

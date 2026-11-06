@@ -46,6 +46,14 @@ very `SearchNav::Mail` gesture a Search result row dispatches
 follows its focus ring. tui's registry, like GTK's, lists every row, so the
 in-view read is the agent's `in-viewport` attribute, measured on the frame the
 terminal actually painted.
+
+android joined 2026-10-31 through the same seam, NOT YET RUN on a device (no
+venue). Its debug `TestAgent` answers `conversations_select_message` with the
+`selectThreadAndMessage` call a Search-result tap makes; the bridge reads the
+selected mark off the node's `isSelected` (`AutomationSemantics.attrValue`
+`selected`); and `AndroidBridgeDriver.in_viewport` measures the realized
+row's frame against the pinned compose bar (LazyColumn composes only rows at
+or near the viewport).
 """
 
 import uuid
@@ -61,6 +69,7 @@ pytestmark = [
     pytest.mark.linux,
     pytest.mark.tui,
     pytest.mark.windows,
+    pytest.mark.android,
 ]
 
 # Enough history on EITHER side of the target that it is out of view when the
