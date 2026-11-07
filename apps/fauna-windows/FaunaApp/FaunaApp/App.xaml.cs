@@ -272,6 +272,19 @@ public partial class App : Application
     /// </summary>
     internal static INestHttpClient? CurrentNest => (Current as App)?._nestClient;
 
+    /// <summary>
+    /// The identity the launch machine serving this window last published — its latest
+    /// verify reply's handle and domain — or <c>null</c> before one resolved (or with no
+    /// machine, as an e2e state-protocol login has none). Read per call through the
+    /// observer the app wired onto the machine it built last, so an account switch's new
+    /// machine is followed without re-wiring. The profile SELF header reads it over the
+    /// registry cache (<see cref="Core.Services.SelfDisplayHandle"/>): the reply is
+    /// published, not persisted, so after a mid-session primary rename only it carries
+    /// the new primary.
+    /// </summary>
+    internal static uniffi.fauna_launch_machine.LaunchIdentity? CurrentLaunchIdentity =>
+        (Current as App)?._selfAddressHealObserver?.Machine?.Snapshot().@identity;
+
 #if DEBUG || FAUNA_E2E_AGENT
     /// <summary>
     /// This session's live WS-RPC client, or <c>null</c> before login / after
@@ -3734,12 +3747,12 @@ public partial class App : Application
         // critical-alerts.md § Mechanism → How often the detector runs: the re-sweep
         // loop rides the SAME universal post-auth hook as the two calls above, and
         // never returns — StartMainAppAsync is process-lifetime, which is the scope
-        // a loop that only stops at identity teardown needs. A re-entry for the
-        // identity whose loop is already running gets one pass instead of a second
-        // loop (StartForIdentity's split). Best-effort, fire-and-forget — never
-        // awaited for sign-in to proceed.
-        Core.Helpers.CriticalAlertsSweep.StartForIdentity(
-            _rpcClient, baseUrl, _cryptoService!.ActorIdHex);
+        // a loop that only stops at identity teardown needs. A loop also ends with
+        // the client it rides, and the old _rpcClient was just disposed above, so a
+        // same-identity re-entry starts the re-established loop on the new client
+        // (StartForIdentity's split). Best-effort, fire-and-forget — never awaited
+        // for sign-in to proceed.
+        Core.Helpers.CriticalAlertsSweep.StartForIdentity(_rpcClient, baseUrl);
 
         // The S8 seal backfill (file-sync.md § Sealed names & paths → Implementation
         // status today): rides the same universal post-auth hook, through the just-
@@ -4054,14 +4067,13 @@ public partial class App : Application
         // Fire-and-forget, but ACTOR-scoped, not app-lifetime: it holds an
         // ActorScope lease and the next actor change retires it (see its header —
         // spawning one per Online transition with no seam is exactly how windows
-        // came to accumulate a live cadence per login). Skipped under the E2E bridge: it would
-        // open a second WS to the test nest, and its 6h first-delay means it never
-        // ticks within a test anyway (the auto-renew *checkbox* is the e2e surface,
-        // not the cadence).
-        if (string.IsNullOrEmpty(E2eEnv.Bridge))
-        {
-            _ = RunAutoRenewCadenceAsync(_rpcClient);
-        }
+        // came to accumulate a live cadence per login), and it is one per client
+        // and actor generation, so a second spawn here or at the e2e login's seam
+        // joins the live one. It runs under the E2E bridge too: it rides the
+        // session's own connection (no second WS), and its 6 h first wait is what
+        // the e2e `auto_renew_wake` poke races (tls-certificates.md § C.3, the
+        // tick witness).
+        _ = RunAutoRenewCadenceAsync(_rpcClient);
 
         // The blessed-nests trust auto-renew loop (nests.md § Expiry / renewal →
         // Duration and blessing): app start, then every AUTO_RENEW_CHECK_SECS,
@@ -4475,6 +4487,18 @@ public partial class App : Application
     /// the next actor change, disposing the machine it owns (it holds the session
     /// client's connection, so a leaked machine would keep that connection
     /// dialling).</para>
+    ///
+    /// <para><b>One per client and actor generation.</b> It is spawned from two
+    /// post-auth sites: production's <c>StartMainAppAsync</c>, and the e2e login's
+    /// <c>session</c> seam, which never reaches it and re-fires on every e2e session
+    /// patch, often over the same client. A spawn that finds a live cadence on the
+    /// same client in the same actor generation leaves at once
+    /// (<see cref="_liveAutoRenewCadence"/>), so neither site stacks a second loop.</para>
+    ///
+    /// <para><b>The e2e poke.</b> In a Debug or <c>FAUNA_E2E_AGENT</c> build the wait
+    /// is an <see cref="Core.Helpers.AutoRenewWake"/> minted for this loop, which the
+    /// agent's <c>auto_renew_wake</c> ends early (convention 14). A Release build
+    /// waits on the bare clock and carries no notifier (convention 15).</para>
     /// </summary>
     private static async Task RunAutoRenewCadenceAsync(Core.Services.INestRpcClient rpc)
     {
@@ -4482,7 +4506,46 @@ public partial class App : Application
         // below is the honest report that no cadence is live for this actor.
         using var lease = Core.Services.ActorScope.BeginBackgroundLoop();
         var actorGone = lease.Token;
+        lock (_autoRenewCadenceGate)
+        {
+            if (_liveAutoRenewCadence is { } running
+                && ReferenceEquals(running.Rpc, rpc)
+                && !running.ActorGone.IsCancellationRequested)
+            {
+                return;
+            }
+            _liveAutoRenewCadence = (rpc, actorGone);
+        }
+        try
+        {
+            await RunClaimedAutoRenewCadenceAsync(rpc, actorGone);
+        }
+        finally
+        {
+            lock (_autoRenewCadenceGate)
+            {
+                // Only our own record: a successor's must outlive this loop's exit.
+                if (_liveAutoRenewCadence is { } running
+                    && ReferenceEquals(running.Rpc, rpc)
+                    && running.ActorGone == actorGone)
+                {
+                    _liveAutoRenewCadence = null;
+                }
+            }
+        }
+    }
 
+    private static readonly object _autoRenewCadenceGate = new();
+
+    /// The client and actor-generation token of the live auto-renew cadence; null
+    /// when none runs. Read and written under <see cref="_autoRenewCadenceGate"/>.
+    private static (Core.Services.INestRpcClient Rpc, CancellationToken ActorGone)? _liveAutoRenewCadence;
+
+    /// The body of <see cref="RunAutoRenewCadenceAsync"/>, once it holds the
+    /// one-per-client claim.
+    private static async Task RunClaimedAutoRenewCadenceAsync(
+        Core.Services.INestRpcClient rpc, CancellationToken actorGone)
+    {
         uniffi.fauna_client_dns.DnsManagementMachine machine;
         try
         {
@@ -4496,11 +4559,20 @@ public partial class App : Application
 
         var pollInterval = TimeSpan.FromSeconds(
             uniffi.fauna_client_dns.FaunaClientDnsMethods.AutoRenewPollSecs());
+#if DEBUG || FAUNA_E2E_AGENT
+        // Minted once the machine is built, so a wake is refused until this loop can
+        // run a pass. Retired in the finally below.
+        var wake = Core.Helpers.AutoRenewWake.Mint(actorGone);
+#endif
         try
         {
         while (!actorGone.IsCancellationRequested)
         {
+#if DEBUG || FAUNA_E2E_AGENT
+            await wake.WaitAsync(pollInterval, actorGone);
+#else
             await Task.Delay(pollInterval, actorGone);
+#endif
             try
             {
                 var domains = await machine.AutoRenewScan();
@@ -4532,6 +4604,9 @@ public partial class App : Application
         }
         finally
         {
+#if DEBUG || FAUNA_E2E_AGENT
+            Core.Helpers.AutoRenewWake.Retire(wake);
+#endif
             // This cadence owns the machine outright (nobody else has a handle), so
             // it must dispose it: the machine holds the session's FfiNestClient, and
             // a leaked holder keeps that client auto-reconnecting to the nest — see
@@ -6987,23 +7062,37 @@ public partial class App : Application
                         // nothing ever dispatched the sweep under e2e. Best-effort,
                         // fire-and-forget — the SAME call as StartMainAppAsync's, so the
                         // e2e build runs the product's loop: a first or identity-changing
-                        // login starts the re-sweep LOOP (what `alert_sweep_wake` wakes),
-                        // and a same-identity re-auth — this handler re-fires on every
-                        // e2e login in one process — gets one pass instead of a second,
-                        // stacked loop. linux's converge arm makes the same split.
+                        // login starts the re-sweep LOOP (what `alert_sweep_wake` wakes).
+                        // A same-identity re-auth — this handler re-fires on every e2e
+                        // login in one process — disposed the previous client above
+                        // (DisposeNestClients), which ended the loop riding it, so it
+                        // starts the re-established loop on this new client: never a
+                        // second loop on a live client, never a loop left on a dead one.
                         // (The temporary sweep-block traces that sat here came out once
                         // their regression was found and fixed, 2026-09-01: the repaint
                         // ran inline on the FFI callback thread — CriticalAlertsHost's
                         // _uiContext note.)
                         if (account.NestUrl is string sweepNestUrl && rpc is not null)
                         {
-                            Core.Helpers.CriticalAlertsSweep.StartForIdentity(
-                                rpc, sweepNestUrl, crypto.ActorIdHex);
+                            Core.Helpers.CriticalAlertsSweep.StartForIdentity(rpc, sweepNestUrl);
                         }
                         else
                         {
                             Core.Logs.E2eTrace.Write("[cmd-session] sweep SKIPPED — LoadNestUrl returned null, or no session client");
                         }
+
+                        // The certificate auto-renew cadence (tls-certificates.md § C.3)
+                        // rides the SAME universal post-auth hook in production
+                        // (StartMainAppAsync), which this login never reaches. Without
+                        // this call no e2e login would run the tick, and the
+                        // `auto_renew_wake` poke (test_admin_dns_cert_auto_renew_tick.py)
+                        // would have no loop to wake. The SAME call as production's: one
+                        // cadence per client and actor generation, so a repeat `session`
+                        // patch over the same client joins the live loop rather than
+                        // stacking another. It sits on its 6 h wait until woken, so
+                        // deterministic suites are unaffected. Mirrors linux, which runs
+                        // the cadence for every e2e login.
+                        if (rpc is not null) _ = RunAutoRenewCadenceAsync(rpc);
 
                         // succession-aftermath.md § Re-key scope's `BackupKey` corpus
                         // row: the aftermath rides the SAME universal post-auth hook as

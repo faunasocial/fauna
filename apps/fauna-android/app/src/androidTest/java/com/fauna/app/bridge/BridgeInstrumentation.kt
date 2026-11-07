@@ -21,7 +21,7 @@ class BridgeInstrumentation : Instrumentation() {
         val elementOps = ElementOps(device) { uiAutomation }
         val launcher = AppLauncher(this)
 
-        val server = BridgeHttpServer(port, elementOps, launcher)
+        val server = BridgeHttpServer(port, elementOps, launcher, DocumentsOps(targetContext))
         server.start()
 
         val result = Bundle()

@@ -69,6 +69,13 @@ pytestmark = [
     # toggle are all built in `apps/fauna-android/`; its device run is the
     # venue row's, the mark is the coverage contract.
     pytest.mark.android,
+    # web: the composer's home-nest toggle, the pending-invite withdraw, the
+    # nest-read toggle and the room's search strip are all painted in
+    # `apps/fauna-web/src/routes/conversations/+page.svelte`; founding and
+    # accepting need the tab's account runtime up (`community-rooms.md`,
+    # the founding entry of § Implementation status today), which the seat's
+    # sign-in brings.
+    pytest.mark.web,
 ]
 
 SEARCH_BUDGET_S = MESSAGE_BUDGET_S

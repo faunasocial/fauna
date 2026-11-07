@@ -2448,6 +2448,7 @@ def test_the_successor_is_asked_to_confirm_its_npub(ungranted_app, nest_instance
 @pytest.mark.web
 @pytest.mark.macos
 @pytest.mark.ios
+@pytest.mark.windows
 @pytest.mark.feature("take-your-account-back")
 def test_the_successors_burned_signer_connection_reads_revoked(
     ungranted_app, nest_instance
@@ -2458,8 +2459,7 @@ def test_the_successors_burned_signer_connection_reads_revoked(
     connection at the succession and lists it to the successor, and the shared
     machine composes it not connected with ``signer_burned`` set; the paint is
     the mail row's — the ``revoked`` attribute and the revoked line under the
-    name. tui, linux, web, android, macos and ios; windows rides the
-    trickle-down.
+    name. All 7 apps.
 
     ⚠ **The pre-ceremony connection is the whole test.** A succession over an
     account with no bunker connection lists nothing, so the post-ceremony

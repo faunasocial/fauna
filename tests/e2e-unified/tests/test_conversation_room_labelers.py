@@ -53,6 +53,9 @@ pytestmark = [
     pytest.mark.macos,
     pytest.mark.ios,
     pytest.mark.android,
+    # web: `RoomLabelerRows.svelte` and `LabelerInspectPanel.svelte` paint the
+    # room settings' labeler rows and the inspect panel.
+    pytest.mark.web,
 ]
 
 

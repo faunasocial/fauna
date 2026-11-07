@@ -622,10 +622,7 @@ public struct AdminDnsView: View {
         let cert = vm.certStatus(name)
         // One shared call decides the whole badge: the state word AND which of the
         // two mutually-exclusive sub-labels follows it. `nil` = still checking.
-        let view = cert.map {
-            FaunaFFISwift.certStatusView(
-                state: certStateSerde($0.state), isFloor: $0.isFloor, notAfterUnix: $0.notAfterUnix)
-        }
+        let view = cert.map { FaunaFFISwift.certRowStatusView(row: $0) }
         HStack(spacing: 6) {
             Text(L.admin.dns.cert.label).font(.caption).foregroundStyle(.secondary)
             Text(view.map { renderLocalizedText($0.state) } ?? L.admin.dns.statusChecking)
@@ -652,22 +649,11 @@ public struct AdminDnsView: View {
     }
 
     // The state word is the shared `cert_status_label` (via `cert_status_view`);
-    // apple only crosses the stringly serde boundary (`CertHealthState` -> its
-    // variant name), so the state->key map lives once in `fauna_core`, not per
-    // client. `nil` cert = still checking.
+    // The typed row crosses the FFI whole (`cert_row_status_view`), so the
+    // state->key map lives once in shared Rust, not per app. `nil` cert = still checking.
     private func certStateWord(_ cert: CertStatusRow?) -> String {
         guard let cert else { return L.admin.dns.statusChecking }
-        return renderLocalizedText(
-            FaunaFFISwift.certStatusView(
-                state: certStateSerde(cert.state), isFloor: cert.isFloor,
-                notAfterUnix: cert.notAfterUnix).state)
-    }
-    private func certStateSerde(_ state: CertHealthState) -> String {
-        switch state {
-        case .validTrusted: "ValidTrusted"
-        case .onFloorRenewNeeded: "OnFloorRenewNeeded"
-        case .expiring: "Expiring"
-        }
+        return renderLocalizedText(FaunaFFISwift.certRowStatusView(row: cert).state)
     }
     private func certStateColor(_ cert: CertStatusRow?) -> Color {
         switch cert?.state {

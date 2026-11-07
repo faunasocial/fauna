@@ -346,6 +346,52 @@ async fn a_sealed_create_by_hash_alone_mints_the_row_and_refuses_the_unnameable(
     assert_eq!(again.code, "fauna.folders.conflict");
 }
 
+/// The by-hash arm has no plaintext name, so the `__`
+/// refusal never saw it. A create whose hash is a reserved rail's address is
+/// refused, for every name of the closed families the nest mints — each read
+/// from its owner, never a list kept here.
+#[tokio::test]
+async fn a_create_by_the_hash_of_a_reserved_rail_name_is_refused() {
+    let (router, state) = router_and_state().await;
+    let names = fauna_nest::db::snapshots::reserved_rail_names();
+    // The derivation reaches every family, not just the message kinds: a
+    // single-rail plane, both account-state scopes, a custody name and a
+    // landing name.
+    for want in [
+        "__mail",
+        "__drafts",
+        "__mls",
+        "__index",
+        "__state",
+        "__state-fleet",
+        "__mail-placement",
+        "__landing/mail",
+    ] {
+        assert!(names.iter().any(|n| n == want), "{want} is enumerated");
+    }
+    // A name that embeds its scope is an open family, answered at its mint.
+    assert!(!names.iter().any(|n| n.starts_with("__conv/")));
+    for kind in &names {
+        let hash = fauna_core::path_crypto::set_name_hash(kind);
+        let req = FolderCreateRequest {
+            name: String::new(),
+            name_hash: Some(ByteBuf::from(hash.to_vec())),
+            name_sealed: Some(ByteBuf::from(vec![0xa1u8; 24])),
+            ..Default::default()
+        };
+        let refused = dispatch(
+            &router,
+            Arc::clone(&state),
+            [16u8; 32],
+            "fauna.folders.create",
+            encode(&req),
+        )
+        .await
+        .expect_err(kind);
+        assert_eq!(refused.code, "fauna.folders.invalid_request", "{kind}");
+    }
+}
+
 /// Every byte the `folders` row addressed by `hash` rests in its name and its
 /// two companions — the plaintext name rendered by SQL `quote`, so a NULL reads
 /// as the four bytes `NULL`.
@@ -4212,6 +4258,87 @@ async fn a_folder_mirror_backup_set_name_is_mintable_on_the_owner_authed_door() 
     assert!(
         fs.custody_copy,
         "the provisioner marks the row a custody copy"
+    );
+}
+
+/// A folder-axis custody name (`__folder/<origin>/<id>`) is an open family:
+/// the by-hash create cannot enumerate it, so the owner's own set created by
+/// that name's hash alone is accepted. The provisioner then meets it on the
+/// record — and answers the coded, recoverable `reserved_address_taken`
+/// naming the recovery, never an internal error; deleting the squatter by its
+/// hash clears the way and the same record provisions (`reserved-folders.md`
+/// § The management surface refuses the namespace — whole, *the address*).
+#[tokio::test]
+async fn a_squatted_custody_address_is_a_coded_refusal_the_owner_recovers_from() {
+    let (state, _tmp) = state_with_blob_store().await;
+    let router = record_router();
+    let actor = [0x72u8; 32];
+    let device = [0x7du8; 32];
+    state
+        .db
+        .register_sync_device(&actor, &device, "ipad", None, "write")
+        .await
+        .unwrap();
+    let manifest = seed_delivered_segment(&state).await;
+    let name = fauna_core::data::folder_backup_set_name(&[0xA7u8; 32], 13);
+    let hash = fauna_core::path_crypto::set_name_hash(&name);
+
+    dispatch(
+        &router,
+        Arc::clone(&state),
+        actor,
+        "fauna.folders.create",
+        encode(&FolderCreateRequest {
+            name: String::new(),
+            name_hash: Some(ByteBuf::from(hash.to_vec())),
+            name_sealed: Some(ByteBuf::from(vec![0xa1u8; 24])),
+            ..Default::default()
+        }),
+    )
+    .await
+    .expect("an open family's address is not enumerable at the create");
+
+    let refused = dispatch(
+        &router,
+        Arc::clone(&state),
+        actor,
+        "fauna.sync.changes.record",
+        custody_record(&name, device, "aa/seg-00000001.dat", manifest),
+    )
+    .await
+    .expect_err("the squatted address refuses the provisioning");
+    assert_eq!(refused.code, "fauna.folders.reserved_address_taken");
+
+    dispatch(
+        &router,
+        Arc::clone(&state),
+        actor,
+        "fauna.folders.delete",
+        encode(&FolderDeleteRequest {
+            name_hash: Some(ByteBuf::from(hash.to_vec())),
+            ..Default::default()
+        }),
+    )
+    .await
+    .expect("the squatter is the owner's own set, deletable by its hash");
+
+    dispatch(
+        &router,
+        Arc::clone(&state),
+        actor,
+        "fauna.sync.changes.record",
+        custody_record(&name, device, "aa/seg-00000001.dat", manifest),
+    )
+    .await
+    .expect("with the squatter gone the custody set provisions");
+    assert!(
+        state
+            .db
+            .get_folder_for_actor(&name, &actor)
+            .await
+            .unwrap()
+            .expect("provisioned")
+            .custody_copy
     );
 }
 

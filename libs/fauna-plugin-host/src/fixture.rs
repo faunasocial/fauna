@@ -24,7 +24,8 @@ const PLUGIN_WIT: &str = include_str!("../wit/plugin.wit");
 /// and `refused`; asks for `https://undeclared.example/` and stores the
 /// discriminant under `http`; stores the clock under `now` (8 bytes LE); logs
 /// one `info` line. On ingress: `/spin…` loops forever, `/grow…` asks for
-/// 128 MiB and answers 507 when refused (200 when admitted), `/whoami…`
+/// 128 MiB and answers 507 when refused (200 when admitted), `/t…` grows a
+/// table by 1 000 000 elements and answers the same way, `/whoami…`
 /// answers 200 with the asserted actor as the body or 401 when anonymous,
 /// `/h…` answers 200 with `Clear-Site-Data: "*"`, `Alt-Svc: h3=":443"` and
 /// `Content-Type: text/plain` (the nest's reply-header filter's probe);

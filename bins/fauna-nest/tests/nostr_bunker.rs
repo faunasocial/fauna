@@ -45,6 +45,12 @@ async fn state() -> Arc<AppState> {
 /// Link a custodial account (deposited nsec encrypted under the state's own
 /// nest key) and return the user's Nostr keypair.
 async fn link_custodial(state: &AppState, actor_hex: &str) -> Keypair {
+    // The `users` row the signer reads the account's authority from: a
+    // roster app is served only while the account stands (suspended or
+    // locked out, every request is `unauthorized`).
+    let mut actor = [0u8; 32];
+    actor.copy_from_slice(&hex::decode(actor_hex).unwrap());
+    state.db.create_user(&actor, "free", "test").await.unwrap();
     let nest_key = state.nest_identity.signing_key.to_bytes();
     let kp = Keypair::generate();
     let encrypted = encrypt_nostr_privkey(&nest_key, &kp.secret_bytes()).unwrap();
@@ -72,6 +78,11 @@ async fn invite(state: &AppState, actor_hex: &str) -> bunker::BunkerInvite {
 
 fn now_secs() -> u64 {
     fauna_core::data::Timestamp::now_secs() as u64
+}
+
+/// A deterministic 32-byte actor id as the hex the nostr tables key by.
+fn actor(seed: u8) -> String {
+    hex::encode([seed; 32])
 }
 
 /// Build a kind-24133 request event as the app would: NIP-44-encrypted
@@ -131,8 +142,8 @@ async fn connect_app(state: &Arc<AppState>, inv: &bunker::BunkerInvite) -> Keypa
 #[tokio::test]
 async fn f4_unsigned_probe_is_membership_blind() {
     let state = state().await;
-    link_custodial(&state, "actor-f4").await;
-    let inv = invite(&state, "actor-f4").await;
+    link_custodial(&state, &actor(0x01)).await;
+    let inv = invite(&state, &actor(0x01)).await;
 
     // Two identical probes, differing ONLY in the target pubkey: one at the
     // real registered signer, one at a pubkey that is no signer. Both carry a
@@ -169,8 +180,8 @@ async fn f4_unsigned_probe_is_membership_blind() {
 #[tokio::test]
 async fn valid_signature_at_unregistered_signer_falls_through() {
     let state = state().await;
-    link_custodial(&state, "actor-ft").await;
-    invite(&state, "actor-ft").await;
+    link_custodial(&state, &actor(0x02)).await;
+    invite(&state, &actor(0x02)).await;
 
     let app = Keypair::generate();
     let stranger = Keypair::generate().public_key_hex();
@@ -195,8 +206,8 @@ async fn valid_signature_at_unregistered_signer_falls_through() {
 #[tokio::test]
 async fn connect_then_sign_event_round_trip_over_relay_tx() {
     let state = state().await;
-    let user_kp = link_custodial(&state, "actor-rt").await;
-    let inv = invite(&state, "actor-rt").await;
+    let user_kp = link_custodial(&state, &actor(0x03)).await;
+    let inv = invite(&state, &actor(0x03)).await;
 
     let mut live_rx = state.nostr.relay_tx.subscribe();
     let app = connect_app(&state, &inv).await;
@@ -259,14 +270,14 @@ async fn connect_then_sign_event_round_trip_over_relay_tx() {
 #[tokio::test]
 async fn revoke_refuses_next_request() {
     let state = state().await;
-    link_custodial(&state, "actor-rv").await;
-    let inv = invite(&state, "actor-rv").await;
+    link_custodial(&state, &actor(0x04)).await;
+    let inv = invite(&state, &actor(0x04)).await;
     let app = connect_app(&state, &inv).await;
 
     // Revoke via the S2 core (what fauna.nostr.bunker.revoke calls).
     let conn = state.db.conn().await;
-    let id = bunker::list_apps(&conn, "actor-rv").unwrap()[0].id;
-    assert!(bunker::revoke_app(&conn, "actor-rv", id).unwrap());
+    let id = bunker::list_apps(&conn, &actor(0x04)).unwrap()[0].id;
+    assert!(bunker::revoke_app(&conn, &actor(0x04), id).unwrap());
     drop(conn);
 
     let req = request_event(&app, &inv.signer_pubkey, &rpc("p1", "ping", &[]));
@@ -295,8 +306,8 @@ async fn revoke_refuses_next_request() {
 #[tokio::test]
 async fn per_signer_rate_limit_binds() {
     let state = state().await;
-    link_custodial(&state, "actor-rl").await;
-    let inv = invite(&state, "actor-rl").await;
+    link_custodial(&state, &actor(0x05)).await;
+    let inv = invite(&state, &actor(0x05)).await;
     let app = connect_app(&state, &inv).await;
 
     let mut limited = false;
@@ -331,8 +342,8 @@ async fn bunker_state_survives_restart() {
     let state1 = AppState::for_test(db.clone());
     fauna_nest::test_support::seat_own_deployment_seed(&state1).await;
     let state1 = Arc::new(state1);
-    link_custodial(&state1, "actor-rs").await;
-    let inv = invite(&state1, "actor-rs").await;
+    link_custodial(&state1, &actor(0x06)).await;
+    let inv = invite(&state1, &actor(0x06)).await;
     let app = connect_app(&state1, &inv).await;
 
     // "Restart": a fresh AppState over the same DB — but the nest identity
@@ -397,8 +408,8 @@ async fn full_ws_end_to_end_connect_and_sign() {
     }
 
     let state = state().await;
-    let user_kp = link_custodial(&state, "actor-ws").await;
-    let inv = invite(&state, "actor-ws").await;
+    let user_kp = link_custodial(&state, &actor(0x07)).await;
+    let inv = invite(&state, &actor(0x07)).await;
 
     let router = axum::Router::new()
         .route(
@@ -468,8 +479,8 @@ async fn full_ws_end_to_end_connect_and_sign() {
 #[tokio::test]
 async fn nip04_legacy_scheme_answered_in_kind() {
     let state = state().await;
-    link_custodial(&state, "actor-04").await;
-    let inv = invite(&state, "actor-04").await;
+    link_custodial(&state, &actor(0x08)).await;
+    let inv = invite(&state, &actor(0x08)).await;
 
     // Connect with a NIP-04-encrypted request (legacy client).
     let app = Keypair::generate();
@@ -510,4 +521,126 @@ async fn nip04_legacy_scheme_answered_in_kind() {
     let plaintext =
         fauna_bridge_nostr::nip04::decrypt(&app, &signer_pk, &response.content).unwrap();
     assert_eq!(plaintext, build_response_json("c1", Ok("ack")));
+}
+
+/// Drive one request through the carve-out and return the signer's
+/// decrypted response JSON.
+async fn exchange(
+    state: &Arc<AppState>,
+    app: &Keypair,
+    signer_pubkey: &str,
+    request_json: &str,
+) -> String {
+    let mut live_rx = state.nostr.relay_tx.subscribe();
+    let req = request_event(app, signer_pubkey, request_json);
+    let ok = drive(state, &req).await;
+    assert!(
+        matches!(ok, RelayMessage::Ok { accepted: true, .. }),
+        "request not accepted: {ok:?}"
+    );
+    let mut response = None;
+    while let Ok(ev) = live_rx.try_recv() {
+        let parsed: Event = serde_json::from_str(&ev.event_json).unwrap();
+        if parsed.pubkey == signer_pubkey {
+            response = Some(parsed);
+        }
+    }
+    let response = response.expect("the signer's response must ride relay_tx");
+    open_response(app, signer_pubkey, &response)
+}
+
+/// `connect` (the reconnect ack), `ping` and `sign_event` from a connected
+/// roster app are all served, or all `unauthorized`.
+async fn expect_roster(
+    state: &Arc<AppState>,
+    app: &Keypair,
+    signer: &str,
+    served: bool,
+    why: &str,
+) {
+    let unsigned = r#"{"kind":1,"content":"roster","tags":[],"created_at":1700000000}"#;
+    let ack = exchange(state, app, signer, &rpc("c", "connect", &[signer])).await;
+    let ping = exchange(state, app, signer, &rpc("p", "ping", &[])).await;
+    let sign = exchange(state, app, signer, &rpc("s", "sign_event", &[unsigned])).await;
+    if served {
+        assert_eq!(ack, build_response_json("c", Ok("ack")), "{why}: connect");
+        assert_eq!(ping, build_response_json("p", Ok("pong")), "{why}: ping");
+        let v: serde_json::Value = serde_json::from_str(&sign).unwrap();
+        assert!(v["result"].is_string(), "{why}: sign_event: {sign}");
+    } else {
+        let refused = |id: &str| build_response_json(id, Err("unauthorized"));
+        assert_eq!(ack, refused("c"), "{why}: connect");
+        assert_eq!(ping, refused("p"), "{why}: ping");
+        assert_eq!(sign, refused("s"), "{why}: sign_event");
+    }
+}
+
+/// The account's authority reaches its own invite-roster apps: while the
+/// account is locked out or suspended the signer answers a connected app's
+/// `connect`, `ping` and `sign_event` — and a fresh invite secret's `connect`
+/// — with the uniform `unauthorized`; the lock's lapse and the admin's
+/// restore serve the same app, and the same still-pending secret, again with
+/// nothing redone. The external-apps switch is never read for a roster app:
+/// these are the user's own (`nostr.md` § The nest as the user's NIP-46
+/// signer → *Connection model*).
+#[tokio::test]
+async fn a_suspended_or_locked_out_accounts_roster_apps_are_not_served() {
+    let state = state().await;
+    let account = [0x5A; 32];
+    let actor_hex = actor(0x5A);
+    link_custodial(&state, &actor_hex).await;
+    let inv = invite(&state, &actor_hex).await;
+    let app = connect_app(&state, &inv).await;
+    let signer = inv.signer_pubkey.as_str();
+
+    expect_roster(&state, &app, signer, true, "standing").await;
+
+    // The external-apps switch pauses principals, never the user's own apps.
+    state
+        .db
+        .set_atproto_external_apps_enabled(&account, false)
+        .await
+        .unwrap();
+    expect_roster(&state, &app, signer, true, "switch OFF").await;
+
+    // Locked out: nothing is served; a lapsed lock is no lock.
+    let now = now_secs() as i64;
+    state
+        .db
+        .set_locked_until(&account, Some(now + 3600))
+        .await
+        .unwrap();
+    expect_roster(&state, &app, signer, false, "locked out").await;
+    state
+        .db
+        .set_locked_until(&account, Some(now - 1))
+        .await
+        .unwrap();
+    expect_roster(&state, &app, signer, true, "lock lapsed").await;
+
+    // Suspended: nothing is served, a fresh secret's connect included — and
+    // the secret stays pending, so the restore serves it with nothing redone.
+    assert!(
+        state
+            .db
+            .suspend_user_now(&account, "test", "test")
+            .await
+            .unwrap()
+    );
+    expect_roster(&state, &app, signer, false, "suspended").await;
+    let pending = invite(&state, &actor_hex).await;
+    let newcomer = Keypair::generate();
+    let connect = rpc("n", "connect", &[signer, &pending.secret]);
+    assert_eq!(
+        exchange(&state, &newcomer, signer, &connect).await,
+        build_response_json("n", Err("unauthorized")),
+        "suspended: a pending secret's connect"
+    );
+    assert!(state.db.cancel_eviction(&account).await.unwrap());
+    expect_roster(&state, &app, signer, true, "restored").await;
+    assert_eq!(
+        exchange(&state, &newcomer, signer, &connect).await,
+        build_response_json("n", Ok("ack")),
+        "restored: the same pending secret connects"
+    );
 }

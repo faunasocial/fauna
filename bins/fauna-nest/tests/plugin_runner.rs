@@ -13,7 +13,8 @@
 //! the settings card's start (`fauna.plugins.bind`) — a card carrying the
 //! install's key and manifest, approved into a binding row with no grant
 //! family — and that row is the one the plugin then calls under; the user's
-//! settings rest in the plugin's state scope; the user's revoke ends the
+//! settings rest in their own row and reach the plugin through its state scope,
+//! which cannot write them; the user's revoke ends the
 //! binding and leaves the plugin installed; uninstall leaves nothing behind.
 //! Over the public router: the declared ingress prefixes reach the plugin
 //! with the nest-asserted actor (`security.md` § Co-resident process trust
@@ -588,7 +589,10 @@ async fn install_run_fault_bind_and_uninstall_a_hosted_plugin() {
     db.set_atproto_external_apps_enabled(&USER, false)
         .await
         .unwrap();
-    db.plugin_state_delete(&pid, "fetch").await.unwrap();
+    db.plugin_state_delete(&pid, "fetch")
+        .await
+        .unwrap()
+        .unwrap();
     let _ = state
         .plugins
         .ingress(
@@ -643,7 +647,29 @@ async fn install_run_fault_bind_and_uninstall_a_hosted_plugin() {
             .is_none()
     );
 
-    // ── Uninstall: nothing left ──
+    // ── Uninstall: a call in flight ends with it, nothing left ──
+    // A runaway call is handed to the plugin and uninstall runs at once: the
+    // call ends as stopped (or, had the uninstall won the race to the
+    // channel, never ran) — never by spending its fuel under a principal
+    // that is being deleted.
+    let in_flight = tokio::spawn({
+        let state = state.clone();
+        let pid = pid.clone();
+        async move {
+            state
+                .plugins
+                .ingress(
+                    &pid,
+                    IngressRequest {
+                        method: "GET".into(),
+                        path: "/spin".into(),
+                        ..Default::default()
+                    },
+                )
+                .await
+        }
+    });
+    tokio::task::yield_now().await;
     let gone: UninstallPluginReply = call(
         &state,
         ADMIN,
@@ -656,6 +682,11 @@ async fn install_run_fault_bind_and_uninstall_a_hosted_plugin() {
     .await
     .unwrap();
     assert!(gone.uninstalled);
+    let ended = in_flight.await.unwrap().unwrap_err();
+    assert!(
+        !ended.contains("fuel"),
+        "uninstall ended the call in flight, it did not run out its budget: {ended}"
+    );
     assert_eq!(
         gone.bindings_ended, 0,
         "the user's own revoke already ended it"
@@ -1221,6 +1252,7 @@ async fn a_development_plugin_installs_over_loopback_and_reinstalls_in_place() {
     assert_eq!(listed.plugins[0].publisher_key, None);
     db.plugin_state_put(&pid, "kept", b"across the reinstall")
         .await
+        .unwrap()
         .unwrap();
 
     // ── Edit, reinstall: the module is replaced, the state scope kept ──
@@ -1422,4 +1454,91 @@ async fn a_whole_name_claim_yields_to_a_live_user_site_and_needs_an_apex() {
     db.add_admin_actor(&ADMIN).await.unwrap();
     let err = install(&state).await.expect_err("no apex, no name");
     assert!(format!("{err:?}").contains("has none"), "{err:?}");
+}
+
+/// An empty or wrong-length `principal_id` at uninstall is refused, and an unknown full-width id touches no file — the plugins root
+/// and every installed plugin's directory survive.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn uninstall_with_an_empty_or_unknown_id_deletes_nothing() {
+    let module = fauna_plugin_host::fixture::hello_plugin().unwrap();
+    let (doc, _key) = document(&module, serde_json::json!([]));
+    let fetcher = Arc::new(TestFetcher {
+        doc,
+        module,
+        calls: Mutex::new(Vec::new()),
+    });
+    let data = tempfile::tempdir().unwrap();
+    let plugins_dir = data.path().join("plugins");
+    let db = Arc::new(CacheDb::open_in_memory().unwrap());
+    let state = Arc::new(AppState {
+        oauth_as: Arc::new(fauna_nest::oauth_as_state::OAuthAsRuntime::new(
+            fauna_core::data::Timestamp::now_secs_or_zero(),
+            fetcher.clone(),
+        )),
+        plugins: Arc::new(PluginRunner::new(Some(plugins_dir.clone()))),
+        rpc_router: Arc::new(router()),
+        ..AppState::for_test(db.clone())
+    });
+    db.create_user(&ADMIN, "free", "test").await.unwrap();
+    db.add_admin_actor(&ADMIN).await.unwrap();
+    let installed: InstallPluginReply = call(
+        &state,
+        ADMIN,
+        "fauna.plugins.install",
+        &InstallPluginRequest {
+            document_url: DOC_URL.into(),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let _: ResolveConsentReply = call(
+        &state,
+        ADMIN,
+        "fauna.bridges.atproto.resolve_consent",
+        &ResolveConsentRequest {
+            consent_id: installed.consent.consent_id.clone(),
+            approved: true,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let pid = db.list_hosted_plugins().await.unwrap()[0]
+        .principal_id
+        .clone();
+    // A second plugin's directory, planted beside the installed one.
+    let other = plugins_dir.join(hex::encode([0xEE; 16]));
+    std::fs::create_dir_all(&other).unwrap();
+    std::fs::write(other.join(MODULE_FILE), b"m").unwrap();
+    std::fs::write(other.join(HOLDER_FILE), b"k").unwrap();
+    let dir = plugins_dir.join(hex::encode(&pid));
+
+    let uninstall = |id: Vec<u8>| {
+        let state = state.clone();
+        async move {
+            call::<_, UninstallPluginReply>(
+                &state,
+                ADMIN,
+                "fauna.plugins.uninstall",
+                &UninstallPluginRequest {
+                    principal_id: id,
+                    extra: BTreeMap::new(),
+                },
+            )
+            .await
+        }
+    };
+    assert!(uninstall(Vec::new()).await.is_err(), "empty id is refused");
+    assert!(
+        uninstall(vec![1, 2, 3]).await.is_err(),
+        "short id is refused"
+    );
+    let unknown = uninstall(vec![0x77; 16]).await.unwrap();
+    assert!(!unknown.uninstalled);
+    for d in [&dir, &other] {
+        assert!(d.join(MODULE_FILE).is_file(), "{d:?} module survives");
+        assert!(d.join(HOLDER_FILE).is_file(), "{d:?} holder.key survives");
+    }
+    assert_eq!(db.list_hosted_plugins().await.unwrap().len(), 1);
 }

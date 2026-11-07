@@ -131,7 +131,7 @@ def test_words_under_a_restricted_post_are_refused_and_a_bare_repost_or_quote_st
 
     # ── Words under it: refused, with the reason.
     words = _unique("words-that-must-not-publish")
-    feed.reply_post(words, index=feed.post_index_by_id(target_id))
+    feed.reply_post(words, index=feed.card_index_by_id(target_id))
 
     def the_refusal():
         shown = app.error_text()
@@ -163,7 +163,7 @@ def test_words_under_a_restricted_post_are_refused_and_a_bare_repost_or_quote_st
     )
 
     # ── A bare repost still works (ruling 3: no words, so it stays public).
-    feed.repost_post(feed.post_index_by_id(target_id))
+    feed.repost_post(feed.card_index_by_id(target_id))
     assert feed.wait_for_interaction_count_by_id(target_id, "repost", 1) == 1, (
         f"a wordless repost of a restricted post must still land; "
         f"error={app.error_text()!r}"
@@ -171,7 +171,7 @@ def test_words_under_a_restricted_post_are_refused_and_a_bare_repost_or_quote_st
 
     # ── So does a bare quote (today's quote button carries no commentary).
     feed.driver.click(
-        "feed-quote-button", scope=f"post-card[{feed.post_index_by_id(target_id)}]"
+        "feed-quote-button", scope=f"post-card[{feed.card_index_by_id(target_id)}]"
     )
     assert feed.wait_for_interaction_count_by_id(target_id, "quote", 1) == 1, (
         f"a commentary-less quote of a restricted post must still land; "

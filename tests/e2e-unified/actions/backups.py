@@ -3227,7 +3227,26 @@ class BackupsActions:
 
     def cancel_offline_share(self) -> None:
         """`offline-share-cancel-button` — close the panel; on the recipient
-        side it also withdraws the expectation (wormability rule 6)."""
+        side it also withdraws the expectation (wormability rule 6).
+
+        ⚠ The entry buttons come back where the panel's TOP was, and the panel's
+        lower controls are read with ``is_visible_scrolled``, which centres them
+        (windows' ``scroll_to`` brings an element in whole since 2026-11-06). On a
+        window shorter than the open panel that leaves the panel's top — and so
+        the restored `offline-share-button` — above the viewport, where windows'
+        bare ``is_visible`` (UIA ``!IsOffscreen``) reads a correct page False. So
+        the wait asks what it means, "is the entry back", with
+        ``is_visible_scrolled`` (a positive read; the closed panel's absence is
+        the caller's ``is_absent``)."""
         self.driver.click("offline-share-cancel-button")
-        self._wait_visible("offline-share-button")
+        wait_until(
+            lambda: self.driver.is_visible_scrolled("offline-share-button"),
+            WIZARD_STEP_WAIT_S,
+            diagnose=lambda: (
+                "the entry buttons did not come back after Cancel: "
+                f"{self.driver.diagnose('offline-share-button')}; "
+                f"open panel: {self.driver.diagnose('offline-share-own-code')}; "
+                f"error-message={self.driver.get_text('error-message')!r}"
+            ),
+        )
 

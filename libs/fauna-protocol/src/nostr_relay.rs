@@ -33,7 +33,7 @@
 
 use std::net::{IpAddr, Ipv4Addr};
 
-use fauna_core::resolve::is_global_ip;
+use fauna_core::resolve::{is_global_ip, is_localhost_name};
 
 /// Why a relay URL is refused before it is stored — the text-decidable half of
 /// the relay dial guard (module docs).
@@ -67,8 +67,7 @@ pub fn relay_url_refusal(url: &str, permits: impl Fn(IpAddr) -> bool) -> Option<
         Some(url::Host::Ipv4(v4)) => IpAddr::V4(v4),
         Some(url::Host::Ipv6(v6)) => IpAddr::V6(v6),
         Some(url::Host::Domain(name)) => {
-            let name = name.trim_end_matches('.');
-            if name == "localhost" || name.ends_with(".localhost") {
+            if is_localhost_name(name) {
                 IpAddr::V4(Ipv4Addr::LOCALHOST)
             } else {
                 return None;

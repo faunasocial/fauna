@@ -57,10 +57,12 @@ pub struct GrantQuotaExceeded {
 }
 
 impl CacheDb {
-    /// Store (mint) a capability grant. `INSERT OR REPLACE` keyed on
+    /// Store (mint) a capability grant. An upsert keyed on
     /// `(owner_actor_id, grant_id)`, so re-minting the same grant id replaces
     /// it (also the storage primitive a renew rides — the handler rebuilds the
-    /// blob with the appended keys and re-stores here). `epoch_end` and
+    /// blob with the appended keys and re-stores here); a replace to the same
+    /// holder keeps the row's first `created_at`, so the list reads below
+    /// order by first mint. `epoch_end` and
     /// `holder_pubkey` are extracted from the blob by the handler and passed in
     /// so the nest can filter/scope without opening the blob.
     pub async fn put_capability_grant(
@@ -116,10 +118,21 @@ impl CacheDb {
                 .into());
             }
         }
+        // A replace keeps the row's FIRST `created_at` while the holder is
+        // unchanged: the column is the grant's mint time, not its last write,
+        // so a renew never reads as a fresh mint — the consent sweep spares a
+        // grant the account held before the card by that stamp. A replace to a different holder is a new grant to that key
+        // and is stamped now.
         conn.execute(
-            "INSERT OR REPLACE INTO capability_grants
+            "INSERT INTO capability_grants
                 (owner_actor_id, grant_id, holder_pubkey, blob, epoch_end, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT (owner_actor_id, grant_id) DO UPDATE SET
+                created_at = CASE WHEN holder_pubkey = excluded.holder_pubkey
+                                  THEN created_at ELSE excluded.created_at END,
+                holder_pubkey = excluded.holder_pubkey,
+                blob = excluded.blob,
+                epoch_end = excluded.epoch_end",
             rusqlite::params![
                 owner_actor_id,
                 grant_id,

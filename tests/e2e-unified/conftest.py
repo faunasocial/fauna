@@ -18309,6 +18309,15 @@ def _write_last_green(session, exitstatus=None):
         print("\nlast-green directory: NOT written — a prewarm-only run")
         return
     try:
+        # The tree once more: one that moved under the run marks its records
+        # dirty (delayed-testing.md § The last-green directory, `flaky`).
+        if last_green._run and not last_green._run.get("dirty"):
+            from helpers import feature_ledger
+            if last_green.settle_dirt(
+                    commit=feature_ledger.head_commit(),
+                    dirty=feature_ledger.is_dirty(feature_ledger.tree_dirt())):
+                print("\nlast-green directory: the tree moved while this run ran — "
+                      "its records are marked dirty")
         path = last_green.write()
     except OSError as exc:
         print(f"\nlast-green directory: NOT written ({exc})")

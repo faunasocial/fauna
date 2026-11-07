@@ -192,11 +192,7 @@ pub(super) fn is_loopback_url(url_str: &str) -> bool {
     url::Url::parse(url_str)
         .ok()
         .and_then(|u| u.host_str().map(str::to_owned))
-        .is_some_and(|h| {
-            h == "localhost"
-                || h.parse::<std::net::IpAddr>()
-                    .is_ok_and(|ip| ip.is_loopback())
-        })
+        .is_some_and(|h| fauna_core::resolve::is_loopback_host(&h))
 }
 
 #[cfg(test)]

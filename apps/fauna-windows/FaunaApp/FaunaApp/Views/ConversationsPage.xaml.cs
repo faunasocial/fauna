@@ -300,11 +300,15 @@ public sealed partial class ConversationsPage : Page
         }
         // The page shown again with a thread still selected (no list click follows):
         // re-read the withheld badges' queue rows, since a takedown or a block lands
-        // while no app is looking (takedown-and-block.md § Legal takedown → App render;
-        // linux reads it on the page's map).
+        // while no app is looking (takedown-and-block.md § Legal takedown → App render),
+        // and the received messages' scan verdicts, since the scan-result switch lives
+        // on mail-settings and the selection read never fires for a thread that stayed
+        // open (mail-content-scanning.md § Per-account opt-out for visible scan details).
+        // linux reads both on the page's map.
         else if (_vm.SelectedThreadId is { } shownThread)
         {
             _ = _vm.RefreshWithheldMessagesAsync(shownThread);
+            _ = _vm.RefreshMessageScanResultsAsync(shownThread);
         }
     }
 
@@ -1555,11 +1559,11 @@ public sealed partial class ConversationsPage : Page
     private bool _roomSelectsFilled;
 
     /// <summary>
-    /// Fill the two token selects the <c>event-detail-reminder-select</c> way:
-    /// each item's Content is the localized sentence, its Name AND Tag the
-    /// driver-facing token — because <c>select</c> matches on Name and
-    /// <c>get_text</c> reads the selected item's Name back, which is what makes
-    /// the token round-trip (<c>ui.yaml</c> `room-join-rule-select`).
+    /// Fill the two token selects the way every keyed windows picker is filled:
+    /// each item paints the localized sentence and is keyed by the driver-facing
+    /// token (<see cref="PickerOption"/>) — <c>select</c> matches the key and
+    /// <c>get_text</c> reads the selected item's key back, which is what makes the
+    /// token round-trip (<c>ui.yaml</c> `room-join-rule-select`).
     ///
     /// <para>Filled ONCE, never rebuilt. Re-filling a ComboBox with the
     /// identical options is not a no-op under UIA — it destroys the automation
@@ -1589,12 +1593,8 @@ public sealed partial class ConversationsPage : Page
         _roomSelectsFilled = true;
     }
 
-    private static void AddRoomTokenItem(ComboBox box, string token, string label)
-    {
-        var item = new ComboBoxItem { Content = label, Tag = token };
-        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(item, token);
-        box.Items.Add(item);
-    }
+    private static void AddRoomTokenItem(ComboBox box, string token, string label) =>
+        box.Items.Add(PickerOption.Create(label, token));
 
     /// <summary>Move a token select's selection without touching its items.</summary>
     private static void SelectRoomToken(ComboBox box, string token)
@@ -2397,11 +2397,17 @@ public sealed class ThreadRow
         // conversation_timestamp_display); this row only supplies the live `now`
         // and the machine's local UTC offset, via the app's one named door
         // (value-formatting.md § Absolute local timestamp display). No
-        // hand-rolled time logic here.
-        Timestamp = ValueFormat.ConversationTimestamp(
-            DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
-            t.lastActivityMs,
-            DeviceOffset.UtcOffsetSeconds());
+        // hand-rolled time logic here. A thread with no activity time
+        // (`last_activity_ms` = 0) has no `conversation-item-timestamp` at all —
+        // Collapsed, as on the other six apps — never a 1970 date.
+        var hasActivity = t.lastActivityMs > 0;
+        Timestamp = hasActivity
+            ? ValueFormat.ConversationTimestamp(
+                DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                t.lastActivityMs,
+                DeviceOffset.UtcOffsetSeconds())
+            : "";
+        TimestampVis = hasActivity ? Visibility.Visible : Visibility.Collapsed;
     }
 
     public string ThreadIdValue { get; }
@@ -2425,8 +2431,13 @@ public sealed class ThreadRow
     public Visibility UnreadVis { get; }
 
     /// <summary>The shared contextual last-activity timestamp shown in the row's
-    /// top-right (conversations.md § Layout list-row timestamp).</summary>
+    /// top-right (conversations.md § Layout list-row timestamp), the indexed
+    /// <c>conversation-item-timestamp</c>; empty while the thread has no activity time.</summary>
     public string Timestamp { get; }
+
+    /// <summary>Collapsed — <c>conversation-item-timestamp</c> absent — while the thread
+    /// has no activity time (<c>last_activity_ms</c> = 0, ui.yaml).</summary>
+    public Visibility TimestampVis { get; }
 
     /// <summary>The indexed <c>protocol-icon</c> glyph for a thread's source concept,
     /// resolved through the shared <c>SourceGlyph</c> token (render-model.md § Deltas

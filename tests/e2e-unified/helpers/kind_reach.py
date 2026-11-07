@@ -718,16 +718,29 @@ def capability_helpers(keys: frozenset[str]) -> dict[str, frozenset[str]]:
 
     table: dict[str, set[str]] = {}
 
+    # A public name several modules define (`observe`, `write`) is merged in the
+    # table, so an ATTRIBUTE call to it (`f.write(...)` on a file) inside a
+    # helper cannot be told from a call to the capability-reading one — that
+    # taints every helper that writes a file (measured 2026-11-06: the store
+    # reviewer journey deselected as "reads db_path"). Such a call does not
+    # propagate; a BARE call resolves in its own module first, not by the
+    # merged name.
+    defined_in: dict[str, int] = {}
+    for fns in modules:
+        for name in fns:
+            defined_in[name] = defined_in.get(name, 0) + 1
+    ambiguous = {name for name, n in defined_in.items() if n > 1}
+
     def reads(fn, fns, seen):
         if id(fn) in seen:
             return set()
         seen.add(id(fn))
         out = set(_key_reads(fn, keys))
         for is_bare, callee in _callees(fn):
-            if callee in table:
-                out |= table[callee]
-            elif is_bare and _is_private(callee) and callee in fns:
+            if is_bare and callee in fns:
                 out |= reads(fns[callee], fns, seen)
+            elif callee in table and (is_bare or callee not in ambiguous):
+                out |= table[callee]
         return out
 
     grew = True

@@ -21,6 +21,12 @@ use std::cell::RefCell;
 use std::sync::Arc;
 use std::sync::mpsc;
 
+/// The post-auth critical-alert split's process-wide record
+/// (`fauna_client_alert_sweep::LoopClaim`): one GTK app per process, like the
+/// alerts registry beside it.
+static LOOP_CLAIM: fauna_client_alert_sweep::LoopClaim<NestClient> =
+    fauna_client_alert_sweep::LoopClaim::new();
+
 use crate::app::{ActionResult, DataMessage, UiMessage};
 use crate::feed::host::LinuxFeedManager;
 use crate::rows::{ContactRow, KnockRow};
@@ -5385,78 +5391,73 @@ impl FaunaClient {
         });
     }
 
-    /// Run the feeders that have no page of their own, at the same universal
-    /// post-auth hook as [`Self::refresh_mail_epoch_schedule`]
-    /// (`critical-alerts.md` § Goal — a set-and-forget deployment must still
-    /// raise its banner). tui's `critical_alerts::spawn_session_start_sweep`
-    /// (`session::establish`) is the reference this mirrors exactly
-    /// (`critical-alerts.md` § Implementation status today: "each is one call
-    /// at the app's own post-auth hook, not a per-app design") — this app's
-    /// `crate::critical_alerts::registry()` substituted in for tui's
-    /// per-`App` one. Best-effort/log-only: sign-in must not fail, or even
-    /// wait, on a nest that cannot answer the recovery/directory planes.
-    ///
-    /// Runs [`fauna_client_alert_sweep::run_alert_sweep_loop`] — sweeps
-    /// immediately, then every `RE_SWEEP_INTERVAL_SECS` for as long as the
-    /// identity lives (§ Mechanism → *Who runs the detector*), logging each
-    /// sweep itself. It stops on the first wake after `CriticalAlerts::clear_all`
-    /// runs, so no cancellation is needed here.
-    ///
-    /// Once per session ESTABLISHMENT (the AuthSuccess hook) — never from the
-    /// same-actor converge arm, which runs [`Self::run_critical_alert_sweep_once`]
-    /// instead: re-firing the loop there stacked one concurrent sweeper per
-    /// re-establish, forever (tui's `spawn_one_shot_sweep` and windows' leg
-    /// ratified the same split, `critical-alerts.md` § Implementation status
-    /// today).
+    /// **The post-auth hook's one critical-alert call** (`critical-alerts.md`
+    /// § Mechanism → *Who runs the detector* / *How often the detector runs*),
+    /// run at both the AuthSuccess hook and the same-actor converge arm: the
+    /// shared `LoopClaim` decides the arm. A first or identity-changing sign-in
+    /// starts the re-sweep loop (first pass at once, then every
+    /// `RE_SWEEP_INTERVAL_SECS` until the identity's teardown); the same identity
+    /// on the client its live loop rides gets ONE pass (a second loop would only
+    /// stack); the same identity on a client its loop does not ride starts a loop
+    /// that opens on the custody door. The claim forgets an identity by the
+    /// registry's teardown epoch, so this app keeps no record of its own.
+    /// Best-effort/log-only: sign-in must not fail, or even wait, on a nest that
+    /// cannot answer the recovery/directory planes.
     pub fn run_critical_alert_sweep(&self) {
+        use fauna_client_alert_sweep::SweepArm;
         let Some((nest_rpc, custody, alerts, actor_id)) = self.alert_sweep_parts() else {
             return;
         };
-        // The e2e build runs the SAME loop with its wait raceable by the agent's
-        // `alert_sweep_wake` (convention 14), minting a fresh wake per identity;
-        // a production build has no wake to race and runs the clock alone.
-        #[cfg(any(debug_assertions, feature = "e2e-agent"))]
-        {
-            let wake = crate::critical_alerts::mint_sweep_wake();
-            self.spawn_bg(async move {
-                fauna_client_alert_sweep::run_alert_sweep_loop_wakeable(
-                    nest_rpc,
-                    &custody,
-                    &alerts,
-                    &actor_id,
-                    move || {
+        let identity = format!("{}@{}", actor_id.to_hex(), nest_rpc.nest_url());
+        let (arm, ticket) = LOOP_CLAIM.claim(&identity, &nest_rpc, &alerts);
+        self.spawn_bg(async move {
+            let _ticket = ticket;
+            match arm {
+                SweepArm::OnePass => {
+                    // The shared one-shot waits (bounded) for the custody door,
+                    // which a converge on the live client finds open at once.
+                    fauna_client_alert_sweep::run_one_shot_sweep(
+                        nest_rpc, &custody, &alerts, &actor_id,
+                    )
+                    .await;
+                }
+                // The e2e build runs the SAME loop with its wait raceable by the
+                // agent's `alert_sweep_wake` (convention 14), minting a fresh wake
+                // per loop; a production build runs the clock alone.
+                #[cfg(any(debug_assertions, feature = "e2e-agent"))]
+                SweepArm::Loop | SweepArm::ReestablishedLoop => {
+                    let wake = crate::critical_alerts::mint_sweep_wake();
+                    let wake = move || {
                         let notify = Arc::clone(&wake);
                         async move { notify.notified().await }
-                    },
-                )
-                .await;
-            });
-        }
-        #[cfg(not(any(debug_assertions, feature = "e2e-agent")))]
-        self.spawn_bg(async move {
-            fauna_client_alert_sweep::run_alert_sweep_loop(nest_rpc, &custody, &alerts, &actor_id)
-                .await;
-        });
-    }
-
-    /// Run ONE sweep pass — the same-actor converge arm's re-run of the
-    /// post-auth feeders (`main.rs`'s session patch). The loop
-    /// [`Self::run_critical_alert_sweep`] started at AuthSuccess is still
-    /// running for this identity, so a second loop here would only stack.
-    pub fn run_critical_alert_sweep_once(&self) {
-        let Some((nest_rpc, custody, alerts, actor_id)) = self.alert_sweep_parts() else {
-            return;
-        };
-        self.spawn_bg(async move {
-            let report = fauna_client_alert_sweep::run_session_start_sweep(
-                nest_rpc, &custody, &alerts, &actor_id,
-            )
-            .await;
-            tracing::debug!(
-                failures = report.failures.len(),
-                skipped = report.skipped.len(),
-                "converge-arm critical-alert sweep pass done"
-            );
+                    };
+                    if arm == SweepArm::Loop {
+                        fauna_client_alert_sweep::run_alert_sweep_loop_wakeable(
+                            nest_rpc, &custody, &alerts, &actor_id, wake,
+                        )
+                        .await;
+                    } else {
+                        fauna_client_alert_sweep::run_alert_sweep_loop_reestablished_wakeable(
+                            nest_rpc, &custody, &alerts, &actor_id, wake,
+                        )
+                        .await;
+                    }
+                }
+                #[cfg(not(any(debug_assertions, feature = "e2e-agent")))]
+                SweepArm::Loop => {
+                    fauna_client_alert_sweep::run_alert_sweep_loop(
+                        nest_rpc, &custody, &alerts, &actor_id,
+                    )
+                    .await;
+                }
+                #[cfg(not(any(debug_assertions, feature = "e2e-agent")))]
+                SweepArm::ReestablishedLoop => {
+                    fauna_client_alert_sweep::run_alert_sweep_loop_reestablished(
+                        nest_rpc, &custody, &alerts, &actor_id,
+                    )
+                    .await;
+                }
+            }
         });
     }
 

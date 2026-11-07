@@ -235,6 +235,114 @@ pub fn is_reserved_custody_copy(custody_copy: bool, name: &str) -> bool {
     custody_copy && is_reserved_folder_name(name)
 }
 
+/// Every reserved name of the **closed** families the nest mints under an
+/// actor — each family read from the module that owns it, never re-listed
+/// here (`reserved-folders.md` § The management surface refuses the namespace
+/// — whole, *the address*):
+///
+/// - the message-kind snapshot rails, `__<kind>` for every
+///   [`crate::backup::message_kind::MESSAGE_KINDS`] entry, and the three
+///   high-cadence placement kinds ([`HIGH_CADENCE_RESERVED_KINDS`]);
+/// - the single-rail planes, each by its owner's constant: `__drafts`
+///   ([`crate::db::drafts::DRAFTS_RAIL_KIND`]), `__index`
+///   ([`crate::db::content_index_rail::INDEX_RAIL_KIND`]), `__mls`
+///   ([`crate::db::mls_replica::MLS_RAIL_KIND`]);
+/// - the account-state served scopes, `__state` and `__state-fleet`
+///   ([`fauna_protocol::account_state::is_served_scope`]'s two constants);
+/// - the scope-independent custody and landing names the shared derivation
+///   produces for every [`fauna_protocol::segments::BACKUP_SET_KINDS`] entry
+///   (`__mail`, `__landing/mail`, …) — a kind whose name embeds its scope
+///   (`conv`'s `__conv/<channel_hex>`) is an open family.
+///
+/// What it cannot hold, because no list can: the **open** families — the
+/// `__ext:<kind>` account-state rails (any kind a principal declares), the
+/// conv custody copies (any channel) and the folder-axis custody copies
+/// (`__folder/<origin>/<id>`). Those are guarded at the mint instead
+/// ([`refuse_a_squatted_rail_address`]). [`get_or_create_reserved_folder`]
+/// debug-asserts every kind it mints is here or an `ext` scope, so a new rail
+/// family reddens its own first test until its owner joins this enumeration.
+pub fn reserved_rail_names() -> Vec<String> {
+    use fauna_protocol::{account_state, segments};
+    let mut kinds: Vec<&str> = crate::backup::message_kind::MESSAGE_KINDS.to_vec();
+    kinds.extend_from_slice(HIGH_CADENCE_RESERVED_KINDS);
+    kinds.extend_from_slice(&[
+        crate::db::drafts::DRAFTS_RAIL_KIND,
+        crate::db::content_index_rail::INDEX_RAIL_KIND,
+        crate::db::mls_replica::MLS_RAIL_KIND,
+        account_state::ACCOUNT_STATE_SCOPE,
+        account_state::ACCOUNT_STATE_FLEET_SCOPE,
+    ]);
+    let mut names: Vec<String> = kinds.iter().map(|k| format!("__{k}")).collect();
+    // A derivation whose name is the same under two different scopes does not
+    // embed its scope, so it is one closed name.
+    let (a, b) = ([0u8; 32], [0xffu8; 32]);
+    for kind in segments::BACKUP_SET_KINDS {
+        for derive in [
+            segments::reserved_backup_set_name as fn(&str, &[u8; 32]) -> Option<String>,
+            segments::landing_set_name,
+        ] {
+            if let (Some(x), Some(y)) = (derive(kind, &a), derive(kind, &b))
+                && x == y
+            {
+                names.push(x);
+            }
+        }
+    }
+    names.sort();
+    names.dedup();
+    names
+}
+
+/// True iff `hash` is `set_name_hash` of one of [`reserved_rail_names`]. A
+/// create by hash carries no plaintext name for the `__` refusal to test, so
+/// this is that refusal's twin over the address — for the closed families; an
+/// open family's squat is answered at its mint ([`refuse_a_squatted_rail_address`]).
+pub fn is_reserved_set_hash(hash: &[u8]) -> bool {
+    reserved_rail_names()
+        .iter()
+        .any(|n| fauna_core::path_crypto::set_name_hash(n)[..] == *hash)
+}
+
+/// The stable marker every squatted-rail refusal's message begins with — what
+/// [`crate::rpc_errors`]' classification keys on to answer the coded
+/// `fauna.folders.reserved_address_taken` rather than an internal error, the
+/// same way it keys on SQLite's own phrasing for a schema mismatch.
+pub const RESERVED_ADDRESS_TAKEN: &str = "reserved address taken";
+
+/// Refuse, with the coded and recoverable [`RESERVED_ADDRESS_TAKEN`] error, a
+/// reserved set whose mint found no row of its name because one of `scope`'s
+/// own sets created **by hash alone** (no plaintext name) already holds the
+/// reserved name's address on `UNIQUE(name_hash, actor_id)`; `Ok(())` when no
+/// such row exists, and the caller reports its own failure.
+///
+/// The by-hash create refuses the closed families' addresses
+/// ([`is_reserved_set_hash`]), but a hash cannot be inverted, so an open
+/// family (an `__ext:<kind>` rail, a conv or folder-axis custody copy) can be
+/// squatted. The squatter is never adopted or removed by the nest — it is the
+/// user's own set and may hold content — so the recovery is the user's:
+/// delete that set (`fauna.folders.delete` addresses it by the same hash; its
+/// name is NULL, so it is not reserved) and retry. Only the squatter's own
+/// actor is reached: the index is per actor (`nest/common.md` §
+/// Client-state recoverability).
+pub fn refuse_a_squatted_rail_address(conn: &Connection, name: &str, scope: &[u8]) -> Result<()> {
+    let hash = fauna_core::path_crypto::set_name_hash(name);
+    let squatted: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM folders
+                            WHERE name_hash = ?1 AND actor_id = ?2 AND name IS NULL)",
+            rusqlite::params![&hash[..], scope],
+            |r| r.get(0),
+        )
+        .context("look up a set holding a reserved address")?;
+    if squatted {
+        anyhow::bail!(
+            "{RESERVED_ADDRESS_TAKEN}: a set of yours created by name hash alone holds the \
+             address of the reserved set {name:?}; delete that set (by its name hash) and retry"
+        );
+    }
+    Ok(())
+}
+
 /// Get or create the per-actor pseudo folder that anchors message-kind
 /// snapshots for `kind` to the owning actor.
 ///
@@ -253,14 +361,30 @@ pub fn get_or_create_reserved_folder(
     kind: &str,
 ) -> Result<i64> {
     let name = format!("__{kind}");
+    debug_assert!(
+        fauna_protocol::scope::ext_scope_kind(kind).is_some()
+            || reserved_rail_names().contains(&name),
+        "rail kind {kind:?} is minted but absent from reserved_rail_names(): add its owner's \
+         constant there, or the create-by-hash refusal cannot see its address"
+    );
     let now = super::now_epoch_secs();
     let high_cadence = is_high_cadence_reserved_kind(kind);
 
     // Attempt insert; ignore UNIQUE constraint violation (row already exists).
+    // `name_hash` is stamped at insert, never left for the boot's companion
+    // pass: a row a client squatted on this rail's hash then collides HERE, on
+    // that client's own request, instead of failing every user's boot
+    // (`nest/common.md` § Client-state recoverability).
     conn.execute(
-        "INSERT OR IGNORE INTO folders (name, actor_id, created_at, high_cadence)
-         VALUES (?1, ?2, ?3, ?4)",
-        rusqlite::params![name, &actor_id[..], now, high_cadence as i64],
+        "INSERT OR IGNORE INTO folders (name, actor_id, created_at, high_cadence, name_hash)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        rusqlite::params![
+            name,
+            &actor_id[..],
+            now,
+            high_cadence as i64,
+            fauna_core::path_crypto::set_name_hash(&name).to_vec()
+        ],
     )
     .context("insert reserved folder")?;
 
@@ -283,14 +407,22 @@ pub fn get_or_create_reserved_folder(
 /// Unreachable through the enroll flow, which never points an owner's backup
 /// destination at their own home nest; the recovery, if it is ever reached, is
 /// the ordinary owner `fauna.folders.delete` of the custody copy, then retry.
+///
+/// No row of the name at all means the insert lost to a set created by hash
+/// alone on the rail's address: answered by [`refuse_a_squatted_rail_address`].
 fn adopt_rail_row(conn: &Connection, name: &str, scope: &[u8; 32]) -> Result<i64> {
-    let (id, custody_copy): (i64, bool) = conn
+    let row: Option<(i64, bool)> = conn
         .query_row(
             "SELECT id, custody_copy FROM folders WHERE name = ?1 AND actor_id = ?2",
             rusqlite::params![name, &scope[..]],
             |r| Ok((r.get(0)?, r.get::<_, i64>(1)? != 0)),
         )
+        .optional()
         .context("get reserved folder id")?;
+    let Some((id, custody_copy)) = row else {
+        refuse_a_squatted_rail_address(conn, name, scope)?;
+        anyhow::bail!("get reserved folder id: no {name:?} row after its mint");
+    };
     if is_reserved_custody_copy(custody_copy, name) {
         anyhow::bail!(
             "refusing to mint the {name:?} rail over a backup custody copy on this nest: \
@@ -355,11 +487,13 @@ pub fn get_or_create_reserved_conv_folder(conn: &Connection, channel_id: &[u8; 3
 /// `__calendar-placement` / `__card-placement` — not the `FramedSegmentStore`
 /// label, which for calendar is the shorter `"cal-placement"`.
 pub fn is_high_cadence_reserved_kind(kind: &str) -> bool {
-    matches!(
-        kind,
-        "mail-placement" | "calendar-placement" | "card-placement"
-    )
+    HIGH_CADENCE_RESERVED_KINDS.contains(&kind)
 }
+
+/// The reserved folder kinds [`is_high_cadence_reserved_kind`] answers true
+/// for — its one list, which [`reserved_rail_names`] reads too.
+pub const HIGH_CADENCE_RESERVED_KINDS: &[&str] =
+    &["mail-placement", "calendar-placement", "card-placement"];
 
 /// Insert a message-kind snapshot row into the `snapshots` table.
 ///
@@ -801,6 +935,51 @@ pub fn has_wrapped_mls_blobs(conn: &Connection, actor_id: &[u8; 32]) -> Result<b
 mod tests {
     use super::*;
     use crate::db::CacheDb;
+
+    fn hash_of(kind: &str) -> Vec<u8> {
+        fauna_core::path_crypto::set_name_hash(&format!("__{kind}")).to_vec()
+    }
+
+    /// A freshly minted rail carries its `name_hash`.
+    #[test]
+    fn a_minted_rail_carries_its_name_hash() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::db::migrations::run_migrations(&conn).unwrap();
+        let id = get_or_create_reserved_folder(&conn, &[3u8; 32], "mail").unwrap();
+        let stored: Vec<u8> = conn
+            .query_row("SELECT name_hash FROM folders WHERE id = ?1", [id], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(stored, hash_of("mail"));
+        assert!(is_reserved_set_hash(&stored));
+        assert!(!is_reserved_set_hash(&[0u8; 32]));
+    }
+
+    /// A row a client planted on a rail's hash must neither
+    /// stop the boot nor take the rail's name.
+    #[test]
+    fn a_squatter_on_a_rail_hash_does_not_stop_the_boot() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::db::migrations::run_migrations(&conn).unwrap();
+        let actor = [4u8; 32];
+        conn.execute(
+            "INSERT INTO folders (name, actor_id, created_at, name_hash, name_sealed) \
+             VALUES (NULL, ?1, 0, ?2, x'a1a1a1a1')",
+            rusqlite::params![&actor[..], hash_of("mail")],
+        )
+        .unwrap();
+        // The rail's own mint collides on the squatter's request path...
+        let _ = get_or_create_reserved_folder(&conn, &actor, "mail");
+        // ...a legacy NULL-hash rail row (pre-stamp insert) hits the boot pass,
+        conn.execute(
+            "INSERT INTO folders (name, actor_id, created_at) VALUES ('__mail', ?1, 0)",
+            rusqlite::params![&actor[..]],
+        )
+        .ok();
+        // ...and the migrations re-run must still succeed.
+        crate::db::migrations::run_migrations(&conn).unwrap();
+    }
 
     #[test]
     fn high_cadence_kind_classifier() {

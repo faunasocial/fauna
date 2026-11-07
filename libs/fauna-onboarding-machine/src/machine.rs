@@ -264,6 +264,21 @@ struct AgeNonceMint {
     attestation_platforms: Vec<String>,
 }
 
+/// One update-channel radio on the VPS-config page — what an app needs to
+/// render and key the row, with no per-app channel table
+/// (`OnboardingMachine::update_channel_rows`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct UpdateChannelRow {
+    pub channel: fauna_provisioning::cloud_init::UpdateChannel,
+    /// The id `vps-config-update-channel-row[<id>]` is keyed by.
+    pub id: String,
+    /// The i18n key of the row's label.
+    pub label_key: String,
+    /// The i18n key of the row's description (no-build / compat-line / plain).
+    pub description_key: String,
+}
+
 /// The SSH door key a run minted (`installers/vps.md` § The SSH door → *The
 /// key*). `private_key` is `Some` only where it waits for its one hand-over —
 /// on a desktop app it went to `~/.ssh` at mint and the machine kept nothing.
@@ -2657,6 +2672,23 @@ impl OnboardingMachine {
                 .map(|a| &a.build);
             channel.description_key_for(&version, build).to_string()
         })
+    }
+
+    /// Every update-channel radio, in `UpdateChannel::ALL` order, each with the
+    /// id its `vps-config-update-channel-row[<id>]` is keyed by, its label's
+    /// i18n key and its description's i18n key
+    /// ([`Self::update_channel_description_key_for_row`]). Apps render this list
+    /// and keep no channel→id or channel→label table of their own.
+    pub fn update_channel_rows(&self) -> Vec<UpdateChannelRow> {
+        fauna_provisioning::cloud_init::UpdateChannel::ALL
+            .into_iter()
+            .map(|channel| UpdateChannelRow {
+                channel,
+                id: channel.id().to_string(),
+                label_key: channel.label_key().to_string(),
+                description_key: self.update_channel_description_key_for_row(channel),
+            })
+            .collect()
     }
 
     /// Fields visible on the vps_config form. Filters the selected VPS
@@ -11799,6 +11831,21 @@ mod tests {
             fresh.update_channel_description_key_for_row(UpdateChannel::Dev),
             UpdateChannel::Dev.description_key()
         );
+        // The row list is the shared ALL order with each channel's own id,
+        // label key and the row getter's description key.
+        let rows = fresh.update_channel_rows();
+        assert_eq!(
+            rows.iter().map(|r| r.channel).collect::<Vec<_>>(),
+            UpdateChannel::ALL.to_vec()
+        );
+        for r in &rows {
+            assert_eq!(r.id, r.channel.id());
+            assert_eq!(r.label_key, r.channel.label_key());
+            assert_eq!(
+                r.description_key,
+                fresh.update_channel_description_key_for_row(r.channel)
+            );
+        }
         // An explicit choice is kept whatever the registry says.
         fresh.set_provision_update_channel(UpdateChannel::Stable);
         assert_eq!(fresh.provision_update_channel(), UpdateChannel::Stable);

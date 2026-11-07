@@ -18,6 +18,11 @@ use anyhow::Context;
 use fauna_protocol::mls_replica::ReplicaBase;
 use rusqlite::OptionalExtension;
 
+/// The kind of the MLS state replica rail, `__mls` — its one spelling, read
+/// by the mint below and by the reserved-address enumeration
+/// ([`crate::db::snapshots::reserved_rail_names`]).
+pub const MLS_RAIL_KIND: &str = "mls";
+
 impl CacheDb {
     /// Raw read of the calling actor's sealed `__mls` blob for `path`
     /// (`fauna.mls.get`): returns the opaque, client-`BackupKey`-sealed bytes
@@ -102,7 +107,8 @@ impl CacheDb {
             }
         }
 
-        let fs_id = crate::db::snapshots::get_or_create_reserved_folder(&conn, actor_id, "mls")?;
+        let fs_id =
+            crate::db::snapshots::get_or_create_reserved_folder(&conn, actor_id, MLS_RAIL_KIND)?;
         conn.execute(
             "INSERT INTO sync_changes (actor_id, path_hash, manifest_hash, size_bytes, change_type, created_at, folder_id, device_id, path)
              VALUES (?1, ?2, ?3, ?4, 'update', ?5, ?6, NULL, ?7)",

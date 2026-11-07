@@ -36,9 +36,12 @@ const FILE_ALL_ACCESS: u32 = 0x001F_01FF;
 /// default; a file's is not.
 ///
 /// The caller owns the object, so it holds `WRITE_DAC` whatever the old DACL
-/// said. A handle already open on `path` keeps the access it was granted:
-/// create the file, restrict it, then write the secret, and no reader can ever
-/// open it under the inherited ACL with the secret inside.
+/// said. A handle already open on `path` keeps the access it was granted — a
+/// reader's included, if the inherited ACL let it open the file before this
+/// call. So for a secret: create the file with NO sharing (`share_mode(0)`) and
+/// hold that handle, restrict it (this by-path set asks for no data access,
+/// which no share mode refuses), then write the secret. Then no other handle
+/// can exist on the file until the DACL governs it.
 pub fn restrict_to_owner(path: &Path) -> Result<()> {
     let is_dir = std::fs::metadata(path)
         .with_context(|| format!("metadata of {}", path.display()))?

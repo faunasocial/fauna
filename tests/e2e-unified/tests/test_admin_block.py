@@ -144,7 +144,7 @@ def test_the_admin_blocks_a_reported_post_and_unblocks_it_through_the_app(app, n
     assert app.feed.wait_for_post_text(target_text, timeout_s=_FEED_BUDGET_S), (
         f"the viewer must see the author's post; error={app.error_text()!r}"
     )
-    app.feed.quote_post(app.feed.post_index_by_id(post_id))
+    app.feed.quote_post(app.feed.card_index_by_id(post_id))
     # The nest-side quote count moves when the quote post lands; a fresh read of
     # the feed then carries the viewer's own quote row on every app.
     assert app.feed.wait_for_interaction_count_by_id(post_id, "quote", 1, timeout=_SEND_BUDGET_S) == 1, (
@@ -164,7 +164,7 @@ def test_the_admin_blocks_a_reported_post_and_unblocks_it_through_the_app(app, n
     assert app.feed.wait_for_post_text(target_text, timeout_s=_FEED_BUDGET_S)
     # By id, never by text: the viewer's quote card carries the target's text
     # in its embed, and it is the newer card.
-    app.report.open_from_post(app.feed, app.feed.post_index_by_id(post_id))
+    app.report.open_from_post(app.feed, app.feed.card_index_by_id(post_id))
     app.report.choose_reason("harassment")
     _poll(app.report.submit_enabled, _PAGE_BUDGET_S, "a reasoned report becomes sendable")
     app.report.submit()

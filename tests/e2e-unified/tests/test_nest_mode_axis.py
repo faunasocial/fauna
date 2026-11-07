@@ -10137,6 +10137,19 @@ def test_the_capability_helper_table_is_shared_functions_only():
     assert not {"stop", "close", "launch", "read"} & table.keys()
 
 
+def test_a_file_write_inside_a_helper_does_not_taint_it_with_a_capability_read():
+    """`f.write(...)` in `_write_private` is an attribute call whose bare name
+    several modules define as public functions (`write`, `observe`); one of
+    those reads `db_path`, and the merged name used to taint every helper that
+    writes a file — `load_or_create_account` among them — so the store reviewer
+    journey was deselected live as "reads db_path" (2026-11-06)."""
+    from helpers import kind_reach
+
+    table = kind_reach.capability_helpers(frozenset(nm.CAPABILITY_KEYS))
+    assert "load_or_create_account" not in table
+    assert "write" not in table
+
+
 def test_a_start_option_the_tests_own_code_passes_is_class_four(tmp_path):
     """Two doors the closure cannot see: an option passed straight to a
     provider's `start`, and a nest fixture requested lazily. Both used to reach

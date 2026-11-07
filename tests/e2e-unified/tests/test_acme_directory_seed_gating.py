@@ -17,10 +17,11 @@ Seven halves, each a false green alone:
   6. the provider fake's mirror into pebble's name server is called only from
      the gated sentinel decorator, and the RFC 2136 UPDATE sender it calls
      (`fauna_core::authoritative_dns::send_txt_update`) is gated too;
-  7. each app's `auto_renew_wake` poke (tui, linux, android, web, macos, ios),
-     which drives the tick to that order, is compiled out of a release build
-     (web: of a production `vite build`, behind `__FAUNA_E2E_AUTOMATION__`;
-     macos + ios: the shared FaunaKit cadence's `#if DEBUG`);
+  7. each app's `auto_renew_wake` poke (tui, linux, android, web, macos, ios,
+     windows), which drives the tick to that order, is compiled out of a release
+     build (web: of a production `vite build`, behind `__FAUNA_E2E_AUTOMATION__`;
+     macos + ios: the shared FaunaKit cadence's `#if DEBUG`; windows:
+     `#if DEBUG || FAUNA_E2E_AGENT`);
   8. web's reading (*The web order*): the wasm seam holds the directory alone,
      under the gate, read from `localStorage` under `fauna-wasm`'s
      `test-helpers`; the nest reads the name server and serves the challenge
@@ -436,3 +437,60 @@ def test_the_apple_auto_renew_wake_is_compiled_out_of_a_release_build():
         assert "wakeForTest" not in "\n".join(_lines_outside_debug(text)), (
             f"{app}'s auto_renew_wake arm reaches a Release build"
         )
+
+
+_WINDOWS = _REPO / "apps" / "fauna-windows" / "FaunaApp"
+_WINDOWS_WAKE = _WINDOWS / "FaunaApp.Core" / "Helpers" / "AutoRenewWake.cs"
+_WINDOWS_APP = _WINDOWS / "FaunaApp" / "App.xaml.cs"
+_WINDOWS_AGENT = _WINDOWS / "FaunaApp" / "Testing" / "TestAgent.cs"
+#: windows' convention-15 gate: Debug, or the opt-in `FaunaE2eAgent` build flavor
+#: (`FaunaApp.csproj`) — never set for the shipped MSI.
+_CS_GATE = "#if DEBUG || FAUNA_E2E_AGENT"
+
+
+def _cs_lines_outside_gate(src: str) -> list[str]:
+    """The lines of a C# file that a Release build compiles: those under no
+    `#if DEBUG || FAUNA_E2E_AGENT` branch (its `#elif` and `#else` count as
+    Release). Nesting-aware for every `#if`, so an inner `#if PAYMENTS` neither
+    opens nor closes the gated region."""
+    out: list[str] = []
+    stack: list[bool] = []  # per open #if: is this branch gated?
+    for line in src.splitlines():
+        t = line.strip()
+        if t.startswith("#if"):
+            stack.append(t.split("//")[0].strip() == _CS_GATE)
+            continue
+        if (t.startswith("#else") or t.startswith("#elif")) and stack:
+            stack[-1] = False
+            continue
+        if t.startswith("#endif") and stack:
+            stack.pop()
+            continue
+        if not any(stack):
+            out.append(line)
+    return out
+
+
+def test_the_windows_auto_renew_wake_is_compiled_out_of_a_release_build():
+    """windows' poke: `AutoRenewWake` (FaunaApp.Core) is gated whole, the
+    cadence's mint, raced wait and retire in `App.xaml.cs` sit under the gate
+    with the bare clock as the Release branch, and the `auto_renew_wake` arm
+    lives in `TestAgent.cs`, which a Release build compiles none of."""
+    wake = _WINDOWS_WAKE.read_text(encoding="utf-8")
+    assert "class AutoRenewWake" in wake, "the windows wake moved"
+    assert "AutoRenewWake" not in "\n".join(_cs_lines_outside_gate(wake)), (
+        "AutoRenewWake reaches a Release build"
+    )
+    app = _WINDOWS_APP.read_text(encoding="utf-8")
+    release = "\n".join(_cs_lines_outside_gate(app))
+    for name in ("AutoRenewWake.Mint(", "wake.WaitAsync(", "AutoRenewWake.Retire("):
+        assert name in app, f"the windows cadence no longer names {name}"
+        assert name not in release, f"{name} reaches a Release build of the windows cadence"
+    assert "await Task.Delay(pollInterval, actorGone);" in release, (
+        "the windows cadence's Release wait is no longer the bare clock"
+    )
+    agent = _WINDOWS_AGENT.read_text(encoding="utf-8")
+    assert 'case "auto_renew_wake":' in agent, "windows does not answer auto_renew_wake"
+    assert "auto_renew_wake" not in "\n".join(_cs_lines_outside_gate(agent)), (
+        "windows' auto_renew_wake arm reaches a Release build"
+    )

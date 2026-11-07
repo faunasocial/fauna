@@ -387,6 +387,7 @@ fn list_mailboxes_handler() -> crate::rpc_router::RpcHandler {
                     .await
                     .map_err(internal)?;
                 mailboxes.push(MailboxEntry {
+                    attrs: fauna_protocol::email::special_use_attrs(&row.name),
                     name: row.name,
                     uid_validity: row.uid_validity,
                     uid_next: row.uid_next,
@@ -2211,6 +2212,44 @@ pub(crate) fn put_spam_model_handler() -> crate::rpc_router::RpcHandler {
             if req.sealed_model.is_empty() {
                 return Err(malformed("sealed_model must not be empty"));
             }
+            // Every opaque field is bounded (): the nest cannot open a
+            // seal, so each gets its plaintext bound plus the envelope, and
+            // nothing over a cap is written.
+            if req.sealed_model.len() > crate::spam_model_seal::SEALED_MODEL_MAX_BYTES {
+                return Err(invalid_params("sealed_model exceeds the model size bound"));
+            }
+            if let Some(SpamHistoryOp::Insert {
+                message_id,
+                sealed_subject,
+                sealed_delta,
+                ..
+            }) = &req.history_op
+            {
+                if message_id.is_empty()
+                    || message_id.len() > crate::spam_model_seal::HISTORY_MESSAGE_ID_MAX_BYTES
+                {
+                    return Err(invalid_params(
+                        "history_op.message_id must be 1..=256 bytes",
+                    ));
+                }
+                if sealed_subject.len() > crate::spam_model_seal::SEALED_SUBJECT_MAX_BYTES {
+                    return Err(invalid_params(
+                        "history_op.sealed_subject exceeds the subject size bound",
+                    ));
+                }
+                if sealed_delta.len() > crate::spam_model_seal::SEALED_DELTA_MAX_BYTES {
+                    return Err(invalid_params(
+                        "history_op.sealed_delta exceeds the delta size bound",
+                    ));
+                }
+            }
+            if let Some(c) = &req.holder_copy
+                && c.sealed_copy.len() > crate::spam_model_seal::SEALED_MODEL_MAX_BYTES
+            {
+                return Err(invalid_params(
+                    "holder_copy.sealed_copy exceeds the model size bound",
+                ));
+            }
             // The model rests ONLY sealed: a blob that decodes as a plaintext
             // `SpamModel` is refused, never stored (`mail-spam.md`
             // § Encrypted-mode interaction).
@@ -3660,6 +3699,50 @@ pub(crate) mod tests {
         assert!(names.contains(&"Drafts"));
         assert!(names.contains(&"Trash"));
         assert!(names.contains(&"Junk"));
+    }
+
+    /// The nest owns the SPECIAL-USE table (`imap-server.md` § Standard
+    /// mailboxes): every standard mailbox carries its RFC 6154 attribute on
+    /// the `list_mailboxes` wire — INBOX none, it is identified by name — and
+    /// the MDA writes them verbatim, keeping no table of its own.
+    #[tokio::test]
+    async fn list_mailboxes_carries_special_use_attrs_for_every_standard_mailbox() {
+        let state = fixture_state().await;
+        let mda = [9u8; 32];
+        approve_bridge(&state.db, &mda, BridgeRole::Mda).await;
+        let target = [43u8; 32];
+        state
+            .db
+            .create_bridge_imap_mailbox(&target, "Projects", 7)
+            .await
+            .expect("create user mailbox");
+
+        let req = ListMailboxesRequest {
+            actor_id: target.to_vec(),
+            ..Default::default()
+        };
+        let payload = Bytes::from(encode_canonical(&req).unwrap().to_vec());
+        let bytes = list_mailboxes_handler()(state, mda, payload)
+            .await
+            .expect("handler ok");
+        let reply: ListMailboxesReply = fauna_cbor::decode_strict(&bytes).unwrap();
+        let attrs_of = |name: &str| -> Vec<String> {
+            reply
+                .mailboxes
+                .iter()
+                .find(|m| m.name == name)
+                .unwrap_or_else(|| panic!("{name} listed"))
+                .attrs
+                .clone()
+        };
+        for name in crate::db::bridge_imap::STANDARD_MAILBOXES {
+            let want: Vec<String> = match *name {
+                "INBOX" => vec![],
+                other => vec![format!("\\{other}")],
+            };
+            assert_eq!(attrs_of(name), want, "{name} attrs on the wire");
+        }
+        assert!(attrs_of("Projects").is_empty(), "user mailbox has no attr");
     }
 
     #[tokio::test]
@@ -9643,6 +9726,257 @@ pub(crate) mod tests {
                 .is_empty(),
             "no refused write left a row"
         );
+    }
+
+    /// Every opaque field has a size cap and `message_id` must be the
+    /// 32-byte content id: each cap accepts its exact bound and refuses one byte
+    /// over with `invalid_params`, writing nothing.
+    #[tokio::test]
+    async fn put_spam_model_caps_each_opaque_field_and_checks_message_id() {
+        use crate::spam_model_seal::{
+            HISTORY_MESSAGE_ID_MAX_BYTES, SEALED_DELTA_MAX_BYTES, SEALED_MODEL_MAX_BYTES,
+            SEALED_SUBJECT_MAX_BYTES,
+        };
+        let state = fixture_state().await;
+        approve_bridge(&state.db, &[200u8; 32], BridgeRole::ContentProcessor).await;
+        let user = [0x94u8; 32];
+        state.db.create_user(&user, "free", "test").await.unwrap();
+        let req = |model_len: usize,
+                   msg_len: usize,
+                   subject_len: usize,
+                   delta_len: usize,
+                   copy_len: Option<usize>| PutSpamModelRequest {
+            sealed_model: vec![0xEEu8; model_len],
+            history_op: Some(SpamHistoryOp::Insert {
+                message_id: vec![0x95u8; msg_len],
+                mailbox: "Junk".into(),
+                sealed_subject: vec![0xC1u8; subject_len],
+                sealed_delta: vec![0xD1u8; delta_len],
+                label: SpamLabel::Spam,
+                source: TrainingSource::ManualOther,
+            }),
+            holder_copy: copy_len.map(|n| fauna_protocol::wrapped_blob::SpamModelHolderCopy {
+                holder_pubkey: vec![9u8; 32],
+                sealed_copy: vec![0xB1u8; n],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let over: Vec<(&str, PutSpamModelRequest)> = vec![
+            ("model", req(SEALED_MODEL_MAX_BYTES + 1, 32, 24, 48, None)),
+            (
+                "subject",
+                req(64, 32, SEALED_SUBJECT_MAX_BYTES + 1, 48, None),
+            ),
+            ("delta", req(64, 32, 24, SEALED_DELTA_MAX_BYTES + 1, None)),
+            (
+                "holder copy",
+                req(64, 32, 24, 48, Some(SEALED_MODEL_MAX_BYTES + 1)),
+            ),
+            ("empty message_id", req(64, 0, 24, 48, None)),
+            (
+                "long message_id",
+                req(64, HISTORY_MESSAGE_ID_MAX_BYTES + 1, 24, 48, None),
+            ),
+        ];
+        for (what, r) in over {
+            let err = call_put_spam_model(state.clone(), user, r)
+                .await
+                .expect_err(what);
+            assert_eq!(err.code, "fauna.email.invalid_params", "{what}");
+        }
+        assert!(
+            state.db.get_spam_model(&user).await.unwrap().is_none(),
+            "no refused write left a model"
+        );
+        assert!(
+            state
+                .db
+                .list_spam_training_history(&user, 10, None)
+                .await
+                .unwrap()
+                .is_empty(),
+            "no refused write left a row"
+        );
+        // Exactly at every bound is accepted.
+        let ok = call_put_spam_model(
+            state.clone(),
+            user,
+            req(
+                SEALED_MODEL_MAX_BYTES,
+                32,
+                SEALED_SUBJECT_MAX_BYTES,
+                SEALED_DELTA_MAX_BYTES,
+                Some(SEALED_MODEL_MAX_BYTES),
+            ),
+        )
+        .await
+        .expect("a write at every bound lands");
+        assert_eq!(ok.outcome, PutSpamModelOutcome::Written);
+        // Exactly at the id cap, and a conversation-shaped id, are accepted.
+        for len in [HISTORY_MESSAGE_ID_MAX_BYTES, 1] {
+            let r = req(64, len, 24, 48, None);
+            call_put_spam_model(state.clone(), user, r)
+                .await
+                .expect("an id within the cap lands");
+        }
+        let mut conv = req(64, 1, 24, 48, None);
+        if let Some(SpamHistoryOp::Insert { message_id, .. }) = conv.history_op.as_mut() {
+            *message_id = format!("conv:{}:7", "ab".repeat(32)).into_bytes();
+        }
+        call_put_spam_model(state.clone(), user, conv)
+            .await
+            .expect("a conv:<hex>:<seq> id lands");
+    }
+
+    /// The prune's inner SELECT is actor-scoped: another actor holding the
+    /// ceiling's worth of NEWER rows must not push the caller's own history
+    /// past the offset.
+    #[tokio::test]
+    async fn put_spam_model_prune_ranks_only_the_callers_rows() {
+        use crate::spam_model_seal::SPAM_HISTORY_MAX_ROWS_PER_ACTOR;
+        let state = fixture_state().await;
+        let user = [0x9Au8; 32];
+        let other = [0x9Bu8; 32];
+        state.db.create_user(&user, "free", "test").await.unwrap();
+        {
+            let conn = state.db.conn().await;
+            let tx = conn.unchecked_transaction().unwrap();
+            for (actor, i, ts) in (0..3i64)
+                .map(|i| (user, i, i + 1))
+                .chain((0..SPAM_HISTORY_MAX_ROWS_PER_ACTOR).map(|i| (other, i, 1_000 + i)))
+            {
+                tx.execute(
+                    "INSERT INTO spam_training_history
+                        (history_id, actor_id, message_id, mailbox, label, source, model_delta_applied, created_at, sealed_subject)
+                     VALUES (?1, ?2, ?3, 'Junk', 'spam', 'manual_other', x'D1', ?4, x'C1')",
+                    rusqlite::params![
+                        (i as u64 + if actor == other { 1 << 40 } else { 0 })
+                            .to_be_bytes()
+                            .to_vec(),
+                        actor.to_vec(),
+                        vec![0x10u8; 32],
+                        ts,
+                    ],
+                )
+                .unwrap();
+            }
+            tx.commit().unwrap();
+        }
+        call_put_spam_model(
+            state.clone(),
+            user,
+            PutSpamModelRequest {
+                sealed_model: vec![0xEEu8; 64],
+                history_op: Some(SpamHistoryOp::Insert {
+                    message_id: vec![0x99u8; 32],
+                    mailbox: "Junk".into(),
+                    sealed_subject: vec![0xC1u8; 24],
+                    sealed_delta: vec![0xD1u8; 48],
+                    label: SpamLabel::Spam,
+                    source: TrainingSource::ManualOther,
+                }),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("insert lands");
+        let conn = state.db.conn().await;
+        let count = |actor: [u8; 32]| -> i64 {
+            conn.query_row(
+                "SELECT COUNT(*) FROM spam_training_history WHERE actor_id = ?1",
+                [actor.to_vec()],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        assert_eq!(count(user), 4, "the caller's own rows are all kept");
+        assert_eq!(count(other), SPAM_HISTORY_MAX_ROWS_PER_ACTOR);
+    }
+
+    /// The per-actor ceiling: an insert past
+    /// `SPAM_HISTORY_MAX_ROWS_PER_ACTOR` prunes the actor's oldest row and keeps
+    /// the newest; another actor's rows are untouched.
+    #[tokio::test]
+    async fn put_spam_model_history_insert_past_the_ceiling_prunes_the_oldest() {
+        use crate::spam_model_seal::SPAM_HISTORY_MAX_ROWS_PER_ACTOR;
+        let state = fixture_state().await;
+        let user = [0x96u8; 32];
+        let other = [0x97u8; 32];
+        state.db.create_user(&user, "free", "test").await.unwrap();
+        // Fill the ceiling with old rows (distinct ascending created_at), plus
+        // one row of another actor that must survive.
+        {
+            let conn = state.db.conn().await;
+            let tx = conn.unchecked_transaction().unwrap();
+            for (actor, i) in (0..SPAM_HISTORY_MAX_ROWS_PER_ACTOR)
+                .map(|i| (user, i))
+                .chain(std::iter::once((other, 0)))
+            {
+                tx.execute(
+                    "INSERT INTO spam_training_history
+                        (history_id, actor_id, message_id, mailbox, label, source, model_delta_applied, created_at, sealed_subject)
+                     VALUES (?1, ?2, ?3, 'Junk', 'spam', 'manual_other', x'D1', ?4, x'C1')",
+                    rusqlite::params![
+                        (i as u64 + if actor == other { 1 << 40 } else { 0 })
+                            .to_be_bytes()
+                            .to_vec(),
+                        actor.to_vec(),
+                        vec![0x10u8; 32],
+                        i + 1,
+                    ],
+                )
+                .unwrap();
+            }
+            tx.commit().unwrap();
+        }
+        let outcome = call_put_spam_model(
+            state.clone(),
+            user,
+            PutSpamModelRequest {
+                sealed_model: vec![0xEEu8; 64],
+                history_op: Some(SpamHistoryOp::Insert {
+                    message_id: vec![0x98u8; 32],
+                    mailbox: "Junk".into(),
+                    sealed_subject: vec![0xC1u8; 24],
+                    sealed_delta: vec![0xD1u8; 48],
+                    label: SpamLabel::Spam,
+                    source: TrainingSource::ManualOther,
+                }),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("insert past the ceiling still lands")
+        .outcome;
+        assert_eq!(outcome, PutSpamModelOutcome::Written);
+        let conn = state.db.conn().await;
+        let count = |actor: [u8; 32]| -> i64 {
+            conn.query_row(
+                "SELECT COUNT(*) FROM spam_training_history WHERE actor_id = ?1",
+                [actor.to_vec()],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        assert_eq!(count(user), SPAM_HISTORY_MAX_ROWS_PER_ACTOR);
+        assert_eq!(count(other), 1, "another actor's rows are untouched");
+        let oldest_left: i64 = conn
+            .query_row(
+                "SELECT MIN(created_at) FROM spam_training_history WHERE actor_id = ?1",
+                [user.to_vec()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(oldest_left, 2, "the single oldest row (created_at 1) went");
+        let newest: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM spam_training_history WHERE actor_id = ?1 AND message_id = ?2",
+                rusqlite::params![user.to_vec(), vec![0x98u8; 32]],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(newest, 1, "the newest row is kept");
     }
 
     /// The MDA path parses `req.actor_id` as the 32-byte target; a short id is

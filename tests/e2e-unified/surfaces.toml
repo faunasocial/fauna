@@ -345,8 +345,8 @@ tracked = "mail-settings.md"
 
 [mail-token-refresh-clock]
 kind = "harness"
-built = ["android", "ios", "linux", "macos", "tui", "web"]
-detail = "the shared refresh and its clock are in place; this app's automation agent does not route the command yet (windows is the last app without the route)"
+built = ["android", "ios", "linux", "macos", "tui", "web", "windows"]
+detail = "the `mail_token_refresh_advance_clock` agent command (the submission-token refresh's clock, convention 14) is routed on every app's test agent over the shared `token_refresh` clock, and every app runs the shared refresh (windows was the last to route the clock)"
 tracked = "mail-credentials.md § Trigger taxonomy"
 
 [member-review-defer-button]
@@ -432,12 +432,6 @@ kind = "harness"
 built = ["android", "ios", "linux", "macos", "tui", "web", "windows"]
 detail = "the button copies, but only tui, linux, web, macos, ios, windows and android report the value it wrote, so a test cannot assert what reached the clipboard"
 tracked = "profile.md § User actions; the cross-app lift"
-
-[profile-handle-primary-domain]
-kind = "product"
-built = ["android", "ios", "linux", "macos", "tui", "web"]
-detail = "windows' SELF header falls back to the bare handle (or the actor id) and never reads the account's live domain"
-tracked = ""
 
 [profile-offers-browse]
 kind = "product"

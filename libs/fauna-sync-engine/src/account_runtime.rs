@@ -749,21 +749,21 @@ where
         let custody = &mut self.custody;
         // The two withdrawal snapshots both peer-leg admission halves read
         // (`account-sync-plane.md` § The admission seam → *Validity and
-        // severance*): revoked custody grants and removed fleet devices. Right
+        // severance*): revoked custody grants and verified fleet members. Right
         // after the fleet walk, so a sibling's removal row merged THIS pass is
         // already severing by the dial below — and before the ensure step, so a
         // pass that binds reads sets derived this pass. That ordering is not
         // what keeps a first bind honest when a refresh FAILS, though: a failed
         // refresh leaves its snapshot as it was, which before any success is
         // underived, and every view over an underived snapshot refuses its arm
-        // (`peer_leg::WithdrawalSnapshot`). After a success, a failure keeps the
+        // (`peer_leg::DerivedSet`). After a success, a failure keeps the
         // last derived set in force until a later pass succeeds — the stated
         // bound, surfaced here as the step error.
         if let Err(e) = custody.refresh_revoked(store, &peer.revoked).await {
             push_step_error(report, format!("custody-revocation snapshot: {e:#}"), &e);
         }
-        if let Err(e) = crate::peer_leg::refresh_removed_devices(peer, store, trust).await {
-            push_step_error(report, format!("removed-device snapshot: {e:#}"), &e);
+        if let Err(e) = crate::peer_leg::refresh_fleet_members(peer, store, trust).await {
+            push_step_error(report, format!("fleet-member snapshot: {e:#}"), &e);
         }
         // The peer-leg ensure step (W5.7 — holder-only by placement: pump passes
         // are the holder's). Before the device-endpoints step so a first bind's

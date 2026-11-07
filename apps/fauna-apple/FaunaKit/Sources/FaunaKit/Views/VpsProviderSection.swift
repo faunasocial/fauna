@@ -86,11 +86,11 @@ public func vpsProviderLinkAndHelp(provider: ProviderMeta) -> some View {
 public func vpsUpdateChannelSection(vm: OnboardingVM) -> some View {
     VStack(alignment: .leading, spacing: 4) {
         Text(L.onboarding.vpsConfig.updateChannelHeading).font(.headline)
-        ForEach(Array(updateChannelRows.enumerated()), id: \.offset) { _, row in
+        ForEach(Array(vm.machine.updateChannelRows().enumerated()), id: \.offset) { _, row in
             let id = "\(Ids.vpsConfigUpdateChannelRow)[\(row.id)]"
             let selected = { vm.machine.provisionUpdateChannel() == row.channel }
             let text = {
-                "\(row.label) — \(L.lookup(vm.machine.updateChannelDescriptionKeyForRow(channel: row.channel)))"
+                "\(L.lookup(row.labelKey)) — \(L.lookup(vm.machine.updateChannelDescriptionKeyForRow(channel: row.channel)))"
             }
             vpsChannelOption(id: id, selected: selected(), text: text()) {
                 vm.machine.setProvisionUpdateChannel(channel: row.channel)
@@ -108,14 +108,6 @@ public func vpsUpdateChannelSection(vm: OnboardingVM) -> some View {
         L.onboarding.vpsConfig.updateChannelHeading
     })
 }
-
-/// `UpdateChannel`'s declaration order (`UpdateChannel::ALL`) with the id each
-/// row is keyed by and its label.
-private let updateChannelRows: [(channel: UpdateChannel, id: String, label: String)] = [
-    (.stable, "stable", L.onboarding.vpsConfig.updateChannelStableLabel),
-    (.test, "test", L.onboarding.vpsConfig.updateChannelTestLabel),
-    (.dev, "dev", L.onboarding.vpsConfig.updateChannelDevLabel),
-]
 
 /// A single-select radio row: a leading circle glyph, then the channel's label
 /// and description.

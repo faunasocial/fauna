@@ -32,6 +32,13 @@ binding, and the member's row — now reading `reader`, which is what a demotion
 does — painted neither the warning nor the parked binding. The row asked the
 access alone; it now asks `fauna_folders_machine::binding_section`, which keys
 on the park too.
+
+The android arm (`test_a_demoted_writer_on_the_documents_provider_…`) is the
+capability-host variant (`file-sync.md` § Multi-writer shared sets →
+*Revocation on a capability host*): an android member binds nothing, but its
+documents provider is a writing seat, so the member's writes go through the
+provider the way another app's picker sends them, and the park is the host's
+persisted mark rather than an agent's binding.
 """
 
 import secrets
@@ -52,7 +59,8 @@ pytestmark = [
     # tui leads; linux, whose member row carried the same access-only rule,
     # adopted the shared `binding_section` decision in the same change; macOS
     # and windows (each as the member, per-param below) followed. web, iOS and
-    # android bind no local folder at all.
+    # android bind no local folder at all; android's documents provider is the
+    # capability-host arm at the foot of this module.
     pytest.mark.tui,
     pytest.mark.linux,
 ]
@@ -82,8 +90,103 @@ def _recorded_path_hashes(nest, owner, set_name: str) -> set[str]:
     return {c.get("path_hash") for c in reply.get("changes", [])}
 
 
+def _recorded_path_hash_counts(nest, owner, set_name: str) -> dict[str, int]:
+    """How many changes the nest has recorded per path in ``set_name`` — a
+    document the provider created empty is recorded once, so a refused edit is
+    one that adds none."""
+    from collections import Counter
+
+    from common.auth import sync_changes_list
+
+    reply = sync_changes_list(
+        nest["port"],
+        secret_key=owner["signing_key"].encode().hex(),
+        folder=set_name,
+        base_url=nest["url"],
+    )
+    return dict(Counter(c.get("path_hash") for c in reply.get("changes", [])))
+
+
 def _member_row(b, set_name: str) -> int | None:
     return b.folder_index(set_name)
+
+
+def _await_member_keypackage(nest, member) -> None:
+    """The owner's share must fetch one of the member's KeyPackages; read the
+    non-destructive count so the probe does not consume it."""
+    from tests.api import conv_api
+
+    wait_until(
+        lambda: conv_api.keypackage_count(nest["port"], member, member["actor_id_hex"]) > 0,
+        30.0,
+        diagnose=lambda: "the member never published a KeyPackage the owner could admit",
+    )
+
+
+def _owner_shares_as_writer(owner_app, member, set_name: str) -> None:
+    """Owner: create the folder, share it with the member, make them a writer —
+    every step through the owner's own controls."""
+    ob = owner_app.backups
+    ob.navigate_folders()
+    ob.create_folder_via_wizard(set_name)
+    owner_row = ob.find_and_expand_folder(set_name)
+    ob.open_share_dialog()
+    ob.share_recipient(handle=member["handle"], actor_id_hex=member["actor_id_hex"])
+    wait_until(
+        lambda: ob.shared_member_count() == 1,
+        20.0,
+        diagnose=lambda: f"the share never landed; error={owner_app.error_text()!r}",
+    )
+    ob.set_member_access("writer", 0, row=owner_row)
+    wait_until(
+        lambda: ob.member_access(0, row=owner_row) == "writer",
+        15.0,
+        diagnose=lambda: f"the writer grant never persisted; error={owner_app.error_text()!r}",
+    )
+
+
+def _member_accepts(member_app, set_name: str) -> None:
+    """Member: accept the knock and wait for the folder to list."""
+    mb = member_app.backups
+    mb.navigate_folders()
+    assert mb.wait_for_pending_shares(1) == 1, (
+        f"[member] the share should wait as one pending knock; error={member_app.error_text()!r}"
+    )
+    mb.accept_pending_share(0)
+    assert mb.wait_for_pending_shares(0) == 0, (
+        f"[member] accepting should consume the knock; error={member_app.error_text()!r}"
+    )
+
+    def _row_listed():
+        if _member_row(mb, set_name) is not None:
+            return True
+        mb.navigate_devices()
+        mb.navigate_folders()
+        return False
+
+    wait_until(
+        _row_listed,
+        90.0,
+        diagnose=lambda: (
+            f"[member] the accepted folder never appeared in the list; "
+            f"error={member_app.error_text()!r}"
+        ),
+    )
+
+
+def _owner_demotes(owner_app, set_name: str) -> None:
+    """Owner: take write access away through the member row's role select."""
+    ob = owner_app.backups
+    ob.navigate_folders()
+    owner_row = ob.find_and_expand_folder(set_name)
+    if ob.shared_member_count() == 0:
+        ob.expand_folder(owner_row)  # the toggle closed a row left open
+    ob.set_member_access("reader", 0, row=owner_row)
+    wait_until(
+        lambda: ob.member_access(0, row=owner_row) == "reader",
+        15.0,
+        diagnose=lambda: f"the demotion never persisted; error={owner_app.error_text()!r}",
+    )
 
 
 @pytest.mark.parametrize(
@@ -129,67 +232,21 @@ def test_a_demoted_writer_sees_the_folder_stop_syncing_and_keeps_their_files(
     request, folder_share_owner_app, folder_share_recipient_app, tmp_path
 ):
     from helpers.sync_agent_config import bound_sync_folder, describe_agent_config
-    from tests.api import conv_api
 
     owner_app, nest, owner = folder_share_owner_app
     member_app, _nest, member = folder_share_recipient_app
     request.addfinalizer(lambda: print(agent_diagnosis(member_app, "member")))
     request.addfinalizer(lambda: print(agent_diagnosis(owner_app, "owner")))
 
-    # The owner's share must fetch one of the member's KeyPackages; read the
-    # non-destructive count so the probe does not consume it.
-    wait_until(
-        lambda: conv_api.keypackage_count(nest["port"], member, member["actor_id_hex"]) > 0,
-        30.0,
-        diagnose=lambda: "the member never published a KeyPackage the owner could admit",
-    )
+    _await_member_keypackage(nest, member)
 
     # ── 1. Owner: create, share, make them a writer ────────────────────────
     set_name = f"revoke-{secrets.token_hex(4)}"
-    ob = owner_app.backups
-    ob.navigate_folders()
-    ob.create_folder_via_wizard(set_name)
-    owner_row = ob.find_and_expand_folder(set_name)
-    ob.open_share_dialog()
-    ob.share_recipient(handle=member["handle"], actor_id_hex=member["actor_id_hex"])
-    wait_until(
-        lambda: ob.shared_member_count() == 1,
-        20.0,
-        diagnose=lambda: f"the share never landed; error={owner_app.error_text()!r}",
-    )
-    ob.set_member_access("writer", 0, row=owner_row)
-    wait_until(
-        lambda: ob.member_access(0, row=owner_row) == "writer",
-        15.0,
-        diagnose=lambda: f"the writer grant never persisted; error={owner_app.error_text()!r}",
-    )
+    _owner_shares_as_writer(owner_app, member, set_name)
 
     # ── 2. Member: accept, bind, and a first file syncs ────────────────────
     mb = member_app.backups
-    mb.navigate_folders()
-    assert mb.wait_for_pending_shares(1) == 1, (
-        f"[member] the share should wait as one pending knock; error={member_app.error_text()!r}"
-    )
-    mb.accept_pending_share(0)
-    assert mb.wait_for_pending_shares(0) == 0, (
-        f"[member] accepting should consume the knock; error={member_app.error_text()!r}"
-    )
-
-    def _row_listed():
-        if _member_row(mb, set_name) is not None:
-            return True
-        mb.navigate_devices()
-        mb.navigate_folders()
-        return False
-
-    wait_until(
-        _row_listed,
-        90.0,
-        diagnose=lambda: (
-            f"[member] the accepted folder never appeared in the list; "
-            f"error={member_app.error_text()!r}"
-        ),
-    )
+    _member_accepts(member_app, set_name)
 
     member_folder = tmp_path / "member-bound"
     member_folder.mkdir()
@@ -207,16 +264,7 @@ def test_a_demoted_writer_sees_the_folder_stop_syncing_and_keeps_their_files(
     )
 
     # ── 3. Owner: take write access away ───────────────────────────────────
-    ob.navigate_folders()
-    owner_row = ob.find_and_expand_folder(set_name)
-    if ob.shared_member_count() == 0:
-        ob.expand_folder(owner_row)  # the toggle closed a row left open
-    ob.set_member_access("reader", 0, row=owner_row)
-    wait_until(
-        lambda: ob.member_access(0, row=owner_row) == "reader",
-        15.0,
-        diagnose=lambda: f"the demotion never persisted; error={owner_app.error_text()!r}",
-    )
+    _owner_demotes(owner_app, set_name)
 
     # ── 4. Member: the next change is refused, and the app says so ─────────
     atomic_write(member_folder / second, second_bytes)
@@ -283,3 +331,132 @@ def test_a_demoted_writer_sees_the_folder_stop_syncing_and_keeps_their_files(
             f"[member] {name} must stay on disk exactly as written — a park never "
             f"touches local files (got {path.read_text() if path.exists() else 'MISSING'!r})"
         )
+
+
+@pytest.mark.parametrize(
+    "folder_share_owner_app,folder_share_recipient_app",
+    [pytest.param("tui", "android", marks=pytest.mark.android)],
+    indirect=True,
+)
+@pytest.mark.real_conversations
+# Two apps + a real MLS share/accept, then two provider writes (the baseline
+# and the refused one). A ceiling, not an expectation.
+@pytest.mark.timeout(1500)
+@pytest.mark.feature("share-a-folder")
+def test_a_demoted_writer_on_the_documents_provider_is_told_and_keeps_the_unsent_edit(
+    request, folder_share_owner_app, folder_share_recipient_app
+):
+    """The android member's only presence is the documents provider. Their
+    second edit is one they had OPEN when the owner took write access away —
+    opened while the provider still advertised write, closed after — so its
+    close meets the refusal: the host persists its mark and keeps the body in
+    its kept root. Asserted, each on its own observable: the warning on the
+    member's row; the nest never recording the edit; the provider still
+    serving the edit byte for byte; and the host's mark."""
+    owner_app, nest, owner = folder_share_owner_app
+    member_app, _nest, member = folder_share_recipient_app
+    request.addfinalizer(lambda: print(agent_diagnosis(owner_app, "owner")))
+    drv = member_app.driver
+
+    _await_member_keypackage(nest, member)
+    set_name = f"revoke-{secrets.token_hex(4)}"
+    _owner_shares_as_writer(owner_app, member, set_name)
+    _member_accepts(member_app, set_name)
+
+    # ── The set in the provider's root, as a picker lists it ──────────────
+    found: dict = {}
+
+    def _set_presented():
+        for child in drv.documents_children():
+            if set_name in child.get("name", ""):
+                found.update(child)
+                return True
+        return False
+
+    wait_until(
+        _set_presented,
+        90.0,
+        interval=2.0,
+        diagnose=lambda: (
+            f"[member] the provider never presented {set_name!r}; root lists "
+            f"{drv.documents_children()!r}"
+        ),
+    )
+    set_doc = found["id"]
+
+    # ── Baseline: a writer's provider write reaches the nest ──────────────
+    first, second = (f"{stem}-{secrets.token_hex(3)}.txt" for stem in ("before", "after"))
+    first_bytes = f"written while a writer — {secrets.token_hex(8)}\n".encode()
+    second_bytes = f"written after the demotion — {secrets.token_hex(8)}\n".encode()
+    first_doc = drv.documents_create(set_doc, first)
+    drv.documents_write(first_doc, first_bytes)
+    # The second document exists (created empty) while a writer; its edit is
+    # opened below while the plan still advertises write.
+    second_doc = drv.documents_create(set_doc, second)
+    wait_until(
+        lambda: {_path_hash(first), _path_hash(second)}
+        <= set(_recorded_path_hash_counts(nest, owner, set_name)),
+        120.0,
+        interval=2.0,
+        diagnose=lambda: (
+            f"the baseline never reached the nest through the provider; recorded "
+            f"{_recorded_path_hash_counts(nest, owner, set_name)!r}; "
+            f"parks {drv.documents_parks()!r}"
+        ),
+    )
+    handle = drv.documents_open_write(second_doc)
+    before = _recorded_path_hash_counts(nest, owner, set_name)
+    mb = member_app.backups
+    mb.navigate_folders()
+    assert drv.is_absent(WARNING), (
+        "[member] a writer whose grant stands must not be told it was taken away"
+    )
+
+    # ── The owner takes write access away; the open edit is closed after ──
+    _owner_demotes(owner_app, set_name)
+    drv.documents_write_close(handle, second_bytes)
+
+    def _warning_shown():
+        if drv.is_visible(WARNING):
+            return True
+        # The fold runs on the folder-list refresh: re-enter the page.
+        mb.navigate_devices()
+        mb.navigate_folders()
+        return drv.is_visible(WARNING)
+
+    wait_until(
+        _warning_shown,
+        240.0,
+        interval=2.0,
+        diagnose=lambda: (
+            f"[member] the member's row never said the folder stopped syncing. "
+            f"The provider's parks read {drv.documents_parks()!r} (access_revoked "
+            f"true ⇒ the host parked and only the row failed to say so). "
+            f"error={member_app.error_text()!r}"
+        ),
+    )
+    assert drv.get_text(WARNING), "the warning must carry its words"
+
+    # ── The host's mark ───────────────────────────────────────────────────
+    parks = [p for p in drv.documents_parks() if set_name in p.get("name", "")]
+    assert parks and parks[0].get("access_revoked") is True, (
+        f"the host must persist its park mark on the set's state DB, or an "
+        f"unloaded provider would forget it: {parks!r}"
+    )
+
+    # ── The nest never recorded the edit ──────────────────────────────────
+    after = _recorded_path_hash_counts(nest, owner, set_name)
+    assert after.get(_path_hash(first)), (
+        "the baseline file must be on the nest (the vacuity guard for the next line)"
+    )
+    assert after.get(_path_hash(second)) == before.get(_path_hash(second)), (
+        f"an edit closed after the demotion must never reach the folder "
+        f"(recorded {before.get(_path_hash(second))} → {after.get(_path_hash(second))})"
+    )
+
+    # ── …and the provider still serves what the member saved ──────────────
+    served = drv.documents_read(second_doc)
+    assert served == second_bytes, (
+        f"[member] the picker must show what the member saved — the kept body "
+        f"before the cache (got {served!r})"
+    )

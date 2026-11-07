@@ -498,8 +498,20 @@ jobs:
             --build-arg FAUNA_VERSION=${{ steps.version.outputs.version }} \
             --target web-tree \
             --output type=local,dest="$RUNNER_TEMP/web-tree" .
+          # The compiler that built the chunks is the rust-wasm stage's pinned
+          # clang, not this runner's: export its version (a cached stage).
+          rm -rf "$RUNNER_TEMP/wasm32-cc"
+          docker buildx build "${builder[@]}" \
+            --platform "linux/${{ matrix.arch }}" \
+            --build-arg BUILD_JOBS="${{ steps.jobs.outputs.jobs }}" \
+            --build-arg FAUNA_BUILD_COMMIT=${{ github.sha }} \
+            --build-arg FAUNA_BUILD_ID="$BUILD_ID" \
+            --build-arg FAUNA_VERSION=${{ steps.version.outputs.version }} \
+            --target wasm32-cc-version \
+            --output type=local,dest="$RUNNER_TEMP/wasm32-cc" .
           uv run --no-project python scripts/web-asset-manifest.py write \
-            "$RUNNER_TEMP/web-tree" --commit ${{ github.sha }}
+            "$RUNNER_TEMP/web-tree" --commit ${{ github.sha }} \
+            --wasm32-cc-version-file "$RUNNER_TEMP/wasm32-cc/wasm32-cc-version.txt"
           test -f "$RUNNER_TEMP/web-tree/share-viewer.html" \
             || { echo "::error::the exported web tree holds no share-viewer.html"; exit 1; }
           du -sh "$RUNNER_TEMP/web-tree"

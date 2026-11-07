@@ -127,7 +127,7 @@ Stamped 2026-11-01 at a6047fbd8b.
 |---|---|---|
 | web | ⚠ partial | 0.1.5-dev+f817d854 standalone |
 | linux | ✅ full | 0.1.5-dev+1e755069 standalone |
-| windows | ✅ full | 0.1.2-dev+be5542fa.dirty standalone |
+| windows | ⚠ partial | 0.1.5-dev+1e755069 standalone |
 | macos | ✅ full | 0.1.5-dev+04a96986 standalone |
 | ios | ⚠ partial | 0.1.5-dev+27af13db standalone |
 | android |  no run recorded | |
@@ -135,8 +135,8 @@ Stamped 2026-11-01 at a6047fbd8b.
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
-| 1 | app | `tests/e2e-unified/tests/test_connected_apps.py::test_a_typed_code_connects_the_app_and_revoke_ends_it` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
-| 2 | app | `tests/e2e-unified/tests/test_connected_apps.py::test_a_typed_code_connects_the_app_and_revoke_ends_it` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 1 | app | `tests/e2e-unified/tests/test_connected_apps.py::test_a_typed_code_connects_the_app_and_revoke_ends_it` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): error, tui (linux): passed, tui (macos): passed |
+| 2 | app | `tests/e2e-unified/tests/test_connected_apps.py::test_a_typed_code_connects_the_app_and_revoke_ends_it` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): error, tui (linux): passed, tui (macos): passed |
 | 2 | app | `tests/e2e-unified/tests/test_connected_apps.py::test_a_revoke_bites_at_the_very_next_write_and_each_session_is_ceilinged` | web (linux): passed, linux (linux): passed, tui (linux): passed, tui (macos): passed |
 | 3 | app | `tests/e2e-unified/tests/test_connected_apps.py::test_a_quiet_push_lands_in_the_tray_and_never_show_blocks_the_app` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 4 | nest | `tests/e2e-unified/tests/api/test_oauth_consent_starts.py::test_a_quiet_push_notifies_only_a_client_alice_has_approved` | nest (linux): passed |
@@ -147,7 +147,7 @@ Stamped 2026-11-01 at a6047fbd8b.
 | 9 | app | `tests/e2e-unified/tests/test_connected_apps.py::test_an_app_signed_in_with_an_app_password_has_its_row` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 10 | app | `tests/e2e-unified/tests/test_connected_apps.py::test_a_mail_app_password_is_a_roster_row_and_no_longer_on_the_mail_page` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 11 | app | `tests/e2e-unified/tests/test_plugin_install.py::test_a_user_connects_a_plugin_from_its_settings_card_and_disconnects_it` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
-| 12 | app | `tests/e2e-unified/tests/test_connected_apps.py::test_each_row_says_when_the_app_was_last_used_and_how_long_it_lasts` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 12 | app | `tests/e2e-unified/tests/test_connected_apps.py::test_each_row_says_when_the_app_was_last_used_and_how_long_it_lasts` | web (linux): passed, linux (linux): passed, windows (windows): failed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 13 | app | `tests/e2e-unified/tests/test_connected_apps.py::test_a_code_nobody_issued_gets_one_plain_message_and_opens_no_card` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 14 | app | `tests/e2e-unified/tests/test_connected_apps.py::test_a_declined_handoff_tells_the_app_no` | web (linux): skipped, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 14 | app | `tests/e2e-unified/tests/test_connected_apps.py::test_declining_a_quiet_push_tells_the_app_no` | web (linux): passed, tui (linux): passed, tui (macos): passed |

@@ -77,14 +77,18 @@ impl HostServices for Recorder {
         Box::pin(async move { Ok(self.state(&key)) })
     }
 
-    fn state_put(&self, key: String, value: Vec<u8>) -> BoxFut<'_, anyhow::Result<()>> {
+    fn state_put(
+        &self,
+        key: String,
+        value: Vec<u8>,
+    ) -> BoxFut<'_, anyhow::Result<Result<(), String>>> {
         self.state.lock().unwrap().insert(key, value);
-        Box::pin(async { Ok(()) })
+        Box::pin(async { Ok(Ok(())) })
     }
 
-    fn state_delete(&self, key: String) -> BoxFut<'_, anyhow::Result<()>> {
+    fn state_delete(&self, key: String) -> BoxFut<'_, anyhow::Result<Result<(), String>>> {
         self.state.lock().unwrap().remove(&key);
-        Box::pin(async { Ok(()) })
+        Box::pin(async { Ok(Ok(())) })
     }
 
     fn holder_key(&self) -> &HolderKey {
@@ -272,6 +276,25 @@ async fn memory_growth_over_the_cap_is_refused() {
         .handle_ingress(IngressRequest {
             method: "GET".into(),
             path: "/grow".into(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(reply.status, 507, "the grow was refused, not trapped");
+    assert!(!plugin.is_poisoned());
+}
+
+/// A guest asking a table for far more elements than
+/// [`fauna_plugin_host::PLUGIN_MAX_TABLE_ELEMENTS`] sees a failed
+/// `table.grow` — the nest allocates nothing for it — and the instance lives.
+#[tokio::test]
+async fn table_growth_over_the_cap_is_refused() {
+    let rec = Recorder::new(vec![]);
+    let mut plugin = instance(rec, OutboundPolicy::none()).await;
+    let reply = plugin
+        .handle_ingress(IngressRequest {
+            method: "GET".into(),
+            path: "/table".into(),
             ..Default::default()
         })
         .await

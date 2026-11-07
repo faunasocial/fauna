@@ -3200,6 +3200,14 @@ table personalization_models
   item sample_count INTEGER NOT NULL DEFAULT 0
   item sealed_blob BLOB NOT NULL
   item updated_at INTEGER NOT NULL
+table plugin_account_settings
+  col actor_id BLOB notnull=1 default=- pk=1 hidden=0
+  col principal_id BLOB notnull=1 default=- pk=2 hidden=0
+  col value BLOB notnull=1 default=- pk=0 hidden=0
+  item PRIMARY KEY (actor_id, principal_id)
+  item actor_id BLOB NOT NULL
+  item principal_id BLOB NOT NULL
+  item value BLOB NOT NULL
 table plugin_state
   col principal_id BLOB notnull=1 default=- pk=1 hidden=0
   col key TEXT notnull=1 default=- pk=2 hidden=0

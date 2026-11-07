@@ -25,6 +25,9 @@ import sys
 #: (release.yml) sets neither.
 RELEASE_TEST_FLAVOR = "win-arm64:release:test-helpers"
 
+#: The MSI's own inputs — what it packages beside the staged Rust binaries. The
+#: Rust those binaries are built from is `workspace_inputs`, read from the helper
+#: bins' registry, never named here crate by crate.
 SOURCE_PATTERNS = [
     "apps/fauna-windows/installer/*.wxs",
     "apps/fauna-windows/*/Cargo.toml",
@@ -33,25 +36,30 @@ SOURCE_PATTERNS = [
     "apps/fauna-windows/FaunaApp/**/*.cs",
     "apps/fauna-windows/FaunaApp/**/*.xaml",
     "apps/fauna-windows/shell-ext/src/icons/*.ico",
-    # The Go MDA the Bridge feature ships (built by `just windows-mail-bridge-build`)
-    # + the gnullvm fauna_ffi.dll it links, so a change to either rebuilds the MSI.
+    # The Go MDA the Bridge feature ships (built by `just windows-mail-bridge-build`);
+    # the gnullvm fauna_ffi.dll it links is `libs/`, a workspace input.
     "bins/fauna-bridges/**/*.go",
-    "libs/fauna-ffi/src/**/*.rs",
-    # The terminal app the TerminalApp feature ships, and the cli app's device
-    # shell beside it (the catalog crate is its whole surface).
-    "apps/fauna-tui/src/**/*.rs",
-    "apps/fauna-cli/src/**/*.rs",
-    "libs/fauna-cli/src/**/*.rs",
-    # The Sync feature's agent and the nest the NestService links: every staged
-    # binary's own crate is an input, or an edit to it reads the cached MSI fresh.
-    "bins/fauna-sync-agent/Cargo.toml",
-    "bins/fauna-sync-agent/src/**/*.rs",
-    "bins/fauna-nest/Cargo.toml",
-    "bins/fauna-nest/src/**/*.rs",
     # Where each staged binary's features are declared (the agent's `e2e-agent`
     # among them): a flavour change is an input like a source edit.
     "tests/e2e-unified/helpers/helper_bins.py",
 ]
+
+
+def workspace_inputs() -> tuple[tuple[str, ...], list[str]]:
+    """The roots the staged Rust binaries are built from, and the excludes over
+    them — the helper bins' own input definition (`helper_bins._newest_source_mtime`):
+    the workspace every binary links (`libs/`, `Cargo.lock`, the toolchain pin)
+    plus the own crates of each registry entry the MSI stages. Every staged binary — the
+    agent, the nest service, the release `fauna_ffi.dll` the publish bundles —
+    links most of `libs/`, so an edit to any crate there is an input."""
+    from common.nest import _EXAMPLE_SOURCE_ROOTS, _NEST_SOURCE_EXCLUDES
+    from helpers import helper_bins
+
+    roots = list(_EXAMPLE_SOURCE_ROOTS)
+    for entry in helper_bins.REGISTRY.values():
+        if helper_bins._WINDOWS_INSTALLER_MODULE in entry.modules:
+            roots.extend(rel for rel in entry.sources if rel not in roots)
+    return tuple(roots), list(_NEST_SOURCE_EXCLUDES)
 
 
 def is_admin() -> bool:
@@ -77,7 +85,35 @@ def _git_ignored(paths):
 
 
 def max_mtime(patterns):
-    """Return the maximum mtime across all files matching the glob patterns.
+    """Return the maximum mtime across all files matching the glob patterns
+    (`_newest`: gitignored output never counts)."""
+    return _newest([p for pattern in patterns for p in glob.glob(pattern, recursive=True)])
+
+
+def _tree_files(repo: str, roots, excludes):
+    """Every file under `roots` (files or directories, relative to `repo`) that
+    no exclude glob matches — `build-if-stale.py`'s one exclusion semantics. A
+    root the tree lacks contributes nothing."""
+    from pathlib import Path
+
+    from common.nest import _load_build_if_stale
+
+    excluded = _load_build_if_stale()._excluded
+    for rel in roots:
+        root = Path(repo, rel)
+        if root.is_file():
+            candidates = [root]
+        elif root.is_dir():
+            candidates = (p for p in root.rglob("*") if p.is_file())
+        else:
+            continue
+        for path in candidates:
+            if not excluded(path, excludes):
+                yield str(path)
+
+
+def _newest(paths):
+    """The newest mtime among `paths`.
 
     Gitignored files are build OUTPUT and never count as input: `bin/`/`obj/`
     (the WinUI publish writes generated *.cs there), `Generated/uniffi/` and the
@@ -85,7 +121,7 @@ def max_mtime(patterns):
     takes the stamp, so counting them made its cache miss on every run following
     a build. (Tracked generated files such as `Generated/UiIds.cs` stay inputs.)
     """
-    paths = [p for pattern in patterns for p in glob.glob(pattern, recursive=True)]
+    paths = list(paths)
     ignored = _git_ignored(paths)
     best = 0.0
     for path in paths:
@@ -108,8 +144,15 @@ def msi_paths(repo: str) -> tuple[str, str]:
 
 
 def source_mtime(repo: str) -> float:
-    """The newest of the MSI's tracked inputs — what its stamp records."""
-    return max_mtime([os.path.join(repo, p) for p in SOURCE_PATTERNS])
+    """The newest of the MSI's tracked inputs — what its stamp records: its own
+    files (`SOURCE_PATTERNS`) and the Rust its staged binaries are built from
+    (`workspace_inputs`), read in one pass so gitignored output is left out of
+    both."""
+    roots, excludes = workspace_inputs()
+    return _newest([
+        *(p for pattern in SOURCE_PATTERNS for p in glob.glob(os.path.join(repo, pattern), recursive=True)),
+        *_tree_files(repo, roots, excludes),
+    ])
 
 
 def msi_is_cached(repo: str, current_mtime: float) -> bool:

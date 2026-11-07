@@ -229,7 +229,14 @@ which forces the host-wrapper path deterministically. The same window holds for 
 conversations SESSION a page was handed (the actor change closes it), so every page
 resolves its manager through `ConversationsManagerHost.ManagerFor`, which answers
 "nothing" for a retired session — never the host's manager, which after the actor
-change is the incoming identity's.
+change is the incoming identity's. The Feed page has the same window: the dropped feed
+manager still ticks between the reset and the page's teardown, so `FeedPage.Refresh`
+paints only while `FeedManagerHost.Holds` the page's manager. A repaint on such a tick
+re-published the outgoing identity's window to the e2e state after
+`AppDataSnapshot.Clear` had emptied it, so the incoming account's first reads saw the
+old ♥ and the old card order. Fixed 2026-11-06. The rule is pinned by
+`FeedCueTrackerHostTests.OnlyTheInstalledManagerIsHeld_NeverOneAnActorChangeOrARebuildLeftBehind`,
+and the journey that exposed it is `test_archive_import.py`'s follower like.
 
 The producer side of the same window: **a disposed `NestRpcClient` is silent.** Its
 own `Disconnect()` makes the connection-state watch yield a last `Disconnected`, and

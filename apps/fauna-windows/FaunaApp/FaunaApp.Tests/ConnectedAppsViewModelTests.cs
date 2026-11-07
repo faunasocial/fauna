@@ -749,6 +749,14 @@ public class ConnectedAppsViewModelTests
         Assert.Equal("revoked=;status=paused", ConnectedAppsViewModel.RowAttributes(Row(paused: true)));
     }
 
+    [Fact]
+    public void A_row_whose_signer_succession_burned_reads_revoked_like_a_burned_mail_row()
+    {
+        var burnedSigner = Row(connected: false) with { @signerBurned = true };
+
+        Assert.Equal("revoked=true;status=not_connected", ConnectedAppsViewModel.RowAttributes(burnedSigner));
+    }
+
     // ── The blocked row ──
 
     [Fact]

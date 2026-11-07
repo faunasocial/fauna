@@ -201,6 +201,19 @@ fun FoldersScreen(
             defaultConflictPolicy = defaultConflictPolicy,
             pendingShares = pendingShares,
             onDemand = onDemand,
+            // The member rows whose `folder-access-revoked-warning` shows: the ONE
+            // shared decision (`binding_section`, FFI) asked with the documents
+            // provider's park as its `parked` input (`file-sync.md` § Multi-writer
+            // shared sets → *Revocation on a capability host*), injected as plain
+            // data like the lease statuses.
+            accessRevoked = snapshot?.folders.orEmpty()
+                .filter { f ->
+                    val parked = onDemand[OnDemandRowKey.of(f)]?.parked ?: false
+                    com.fauna.ffi.bindingSection(f.role, f.access, parked)
+                        .let { it.shown && it.revokedWarning }
+                }
+                .map { OnDemandRowKey.of(it) }
+                .toSet(),
             // Per-conflict localized badge text, computed here (FFI) and injected as
             // plain data — keeps FoldersContent FFI-free for Robolectric (mirrors
             // nestSnapshotsOptions below). Keyed by conflict id.
@@ -573,6 +586,9 @@ fun FoldersContent(
     // Shared sets this device holds the machinery for — ordinary, read-only
     // `folder-row`s after the folder list.
     groupScopes: List<GroupScope> = emptyList(),
+    // Member rows whose device-local section is headed by
+    // `folder-access-revoked-warning`, already decided at the Screen.
+    accessRevoked: Set<OnDemandRowKey> = emptySet(),
     modifier: Modifier = Modifier,
 ) {
     Column(
@@ -647,7 +663,13 @@ fun FoldersContent(
                 // (folders.md § Sharing) — this Content just renders what it's given.
                 val onDemandRow = onDemand[OnDemandRowKey.of(folder)]
                 if (folder.role == "member") {
-                    MemberFolderRow(folder, actions, onDemandRow, folderLeaseStatuses[folder.name])
+                    MemberFolderRow(
+                        folder,
+                        actions,
+                        onDemandRow,
+                        folderLeaseStatuses[folder.name],
+                        accessRevoked = OnDemandRowKey.of(folder) in accessRevoked,
+                    )
                 } else {
                     FolderRow(
                         folder,
@@ -1951,6 +1973,12 @@ private fun PendingShareRow(share: FfiPendingShare, actions: FoldersActions) {
  * ("Shared by ‹handle›", the precomputed `FolderSummary.ownerDisplay`), the
  * `folder-leave-button` and the hide-only `folder-on-demand-toggle` — the android
  * twin of apple's `memberFolderRow`.
+ *
+ * The documents provider is a writing seat for a writer member, so a demotion
+ * reaches it: while the provider holds the set parked the row's one
+ * device-local presence, the toggle, is headed by `folder-access-revoked-warning`
+ * (`file-sync.md` § Multi-writer shared sets → *Revocation on a capability
+ * host*; the location-binding half above stays N/A).
  */
 @Composable
 private fun MemberFolderRow(
@@ -1958,6 +1986,7 @@ private fun MemberFolderRow(
     actions: FoldersActions,
     onDemand: OnDemandRow? = null,
     leaseStatus: LocalizedText? = null,
+    accessRevoked: Boolean = false,
 ) {
     Card(modifier = Modifier.fillMaxWidth().testTag(Ids.FOLDER_ROW)) {
         Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -1987,6 +2016,16 @@ private fun MemberFolderRow(
             }
             // A reader has no body to expand and most needs to see the lock.
             LeaseStatusText(leaseStatus)
+            // A demotion is never silent: the member's own changes no longer leave
+            // this device, and what they saved stays where the picker shows it.
+            if (accessRevoked) {
+                Text(
+                    stringResource(R.string.devices_access_revoked_warning),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
+                    modifier = Modifier.testTag(Ids.FOLDER_ACCESS_REVOKED_WARNING),
+                )
+            }
             // "Show in Files" on a folder shared with the account — hide-only: the
             // membership is the seat, so the flip writes no place
             // (`on-demand-files-shared-sets.md` § Shared sets on a capability host, decision 3).

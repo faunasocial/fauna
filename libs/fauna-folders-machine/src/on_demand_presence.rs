@@ -562,6 +562,47 @@ impl OnDemandPrefs {
     }
 }
 
+/// One set's capability-host park as the app reads it from the set's state DB
+/// (`file-sync.md` § Multi-writer shared sets → *Revocation on a capability
+/// host*; the read is `fauna_ffi::sync_set_park`, the DB the host writes).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct SetPark {
+    /// The set's bare `FolderRef` wire string.
+    pub folder_id: String,
+    /// The host persisted its park mark: it rebuilt read-only at an edge whose
+    /// basis read `writer` and whose row read `reader`, or the nest refused a
+    /// write typed. Cleared only by an edge whose row reads `writer`.
+    pub access_revoked: bool,
+    /// How many rels hold local content the nest never recorded — what the
+    /// member saved and nothing sent.
+    pub unrecorded: u32,
+}
+
+/// The sets of `presences` (the sets this device presents through a capability
+/// host) whose row must head its device-local section with
+/// `folder-access-revoked-warning` — `binding_section`'s `parked` input on a
+/// capability-host app, folded here once so neither app maps it itself. A set
+/// is parked when (a) its host persisted the park mark, or (b) the row reads
+/// `reader` (`PresenceSet::read_only`) while the domain holds un-recorded rels
+/// — the state the mark names, caught even when the app refreshes before the
+/// host's next edge. A writer with un-recorded rels is mid-upload, not parked;
+/// a reader holding nothing unsent has nothing the park would warn about. A set
+/// with no read is not parked (the read fails closed at its own seam).
+#[must_use]
+pub fn parked_presences(presences: &[PresenceSet], reads: &[SetPark]) -> BTreeSet<String> {
+    presences
+        .iter()
+        .filter(|p| {
+            reads
+                .iter()
+                .filter(|r| r.folder_id == p.folder_id)
+                .any(|r| r.access_revoked || (p.read_only && r.unrecorded > 0))
+        })
+        .map(|p| p.folder_id.clone())
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -582,6 +623,43 @@ mod tests {
 
     fn docs() -> PresenceSet {
         set("docs", "local:1")
+    }
+
+    fn park(folder_id: &str, access_revoked: bool, unrecorded: u32) -> SetPark {
+        SetPark {
+            folder_id: folder_id.into(),
+            access_revoked,
+            unrecorded,
+        }
+    }
+
+    fn reader(mut s: PresenceSet) -> PresenceSet {
+        s.role = PresenceRole::SharedWithMe;
+        s.read_only = true;
+        s
+    }
+
+    #[test]
+    fn the_hosts_mark_alone_parks_a_presence() {
+        let parked = parked_presences(&[docs(), pics()], &[park("local:1", true, 0)]);
+        assert_eq!(parked, BTreeSet::from(["local:1".to_string()]));
+        // The mark parks even a row that reads writer again before the host's
+        // next edge clears it: the host, not the app, clears the mark.
+        assert!(parked_presences(&[docs()], &[park("local:1", true, 3)]).contains("local:1"));
+    }
+
+    #[test]
+    fn a_reader_holding_unrecorded_rels_parks_without_the_mark() {
+        let parked = parked_presences(&[reader(docs())], &[park("local:1", false, 2)]);
+        assert_eq!(parked, BTreeSet::from(["local:1".to_string()]));
+    }
+
+    #[test]
+    fn a_writer_mid_upload_and_a_reader_with_nothing_unsent_do_not_park() {
+        assert!(parked_presences(&[docs()], &[park("local:1", false, 2)]).is_empty());
+        assert!(parked_presences(&[reader(docs())], &[park("local:1", false, 0)]).is_empty());
+        // A read for a set this device does not present parks nothing.
+        assert!(parked_presences(&[pics()], &[park("local:1", true, 1)]).is_empty());
     }
 
     fn pics() -> PresenceSet {

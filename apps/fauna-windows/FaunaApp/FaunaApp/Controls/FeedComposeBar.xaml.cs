@@ -408,9 +408,9 @@ public sealed partial class FeedComposeBar : UserControl
     /// would disrupt an in-progress selection. The prior selection is preserved by KIND +
     /// KEY (tier name / room id), never by index or text, so a list that grew or shrank on
     /// the OTHER axis (a room joined while a tier list is unchanged, or vice versa) cannot
-    /// silently move the selection onto a different answer. Each item carries its label in
-    /// BOTH Content (the visible label) and AutomationProperties.Name — <c>driver.select</c>
-    /// matches Name EXACTLY (reference_windows_flaui_select_exact_name).</summary>
+    /// silently move the selection onto a different answer. Each item is named by the
+    /// label it paints (Content and AutomationProperties.Name alike), which is what
+    /// <c>driver.select</c> names here.</summary>
     private void RebuildGateItems()
     {
         var current = CurrentGateSelection();

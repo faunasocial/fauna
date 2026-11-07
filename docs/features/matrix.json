@@ -297,9 +297,9 @@
             },
             "macos": {
               "date": "2026-10-24",
-              "dirty": false,
+              "dirty": true,
               "stamp": "0.1.5-dev+3f9f2b95 standalone",
-              "state": "partial"
+              "state": "full"
             },
             "tui": {
               "date": "2026-10-30",
@@ -377,7 +377,7 @@
               "date": "2026-10-31",
               "dirty": false,
               "stamp": "0.1.5-dev+5a9a5fa8 standalone",
-              "state": "partial"
+              "state": "full"
             },
             "web": {
               "date": "2026-10-31",
@@ -392,7 +392,7 @@
               "state": "partial"
             }
           },
-          "full": false,
+          "full": true,
           "goal": "docs/goal/architecture/nest/box-recovery.md § Goal",
           "guide": "docs/guides/cloud-backup.md § Restoring after disaster",
           "nest_only": false,
@@ -1114,7 +1114,7 @@
               "date": "2026-10-31",
               "dirty": false,
               "stamp": "0.1.5-dev+cbd813be standalone",
-              "state": "partial"
+              "state": "full"
             },
             "macos": {
               "date": "2026-10-24",
@@ -1132,7 +1132,7 @@
               "date": "2026-10-22",
               "dirty": false,
               "stamp": "0.1.5-dev+646e0070 standalone",
-              "state": "partial"
+              "state": "full"
             },
             "windows": {
               "date": "",
@@ -1194,7 +1194,7 @@
               "date": "2026-10-08",
               "dirty": false,
               "stamp": "0.1.3-dev+3a518178 standalone",
-              "state": "partial"
+              "state": "full"
             }
           },
           "full": true,
@@ -1300,7 +1300,7 @@
               "date": "2026-10-30",
               "dirty": false,
               "stamp": "0.1.5-dev+390d61b5 standalone",
-              "state": "partial"
+              "state": "full"
             },
             "windows": {
               "date": "2026-09-11",
@@ -1556,19 +1556,19 @@
               "date": "2026-10-31",
               "dirty": false,
               "stamp": "0.1.5-dev+17b5832c standalone",
-              "state": "full"
+              "state": "partial"
             },
             "linux": {
               "date": "2026-10-31",
               "dirty": false,
               "stamp": "0.1.5-dev+cbd813be standalone",
-              "state": "full"
+              "state": "partial"
             },
             "macos": {
               "date": "2026-10-30",
               "dirty": false,
               "stamp": "0.1.5-dev+3ef45f1b standalone",
-              "state": "full"
+              "state": "partial"
             },
             "tui": {
               "date": "2026-10-22",
@@ -1580,12 +1580,12 @@
               "date": "",
               "dirty": false,
               "stamp": "",
-              "state": "full"
+              "state": "partial"
             },
             "windows": {
-              "date": "",
-              "dirty": false,
-              "stamp": "",
+              "date": "2026-11-06",
+              "dirty": true,
+              "stamp": "0.1.6-dev+6313dfdf.dirty standalone",
               "state": "partial"
             }
           },
@@ -2958,10 +2958,10 @@
               "state": "partial"
             },
             "windows": {
-              "date": "2026-10-03",
-              "dirty": true,
-              "stamp": "0.1.2-dev+be5542fa.dirty standalone",
-              "state": "full"
+              "date": "2026-10-31",
+              "dirty": false,
+              "stamp": "0.1.5-dev+1e755069 standalone",
+              "state": "partial"
             }
           },
           "full": true,
@@ -3219,9 +3219,9 @@
               "state": "partial"
             },
             "tui": {
-              "date": "2026-09-28",
-              "dirty": true,
-              "stamp": "0.1.2-dev+fccdae11.dirty standalone",
+              "date": "2026-11-02",
+              "dirty": false,
+              "stamp": "0.1.5-dev+02e5676e standalone",
               "state": "partial"
             },
             "web": {
@@ -3745,10 +3745,10 @@
               "state": "absent"
             },
             "windows": {
-              "date": "2026-09-30",
-              "dirty": true,
-              "stamp": "0.1.2-dev+2a213a2d.dirty standalone",
-              "state": "partial"
+              "date": "2026-11-06",
+              "dirty": false,
+              "stamp": "0.1.6-dev+00ef95a1 standalone",
+              "state": "full"
             }
           },
           "full": true,
@@ -3780,7 +3780,7 @@
               "date": "2026-10-30",
               "dirty": false,
               "stamp": "0.1.5-dev+8755c14e standalone",
-              "state": "full"
+              "state": "partial"
             },
             "macos": {
               "date": "2026-10-30",
@@ -3792,7 +3792,7 @@
               "date": "2026-10-30",
               "dirty": false,
               "stamp": "0.1.5-dev+8755c14e standalone",
-              "state": "full"
+              "state": "partial"
             },
             "web": {
               "date": "2026-10-30",
@@ -4784,7 +4784,7 @@
               "date": "2026-10-30",
               "dirty": false,
               "stamp": "0.1.5-dev+b7384d11 standalone",
-              "state": "full"
+              "state": "partial"
             },
             "web": {
               "date": "2026-10-30",
@@ -5233,7 +5233,7 @@
               "date": "",
               "dirty": false,
               "stamp": "",
-              "state": "full"
+              "state": "partial"
             },
             "linux": {
               "date": "2026-10-31",
@@ -5375,7 +5375,7 @@
               "date": "2026-10-27",
               "dirty": false,
               "stamp": "0.1.5-dev+5f525618 docker",
-              "state": "partial"
+              "state": "full"
             }
           },
           "full": true,
@@ -5759,7 +5759,7 @@
               "date": "2026-10-28",
               "dirty": false,
               "stamp": "0.1.5-dev+617b4b9c standalone",
-              "state": "partial"
+              "state": "full"
             },
             "tui": {
               "date": "2026-10-30",
@@ -5876,7 +5876,7 @@
             "tui": {
               "date": "2026-10-31",
               "dirty": true,
-              "stamp": "0.1.5-dev+30282079.dirty standalone",
+              "stamp": "0.1.5-dev+4d41bfdd.dirty standalone",
               "state": "full"
             },
             "web": {
@@ -5925,7 +5925,7 @@
             },
             "macos": {
               "date": "2026-10-24",
-              "dirty": false,
+              "dirty": true,
               "stamp": "0.1.5-dev+3f9f2b95 standalone",
               "state": "full"
             },
@@ -5983,7 +5983,7 @@
               "date": "2026-10-28",
               "dirty": false,
               "stamp": "0.1.5-dev+17f01f46 standalone",
-              "state": "partial"
+              "state": "full"
             },
             "tui": {
               "date": "2026-10-27",
@@ -6274,7 +6274,7 @@
               "date": "2026-10-30",
               "dirty": false,
               "stamp": "0.1.5-dev+c9e7fe5d standalone",
-              "state": "partial"
+              "state": "full"
             },
             "web": {
               "date": "2026-10-30",
@@ -6566,7 +6566,7 @@
               "date": "2026-11-02",
               "dirty": false,
               "stamp": "0.1.5-dev+acde58f9 standalone",
-              "state": "partial"
+              "state": "full"
             }
           },
           "full": true,

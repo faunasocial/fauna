@@ -6528,6 +6528,25 @@ impl SyncEngine {
         let mut rerecorded = 0usize;
         // A transient failure (the door, a fetch) keeps an adoption unspent.
         let mut complete = true;
+        // The candidates the pass leaves on purpose without a line of their
+        // own, counted into its closing line: a pass that skipped every
+        // candidate silently read as one that never finished.
+        #[derive(Default)]
+        struct TakeOverSkips {
+            /// No entry on this device, and no adoption marker to adopt by.
+            not_held: usize,
+            /// The entry this device holds names no recorded manifest yet.
+            entry_unrecorded: usize,
+            /// A history delete this device does not re-record: the owner's
+            /// own, or one over a path it still holds.
+            delete_not_owed: usize,
+            /// The head's name refused for a reason other than its signer's
+            /// roots (that one is warned).
+            name_unopened: usize,
+            /// The manifest address does not parse.
+            manifest_unparsed: usize,
+        }
+        let mut skipped = TakeOverSkips::default();
         for (hash, candidate) in &candidates {
             let head = candidate.head;
             let entry = held.get(hash);
@@ -6536,6 +6555,7 @@ impl SyncEngine {
             // What this device records, and under whose bound it opens.
             let (manifest_hex, size_bytes, content_stamp, thumbnail, signer) = if is_delete {
                 if !candidate.over_member || entry.is_some() {
+                    skipped.delete_not_owed += 1;
                     continue;
                 }
                 (
@@ -6549,6 +6569,7 @@ impl SyncEngine {
                 match entry {
                     Some(e) => {
                         let Some(manifest) = e.manifest_hash else {
+                            skipped.entry_unrecorded += 1;
                             continue;
                         };
                         (
@@ -6567,7 +6588,10 @@ impl SyncEngine {
                         head.thumbnail_hash.clone(),
                         self.record_signer_of(&candidate.signed_as),
                     ),
-                    None => continue,
+                    None => {
+                        skipped.not_held += 1;
+                        continue;
+                    }
                 }
             };
             let keys = fauna_core::file_download::FileDownloadKeys {
@@ -6599,7 +6623,10 @@ impl SyncEngine {
                             );
                             continue;
                         }
-                        _ => continue,
+                        _ => {
+                            skipped.name_unopened += 1;
+                            continue;
+                        }
                     },
                 },
             };
@@ -6610,6 +6637,7 @@ impl SyncEngine {
             let mut thumbnail = thumbnail;
             if let Some(hex_hash) = manifest_hex.clone() {
                 let Ok(manifest) = Self::parse_manifest_hash(&hex_hash) else {
+                    skipped.manifest_unparsed += 1;
                     continue;
                 };
                 let owner_root = content_stamp.is_none()
@@ -6744,6 +6772,30 @@ impl SyncEngine {
         {
             self.db
                 .set_adoption_state(nonce, crate::db::AdoptionState::Spent)?;
+        }
+        // The pass's own verdict, whichever door ran it: the pull's nonce-gain
+        // trigger ([`Self::take_over_if_owed`]) and an engine start's corpus
+        // passes (`always_resident::converge_corpus_at_start` — the only one an
+        // on-demand root runs, its inbound rail being the placeholder fold)
+        // each log in their own words, so a reader of either needs this one.
+        if rerecorded > 0 {
+            tracing::info!(
+                candidates = candidates.len(),
+                rerecorded,
+                complete,
+                "succession take-over: re-recorded history heads as this identity"
+            );
+        } else if !candidates.is_empty() {
+            tracing::info!(
+                candidates = candidates.len(),
+                not_held = skipped.not_held,
+                entry_unrecorded = skipped.entry_unrecorded,
+                delete_not_owed = skipped.delete_not_owed,
+                name_unopened = skipped.name_unopened,
+                manifest_unparsed = skipped.manifest_unparsed,
+                complete,
+                "succession take-over: re-recorded nothing this pass"
+            );
         }
         Ok(rerecorded)
     }

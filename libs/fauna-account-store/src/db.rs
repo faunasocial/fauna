@@ -966,6 +966,42 @@ pub fn set_unrecorded_rels(state_dir: &Path, folder_ref: FolderRef) -> Result<Ve
         .collect())
 }
 
+/// One set's capability-host park as the app reads it
+/// (`file-sync.md` § Multi-writer shared sets → *Revocation on a capability
+/// host*): the mark the host persisted at a writer→reader edge or an
+/// access-gate flip, and how many rels hold local content the nest never
+/// recorded ([`set_unrecorded_rels`]'s rule). The app folds it with the row's
+/// access (`fauna_folders_machine::on_demand_presence::parked_presences`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SetParkRead {
+    /// When the host marked the set parked (unix seconds); `None` = no mark.
+    pub access_revoked_at: Option<i64>,
+    /// The count of [`set_unrecorded_rels`].
+    pub unrecorded: u32,
+}
+
+/// Read one set's [`SetParkRead`] from its state DB — the same cross-process
+/// WAL read [`set_unrecorded_rels`] makes. A missing DB is a set never served:
+/// no mark, nothing un-recorded. An unreadable one is an error the caller
+/// treats as parked (fail closed: an un-shown park is the silent un-sync the
+/// iron rule forbids).
+pub fn set_park(state_dir: &Path, folder_ref: FolderRef) -> Result<SetParkRead> {
+    let path = folder_ref.state_db_path(state_dir);
+    if !path.exists() {
+        return Ok(SetParkRead::default());
+    }
+    let db = SyncDb::open(&path)?;
+    let unrecorded = db
+        .list_all()?
+        .iter()
+        .filter(|e| entry_is_unrecorded(e))
+        .count();
+    Ok(SetParkRead {
+        access_revoked_at: db.access_revoked_at()?,
+        unrecorded: u32::try_from(unrecorded).unwrap_or(u32::MAX),
+    })
+}
+
 fn entry_is_unrecorded(e: &SyncEntry) -> bool {
     match e.state {
         SyncState::LocallyModified | SyncState::Uploading | SyncState::Conflicted => true,
@@ -3086,6 +3122,34 @@ impl SyncDb {
     /// pass returns cleanly, so a crash mid-pass re-drives it.
     pub fn set_corpus_audience(&self, shape: &str) -> Result<()> {
         self.meta_put("corpus_audience", shape)
+    }
+
+    /// The capability host's park mark on this set (unix seconds), or `None`
+    /// (`file-sync.md` § Multi-writer shared sets → *Revocation on a
+    /// capability host*). Written by the host at the edge whose basis read
+    /// `writer` and whose fresh row reads `reader`, and at an access-gate flip;
+    /// cleared only at an edge whose row reads `writer` — a positive fact from
+    /// the nest, never the absence of a refusal. A `meta` row, so the mark
+    /// rides the per-set DB the host and the app of one device share, and
+    /// outlives an unloaded extension.
+    pub fn access_revoked_at(&self) -> Result<Option<i64>> {
+        Ok(self
+            .meta_get("access_revoked_at")?
+            .and_then(|v| v.parse::<i64>().ok()))
+    }
+
+    /// Persist the park mark (the write half of [`Self::access_revoked_at`]).
+    /// An existing mark keeps its first stamp: the park began then.
+    pub fn mark_access_revoked(&self, at_unix_s: i64) -> Result<()> {
+        if self.access_revoked_at()?.is_some() {
+            return Ok(());
+        }
+        self.meta_put("access_revoked_at", &at_unix_s.to_string())
+    }
+
+    /// Clear the park mark — the row read `writer` again.
+    pub fn clear_access_revoked(&self) -> Result<()> {
+        self.meta_del("access_revoked_at")
     }
 
     /// What this seat remembers about its folder's audience attestations —
@@ -5367,6 +5431,51 @@ mod tests {
     /// states and the record-failed `Synced` shape — while placeholder /
     /// remote-only rows never block a removal. A set with no DB has nothing to
     /// lose.
+    #[test]
+    fn set_park_reads_the_hosts_mark_and_the_unrecorded_count() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state_dir = tmp.path();
+        let set = FolderRef::Local(11);
+        // No DB: never served, nothing parked.
+        assert_eq!(set_park(state_dir, set).unwrap(), SetParkRead::default());
+
+        let db = SyncDb::open(set.state_db_path(state_dir)).unwrap();
+        db.upsert_entry(
+            "kept.txt",
+            Some(test_hash(1)),
+            None,
+            Some(test_hash(9)),
+            SyncState::LocallyModified,
+            0,
+            0,
+            1,
+            1,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            set_park(state_dir, set).unwrap(),
+            SetParkRead {
+                access_revoked_at: None,
+                unrecorded: 1
+            }
+        );
+
+        db.mark_access_revoked(1_000).unwrap();
+        // A second mark keeps the first stamp: the park began then.
+        db.mark_access_revoked(2_000).unwrap();
+        assert_eq!(
+            set_park(state_dir, set).unwrap(),
+            SetParkRead {
+                access_revoked_at: Some(1_000),
+                unrecorded: 1
+            }
+        );
+
+        db.clear_access_revoked().unwrap();
+        assert_eq!(set_park(state_dir, set).unwrap().access_revoked_at, None);
+    }
+
     #[test]
     fn set_unrecorded_rels_reports_unproven_local_content_only() {
         let tmp = tempfile::tempdir().unwrap();

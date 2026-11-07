@@ -195,6 +195,16 @@ fn endpoints_row(node_id: [u8; 32]) -> StateEntry {
 /// device is a verified fleet member (`account-sync-plane.md` § The peer leg
 /// → *Discovery*). `device`'s writer key must already be pre-minted.
 fn member_rows(base: &Path, device: &str) -> Vec<StateEntry> {
+    let enrollment = enrollment_row(base, device);
+    let id = fauna_core::hex32::decode(&enrollment.key).unwrap();
+    vec![enrollment, endpoints_row(id)]
+}
+
+/// `device`'s verified enrollment alone — what the SERVING sibling holds of
+/// its dialer, which admits only a verified member of its own fleet view
+/// (`account-sync-plane.md` § The admission seam → *Validity and
+/// severance*). `device`'s writer key must already be pre-minted.
+fn enrollment_row(base: &Path, device: &str) -> StateEntry {
     let key = resolve_writer_key_serialized(
         &store_root_for(base, device),
         &root().actor_id_hex(),
@@ -213,7 +223,7 @@ fn member_rows(base: &Path, device: &str) -> Vec<StateEntry> {
     let authorization =
         canonical_encode(&fauna_core::encoding::EmbedAsBytes::from_signed(bytes, env)).unwrap();
     let kind = fauna_protocol::merge_policy::KIND_DEVICE_SET;
-    let enrollment = StateEntry {
+    StateEntry {
         kind: kind.into(),
         key: fauna_core::hex32::encode(&id),
         scope: home_scope_for_kind(kind).unwrap().into(),
@@ -226,8 +236,7 @@ fn member_rows(base: &Path, device: &str) -> Vec<StateEntry> {
         merge_meta: None,
         entry_version: 0,
         tombstone: false,
-    };
-    vec![enrollment, endpoints_row(id)]
+    }
 }
 
 /// Pre-mint a device's writer key (the sanctioned pre-assembly resolver) and
@@ -334,6 +343,9 @@ async fn preference_converges_over_the_dialed_leg(path: Option<PathCell>) -> Dia
     // from a device-endpoints entry already in its store.
     let a_pub = premint_and_stage(&base, "a", &[]).await;
     let _b_pub = premint_and_stage(&base, "b", &member_rows(&base, "a")).await;
+    // …and A holds B's enrollment, so it admits B (both rows ride the
+    // fleet-only scope together in production).
+    premint_and_stage(&base, "a", &[enrollment_row(&base, "b")]).await;
 
     let a = AccountStoreRuntime::start(params_for("a"))
         .await
@@ -550,6 +562,7 @@ async fn a_shredded_mint_over_the_dialed_leg_drops_the_retained_key() {
             store.put_state(row).await.unwrap();
         }
     }
+    premint_and_stage(&base, "a", &[enrollment_row(&base, "b")]).await;
 
     let a = AccountStoreRuntime::start(params(&base, "a", &net))
         .await
@@ -636,6 +649,7 @@ async fn two_seats_one_body(
 ) {
     let a_pub = premint_and_stage(base, "a", &[]).await;
     let _b_pub = premint_and_stage(base, "b", &member_rows(base, "a")).await;
+    premint_and_stage(base, "a", &[enrollment_row(base, "b")]).await;
     let (a_files, _a_siblings) = file_sync_serving(Some((key, body)));
     let (b_files, b_siblings) = file_sync_serving(None);
     let a = AccountStoreRuntime::start(params_with_files(base, "a", net, a_files))

@@ -98,7 +98,7 @@ Stamped 2026-10-01 at dfa27a899f.
 | 6 | app | absent by design on ios, android | — |
 | 7 | app | `tests/e2e-unified/tests/test_device_to_device_file_transfer.py::test_two_devices_keep_passing_a_file_while_the_nest_is_down` | linux (linux): passed, windows (windows): passed, macos (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
 | 7 | app | absent by design on ios, android | — |
-| 8 | app | `tests/e2e-unified/tests/test_device_direct_path_never_announces_or_scans.py::test_your_devices_never_broadcast_scan_or_announce_themselves` | linux (linux): passed, macos (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): failed |
+| 8 | app | `tests/e2e-unified/tests/test_device_direct_path_never_announces_or_scans.py::test_your_devices_never_broadcast_scan_or_announce_themselves` | linux (linux): passed, windows (windows): passed, macos (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
 | 8 | app | absent by design on ios, android | — |
 | 9 | app | `tests/e2e-unified/tests/test_p2p_participation.py::test_this_devices_peer_transfer_switch_flips_and_rests` | web (linux): skipped, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
 | 10 | app | `tests/e2e-unified/tests/test_device_direct_transfer_switch.py::test_a_sibling_can_only_ask_a_device_to_stop_and_syncing_is_untouched` | linux (linux): passed, windows (windows): passed, macos (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
@@ -117,7 +117,7 @@ Stamped 2026-10-01 at dfa27a899f.
 | 16 | app | absent by design on ios, android | — |
 | 17 | app | `tests/e2e-unified/tests/test_device_direct_path_admits_only_your_devices.py::test_a_device_that_is_not_yours_fetches_nothing_and_yours_fetch_only_ciphertext` | linux (linux): passed, windows (windows): passed, macos (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
 | 17 | app | absent by design on ios, android | — |
-| 18 | app | `tests/e2e-unified/tests/test_device_placeholder_serves_no_sibling.py::test_a_placeholder_is_never_downloaded_to_hand_to_another_device` — requires `on-demand-replica-serve-seat` (not built: web, macos, ios, android) | linux (linux): passed, windows (windows): failed, macos (macos): skipped, tui (linux): passed, tui (macos): failed, tui (windows): failed |
+| 18 | app | `tests/e2e-unified/tests/test_device_placeholder_serves_no_sibling.py::test_a_placeholder_is_never_downloaded_to_hand_to_another_device` — requires `on-demand-replica-serve-seat` (not built: web, macos, ios, android) | linux (linux): passed, windows (windows): failed, tui (linux): passed, tui (windows): failed |
 | 18 | app | absent by design on ios, android | — |
 | 19 | app | `tests/e2e-unified/tests/test_device_to_device_file_transfer.py::test_a_file_moves_straight_between_two_of_your_devices` | linux (linux): passed, windows (windows): passed, macos (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
 | 19 | app | absent by design on ios, android | — |

@@ -1752,6 +1752,10 @@ pub struct WsRpcClient {
     /// latch lives here, with the session, or the once-per-connect pass would
     /// run on every 30 s tick.
     subscriptions_connect_pass: ConnectPassLatch,
+    /// This client's name for the critical-alert post-auth split
+    /// (`fauna_client_alert_sweep::LoopClaim::claim_keyed`): minted once per
+    /// client from a counter, never reused.
+    loop_key: usize,
 }
 
 /// This browser's device id for `actor_id_hex` — the same derivation
@@ -1802,6 +1806,7 @@ impl WsRpcClient {
             inner,
             actor_id_hex,
             subscriptions_connect_pass: ConnectPassLatch::default(),
+            loop_key: crate::critical_alerts::mint_loop_key(),
         }
     }
 
@@ -8218,7 +8223,7 @@ impl WsRpcClient {
     /// Run the feeders that have no page of their own, at the same universal
     /// post-auth point as [`Self::self_heal_deployment_seed_custody`] /
     /// `refreshMailEpochSchedule` (`critical-alerts.md` § Mechanism → *Who
-    /// runs the detector*). tui's `critical_alerts::spawn_session_start_sweep`
+    /// runs the detector*). tui's `critical_alerts::spawn_post_auth_sweep`
     /// (`session::establish`) is the reference this mirrors; `secret_hex`
     /// derives the actor id the sweep checks conditions against, and feeder
     /// #1 reads the rotation keyring from that account's runtime in this tab
@@ -8235,14 +8240,16 @@ impl WsRpcClient {
     /// (`+layout.svelte`'s `void runCriticalAlertSweep(...).catch(...)`, never
     /// awaited). Only rejects on a malformed `secret_hex`.
     ///
-    /// **One loop per identity.** A call for an identity whose loop is already
-    /// running (no teardown since it started) runs ONE pass and resolves — the
-    /// SPA fires this on every session establishment, a same-actor re-establish
-    /// included, and a second loop there would only stack a concurrent sweeper
-    /// (`crate::critical_alerts::loop_is_live_for`).
+    /// **One loop per identity.** The shared `LoopClaim` decides the arm: a call
+    /// for an identity whose loop already rides this client (no teardown since it
+    /// started) runs ONE pass and resolves — the SPA fires this on every session
+    /// establishment, a same-actor re-establish included, and a second loop there
+    /// would only stack a concurrent sweeper; the same identity on a client its
+    /// loop does not ride starts a loop that opens on the custody door.
     #[wasm_bindgen(js_name = runCriticalAlertSweep)]
     pub fn run_critical_alert_sweep(&self, secret_hex: String) -> js_sys::Promise {
         let client = self.inner.clone();
+        let loop_key = self.loop_key;
         future_to_promise(async move {
             let keypair = keypair_from_secret_hex(&secret_hex)?;
             let actor_id = keypair.actor_id();
@@ -8255,35 +8262,55 @@ impl WsRpcClient {
                 }),
             );
             let alerts = crate::critical_alerts::alerts_registry();
-            if crate::critical_alerts::loop_is_live_for(&actor_id) {
-                fauna_client_alert_sweep::run_session_start_sweep(
-                    client, &custody, &alerts, &actor_id,
-                )
-                .await;
-                return Ok(JsValue::UNDEFINED);
-            }
-            crate::critical_alerts::mark_loop_live(&actor_id);
-            // The e2e bundle runs the SAME loop with its wait raceable by
-            // `alertSweepWakeForTest` (convention 14); a production bundle has
-            // no wake to race and runs the clock alone.
-            #[cfg(feature = "test-helpers")]
-            {
-                let wake = crate::critical_alerts::mint_sweep_wake();
-                fauna_client_alert_sweep::run_alert_sweep_loop_wakeable(
-                    client,
-                    &custody,
-                    &alerts,
-                    &actor_id,
-                    move || {
+            let (arm, _ticket) = crate::critical_alerts::LOOP_CLAIM.claim_keyed(
+                &keypair.actor_id_hex(),
+                loop_key,
+                &alerts,
+            );
+            match arm {
+                fauna_client_alert_sweep::SweepArm::OnePass => {
+                    fauna_client_alert_sweep::run_one_shot_sweep(
+                        client, &custody, &alerts, &actor_id,
+                    )
+                    .await;
+                }
+                // The e2e bundle runs the SAME loop with its wait raceable by
+                // `alertSweepWakeForTest` (convention 14); a production bundle
+                // has no wake to race and runs the clock alone.
+                #[cfg(feature = "test-helpers")]
+                loop_arm => {
+                    let wake = crate::critical_alerts::mint_sweep_wake(alerts.teardown_epoch());
+                    let wake = move || {
                         let notify = std::rc::Rc::clone(&wake);
                         async move { notify.notified().await }
-                    },
-                )
-                .await;
+                    };
+                    if loop_arm == fauna_client_alert_sweep::SweepArm::Loop {
+                        fauna_client_alert_sweep::run_alert_sweep_loop_wakeable(
+                            client, &custody, &alerts, &actor_id, wake,
+                        )
+                        .await;
+                    } else {
+                        fauna_client_alert_sweep::run_alert_sweep_loop_reestablished_wakeable(
+                            client, &custody, &alerts, &actor_id, wake,
+                        )
+                        .await;
+                    }
+                }
+                #[cfg(not(feature = "test-helpers"))]
+                fauna_client_alert_sweep::SweepArm::Loop => {
+                    fauna_client_alert_sweep::run_alert_sweep_loop(
+                        client, &custody, &alerts, &actor_id,
+                    )
+                    .await;
+                }
+                #[cfg(not(feature = "test-helpers"))]
+                fauna_client_alert_sweep::SweepArm::ReestablishedLoop => {
+                    fauna_client_alert_sweep::run_alert_sweep_loop_reestablished(
+                        client, &custody, &alerts, &actor_id,
+                    )
+                    .await;
+                }
             }
-            #[cfg(not(feature = "test-helpers"))]
-            fauna_client_alert_sweep::run_alert_sweep_loop(client, &custody, &alerts, &actor_id)
-                .await;
             Ok(JsValue::UNDEFINED)
         })
     }

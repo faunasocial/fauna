@@ -59,9 +59,10 @@ class MailSettingsActions:
         routes its fake clock — the `mail_token_refresh_advance_clock` agent
         command over `fauna_client_mail_settings::token_refresh` (e2e
         convention 7). tui led; linux, web and android followed in one
-        trickle-down lift; windows, macos and ios follow in theirs
-        (`mail-credentials.md` § Trigger taxonomy, the "Submission-token
-        refresh" row)."""
+        trickle-down lift, macos and ios in FaunaKit's, windows last — so
+        every app is built today and the gate stays only as the one place a
+        new app would declare the gap (`mail-credentials.md` § Trigger
+        taxonomy, the "Submission-token refresh" row)."""
         from helpers.app_surface import require_surface
 
         require_surface(self.driver, "mail-token-refresh-clock")

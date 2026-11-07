@@ -8,6 +8,7 @@ using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Navigation;
 using FaunaApp.Core.Services;
 using FaunaApp.Core.ViewModels;
+using FaunaApp.Helpers;
 using uniffi.fauna_client_mail_settings;
 using uniffi.fauna_core;
 using uniffi.fauna_ffi;
@@ -277,7 +278,7 @@ public sealed partial class AdminMailPage : Page
         // ── DMARC reports ──
         var dm = _vm.Dmarc;
         DmarcRufPublishToggle.IsOn = dm.RufPublish;
-        PopulateSelect(DmarcFoModeSelect, FaunaClientMailSettingsMethods.DmarcForensicModeOptions(), dm.FoMode, failClosed: "0", rawValueName: true);
+        PopulateSelect(DmarcFoModeSelect, FaunaClientMailSettingsMethods.DmarcForensicModeOptions(), dm.FoMode, failClosed: "0");
         DmarcAggregateRetentionInput.Text = dm.AggregateRetentionDays.ToString();
         DmarcForensicRetentionInput.Text = dm.ForensicRetentionDays.ToString();
         DmarcOutboundAggregateToggle.IsOn = dm.OutboundAggregateEnabled;
@@ -638,18 +639,15 @@ public sealed partial class AdminMailPage : Page
     /// of leaving nothing selected; each call site's <paramref name="failClosed"/> is
     /// that field's own established default, not necessarily the strictest option
     /// (fcrdns' is the observability-first middle default; delete-nonempty's is the
-    /// safer one) — both mirror `admin_policy.rs`'s own `from_wire_or_default`.</summary>
-    private static void PopulateSelect(ComboBox combo, ReachPolicyOption[] options, string selected, string failClosed, bool rawValueName = false)
+    /// safer one) — both mirror `admin_policy.rs`'s own `from_wire_or_default`. Each
+    /// item paints the localized label and is keyed by the wire value
+    /// (<see cref="PickerOption"/>).</summary>
+    private static void PopulateSelect(ComboBox combo, ReachPolicyOption[] options, string selected, string failClosed)
     {
         combo.Items.Clear();
         foreach (var opt in options)
         {
-            var item = new ComboBoxItem { Content = Strings.Resolve(opt.@label), Tag = opt.@value };
-            // A raw-value picker (the `fo=` tags): the FlaUI bridge's select/get_text match
-            // a ComboBoxItem by its Name, so the Name is the wire tag (AdminDnsPage's
-            // per-domain DMARC picker precedent).
-            if (rawValueName)
-                Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(item, opt.@value);
+            var item = PickerOption.Create(Strings.Resolve(opt.@label), opt.@value);
             combo.Items.Add(item);
             if (opt.@value == selected) combo.SelectedItem = item;
         }

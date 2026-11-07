@@ -5129,19 +5129,25 @@ components:
         wired on feed's post-image tap in the list card (PostCardView.swift) — mirrors
         web's C2paImage wiring on the same surface. Fixed 2026-07-18: the prior note
         claimed this worked, but the component existed with zero callers anywhere
-        (dead code, same class of gap as linux's) until this session wired it."
+        (dead code, same class of gap as linux's) until this session wired it.
+        Conversations too since 2026-11-06: a received dm-attachment-image's tap
+        (DmMessageBubble.swift, shared with macos) opens it over the thread; Escape
+        (a cancel-action shortcut, and the driver's press_key door) dismisses it."
       macos: "Shared FaunaKit ImageLightbox (same component as iOS — the legacy
         macOS-only LightboxOverlay this note used to describe was deleted 2026-05-11
         with the unified-conversations migration and never reinstated until this
         session), wired on feed's post-image tap in the list card
-        (MacPostCardView.swift)."
+        (MacPostCardView.swift), and since 2026-11-06 on a received
+        dm-attachment-image in the shared DmMessageBubble (the iOS note's wiring)."
       linux: "views/lightbox.rs::show_image_lightbox (Modal Window with Picture widget).
         WIRED on feed's post-image since 2026-07-30 via the sibling
         show_image_lightbox_paintable, which reuses the gdk::Texture the card already
         decoded. Before that it had ZERO callers from the feed: the click wrote the blob
         to a hard-coded /work/tmp/fauna-blob-… path and opened nothing (a stale doc
         comment on post_list.rs::build_post_image claimed otherwise). conversations'
-        dm-attachment-image still has no click handler — the remaining per-page gap."
+        dm-attachment-image is wired too since 2026-11-06: the bubble's picture is a flat
+        button whose click opens the same paintable lightbox, and the lightbox window
+        binds Escape to close."
       tui: "One painter, lightbox.rs, serves both wired pages: a modal overlay element
         painted while feed.lightbox (a post-image click) or conversations.lightbox (a
         received dm-attachment-image click, since 2026-11-05) is Some, dismissed with
@@ -5152,9 +5158,10 @@ components:
         kitty/iTerm2/sixel terminal the graphics painter scales the same pixels into the
         bigger rect, so it gains real detail. An image whose bytes never arrived still
         opens, as the placeholder (never a silently-dropped click)."
-      web: "Lightbox.svelte component, wired ONLY on feed's post-image (via C2paImage's
-        onclick) — verified 2026-07-17. conversations' dm-attachment-image is a plain
-        <img> with no click handler; media's items aren't wired either."
+      web: "Lightbox.svelte component, wired on feed's post-image (via C2paImage's
+        onclick) — verified 2026-07-17 — and since 2026-11-06 on conversations'
+        dm-attachment-image (the bubble's picture is a C2paImage too); media's items
+        aren't wired."
       all: >
         SURFACE (settled 2026-07-30, closing what this component's notes previously
         called "a real priority-#1 divergence, not just a coverage gap"): the unified
@@ -5164,7 +5171,9 @@ components:
         remaining work is per-page, not per-app. Conversations: activating a
         received dm-attachment-image opens the lightbox over the thread, Escape
         closes it — wired on tui first (2026-11-05,
-        test_conversations_image_lightbox.py), the other six to follow. Media: a
+        test_conversations_image_lightbox.py), then linux, web, macos and ios
+        (2026-11-06; macos and ios through the shared DmMessageBubble), windows and
+        android to follow. Media: a
         media-item tap already opens media-item-detail, so the page has no free
         gesture; whether a preview inside media-item-detail becomes the trigger or
         media leaves used_in waits on an owner ruling, and no app wires it until then.

@@ -22,7 +22,8 @@ namespace FaunaApp.Core.ViewModels;
 /// through the shared author orchestration (the encrypted-mode KeyBlob mint+upload
 /// lives in shared Rust, priority #2); plaintext mode mints nest-side behind the
 /// same calls. Rich identity (display name / avatar / bio) is publish-path-gated,
-/// so the header renders the actor id (the handle fallback).
+/// so an unpublished SELF header renders the handle on the current primary, else the
+/// actor id (<see cref="RepaintHeader"/>).
 ///
 /// <para>No <c>ConfigureAwait(false)</c> on any await — bound-state mutation must
 /// resume on the UI thread (the WinUI VM rule).</para>
@@ -129,9 +130,11 @@ public partial class ProfileViewModel : ViewModelBase
 #endif   // PAYMENTS
 
     // ── Profile edit (display-name / bio / links read-modify-write) ──────────
-    /// <summary>The header's primary line (<c>profile-handle</c>) — the shared overlay
-    /// resolver's answer: the viewer's nickname, else the published display name, else
-    /// the canonical short id (see <see cref="RefreshHeaderAsync"/>).</summary>
+    /// <summary>The header's primary line (<c>profile-handle</c>) — SELF: the published
+    /// display name, else <c>&lt;handle&gt;@&lt;current primary&gt;</c>, else the actor id;
+    /// OTHER: the shared overlay resolver's answer — the viewer's nickname, else the
+    /// published display name, else the canonical short id (see
+    /// <see cref="RepaintHeader"/>).</summary>
     [ObservableProperty] private string _headerName = "";
     /// <summary>The header's secondary line (<c>profile-public-name</c>): the public name
     /// a nickname replaced, empty while no nickname is the primary line.</summary>
@@ -231,12 +234,17 @@ public partial class ProfileViewModel : ViewModelBase
 
     /// <summary>The viewed profile. <paramref name="isSelf"/> <c>false</c> = another
     /// actor's profile (tap-through), rendering the OTHER header (follow button) + the
-    /// Tiers-tab offers browse instead of the SELF author management.</summary>
-    internal ProfileViewModel(INestRpcClient nest, string actorId, bool isSelf, string? home = null)
+    /// Tiers-tab offers browse instead of the SELF author management.
+    /// <paramref name="selfDisplayHandle"/> is the SELF header's handle source, read at
+    /// every paint (<see cref="RepaintHeader"/>); an OTHER profile never reads it.</summary>
+    internal ProfileViewModel(
+        INestRpcClient nest, string actorId, bool isSelf, string? home = null,
+        Func<string?>? selfDisplayHandle = null)
     {
         _nest = nest;
         ActorId = actorId;
         IsSelf = isSelf;
+        _selfDisplayHandle = selfDisplayHandle;
         // The actor-home slot, seeded at open through the shared rule (the carried
         // hint, else nothing yet); the header read replaces it with the profile's word.
         _carriedHome = home;
@@ -1086,12 +1094,13 @@ public partial class ProfileViewModel : ViewModelBase
     /// <see cref="RepaintHeader"/> hands the shared resolver again when the overlay moves.</summary>
     private string? _publicDisplayName;
 
-    /// <summary>Re-read the profile, then paint the header's two names from the shared
-    /// overlay resolver: <see cref="HeaderName"/> is the viewer's nickname, else the
-    /// published display name, else the canonical short id (an unpublished profile /
-    /// read failure just gives the last); <see cref="HeaderPublicName"/> is the name a
-    /// nickname replaced (profile.md § The private section → <i>The header shows both
-    /// names</i>).</summary>
+    /// <summary>Re-read the profile, then paint the header's two names
+    /// (<see cref="RepaintHeader"/>): for OTHER, <see cref="HeaderName"/> is the viewer's
+    /// nickname, else the published display name, else the canonical short id (an
+    /// unpublished profile / read failure just gives the last), and
+    /// <see cref="HeaderPublicName"/> is the name a nickname replaced (profile.md § The
+    /// private section → <i>The header shows both names</i>); for SELF, the published
+    /// display name, else the handle on the current primary, else the actor id.</summary>
     public async Task RefreshHeaderAsync()
     {
         var epoch = ++_headerEpoch;
@@ -1137,11 +1146,32 @@ public partial class ProfileViewModel : ViewModelBase
         BannerHash = Opt(pictures?.BannerHashHex ?? "");
     }
 
-    /// <summary>Re-ask the overlay face what the header calls this person — the page
-    /// calls it when the projection moves (a Save here, a sibling device's edit, a late
-    /// load after a relaunch), with no profile re-read.</summary>
+    /// <summary>The SELF header's <c>&lt;handle&gt;@&lt;current primary&gt;</c> source
+    /// (<see cref="SelfDisplayHandle"/>), null for an OTHER profile.</summary>
+    private readonly Func<string?>? _selfDisplayHandle;
+
+    /// <summary>Re-paint the header's two names with no profile re-read — the page calls
+    /// it when an input moves: the overlay projection (a Save here, a sibling device's
+    /// edit, a late load after a relaunch), or, for SELF, the account's identity (a
+    /// primary-domain rename the launch machine's verify reply carries).
+    ///
+    /// <para>SELF: the published display name, then the handle on the CURRENT primary
+    /// (<c>mail-primary-domain-rename.md</c> § Display-handle interaction — read here, at
+    /// paint time, never baked), then the actor id; no second line, the viewer keeps no
+    /// nickname for themselves (tui's <c>header_label</c>, linux's
+    /// <c>self_header_fallback</c>). OTHER: the overlay face's answer.</para></summary>
     public void RepaintHeader()
     {
+        if (IsSelf)
+        {
+            var handle = _selfDisplayHandle?.Invoke();
+            HeaderName = _publicDisplayName
+                ?? (string.IsNullOrWhiteSpace(handle) ? null : handle)
+                ?? ActorId;
+            HeaderPublicName = "";
+            return;
+        }
+
         using var names = ContactOverlayNames.Open();
         // Profile header: `peer_label(display_name, None, id)` (the face's contract).
         var label = names.PeerLabel(_publicDisplayName, null, ActorId);

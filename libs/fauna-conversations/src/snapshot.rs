@@ -83,6 +83,38 @@ pub enum SortOrder {
     Unread,
 }
 
+impl SortOrder {
+    /// The order's stable name — its serde spelling, what the snapshot's `sort`
+    /// field serializes and `setSort` / `data.conversation_sort` speak. The one
+    /// owner: apps read it through [`sort_order_name`] rather than hand-mapping
+    /// the variants.
+    pub fn name(self) -> &'static str {
+        match self {
+            SortOrder::LatestActivity => "LatestActivity",
+            SortOrder::OldestFirst => "OldestFirst",
+            SortOrder::Unread => "Unread",
+        }
+    }
+
+    /// Inverse of [`SortOrder::name`]; `None` for an unknown name.
+    pub fn parse(name: &str) -> Option<SortOrder> {
+        [
+            SortOrder::LatestActivity,
+            SortOrder::OldestFirst,
+            SortOrder::Unread,
+        ]
+        .into_iter()
+        .find(|order| order.name() == name)
+    }
+}
+
+/// [`SortOrder::name`] over UniFFI — the stable label a cycle-button's
+/// automation value reads (Swift `ConversationsUI.sortLabel` hand-wrote it).
+#[cfg_attr(feature = "uniffi", uniffi::export)]
+pub fn sort_order_name(order: SortOrder) -> String {
+    order.name().to_string()
+}
+
 /// The `conversation-sort` button's canonical cycle: latest activity → oldest
 /// first → unread → back to latest. One tap advances one step; three taps from
 /// any order return home, so every order stays reachable on every app.
@@ -119,12 +151,7 @@ pub fn next_sort_order(current: SortOrder) -> SortOrder {
 /// which *does* reject an unknown value — there the caller is asserting a
 /// specific order, and a silent fallback would hide the bug.)
 pub fn next_sort_order_from_variant(name: &str) -> SortOrder {
-    match name {
-        "LatestActivity" => next_sort_order(SortOrder::LatestActivity),
-        "OldestFirst" => next_sort_order(SortOrder::OldestFirst),
-        "Unread" => next_sort_order(SortOrder::Unread),
-        _ => SortOrder::default(),
-    }
+    SortOrder::parse(name).map_or_else(SortOrder::default, next_sort_order)
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -391,6 +418,23 @@ mod tests {
             let looped = next_sort_order(next_sort_order(next_sort_order(start)));
             assert_eq!(looped, start, "three taps from {start:?} must return home");
         }
+    }
+
+    #[test]
+    fn sort_order_name_and_parse_round_trip_the_serde_spelling() {
+        for (order, name) in [
+            (SortOrder::LatestActivity, "LatestActivity"),
+            (SortOrder::OldestFirst, "OldestFirst"),
+            (SortOrder::Unread, "Unread"),
+        ] {
+            assert_eq!(sort_order_name(order), name);
+            assert_eq!(order.name(), name);
+            assert_eq!(SortOrder::parse(name), Some(order));
+            // The name is exactly what serde emits for the snapshot's `sort`.
+            assert_eq!(serde_json::to_value(order).unwrap(), name);
+        }
+        assert_eq!(SortOrder::parse(""), None);
+        assert_eq!(SortOrder::parse("latestactivity"), None);
     }
 
     #[test]

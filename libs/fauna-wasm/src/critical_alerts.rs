@@ -24,67 +24,53 @@ use wasm_bindgen::prelude::*;
 
 static ALERTS_REGISTRY: AlertsRegistryCell = AlertsRegistryCell::new();
 
-thread_local! {
-    /// The identity the running re-sweep LOOP serves, and the registry's
-    /// teardown epoch it started under — so a same-identity re-establish runs
-    /// one pass instead of stacking a second loop (see [`loop_is_live_for`]).
-    static LIVE_LOOP: std::cell::Cell<Option<(fauna_core::identity::ActorId, u64)>> =
-        const { std::cell::Cell::new(None) };
-}
+/// The post-auth split's record for this tab (`fauna_client_alert_sweep::LoopClaim`):
+/// `runCriticalAlertSweep` claims through it, so web keeps no loop record or
+/// forget of its own — the claim forgets an identity by this chunk's registry's
+/// teardown epoch, which `clearAllCriticalAlerts` bumps. Clients are named by a
+/// key minted per client ([`mint_loop_key`]), web's client being a handle, not an
+/// `Arc`.
+pub(crate) static LOOP_CLAIM: fauna_client_alert_sweep::LoopClaim<()> =
+    fauna_client_alert_sweep::LoopClaim::new();
 
-/// Whether a re-sweep loop is already running for `actor_id`: one was started
-/// for it and no identity teardown (`clear_all`, which bumps the epoch the loop
-/// stops on) has happened since. The SPA re-fires `runCriticalAlertSweep` on
-/// every session establishment, a same-actor re-establish included, and the
-/// loop the first one started is still running then — the one-shot pass is the
-/// re-check that establishment owes, as tui's and linux's converge arms run it
-/// (`critical-alerts.md` § Implementation status today).
-pub(crate) fn loop_is_live_for(actor_id: &fauna_core::identity::ActorId) -> bool {
-    let epoch = alerts_registry().teardown_epoch();
-    LIVE_LOOP.with(|live| live.get()) == Some((*actor_id, epoch))
-}
-
-/// Record that a loop is starting for `actor_id` under the current epoch.
-pub(crate) fn mark_loop_live(actor_id: &fauna_core::identity::ActorId) {
-    let epoch = alerts_registry().teardown_epoch();
-    LIVE_LOOP.with(|live| live.set(Some((*actor_id, epoch))));
+/// A fresh client key for [`LOOP_CLAIM`] — a counter, so never reused.
+pub(crate) fn mint_loop_key() -> usize {
+    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(1);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
 #[cfg(feature = "test-helpers")]
 thread_local! {
     /// What ends the current identity's re-sweep WAIT early — the e2e seam behind
-    /// `fauna_e2e_agent::ALERT_SWEEP_WAKE` (tui's `SweepWake` is the reference).
-    /// Minted fresh for each loop [`crate::rpc`] starts, replacing the last, so a
-    /// departed identity's lingering loop holds a handle nothing fires any more.
+    /// `fauna_e2e_agent::ALERT_SWEEP_WAKE` (tui's `SweepWake` is the reference),
+    /// with the registry teardown epoch its loop started under. Minted fresh for
+    /// each loop [`crate::rpc`] starts, replacing the last, so a departed
+    /// identity's lingering loop holds a handle nothing fires any more.
     /// `test-helpers` only: a production bundle's loop runs on its clock alone.
-    static SWEEP_WAKE: std::cell::RefCell<Option<std::rc::Rc<tokio::sync::Notify>>> =
+    static SWEEP_WAKE: std::cell::RefCell<Option<(std::rc::Rc<tokio::sync::Notify>, u64)>> =
         const { std::cell::RefCell::new(None) };
 }
 
 #[cfg(feature = "test-helpers")]
-pub(crate) fn mint_sweep_wake() -> std::rc::Rc<tokio::sync::Notify> {
+pub(crate) fn mint_sweep_wake(epoch: u64) -> std::rc::Rc<tokio::sync::Notify> {
     let notify = std::rc::Rc::new(tokio::sync::Notify::new());
-    SWEEP_WAKE.with_borrow_mut(|w| *w = Some(std::rc::Rc::clone(&notify)));
+    SWEEP_WAKE.with_borrow_mut(|w| *w = Some((std::rc::Rc::clone(&notify), epoch)));
     notify
 }
 
 /// End the current identity's re-sweep wait now. `false` when no loop is live
-/// for any identity (pre-auth, or torn down since) — the caller refuses loudly
-/// (convention 11). A wake landing mid-pass is kept and ends the next wait.
+/// for the current identity (pre-auth, or torn down since) — the caller refuses
+/// loudly (convention 11). A wake landing mid-pass is kept and ends the next wait.
 #[cfg(feature = "test-helpers")]
 #[wasm_bindgen(js_name = alertSweepWakeForTest)]
 pub fn alert_sweep_wake_for_test() -> bool {
-    let live = LIVE_LOOP.with(|live| live.get());
     let epoch = alerts_registry().teardown_epoch();
-    if !live.is_some_and(|(_, started)| started == epoch) {
-        return false;
-    }
     SWEEP_WAKE.with_borrow(|w| match w {
-        Some(notify) => {
+        Some((notify, started)) if *started == epoch => {
             notify.notify_one();
             true
         }
-        None => false,
+        _ => false,
     })
 }
 

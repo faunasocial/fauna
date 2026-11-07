@@ -80,7 +80,18 @@ public partial class WebSettingsViewModel : ObservableObject
     //    published posts" about a list nobody asked for. ──
 
     public ObservableCollection<PublishedPostRow> PublishedPosts { get; } = new();
-    [ObservableProperty] private bool _hydrated;
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(SubdomainToggleEnabled))]
+    private bool _hydrated;
+
+    /// <summary>Whether <c>web-settings-subdomain-toggle</c> is live: only once the page
+    /// has read the nest (<see cref="Hydrated"/>). <see cref="ToggleAsync"/> flips against
+    /// the nest-confirmed view, so a pre-read flip would be dropped without a word;
+    /// painted disabled, an early click is refused loudly instead (ui/README.md rule 1 —
+    /// a frame drawn before the nest is read claims nothing; tui's
+    /// <c>.enabled(view.is_some())</c>, apple's <c>.disabled(!webPublish.isHydrated)</c>,
+    /// linux's <c>set_toggle_hydrated</c>).</summary>
+    public bool SubdomainToggleEnabled => Hydrated;
 
     /// <summary><c>web-settings-render-status</c> — true while (and only while) the
     /// last <c>publish.list</c> answered <c>rendered_pages_down</c> (web-content-hosting.md

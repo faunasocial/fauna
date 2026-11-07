@@ -995,22 +995,36 @@ public class ProfileViewModelTests
     }
 
     [Fact]
-    public async Task RefreshHeaderAsync_FallsBackToTheCanonicalShortIdWhenUnpublished()
+    public async Task RefreshHeaderAsync_AnUnpublishedOtherHeaderFallsBackToTheCanonicalShortId()
     {
-        // The shared resolver's public fallback (`peer_label`): no display name and no
-        // nickname → the canonical short id, with no secondary line. An id of twelve
-        // characters or fewer is its own short form; a 64-hex one is cut.
+        // The shared resolver's public fallback (`peer_label`) on ANOTHER actor's
+        // header: no display name and no nickname → the canonical short id, with no
+        // secondary line. An id of twelve characters or fewer is its own short form; a
+        // 64-hex one is cut.
         var rpc = new MockNestRpcClient { NextProfile = null }; // unpublished
-        var vm = new ProfileViewModel(rpc, "deadbeef");
+        var vm = new ProfileViewModel(rpc, "deadbeef", isSelf: false);
         await vm.RefreshHeaderAsync();
         Assert.Equal("deadbeef", vm.HeaderName);
         Assert.Equal("", vm.HeaderPublicName);
 
         var longId = "ab".PadRight(64, 'c');
-        var vmLong = new ProfileViewModel(rpc, longId);
+        var vmLong = new ProfileViewModel(rpc, longId, isSelf: false);
         await vmLong.RefreshHeaderAsync();
         Assert.Equal(uniffi.fauna_ffi.FaunaFfiMethods.ShortId(longId), vmLong.HeaderName);
         Assert.Equal("", vmLong.HeaderPublicName);
+    }
+
+    [Fact]
+    public async Task RefreshHeaderAsync_AnUnpublishedSelfHeaderWithNoHandleIsTheActorId()
+    {
+        // The viewer's own header is not `peer_label`'s (it names someone who is not the
+        // viewer): published name, else `<handle>@<current primary>`, else the actor id —
+        // the same chain on all 7 apps (ProfileSelfDisplayHandleTests pins the handle leg).
+        var longId = "ab".PadRight(64, 'c');
+        var vm = new ProfileViewModel(new MockNestRpcClient { NextProfile = null }, longId);
+        await vm.RefreshHeaderAsync();
+        Assert.Equal(longId, vm.HeaderName);
+        Assert.Equal("", vm.HeaderPublicName);
     }
 
     [Fact]

@@ -419,6 +419,19 @@
                     <TextBlock Opacity="0.7" FontSize="12" TextWrapping="Wrap"
                                Text="{loc:Localize Key=mail_settings/send_subtitle}" />
                 </StackPanel>
+                <!-- Whether received messages show the scan-result row
+                     (mail-content-scanning.md § Per-account opt-out for visible scan
+                     details). Only the switch lives here: the shared conversations
+                     projection re-reads it when a thread opens and paints no
+                     dm-message-scan-result while it is off. -->
+                <StackPanel Spacing="2">
+                    <ToggleSwitch x:Name="ScanResultVisibleToggle"
+                                  AutomationProperties.AutomationId="{x:Bind ids:Ids.MailSettingsScanResultVisibleToggle}"
+                                  Header="{loc:Localize Key=mail_settings/scan_result_visible_label}"
+                                  Toggled="ScanResultVisibleToggle_Toggled" />
+                    <TextBlock Opacity="0.7" FontSize="12" TextWrapping="Wrap"
+                               Text="{loc:Localize Key=mail_settings/scan_result_visible_subtitle}" />
+                </StackPanel>
             </StackPanel>
             <StackPanel x:Name="AutorespondToggleGroup" Spacing="2" Visibility="Collapsed">
                 <ToggleSwitch x:Name="AutorespondToggle"

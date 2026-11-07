@@ -228,9 +228,9 @@ internal sealed class TaskDelegationRowVm
     /// <summary>The stable cross-app option key ("automatic" / "this-device" /
     /// a participant-ref hex for a foreign pin — never offered by the picker,
     /// only rendered as an already-pinned-elsewhere row's current assignment).
-    /// FlaUI's <c>Select()</c> matches a ComboBoxItem's Name to this EXACTLY, with
-    /// no normalization (reference_windows_flaui_select_exact_name) — so this
-    /// must back <c>AutomationProperties.Name</c>, never the visible Content.</summary>
+    /// The picker item's key (its AutomationId, <c>FaunaApp.Helpers.PickerOption</c>),
+    /// which the FlaUI bridge's <c>Select()</c> matches EXACTLY, with no
+    /// normalization — never the visible Content, which is the label.</summary>
     internal static string OptionKey(FfiPinOption option) =>
         FaunaFfiMethods.TaskDelegationOptionKey(option);
 }

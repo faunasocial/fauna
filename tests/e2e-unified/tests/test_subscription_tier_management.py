@@ -373,11 +373,7 @@ def test_a_higher_tier_opens_every_lower_tiers_posts(app, request, tiers_nest):
         )
         # The state dump can lead the painted cards by a frame after the nav
         # reset: wait for the card itself before aiming the click at it.
-        deadline = time.monotonic() + 15
-        card = feed.post_index_by_id(row["post_id"])
-        while time.monotonic() < deadline and not (0 <= card < app.driver.count("post-card")):
-            time.sleep(0.3)  # sleep-ok: poll interval of a deadline loop
-            card = feed.post_index_by_id(row["post_id"])
+        card = feed.card_index_by_id(row["post_id"], timeout=15)
         assert 0 <= card < app.driver.count("post-card"), (
             f"the post teased {preview!r} is in state but has no painted card "
             f"(index {card}, cards={app.driver.count('post-card')})"

@@ -74,7 +74,7 @@ Stamped 2026-10-01 at e5a7e5d758.
 | macos | ✅ full | 0.1.5-dev+3f9f2b95 standalone |
 | ios | ✅ full | 0.1.5-dev+662ece79 standalone |
 | android | 🚧 unbuilt | 0.1.5-dev+4d41bfdd.dirty standalone |
-| tui | ✅ full | 0.1.5-dev+30282079.dirty standalone |
+| tui | ✅ full | 0.1.5-dev+4d41bfdd.dirty standalone |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|

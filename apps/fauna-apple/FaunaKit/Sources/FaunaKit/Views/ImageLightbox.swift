@@ -43,11 +43,24 @@ public struct ImageLightbox: View {
                 }
 
             content
+
+            // Escape dismisses (ui.yaml declares no dismiss element inside the lightbox):
+            // a cancel-action shortcut fires without the lightbox holding focus.
+            Button("", action: onDismiss)
+                .keyboardShortcut(.cancelAction)
+                .opacity(0)
+                .frame(width: 0, height: 0)
+                .accessibilityHidden(true)
         }
         .statusBarHidden()
         .accessibilityIdentifier(Ids.imageLightbox)
-        // Presence-only anchor for `is_visible("image-lightbox")`.
-        .automationValue(Ids.imageLightbox, text: { "" })
+        // Presence anchor for `is_visible("image-lightbox")`, and the driver's Escape
+        // door — the same dismiss the shortcut above runs for a real key.
+        .automationValue(Ids.imageLightbox, text: { "" }, pressKey: { key in
+            guard key == "Escape" else { return "image-lightbox takes only Escape" }
+            onDismiss()
+            return nil
+        })
     }
 
     /// The image itself, always arriving already fetched through the post-blob
@@ -111,5 +124,16 @@ public struct ImageLightbox: View {
         Image(systemName: "photo")
             .font(.system(size: 48))
             .foregroundStyle(.white.opacity(0.6))
+    }
+}
+
+public extension View {
+    /// Presents ``ImageLightbox`` full-screen while `item` is set and clears it on
+    /// dismiss. One home for the cover every image-bearing card shares (the feed
+    /// card and the DM bubble both attach it), so the trigger shape never forks.
+    func imageLightbox(item: Binding<LightboxItem?>) -> some View {
+        fullScreenCover(item: item) { shown in
+            ImageLightbox(source: shown.source, onDismiss: { item.wrappedValue = nil })
+        }
     }
 }

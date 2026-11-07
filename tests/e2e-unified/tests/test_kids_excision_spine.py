@@ -347,7 +347,7 @@ _KIDS_ABSENT_FUNCTIONS = (
     "buildWebClient", "subscriptionsCreateTier", "subscriptionsApproveSubscriber",
     "subscriptionsRemoveSubscriber", "subscriptionsSubscribePublishingEk",
     "subscriptionsReconcileOnce", "subscriptionsAuthorPollSecs", "runCriticalAlertSweep",
-    "runCriticalAlertSweepLoop", "npubConfirmationOwed", "confirmNpub", "classifySources",
+    "runCriticalAlertSweepLoop", "startCriticalAlertSweep", "npubConfirmationOwed", "confirmNpub", "classifySources",
 )
 # Element-id prefixes of the surfaces the kids flavor excises — the same list the
 # `android-kids-check` witness greps the dex for (a test below keeps them equal).

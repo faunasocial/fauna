@@ -1,7 +1,8 @@
---app windows: 845 files, 9814 items
+--app windows: 852 files, 9857 items
 live/test_activitypub_federation_live.py                            1  tier_4x1        app
 live/test_dns01_cert_renewal_hetzner.py                             1  tier_4x1        app
 live/test_hetzner_provision.py                                      1  tier_4x1        app
+live/test_ios_export_compliance_live.py                             1  tier_4x1        -
 live/test_private_relay_hetzner.py                                  1  tier_4x1        app
 live/test_staging_box_provision.py                                  1  tier_4x1        app
 test_abuse_reporting.py                                             9  tier_3x9        app logged_in_app room_app
@@ -12,7 +13,7 @@ test_account_runtime_e2e_holds.py                                   2  tier_1x2 
 test_account_runtime_handover.py                                    2  tier_3x2        app logged_in_app
 test_account_runtime_pump.py                                        6  tier_3x6        app logged_in_app
 test_account_switcher_windows.py                                   16  tier_3x16       -
-test_acme_directory_seed_gating.py                                 16  tier_1x16       -
+test_acme_directory_seed_gating.py                                 17  tier_1x17       -
 test_acme_pebble_docker_gating.py                                   9  tier_1x9        -
 test_activitypub_live.py                                            1  tier_4x1        app
 test_add_account_provisioning.py                                    2  tier_3x2        -
@@ -30,6 +31,7 @@ test_admin_custody_hosting.py                                       3  tier_3x3 
 test_admin_dns.py                                                  14  tier_3x14       admin_app app
 test_admin_dns_cert.py                                              1  tier_3x1        admin_app app
 test_admin_dns_cert_auto_renew.py                                   1  tier_2x1        admin_app app
+test_admin_dns_cert_auto_renew_tick.py                              1  tier_2x1        admin_app app
 test_admin_dns_cert_badge_live_then_due.py                          1  tier_2x1        app cert_badge_admin_app
 test_admin_dns_cert_delegate.py                                     1  tier_2x1        admin_app app
 test_admin_dns_cert_issuance_error.py                               1  tier_3x1        admin_app app
@@ -68,9 +70,9 @@ test_agent_barrier.py                                               3  tier_3x3 
 test_agent_health.py                                                1  tier_3x1        persistent_app
 test_agent_ipc_seam_gating.py                                       3  tier_1x3        -
 test_agent_log_redaction_twins.py                                   4  tier_1x4        -
-test_agent_refuses_declining_arm.py                                 1  tier_3x1        app logged_in_app
+test_agent_refuses_declining_arm.py                                 2  tier_3x2        app logged_in_app
 test_agent_refuses_unknown_command.py                               2  tier_3x2        app logged_in_app
-test_agent_sockets_parsing.py                                      12  tier_1x12       -
+test_agent_sockets_parsing.py                                      21  tier_1x21       -
 test_alert_sweep_directory_feeders_e2e.py                           3  tier_3x3        -
 test_android_close_reads_crash.py                                  16  tier_1x16       -
 test_android_drafts_survive_arms.py                                 3  tier_1x3        -
@@ -264,7 +266,7 @@ test_conversations_selected_message.py                              1  tier_3x1 
 test_conversations_thread_resolver.py                              13  tier_1x13       -
 test_conversations_tombstone_and_reactions_survive_restart.py       1  tier_3x1        app logged_in_app
 test_conversations_unknown_message_kind.py                          1  tier_3x1        app logged_in_app real_faunamls_app
-test_core_broker.py                                               896  tier_1x896      -
+test_core_broker.py                                               897  tier_1x897      -
 test_core_priority.py                                              15  tier_1x15       -
 test_crash_recovery_journeys.py                                    14  tier_3x14       app folder_share_owner_app killable_app
 test_critical_alert_lifetime.py                                     4  tier_3x4        app
@@ -283,6 +285,7 @@ test_detached_run.py                                               49  tier_1x49
 test_device_cap_refusal.py                                          1  tier_3x1        app
 test_device_cards.py                                                7  tier_3x7        app logged_in_app
 test_device_direct_path_admits_only_your_devices.py                 1  tier_3x1        -
+test_device_direct_path_never_announces_or_scans.py                 1  tier_3x1        -
 test_device_direct_transfer_switch.py                               1  tier_3x1        -
 test_device_member_removal.py                                       2  tier_3x2        app
 test_device_names.py                                                2  tier_3x2        -
@@ -318,7 +321,7 @@ test_email_guard.py                                                26  tier_1x26
 test_emergency_lockout_door.py                                      2  tier_3x2        app succeedable_app
 test_enable_real_faunamls_verdict.py                                2  tier_1x2        -
 test_encryption_settings_page.py                                    5  tier_3x5        app dedicated_actor_app
-test_engagement_cues.py                                             9  tier_3x9        app logged_in_app
+test_engagement_cues.py                                            10  tier_3x10       app logged_in_app
 test_ephemeral_ca.py                                                7  tier_1x7        -
 test_erase_refused_other_instance_windows.py                        1  tier_3x1        -
 test_errors.py                                                      1  tier_3x1        app logged_in_app
@@ -345,7 +348,7 @@ test_fauna_mls_cross_nest_roundtrip.py                              3  tier_3x3 
 test_fauna_mls_real_roundtrip.py                                    1  tier_3x1        app logged_in_app real_faunamls_app
 test_fauna_mls_two_client_inbox_drain.py                            1  tier_3x1        app logged_in_app real_faunamls_app second_real_faunamls_app
 test_feature_gated_test_coverage.py                                19  tier_1x19       -
-test_feature_ledger.py                                            184  tier_1x184      -
+test_feature_ledger.py                                            186  tier_1x186      -
 test_feature_limits.py                                             12  tier_3x12       admin_app app logged_in_app
 test_federated_follow_cross_nest.py                                 1  tier_3x1        room_app
 test_federation.py                                                  3  tier_3x3        -
@@ -446,7 +449,7 @@ test_identity_create_detour.py                                      2  tier_3x2 
 test_identity_export.py                                             3  tier_3x3        app logged_in_app
 test_identity_reimport_resets_handle_check.py                       1  tier_2x1        app
 test_identity_store_unreachable.py                                  1  tier_3x1        -
-test_identity_succession_aftermath.py                              10  tier_3x10       app succeedable_app ungranted_app
+test_identity_succession_aftermath.py                              11  tier_3x11       app succeedable_app ungranted_app
 test_identity_succession_ceremony.py                               10  tier_3x10       app succeedable_app succession_member_app ungranted_app
 test_identity_succession_mail_auth.py                               1  tier_3x1        app
 test_identity_succession_refusal.py                                 2  tier_3x2        app succeedable_app
@@ -687,6 +690,7 @@ test_recipient_picker.py                                            9  tier_3x9 
 test_reclaim_cycle_mechanism.py                                     1  tier_3x1        -
 test_recovery_kit_ceremonies.py                                     4  tier_3x4        app succeedable_app
 test_recovery_kit_create_journey.py                                 3  tier_3x3        app
+test_recovery_kit_let_go.py                                         1  tier_3x1        app ungranted_app
 test_recovery_kit_restore.py                                        9  tier_3x9        app succeedable_app ungranted_app
 test_recovery_kit_settings.py                                       2  tier_3x2        app ungranted_app
 test_refs_clone_probe.py                                            5  tier_1x5        -
@@ -820,6 +824,7 @@ test_windows_dialog_gate.py                                         3  tier_3x3 
 test_windows_dialog_gate_ratchet.py                                 3  tier_1x3        -
 test_windows_disabled_actuation.py                                  3  tier_3x3        app logged_in_app
 test_windows_driver_data_dir_isolation.py                          17  tier_1x17       driver
+test_windows_driver_in_viewport.py                                  7  tier_1x7        -
 test_windows_driver_real_keyring.py                                13  tier_1x13       driver
 test_windows_feed_page_teardown.py                                  2  tier_3x2        app logged_in_app
 test_windows_ffi_flavor_guard.py                                    7  tier_1x7        -
@@ -827,13 +832,14 @@ test_windows_ffi_flavor_stash.py                                    8  tier_1x8 
 test_windows_ffi_stage_over_mapped_dll.py                           2  tier_1x2        -
 test_windows_ffi_warm_takes_no_slot.py                              5  tier_1x5        -
 test_windows_installed_product_agent_pin.py                         4  tier_1x4        -
-test_windows_installer_prebuild.py                                 26  tier_1x26       -
+test_windows_installer_prebuild.py                                 30  tier_1x30       -
 test_windows_launch_timeout.py                                     15  tier_1x15       -
 test_windows_login_cycle_poller_leak.py                             1  tier_3x1        app logged_in_app
 test_windows_msvc_linker.py                                         5  tier_1x5        -
 test_windows_nav_rail_persistent.py                                 1  tier_3x1        app logged_in_app
 test_windows_no_focus_steal.py                                      1  tier_3x1        app logged_in_app
-test_windows_scroll_into_view_fraction.py                           2  tier_3x2        app logged_in_app
+test_windows_picker_option_ratchet.py                               4  tier_1x4        -
+test_windows_scroll_into_view_fraction.py                           6  tier_3x6        app logged_in_app
 test_windows_store_give_back.py                                    12  tier_1x12       -
 test_windows_window_close_flush.py                                  1  tier_3x1        app logged_in_app
 test_workspace_test_scope.py                                       16  tier_1x16       -
@@ -842,6 +848,7 @@ test_worktree_switch_guard.py                                       8  tier_1x8 
 test_ws_rpc_admin_client.py                                         4  tier_3x4        -
 test_ws_rpc_bearer_cache.py                                         2  tier_1x2        -
 test_ws_rpc_liveness_reconnect.py                                  23  tier_1x23       -
+test_ws_rpc_spki_pin.py                                             4  tier_1x4        -
 test_x_display_lock_sweep.py                                        7  tier_1x7        -
 test_your_address_on_every_domain.py                                3  tier_3x3        app logged_in_app
-(845 shown)
+(852 shown)

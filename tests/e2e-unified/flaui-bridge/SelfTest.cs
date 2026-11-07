@@ -242,6 +242,18 @@ static class SelfTest
     /// <item>Where a sweep stops: <see cref="ScrollPolicy.ReachedBottom"/> reads the
     /// position, never whether it moved, because a scroll that has not landed yet does
     /// not move either.</item>
+    /// <item>7–12, bringing an element in WHOLE (<c>Actions.MakeWhole</c>), on the
+    /// 28 %-visible post-card UIA's clipped rect reported whole: the honest share is the
+    /// shown part over the true height; one reading proves wholeness only clear of both
+    /// edges; a move's percent walks the scrollable range; two readings classify an
+    /// element as whole, spanning the viewport, or unproven; an end of the range proves a
+    /// near-half reading whole; a small centring move is not read as landed before it
+    /// began.</item>
+    /// <item>13–18, reading "in view" WITHOUT moving the list (the <c>in-viewport</c>
+    /// attribute, <see cref="ScrollPolicy.ReadInViewport"/>), on the same geometry: the
+    /// 28 % sliver is Undecided, never in view from its clipped centre; a centred card, a
+    /// text whose neighbour reads past its edge, and a card flush with an edge at that end
+    /// of the range are whole and in view; nothing shown is out of view.</item>
     /// </list>
     ///
     /// <para>Run: <c>FauiBridge.exe --self-test-scroll-policy</c>; exit code = failures.</para>
@@ -310,8 +322,145 @@ static class SelfTest
         Check(ScrollPolicy.Landed(25.0, 25.0), "a position at its target has landed");
         Check(!ScrollPolicy.Landed(0.0, 25.0), "a position short of its target has not landed");
 
+        // 7–12. Bringing an element in WHOLE (Actions.MakeWhole), on the geometry measured
+        // 2026-11-04: a 189 px post-card whose top sat at 286.3 in a 338.5 px
+        // viewport — 28 % of it on screen, which UIA's clipped rect reported as a 52.2 px
+        // element wholly inside the viewport.
+        var band = new ScrollPolicy.Span(0, 338.5);
+        const double cardHeight = 189.0;
+        var sliver = new ScrollPolicy.Span(286.3, band.Bottom - 286.3);
+
+        // 7. The honest share is the shown part over the TRUE height; the clipped rect over
+        // itself (the pre-fix VisibleFraction) answered 1.0 for this sliver.
+        Check(Math.Abs(ScrollPolicy.VisibleShare(sliver.Height, cardHeight) - 0.276) < 0.005,
+            $"the measured sliver shows {ScrollPolicy.VisibleShare(sliver.Height, cardHeight):0.000} of the card, not {sliver.Height / sliver.Height:0.0}");
+        Check(ScrollPolicy.VisibleShare(cardHeight, cardHeight) == 1.0
+              && ScrollPolicy.VisibleShare(10, 0) == 0.0,
+            "a whole reading shows all of the card; no true height measures nothing");
+
+        // 8. One reading proves wholeness only clear of both edges: the sliver is flush with
+        // the bottom edge, and so is a whole card that merely touches it; a centred card is
+        // clear; an edge one ScrollViewer padding (24 px) inside the rect proves nothing.
+        Check(!ScrollPolicy.ClearOfEdges(sliver, band),
+            "a reading flush with the viewport's bottom edge does not prove the card whole");
+        var centred = new ScrollPolicy.Span(band.Centre - cardHeight / 2, cardHeight);
+        Check(ScrollPolicy.ClearOfEdges(centred, band), "a centred card is proven whole by one reading");
+        Check(!ScrollPolicy.ClearOfEdges(new ScrollPolicy.Span(band.Bottom - 24 - 60, 60), band),
+            "a reading whose edge sits one padding inside the container's rect does not prove the card whole");
+
+        // 9. A move's percent: one viewport of travel on a 25 % view size is a third of the
+        // range (the range is content minus viewport: three viewports), clamped at both ends.
+        var oneViewport = ScrollPolicy.PercentAfterMove(0, 25.0, 100.0, 100.0);
+        Check(Math.Abs(oneViewport - 100.0 / 3.0) < 1e-9,
+            $"moving one viewport down on a 25% view size lands at 33.3% (got {oneViewport:0.###})");
+        Check(ScrollPolicy.PercentAfterMove(10, 25.0, 100.0, -1000) == 0.0
+              && ScrollPolicy.PercentAfterMove(90, 25.0, 100.0, 1000) == 100.0,
+            "a move past either end of the range clamps to it");
+        Check(ScrollPolicy.PercentAfterMove(40, 0.0, 100.0, 50) == 40
+              && ScrollPolicy.PercentAfterMove(40, 100.0, 100.0, 50) == 40,
+            "an unreadable or non-scrolling view size moves nothing");
+
+        // 10. Two readings classify: the sliver, centred on what shows, grows (proves
+        // nothing yet); the card then keeps its height as it moves (whole); a reading that
+        // fills the band and does not move spans the viewport; a small one that does not
+        // move proves nothing.
+        var afterFirstMove = new ScrollPolicy.Span(band.Centre - sliver.Height / 2, cardHeight);
+        Check(ScrollPolicy.ClassifyMove(sliver, afterFirstMove, band) == ScrollPolicy.WholeVerdict.Unknown,
+            "a reading that grew as the list moved was clipped — nothing proven yet");
+        Check(ScrollPolicy.ClassifyMove(afterFirstMove, centred, band) == ScrollPolicy.WholeVerdict.Whole,
+            "a reading that kept its height as both edges moved is the whole card");
+        var fill = new ScrollPolicy.Span(band.Top + 16, band.Height - 32);
+        Check(ScrollPolicy.ClassifyMove(fill, fill, band) == ScrollPolicy.WholeVerdict.SpansViewport,
+            "a reading that fills the band and did not move spans the viewport");
+        Check(ScrollPolicy.ClassifyMove(centred, centred, band) == ScrollPolicy.WholeVerdict.Unknown,
+            "a small reading that did not move proves nothing");
+
+        // 11. At an end of the range the list cannot move toward centring: a reading in the
+        // upper half at the top, or the lower half at the bottom, cannot be clipped.
+        var upper = new ScrollPolicy.Span(10, 60);
+        var lower = new ScrollPolicy.Span(band.Bottom - 70, 60);
+        Check(ScrollPolicy.AtRangeEnd(upper, band, 0.0) == ScrollPolicy.WholeVerdict.Whole
+              && ScrollPolicy.AtRangeEnd(lower, band, 100.0) == ScrollPolicy.WholeVerdict.Whole,
+            "a reading on the near half at an end of the range is whole");
+        Check(ScrollPolicy.AtRangeEnd(sliver, band, 0.0) == ScrollPolicy.WholeVerdict.Unknown
+              && ScrollPolicy.AtRangeEnd(upper, band, 50.0) == ScrollPolicy.WholeVerdict.Unknown,
+            "a reading on the far half, or mid-range, proves nothing");
+
+        // 12. A centring move smaller than Landed's fixed half percent has not landed
+        // before it began.
+        Check(!ScrollPolicy.MoveLanded(40.0, 40.0, 40.26) && ScrollPolicy.MoveLanded(40.0, 40.25, 40.26),
+            "a 0.26% move reads landed only once the position has moved");
+
+        // 13–18. Reading "in view" WITHOUT moving the list (the `in-viewport` attribute), on the same measured geometry: the true centre answers only once both
+        // of the reading's edges are proven the element's own.
+        const ScrollPolicy.ViewportVerdict inView = ScrollPolicy.ViewportVerdict.InView;
+        const ScrollPolicy.ViewportVerdict outOfView = ScrollPolicy.ViewportVerdict.OutOfView;
+        const ScrollPolicy.ViewportVerdict undecided = ScrollPolicy.ViewportVerdict.Undecided;
+        // Mid-list on a 25 % view size: neither end of the range is near.
+        var midRange = ScrollPolicy.RangeOffsetsPx(40.0, 25.0, band.Height);
+
+        // 13. Where the list sits in its range, in pixels: nothing above it at 0 %, nothing
+        // below it at 100 %, both far mid-list; an unreadable view size knows nothing.
+        var atTop = ScrollPolicy.RangeOffsetsPx(0.0, 25.0, band.Height);
+        var atBottom = ScrollPolicy.RangeOffsetsPx(100.0, 25.0, band.Height);
+        Check(atTop is { FromTop: 0.0 } && atBottom is { FromBottom: 0.0 }
+              && midRange is { FromTop: > 100, FromBottom: > 100 },
+            $"the range offsets read 0 at each end and far mid-list (mid: {midRange})");
+        Check(ScrollPolicy.RangeOffsetsPx(40.0, 0.0, band.Height) is null
+              && ScrollPolicy.RangeOffsetsPx(40.0, 100.0, band.Height) is null
+              && ScrollPolicy.RangeOffsetsPx(double.NaN, 25.0, band.Height) is null,
+            "an unreadable view size or position, or a container that does not scroll, gives no range");
+
+        // 14. THE gap: the 28 % sliver flush with the bottom edge, mid-list, nothing reading
+        // below it. Its clipped rect's centre (312.4) lies inside the band, which is what read
+        // it in view; its true centre (380.8) lies below the band. One reading cannot tell the
+        // two cards apart, so the answer is Undecided — never InView.
+        var (sliverVerdict, sliverWhy) = ScrollPolicy.ReadInViewport(sliver, false, band, midRange, null, null);
+        Check(sliverVerdict == undecided && sliverWhy.Contains("bottom edge"),
+            $"the measured sliver is not read in view from its clipped centre (got {sliverVerdict}: {sliverWhy})");
+        var topSliver = new ScrollPolicy.Span(band.Top, sliver.Height);
+        Check(ScrollPolicy.ReadInViewport(topSliver, false, band, midRange, null, null).Verdict == undecided,
+            "a sliver flush with the top edge is Undecided too");
+        // Its clipped neighbours share its clip line, so they prove nothing.
+        Check(ScrollPolicy.ReadInViewport(sliver, false, band, midRange, 10.0, sliver.Bottom + 1.0).Verdict == undecided,
+            "a neighbour reading to the same clip line does not prove the edge");
+
+        // 15. A centred card is clear of both edges: whole, its centre in the band.
+        Check(ScrollPolicy.ReadInViewport(centred, false, band, midRange, null, null).Verdict == inView,
+            "a centred card reads in view with no evidence needed");
+
+        // 16. A message text a bring-into-view left near the bottom edge: within the edge
+        // allowance, but its own bubble's reply row reads below it, so the clip line is
+        // below it too — whole, in view. The same text with nothing read below it is not proven.
+        var text = new ScrollPolicy.Span(band.Bottom - 36 - 40, 40);
+        Check(ScrollPolicy.ReadInViewport(text, false, band, midRange, text.Top - 30, band.Bottom - 6).Verdict == inView,
+            "a text near the edge whose neighbour reads past it is whole and in view");
+        Check(ScrollPolicy.ReadInViewport(text, false, band, midRange, null, null).Verdict == undecided,
+            "the same text with no neighbour read past it is not proven whole");
+
+        // 17. At an end of the range the content ends inside the viewport: a whole card
+        // flush with the bottom at 100 %, or with the top at 0 %, is the whole card.
+        var flushBottom = new ScrollPolicy.Span(band.Bottom - cardHeight, cardHeight);
+        var flushTop = new ScrollPolicy.Span(band.Top, cardHeight);
+        Check(ScrollPolicy.ReadInViewport(flushBottom, false, band, atBottom, null, null).Verdict == inView
+              && ScrollPolicy.ReadInViewport(flushTop, false, band, atTop, null, null).Verdict == inView,
+            "a card flush with an edge at that end of the range reads in view");
+        Check(ScrollPolicy.ReadInViewport(flushBottom, false, band, atTop, null, null).Verdict == undecided,
+            "a card flush with the bottom edge at the TOP of the range is not proven whole");
+
+        // 18. Nothing shows: out of view, whatever else is known. One that fills the band
+        // mid-list may run past both edges.
+        Check(ScrollPolicy.ReadInViewport(centred, true, band, midRange, null, null).Verdict == outOfView
+              && ScrollPolicy.ReadInViewport(new ScrollPolicy.Span(0, 0), false, band, midRange, null, null).Verdict == outOfView
+              && ScrollPolicy.ReadInViewport(centred, false, new ScrollPolicy.Span(0, 0), midRange, null, null).Verdict == outOfView,
+            "an offscreen element, an empty reading or an empty band reads out of view");
+        var (fillVerdict, fillWhy) = ScrollPolicy.ReadInViewport(
+            new ScrollPolicy.Span(band.Top, band.Height), false, band, midRange, null, null);
+        Check(fillVerdict == undecided && fillWhy.Contains("top and bottom edges"),
+            $"a reading filling the band mid-list is Undecided at both edges (got {fillVerdict}: {fillWhy})");
+
         Console.WriteLine(failures == 0
-            ? "[self-test] PASS — sweep step policy and container choice are gap-free and cheap."
+            ? "[self-test] PASS — sweep step policy and container choice are gap-free and cheap; an element is brought in whole from honest readings, and read in view only once proven whole."
             : $"[self-test] {failures} FAILURE(S)");
         return failures;
     }

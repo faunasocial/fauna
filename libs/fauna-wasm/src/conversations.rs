@@ -1938,12 +1938,8 @@ impl WasmConversationsManager {
     /// value rather than silently defaulting.
     #[wasm_bindgen(js_name = setSort)]
     pub fn set_sort(&self, order: String) -> Result<(), JsValue> {
-        let sort = match order.as_str() {
-            "LatestActivity" => SortOrder::LatestActivity,
-            "OldestFirst" => SortOrder::OldestFirst,
-            "Unread" => SortOrder::Unread,
-            other => return Err(JsValue::from_str(&format!("unknown sort order: {other}"))),
-        };
+        let sort = SortOrder::parse(&order)
+            .ok_or_else(|| JsValue::from_str(&format!("unknown sort order: {order}")))?;
         self.manager.set_sort(sort);
         Ok(())
     }

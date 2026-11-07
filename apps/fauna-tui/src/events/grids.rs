@@ -1,15 +1,15 @@
 //! The month/week/day view-rendering block (split out of `events/mod.rs`).
 
 use fauna_core::caltime::{
-    EventPlacement, add_days, day_column_layout, day_of_week, days_in_month, is_all_day,
-    parse_date, visible_days, week_start_date,
+    EventPlacement, day_column_layout, day_of_week, days_in_month, is_all_day, parse_date,
+    visible_days,
 };
 use fauna_i18n::strings::events as et;
 use fauna_ui_ids as ids;
 
 use super::{EventRow, EventsState, ViewMode, now_hm, today};
 use crate::element::Element;
-use crate::format::{month_name, month_name_short, weekday_name, weekday_short};
+use crate::format::weekday_short;
 
 /// ui.yaml's `events` page + `event_detail`/`create_calendar`/`create_event`
 /// sub-pages. Renders the view-controls chrome always (view-mode toggles,
@@ -61,49 +61,11 @@ fn hhmm(min: u32) -> String {
     format!("{:02}:{:02}", min / 60, min % 60)
 }
 
-/// "July 2026" — the month view's `calendar-date-label`.
-pub(super) fn format_month_label(y: i32, m: u32) -> String {
-    format!("{} {}", month_name(m), y)
-}
-
-/// "Jul 13 – 19, 2026" — the week view's range label (mirrors linux
-/// `time_utils::format_week_label`, down to the three range shapes and the
-/// en-dash; both read their month names from the same `en.yaml` entries, so the
-/// two apps localize together instead of one of them being stuck on English).
-///
-/// Takes `week_start` rather than probing it, for the reason linux's copy did
-/// not and shipped the bug: a label that reads the locale independently of the
-/// grid beside it can disagree with that grid about which week is on screen.
-/// The explicit param also keeps this function pure, so its pin below asserts a
-/// fixed string instead of whatever `LC_TIME` the test host happens to carry.
-pub(super) fn format_week_label(y: i32, m: u32, d: u32, week_start: u32) -> String {
-    let (sy, sm, sd) = week_start_date(y, m, d, week_start);
-    let (ey, em, ed) = add_days(sy, sm, sd, 6);
-    if sy == ey && sm == em {
-        format!("{} {sd} \u{2013} {ed}, {sy}", month_name_short(sm))
-    } else if sy == ey {
-        format!(
-            "{} {sd} \u{2013} {} {ed}, {sy}",
-            month_name_short(sm),
-            month_name_short(em)
-        )
-    } else {
-        format!(
-            "{} {sd}, {sy} \u{2013} {} {ed}, {ey}",
-            month_name_short(sm),
-            month_name_short(em)
-        )
-    }
-}
-
-/// "Wednesday, Jul 15, 2026" — the day view's label.
-pub(super) fn format_day_label(y: i32, m: u32, d: u32) -> String {
-    format!(
-        "{}, {} {d}, {y}",
-        weekday_name(day_of_week(y, m, d)),
-        month_name_short(m)
-    )
-}
+// The month/week/day label formatters are shared with linux — one owner in
+// `fauna_client_features::calendar_labels`.
+pub(super) use fauna_client_features::calendar_labels::{
+    format_day_label, format_month_label, format_week_label,
+};
 
 /// The `calendar-date-label` text for the active view mode (agenda shows the
 /// month, like Outlook's mini-calendar header).

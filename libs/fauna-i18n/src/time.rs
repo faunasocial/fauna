@@ -6,15 +6,10 @@
 //! four (tui in `crate::format`, linux in `views/events/time_utils.rs`) over the
 //! *same* constants, which is priority #4's resolve-don't-match case.
 //!
-//! **Why the name tables move but the label formatters do not** (2026-08-19):
-//! this crate is a dependency-free leaf that much of the workspace links
-//! (`fauna-protocol`, `fauna-client`, `fauna-conversations`, `fauna-anon-client`,
-//! `fauna-client-features`, plus both Rust apps). These four functions read only constants already in this crate, so
-//! they cost it nothing. The three calendar *label* formatters that call them
-//! (`format_month_label` / `format_week_label` / `format_day_label`) need
-//! `fauna_core::caltime`'s Gregorian math, and giving this leaf a `fauna-core`
-//! dependency to host them would invert the build graph for every crate above —
-//! so those stay app-side, now over one shared name source.
+//! The three calendar *label* formatters (`format_month_label` / `format_week_label` /
+//! `format_day_label`) need `fauna_core::caltime`'s Gregorian math, which this
+//! dependency-free leaf must not link, so they live in
+//! `fauna_client_features::calendar_labels`, over these name tables.
 //!
 //! `docs/goal/ui/events.md` § Where logic lives owns the rule these serve:
 //! the names come from the i18n catalog, never from a platform date library's

@@ -86,6 +86,7 @@ public sealed partial class MailSettingsPanel : UserControl
         // gate could never desensitize.
         ReceiveToggle.FaunaGate("fauna.bridges.set_mail_switches");
         SendToggle.FaunaGate("fauna.bridges.set_mail_switches");
+        ScanResultVisibleToggle.FaunaGate("fauna.bridges.set_mail_switches");
     }
 
     /// <summary>Supplied by the host page (SettingsMailPage.OnNavigatedTo) before Loaded
@@ -289,7 +290,7 @@ public sealed partial class MailSettingsPanel : UserControl
         if (snap.enabled && _account is null) _ = LoadAccountAsync();
     }
 
-    // ── Account controls (receive / send, automatic reply, quota readouts) ──
+    // ── Account controls (receive / send / scan-result row, automatic reply, quota readouts) ──
 
     private async Task LoadAccountAsync()
     {
@@ -313,11 +314,13 @@ public sealed partial class MailSettingsPanel : UserControl
     {
         if (_account is not { } vm) return;
         _suppressAccount = true;
-        if (vm.ReceiveEnabled is { } receive && vm.SendEnabled is { } send)
+        if (vm.ReceiveEnabled is { } receive && vm.SendEnabled is { } send
+            && vm.ScanResultVisible is { } scanResultVisible)
         {
             SwitchesGroup.Visibility = Visibility.Visible;
             PaintSwitch(ReceiveToggle, receive);
             PaintSwitch(SendToggle, send);
+            PaintSwitch(ScanResultVisibleToggle, scanResultVisible);
         }
         if (vm.AutorespondEnabled is { } autorespond)
         {
@@ -355,6 +358,14 @@ public sealed partial class MailSettingsPanel : UserControl
     {
         if (_suppressAccount || _account is not { } vm) return;
         await vm.SetSendAsync(SendToggle.IsOn);
+        PaintAccount(repaintMessage: false);
+        ErrorChanged?.Invoke(vm.Error);
+    }
+
+    private async void ScanResultVisibleToggle_Toggled(object sender, RoutedEventArgs e)
+    {
+        if (_suppressAccount || _account is not { } vm) return;
+        await vm.SetScanResultVisibleAsync(ScanResultVisibleToggle.IsOn);
         PaintAccount(repaintMessage: false);
         ErrorChanged?.Invoke(vm.Error);
     }

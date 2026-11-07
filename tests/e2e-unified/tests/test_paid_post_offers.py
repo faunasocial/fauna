@@ -113,7 +113,7 @@ def _sell(app, preview: str, *, subscribers_get_it_free: bool = True) -> str:
     )
     row = feed.wait_for_post_state_by_text(preview)
     assert row is not None, f"the sold post should land; error={app.error_text()!r}"
-    card = feed.post_index_by_id(row["post_id"])
+    card = feed.card_index_by_id(row["post_id"])
     badge = app.driver.get_text("gated-post-badge", scope=f"post-card[{card}]")
     assert badge.startswith(UNLOCK_TIER_PREFIX), (
         f"a sold post's badge names its {UNLOCK_TIER_PREFIX}* tier, got {badge!r}; "
@@ -127,7 +127,7 @@ def _card_for(app, preview: str) -> int:
     assert row is not None, (
         f"the feed should list the post teased {preview!r}; error={app.error_text()!r}"
     )
-    card = app.feed.post_index_by_id(row["post_id"])
+    card = app.feed.card_index_by_id(row["post_id"])
     assert card >= 0, f"the post {row['post_id']} has no rendered card"
     return card
 

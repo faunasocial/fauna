@@ -65,8 +65,8 @@ Stamped 2026-09-19 at e9152e3330.
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ⚠ partial | 0.1.5-dev+646e0070 standalone |
-| linux | ⚠ partial | 0.1.5-dev+cbd813be standalone |
+| web | ✅ full | 0.1.5-dev+646e0070 standalone |
+| linux | ✅ full | 0.1.5-dev+cbd813be standalone |
 | windows | ⚠ partial | |
 | macos | ⚠ partial | 0.1.5-dev+3f9f2b95 standalone |
 | ios | ⚠ partial | 0.1.5-dev+79c80402 standalone |
@@ -105,5 +105,5 @@ Stamped 2026-09-19 at e9152e3330.
 | 9 | app | `tests/e2e-unified/tests/test_conversations_attachment_retention.py::test_a_file_this_device_cannot_fetch_still_shows_its_name_and_size` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 10 | app | `tests/e2e-unified/tests/test_conversations_mail_attachments.py::test_camera_and_location_details_are_removed_from_a_file_before_it_is_sent` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 11 | app | `tests/e2e-unified/tests/test_conversations_attachment_c2pa.py::test_a_received_signed_picture_shows_a_provenance_badge` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
-| 12 | app | `tests/e2e-unified/tests/test_conversations_image_lightbox.py::test_received_attachment_image_click_opens_lightbox` | tui (linux): passed, tui (macos): passed |
+| 12 | app | `tests/e2e-unified/tests/test_conversations_image_lightbox.py::test_received_attachment_image_click_opens_lightbox` | web (linux): passed, linux (linux): passed, tui (linux): passed, tui (macos): passed |
 <!-- features-render:end -->

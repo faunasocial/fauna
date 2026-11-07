@@ -846,10 +846,20 @@ const NON_ACTOR_OPAQUE_COLUMNS: &[(&str, &str, &str)] = &[
     (
         "plugin_state",
         "value",
-        "a hosted plugin's own working state behind its `state` import, opaque to the \
-         nest and deleted with the plugin's principal row; no production writer exists \
-         yet (only the store's own tests call `plugin_state_put`), so the host that \
-         wires the import re-rules this column if a plugin may keep actor ids in it",
+        "a hosted plugin's own working state, written by its `state` import \
+         (`plugin_runner.rs`), opaque to the nest and deleted with the plugin. It may \
+         hold actor ids -- the bound accounts `nest-api.bindings` lists -- but as the \
+         plugin's own cache of whom it serves, never as rows of theirs: the scope is \
+         the install's, an account's own entries live in `plugin_account_settings` and \
+         leave with the account, and nothing resolves through these bytes nest-side",
+    ),
+    (
+        "plugin_account_settings",
+        "value",
+        "one bound account's settings for a hosted plugin as `fauna.plugins.set_settings` \
+         wrote them: a JSON object of the keys the plugin's settings schema declares, \
+         values the user typed. FOLLOWS THE ROW (Purge; Burn with the binding) and names \
+         no account the nest resolves",
     ),
     (
         "folder_deposit_inbox",

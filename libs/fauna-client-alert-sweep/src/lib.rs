@@ -24,7 +24,10 @@
 //!
 //! Priority #1 (minimize per-app divergence) and #2 (maximize shared Rust): a
 //! feeder joining the sweep must not mean seven app changes. Apps call
-//! [`run_session_start_sweep`] exactly once and never change again — which
+//! [`run_alert_sweep_loop`] once per identity, and [`run_one_shot_sweep`] on a
+//! same-identity re-establish — or, where that re-establish tore the loop's
+//! client down, [`run_alert_sweep_loop_reestablished`] on the new client — and
+//! never change again — which
 //! feeders exist, in what order they run, how a failure is handled, and what
 //! gets logged are all decided here, once, for all seven.
 //!
@@ -475,6 +478,15 @@ where
 /// and, because the check sits between the sleep and the sweep, a departed
 /// identity is never swept for.
 ///
+/// **It also ends with its own client** ([`RpcRequester::torn_down`], ruled
+/// 2026-11-06). The loop rides the client it was
+/// started on, and a torn-down client fails every request at once; a loop left
+/// holding one checked nothing for the rest of the session while looking alive.
+/// So a teardown of the client ends the loop's wait at once, with no further
+/// pass. The identity may live on — a shell that rebuilds its client on a
+/// same-identity re-establish starts the new client's loop with
+/// [`run_alert_sweep_loop_reestablished`].
+///
 /// One residual, unchanged from the one-shot sweep it replaces: a teardown
 /// landing *during* a sweep can still race an alert into the registry after
 /// `clear_all` ran. The window is one sweep, and the next establish's own
@@ -507,7 +519,7 @@ pub async fn run_alert_sweep_loop_with<R, W, F>(
     custody: &Arc<dyn AtprotoIdentityStore>,
     alerts: &CriticalAlerts,
     actor_id: &ActorId,
-    mut wait: W,
+    wait: W,
 ) -> u32
 where
     R: RpcRequester + Clone,
@@ -515,12 +527,136 @@ where
     W: FnMut() -> F,
     F: core::future::Future<Output = bool>,
 {
+    sweep_loop(
+        rpc,
+        custody,
+        alerts,
+        actor_id,
+        None::<core::future::Ready<()>>,
+        wait,
+    )
+    .await
+}
+
+/// The loop for a **same-identity re-establish onto a NEW client** — the
+/// third arm of the post-auth split (`critical-alerts.md` § Mechanism → *How
+/// often the detector runs*), beside a sign-in's [`run_alert_sweep_loop`] and a
+/// re-establish's [`run_one_shot_sweep`] on the client the identity's loop
+/// already rides.
+///
+/// # Why a new loop
+///
+/// A loop rides one client and ends with it (§ *Stopping* on
+/// [`run_alert_sweep_loop`]). A shell that tears its client down on a
+/// same-identity re-establish — windows disposes the session's client and
+/// builds another on every one — therefore ends the identity's loop while the
+/// identity lives on, and the new client needs a loop of its own: a one-shot
+/// there would leave the identity unswept from then on.
+///
+/// # Why it opens on the custody door
+///
+/// It stands where the one-shot stood, so it opens the way the one-shot does:
+/// its first pass begins only once the door is readable
+/// ([`AtprotoIdentityStore::until_readable`]) or [`ONE_SHOT_READY_WAIT_SECS`]
+/// has passed, because the shell rebuilds the seat's account runtime under it
+/// and a pass run at once would record custody unreachable and still count
+/// itself complete (§ *It waits for the custody door first* on
+/// [`run_one_shot_sweep`]). A sign-in's loop keeps running its first pass at
+/// once: there the keyring-free feeders must not wait on a runtime nobody has
+/// started, and here the identity has already had that pass. From the second
+/// pass on, the two loops are one.
+pub async fn run_alert_sweep_loop_reestablished<R>(
+    rpc: R,
+    custody: &Arc<dyn AtprotoIdentityStore>,
+    alerts: &CriticalAlerts,
+    actor_id: &ActorId,
+) where
+    R: RpcRequester + Clone,
+    R::Error: RpcErrorClass,
+{
+    run_alert_sweep_loop_reestablished_with(
+        rpc,
+        custody,
+        alerts,
+        actor_id,
+        cross_platform_sleep_secs(ONE_SHOT_READY_WAIT_SECS),
+        || async {
+            cross_platform_sleep_secs(RE_SWEEP_INTERVAL_SECS).await;
+            true
+        },
+    )
+    .await;
+}
+
+/// [`run_alert_sweep_loop_reestablished`] with the opening pass's bound on its
+/// wait for the custody door, and the wait between passes, both injected — so
+/// the tests drive it with no wall clock (`testing.md` § point 14).
+pub async fn run_alert_sweep_loop_reestablished_with<R, B, W, F>(
+    rpc: R,
+    custody: &Arc<dyn AtprotoIdentityStore>,
+    alerts: &CriticalAlerts,
+    actor_id: &ActorId,
+    ready_wait: B,
+    wait: W,
+) -> u32
+where
+    R: RpcRequester + Clone,
+    R::Error: RpcErrorClass,
+    B: core::future::Future<Output = ()>,
+    W: FnMut() -> F,
+    F: core::future::Future<Output = bool>,
+{
+    sweep_loop(rpc, custody, alerts, actor_id, Some(ready_wait), wait).await
+}
+
+/// The one loop body behind every loop entry point. `opening` is `None` for a
+/// sign-in's loop (the first pass runs at once) and the bound on the custody
+/// door's wait for a re-established one.
+async fn sweep_loop<R, B, W, F>(
+    rpc: R,
+    custody: &Arc<dyn AtprotoIdentityStore>,
+    alerts: &CriticalAlerts,
+    actor_id: &ActorId,
+    opening: Option<B>,
+    mut wait: W,
+) -> u32
+where
+    R: RpcRequester + Clone,
+    R::Error: RpcErrorClass,
+    B: core::future::Future<Output = ()>,
+    W: FnMut() -> F,
+    F: core::future::Future<Output = bool>,
+{
     let epoch = alerts.teardown_epoch();
+    if let Some(ready_wait) = opening {
+        let opened = unless_torn_down(&rpc, async {
+            let readable = readable_or_wait(custody.until_readable(), async {
+                ready_wait.await;
+                false
+            })
+            .await;
+            if !readable {
+                tracing::debug!(
+                    "critical-alert sweep loop (re-established): the custody door was still \
+                     not readable at the wait's bound; sweeping anyway"
+                );
+            }
+            true
+        })
+        .await;
+        if !opened || alerts.teardown_epoch() != epoch {
+            tracing::debug!(
+                "critical-alert sweep loop (re-established): its client or identity was torn \
+                 down before the opening pass; stopping"
+            );
+            return 0;
+        }
+    }
     let mut sweeps = 0u32;
     // Whether a refused ring read may still end the next wait at the door's
     // readiness edge — spent by one such wait, re-armed by a pass that read
-    // the ring (the rustdoc above: *A first pass that ran before the account
-    // runtime*).
+    // the ring (the rustdoc on `run_alert_sweep_loop`: *A first pass that ran
+    // before the account runtime*).
     let mut readable_edge_armed = true;
     loop {
         let report = run_session_start_sweep(rpc.clone(), custody, alerts, actor_id).await;
@@ -556,11 +692,16 @@ where
                 "critical-alert sweep: the rotation keyring was unreadable; the \
                  next pass also runs once the account runtime is readable"
             );
-            readable_or_wait(custody.until_readable(), wait()).await
+            unless_torn_down(&rpc, readable_or_wait(custody.until_readable(), wait())).await
         } else {
-            wait().await
+            unless_torn_down(&rpc, wait()).await
         };
         if !go_on {
+            tracing::debug!(
+                sweeps,
+                "critical-alert sweep loop: its wait ended it, or its client was torn down; \
+                 stopping"
+            );
             return sweeps;
         }
         if alerts.teardown_epoch() != epoch {
@@ -571,6 +712,26 @@ where
             return sweeps;
         }
     }
+}
+
+/// `wait`'s answer, unless the loop's own client is torn down first
+/// ([`RpcRequester::torn_down`]): then `false`, ending the loop at once rather
+/// than at the end of a wait whose next pass could only fail. The teardown is
+/// polled first, so a client already torn down never drives the wait at all.
+async fn unless_torn_down<R, B>(rpc: &R, wait: B) -> bool
+where
+    R: RpcRequester,
+    B: core::future::Future<Output = bool>,
+{
+    let mut torn_down = core::pin::pin!(rpc.torn_down());
+    let mut wait = core::pin::pin!(wait);
+    core::future::poll_fn(|cx| {
+        if torn_down.as_mut().poll(cx).is_ready() {
+            return core::task::Poll::Ready(false);
+        }
+        wait.as_mut().poll(cx)
+    })
+    .await
 }
 
 /// The loop's wait after a refused ring read: `true` (sweep again) the moment
@@ -590,6 +751,266 @@ where
         wait.as_mut().poll(cx)
     })
     .await
+}
+
+/// How long [`run_one_shot_sweep`] waits for the custody door before its pass —
+/// the same order as the custody seam gives a write meeting an assembling
+/// runtime (`fauna_account_seams::atproto_identity::WRITE_WAIT_POLLS` ×
+/// `WRITE_WAIT_POLL`, about 30 s), since both are waiting out one runtime's
+/// assembly and first catch-up pass.
+///
+/// Past it the pass runs anyway: a seat whose runtime never comes must not
+/// hold back the feeders that need no keyring, and the identity's loop is still
+/// there to read the ring at its own edge.
+pub const ONE_SHOT_READY_WAIT_SECS: u64 = 30;
+
+/// One sweep pass for a **same-identity re-establish** — the converge arm of the
+/// post-auth split (`critical-alerts.md` § Mechanism → *Who runs the
+/// detector*), where the identity's loop ([`run_alert_sweep_loop`]) is still
+/// running and a second loop would only stack. Every app's one-shot arm calls
+/// this, never a bare [`run_session_start_sweep`].
+///
+/// # It waits for the custody door first
+///
+/// A re-establish may rebuild the seat's account runtime under the pass — the
+/// windows shell disposes the session's client and starts a fresh runtime on
+/// every one, the e2e session seam included — and feeder #1 reads the rotation
+/// keyring through that runtime. A pass that ran at once would find the door
+/// refusing, record custody as unreachable, and still count itself complete, so
+/// the converge's one verdict on custody would be a refusal; anything reading
+/// the pass as an audit (the `sweep_passes_completed` barrier a negative e2e
+/// read waits on) would read nothing. So the pass begins only once the door is
+/// readable ([`AtprotoIdentityStore::until_readable`]: the runtime there and its
+/// first catch-up pass settled), or once `ready_wait` has elapsed. A live
+/// runtime — tui's and linux's converge arm, which keep the session — answers
+/// at once and costs nothing.
+///
+/// The loop's own rule is the other shape — run first, re-run at the edge —
+/// because at a FRESH sign-in the feeders that need no keyring must not wait on
+/// a runtime nobody has started yet; a re-establish has already had that pass.
+pub async fn run_one_shot_sweep<R>(
+    rpc: R,
+    custody: &Arc<dyn AtprotoIdentityStore>,
+    alerts: &CriticalAlerts,
+    actor_id: &ActorId,
+) -> SweepReport
+where
+    R: RpcRequester + Clone,
+    R::Error: RpcErrorClass,
+{
+    run_one_shot_sweep_with(rpc, custody, alerts, actor_id, async {
+        cross_platform_sleep_secs(ONE_SHOT_READY_WAIT_SECS).await;
+    })
+    .await
+}
+
+/// [`run_one_shot_sweep`] with the bound on its wait for the custody door
+/// injected, so the tests drive it with no wall clock (`testing.md` § point 14).
+pub async fn run_one_shot_sweep_with<R, B>(
+    rpc: R,
+    custody: &Arc<dyn AtprotoIdentityStore>,
+    alerts: &CriticalAlerts,
+    actor_id: &ActorId,
+    ready_wait: B,
+) -> SweepReport
+where
+    R: RpcRequester + Clone,
+    R::Error: RpcErrorClass,
+    B: core::future::Future<Output = ()>,
+{
+    let readable = readable_or_wait(custody.until_readable(), async {
+        ready_wait.await;
+        false
+    })
+    .await;
+    if !readable {
+        tracing::debug!(
+            "one-shot critical-alert sweep: the custody door was still not readable at the \
+             wait's bound; sweeping anyway"
+        );
+    }
+    let report = run_session_start_sweep(rpc, custody, alerts, actor_id).await;
+    if report.failures.is_empty() {
+        tracing::debug!(
+            checked = ?report.checked,
+            skipped = ?report.skipped,
+            "one-shot critical-alert sweep: every reachable feeder ran"
+        );
+    } else {
+        // Not user-visible: a standing alert (if any) is left alone, and the
+        // identity's loop retries on its own clock.
+        tracing::warn!(
+            checked = ?report.checked,
+            failures = ?report.failures,
+            skipped = ?report.skipped,
+            "one-shot critical-alert sweep: some feeders were unreachable"
+        );
+    }
+    report
+}
+
+/// Which arm of the post-auth split a hook runs — [`LoopClaim::claim`]'s answer
+/// (`critical-alerts.md` § Mechanism → *How often the detector runs*).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SweepArm {
+    /// A first or identity-changing sign-in: [`run_alert_sweep_loop`], its first
+    /// pass at once.
+    Loop,
+    /// The same identity on a client its loop does not ride — the hook was handed
+    /// a rebuilt client, or the identity's loop has ended:
+    /// [`run_alert_sweep_loop_reestablished`] on the hook's client.
+    ReestablishedLoop,
+    /// The same identity on the client its live loop already rides:
+    /// [`run_one_shot_sweep`], because a second loop would only stack.
+    OnePass,
+}
+
+/// The post-auth split's record — one per process, held by whatever starts the
+/// sweep there (`fauna-ffi`'s `start_critical_alert_sweep` for the native shells).
+/// It decides the [`SweepArm`] of every hook from two facts: which identity the
+/// hook last established, and which client the identity's live loop rides.
+///
+/// **Keyed on the client as well as the identity, because a loop rides one
+/// client and ends with it** (§ *Stopping* on [`run_alert_sweep_loop`]). A shell
+/// whose same-identity re-establish tears the old client down and builds another
+/// — windows on every one; apple's and android's e2e session patches — ends the
+/// loop riding the old client while the identity lives on, so the hook on the
+/// new client must start a loop, not the one-shot: keyed on the identity alone,
+/// the identity's only loop was left failing every pass on the torn-down client. A shell that keeps its client gets the
+/// one-shot, as before.
+///
+/// **The identity is forgotten by the registry's teardown epoch, not by a call.**
+/// Every identity teardown already calls [`CriticalAlerts::clear_all`] (§
+/// Mechanism → *Lifetime*), which bumps [`CriticalAlerts::teardown_epoch`] — the
+/// same signal that stops the departed identity's loop — so a record taken under
+/// an older epoch no longer speaks for anyone, with no per-shell forget to keep
+/// in step.
+pub struct LoopClaim<C> {
+    record: std::sync::Mutex<ClaimRecord<C>>,
+}
+
+struct ClaimRecord<C> {
+    /// The identity the hook last established, with the teardown epoch it was
+    /// established under.
+    identity: Option<(String, u64)>,
+    /// The client the identity's live loop rides, and that run's token; `None`
+    /// once the loop has ended. Held weakly, so the claim never keeps a client
+    /// alive — and a `Weak` keeps the allocation, so a later client can never be
+    /// mistaken for this one at a reused address.
+    live: Option<(usize, Option<std::sync::Weak<C>>, u64)>,
+    next_token: u64,
+}
+
+/// A loop's hold on its [`LoopClaim`]: dropping it — the loop has ended, for
+/// whatever reason — marks the identity as having no live loop, unless a later
+/// hook has claimed a loop since (a replaced loop ending late must not clear its
+/// successor's record).
+pub struct LoopTicket<'a, C> {
+    claim: &'a LoopClaim<C>,
+    token: u64,
+}
+
+impl<C> Drop for LoopTicket<'_, C> {
+    fn drop(&mut self) {
+        let mut record = self
+            .claim
+            .record
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if record
+            .live
+            .as_ref()
+            .is_some_and(|(_, _, token)| *token == self.token)
+        {
+            record.live = None;
+        }
+    }
+}
+
+impl<C> Default for LoopClaim<C> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<C> LoopClaim<C> {
+    /// An empty record: the next hook is a first sign-in.
+    pub const fn new() -> Self {
+        Self {
+            record: std::sync::Mutex::new(ClaimRecord {
+                identity: None,
+                live: None,
+                next_token: 0,
+            }),
+        }
+    }
+
+    /// The split's decision for a post-auth hook establishing `identity` (the
+    /// actor at a nest — a re-point at another nest needs a loop sweeping that
+    /// nest) on `client`. A loop arm comes with its [`LoopTicket`], which the
+    /// caller holds for as long as the loop runs; [`SweepArm::OnePass`] with none.
+    pub fn claim(
+        &self,
+        identity: &str,
+        client: &Arc<C>,
+        alerts: &CriticalAlerts,
+    ) -> (SweepArm, Option<LoopTicket<'_, C>>) {
+        self.decide(
+            identity,
+            Arc::as_ptr(client) as usize,
+            Some(Arc::downgrade(client)),
+            alerts,
+        )
+    }
+
+    /// [`Self::claim`] for a shell whose client is not an `Arc` — web's is a
+    /// cloneable handle inside a wasm-bindgen object. The caller names the client
+    /// by `client_key`, a number it mints once per client and never reuses (a
+    /// counter, not an address: nothing here keeps the client alive to stop an
+    /// address being recycled).
+    pub fn claim_keyed(
+        &self,
+        identity: &str,
+        client_key: usize,
+        alerts: &CriticalAlerts,
+    ) -> (SweepArm, Option<LoopTicket<'_, C>>) {
+        self.decide(identity, client_key, None, alerts)
+    }
+
+    fn decide(
+        &self,
+        identity: &str,
+        client_key: usize,
+        keepalive: Option<std::sync::Weak<C>>,
+        alerts: &CriticalAlerts,
+    ) -> (SweepArm, Option<LoopTicket<'_, C>>) {
+        let epoch = alerts.teardown_epoch();
+        let mut record = self
+            .record
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let same_identity = record
+            .identity
+            .as_ref()
+            .is_some_and(|(known, at)| known == identity && *at == epoch);
+        let rides_this_client = record
+            .live
+            .as_ref()
+            .is_some_and(|(rides, _, _)| *rides == client_key);
+        if same_identity && rides_this_client {
+            return (SweepArm::OnePass, None);
+        }
+        record.next_token += 1;
+        let token = record.next_token;
+        record.identity = Some((identity.to_owned(), epoch));
+        record.live = Some((client_key, keepalive, token));
+        let arm = if same_identity {
+            SweepArm::ReestablishedLoop
+        } else {
+            SweepArm::Loop
+        };
+        (arm, Some(LoopTicket { claim: self, token }))
+    }
 }
 
 /// [`run_alert_sweep_loop`] whose wait between passes also ends when the future
@@ -636,6 +1057,42 @@ where
             true
         }
     })
+    .await
+}
+
+/// [`run_alert_sweep_loop_reestablished`] whose wait between passes also ends
+/// when the future `wake` hands back resolves — [`run_alert_sweep_loop_wakeable`]'s
+/// seam on the re-established loop, so the e2e build of a shell that rebuilds
+/// its client on a re-establish runs that loop and wakes it the same way. The
+/// opening pass's wait on the custody door is the production one.
+#[cfg(any(test, debug_assertions, feature = "test-helpers"))]
+pub async fn run_alert_sweep_loop_reestablished_wakeable<R, W, F>(
+    rpc: R,
+    custody: &Arc<dyn AtprotoIdentityStore>,
+    alerts: &CriticalAlerts,
+    actor_id: &ActorId,
+    mut wake: W,
+) -> u32
+where
+    R: RpcRequester + Clone,
+    R::Error: RpcErrorClass,
+    W: FnMut() -> F,
+    F: core::future::Future<Output = ()>,
+{
+    run_alert_sweep_loop_reestablished_with(
+        rpc,
+        custody,
+        alerts,
+        actor_id,
+        cross_platform_sleep_secs(ONE_SHOT_READY_WAIT_SECS),
+        || {
+            let woken = wake();
+            async move {
+                first_of(woken, cross_platform_sleep_secs(RE_SWEEP_INTERVAL_SECS)).await;
+                true
+            }
+        },
+    )
     .await
 }
 
@@ -1385,6 +1842,9 @@ mod tests {
         /// `(kind, error code)` to reject with, leaving every other kind alone.
         reject_kind: Mutex<Option<(&'static str, &'static str)>>,
         calls: Mutex<Vec<&'static str>>,
+        /// Set by [`FakeRpc::tear_down`]; what `torn_down` reports. Requests
+        /// still answer, so a test reads the loop's own stop, not a failure.
+        torn_down: Mutex<bool>,
     }
 
     #[derive(Debug)]
@@ -1454,6 +1914,7 @@ mod tests {
                     account: Mutex::new(account_reply(None)),
                     reject_kind: Mutex::new(None),
                     calls: Mutex::new(Vec::new()),
+                    torn_down: Mutex::new(false),
                 }),
             }
         }
@@ -1467,6 +1928,7 @@ mod tests {
                     account: Mutex::new(account_reply(None)),
                     reject_kind: Mutex::new(None),
                     calls: Mutex::new(Vec::new()),
+                    torn_down: Mutex::new(false),
                 }),
             }
         }
@@ -1521,6 +1983,11 @@ mod tests {
         fn calls(&self) -> Vec<&'static str> {
             self.inner.calls.lock().unwrap().clone()
         }
+
+        /// Tear this client down, as a shell's `disconnect` does.
+        fn tear_down(&self) {
+            *self.inner.torn_down.lock().unwrap() = true;
+        }
     }
 
     impl RpcRequester for FakeRpc {
@@ -1569,6 +2036,15 @@ mod tests {
                 .expect("encode reply")
             };
             Ok(fauna_core::encoding::canonical_decode(&bytes).expect("decode reply"))
+        }
+
+        /// Read when polled: a teardown that lands before the poll is seen,
+        /// one after it is not — enough for these single-threaded tests, which
+        /// tear down from inside the loop's own wait closure.
+        async fn torn_down(&self) {
+            if !*self.inner.torn_down.lock().unwrap() {
+                core::future::pending::<()>().await;
+            }
         }
     }
 
@@ -2986,6 +3462,62 @@ mod tests {
         assert_eq!(sweeps, 1);
     }
 
+    /// A loop rides one client and ends with it.
+    /// A shell that tears its client down on a same-identity re-establish
+    /// (windows disposes the session's client and builds another on every one)
+    /// leaves the identity alive, so the teardown epoch never moves — and a
+    /// loop still holding the torn-down client failed every later pass at its
+    /// first nest read, checking nothing for the rest of the session. It must
+    /// end instead, at its next wait, without sweeping again.
+    ///
+    /// Bounded: a loop that ignored the teardown takes both wakes (3 sweeps).
+    #[test]
+    fn a_torn_down_client_ends_the_loop_before_it_sweeps_again() {
+        let alerts = CriticalAlerts::new();
+        let rpc = FakeRpc::answering(None);
+
+        let sweeps = block_on(run_alert_sweep_loop_with(
+            rpc.clone(),
+            &store(&[]),
+            &alerts,
+            &actor(7),
+            {
+                let rpc = rpc.clone();
+                let mut wake = wake_times(2);
+                move || {
+                    rpc.tear_down();
+                    wake()
+                }
+            },
+        ));
+
+        assert_eq!(
+            sweeps, 1,
+            "the wait after the client's teardown must end the loop, not sweep on it"
+        );
+        assert_eq!(alerts.sweep_passes_started(), 1);
+    }
+
+    /// …and it ends at the teardown, not when its clock next comes round: a
+    /// retired loop must not linger out a 6 h wait. The wait here may never be
+    /// polled at all.
+    #[test]
+    fn a_loop_whose_client_is_torn_down_never_waits_out_its_clock() {
+        let alerts = CriticalAlerts::new();
+        let rpc = FakeRpc::answering(None);
+        rpc.tear_down();
+
+        let sweeps = block_on(run_alert_sweep_loop_with(
+            rpc,
+            &store(&[]),
+            &alerts,
+            &actor(7),
+            || async { unreachable!("a torn-down client's loop must not wait out its clock") },
+        ));
+
+        assert_eq!(sweeps, 1);
+    }
+
     /// A custody door modelling a seat whose account runtime assembles after
     /// sign-in: every read is refused as the plane door refuses one, until
     /// the readiness edge fires — which, here, is the runtime assembling.
@@ -3130,6 +3662,314 @@ mod tests {
 
         assert_eq!(sweeps, 1);
         assert_eq!(*door.edges.lock().unwrap(), 1, "the edge was never awaited");
+    }
+
+    /// The re-establish regression: a shell that
+    /// rebuilds its account runtime on a same-identity re-establish (windows,
+    /// every time) ran the one-shot pass while the door refused, so the pass
+    /// counted itself complete with custody unread and the converge's verdict
+    /// on a seized identity was silence. The one-shot waits for the door
+    /// first and runs ONE pass, which reads the ring.
+    #[test]
+    fn a_one_shot_waits_for_the_custody_door_then_sweeps_once() {
+        let alerts = CriticalAlerts::new();
+        let door = AssemblingStore::new(false, 1);
+        let custody: Arc<dyn AtprotoIdentityStore> = door.clone();
+
+        let report = block_on(run_one_shot_sweep_with(
+            FakeRpc::answering(None),
+            &custody,
+            &alerts,
+            &actor(7),
+            core::future::pending::<()>(),
+        ));
+
+        assert!(!report.ring_unread, "the pass ran after the door opened");
+        assert_eq!(
+            *door.ring_reads.lock().unwrap(),
+            1,
+            "feeder #1 read the ring"
+        );
+        assert_eq!(
+            (
+                alerts.sweep_passes_started(),
+                alerts.sweep_passes_completed()
+            ),
+            (1, 1),
+            "one pass, begun only once the door was readable — the barrier a \
+             negative read waits on counts an audit, never a refusal"
+        );
+    }
+
+    /// A door that never opens holds the pass back only to the bound: the
+    /// feeders that need no keyring still run, and custody is reported
+    /// unreachable rather than passed over.
+    #[test]
+    fn a_one_shot_whose_door_never_opens_sweeps_at_the_bound() {
+        let alerts = CriticalAlerts::new();
+        let door = AssemblingStore::new(false, 0);
+        let custody: Arc<dyn AtprotoIdentityStore> = door.clone();
+
+        let report = block_on(run_one_shot_sweep_with(
+            FakeRpc::answering(None),
+            &custody,
+            &alerts,
+            &actor(7),
+            core::future::ready(()),
+        ));
+
+        assert!(report.ring_unread);
+        assert!(
+            report.checked.contains(&feeders::PENDING_REPLACEMENT),
+            "the keyring-free feeders still ran: {report:?}"
+        );
+        assert_eq!(alerts.sweep_passes_completed(), 1, "exactly one pass");
+    }
+
+    /// An open door — the converge on a live session tui and linux make —
+    /// never drives the bound at all.
+    #[test]
+    fn a_one_shot_on_an_open_door_never_waits_on_the_bound() {
+        let alerts = CriticalAlerts::new();
+        let door = AssemblingStore::new(false, 1);
+        *door.assembled.lock().unwrap() = true;
+        let custody: Arc<dyn AtprotoIdentityStore> = door.clone();
+
+        let report = block_on(run_one_shot_sweep_with(
+            FakeRpc::answering(None),
+            &custody,
+            &alerts,
+            &actor(7),
+            async { unreachable!("an open door must not poll the bound") },
+        ));
+
+        assert!(!report.ring_unread);
+        assert_eq!(alerts.sweep_passes_completed(), 1);
+    }
+
+    /// The loop a shell starts on a NEW client for an identity it re-establishes
+    /// (windows, every time) stands where the
+    /// one-shot stood, so it opens the way the one-shot does: its first pass
+    /// begins once the custody door is readable, and reads the ring — the
+    /// re-establish's first verdict on custody is an audit, never a refusal.
+    /// Then it is the ordinary loop: one pass per wake.
+    ///
+    /// A loop that opened at once would read the ring once in two passes (a
+    /// refusal, then the readable edge's re-run).
+    #[test]
+    fn a_reestablished_loop_opens_on_the_custody_door_then_keeps_the_clock() {
+        let alerts = CriticalAlerts::new();
+        let door = AssemblingStore::new(false, 1);
+        let custody: Arc<dyn AtprotoIdentityStore> = door.clone();
+
+        let sweeps = block_on(run_alert_sweep_loop_reestablished_with(
+            FakeRpc::answering(None),
+            &custody,
+            &alerts,
+            &actor(7),
+            core::future::pending::<()>(),
+            wake_times(1),
+        ));
+
+        assert_eq!(sweeps, 2, "the opening pass, then one per wake");
+        assert_eq!(
+            *door.ring_reads.lock().unwrap(),
+            2,
+            "both passes read the ring: the opening one began only once the door was readable"
+        );
+    }
+
+    /// A door that never opens holds the opening pass back only to the bound,
+    /// as the one-shot's does: the keyring-free feeders still run.
+    #[test]
+    fn a_reestablished_loop_whose_door_never_opens_sweeps_at_the_bound() {
+        let alerts = CriticalAlerts::new();
+        let door = AssemblingStore::new(false, 0);
+        let custody: Arc<dyn AtprotoIdentityStore> = door.clone();
+
+        let sweeps = block_on(run_alert_sweep_loop_reestablished_with(
+            FakeRpc::answering(None),
+            &custody,
+            &alerts,
+            &actor(7),
+            core::future::ready(()),
+            wake_times(0),
+        ));
+
+        assert_eq!(sweeps, 1);
+        assert_eq!(alerts.sweep_passes_completed(), 1, "the opening pass ran");
+    }
+
+    /// An identity or client torn down while the opening pass waits on the
+    /// door gets no pass at all — a departed identity is never swept for, and
+    /// a torn-down client is never swept on.
+    #[test]
+    fn a_reestablished_loop_torn_down_before_it_opens_never_sweeps() {
+        let door = AssemblingStore::new(false, 0);
+        let custody: Arc<dyn AtprotoIdentityStore> = door.clone();
+
+        let alerts = Arc::new(CriticalAlerts::new());
+        let identity_gone = block_on(run_alert_sweep_loop_reestablished_with(
+            FakeRpc::answering(None),
+            &custody,
+            &alerts,
+            &actor(7),
+            {
+                let alerts = Arc::clone(&alerts);
+                async move {
+                    alerts.clear_all();
+                }
+            },
+            wake_times(1),
+        ));
+        assert_eq!(
+            identity_gone, 0,
+            "an identity torn down before the opening pass"
+        );
+
+        // The door never opens and its bound may never be polled: a torn-down
+        // client ends the opening wait before either is asked.
+        let alerts = CriticalAlerts::new();
+        let rpc = FakeRpc::answering(None);
+        rpc.tear_down();
+        let client_gone = block_on(run_alert_sweep_loop_reestablished_with(
+            rpc,
+            &custody,
+            &alerts,
+            &actor(7),
+            async { unreachable!("a torn-down client's loop must not wait on the custody door") },
+            wake_times(1),
+        ));
+        assert_eq!(client_gone, 0, "a client torn down before the opening pass");
+        assert_eq!(alerts.sweep_passes_started(), 0);
+    }
+
+    // ── The post-auth split (`LoopClaim`) ───────────────────────────────────
+
+    fn arm_of(
+        claim: &LoopClaim<u8>,
+        identity: &str,
+        client: &Arc<u8>,
+        alerts: &CriticalAlerts,
+    ) -> SweepArm {
+        // The ticket is held by the caller in production; a test that only reads
+        // the arm keeps the loop "live" by leaking its ticket.
+        let (arm, ticket) = claim.claim(identity, client, alerts);
+        core::mem::forget(ticket);
+        arm
+    }
+
+    #[test]
+    fn a_first_sign_in_claims_the_loop_and_a_re_auth_on_its_client_runs_one_pass() {
+        let (claim, alerts, client) = (LoopClaim::new(), CriticalAlerts::new(), Arc::new(0u8));
+        assert_eq!(arm_of(&claim, "a@nest1", &client, &alerts), SweepArm::Loop);
+        assert_eq!(
+            arm_of(&claim, "a@nest1", &client, &alerts),
+            SweepArm::OnePass
+        );
+    }
+
+    /// The defect: keyed on the identity alone, a
+    /// re-establish onto a rebuilt client ran one pass and left the identity's
+    /// only loop on the torn-down client, failing every pass from then on. A
+    /// rebuilt client claims a loop of its own — the re-established kind, which
+    /// opens on the custody door — and a re-auth on THAT client is one pass again.
+    #[test]
+    fn a_re_establish_on_a_rebuilt_client_claims_a_fresh_loop() {
+        let (claim, alerts) = (LoopClaim::new(), CriticalAlerts::new());
+        let (first, rebuilt) = (Arc::new(0u8), Arc::new(0u8));
+        assert_eq!(arm_of(&claim, "a@nest1", &first, &alerts), SweepArm::Loop);
+        assert_eq!(
+            arm_of(&claim, "a@nest1", &rebuilt, &alerts),
+            SweepArm::ReestablishedLoop
+        );
+        assert_eq!(
+            arm_of(&claim, "a@nest1", &rebuilt, &alerts),
+            SweepArm::OnePass
+        );
+    }
+
+    /// The replaced loop ends late — its client's teardown reaches it after the
+    /// new loop's claim — and its ticket must not clear the new loop's record, or
+    /// the next re-auth on the new client would stack a second loop on it.
+    #[test]
+    fn the_replaced_loop_ending_late_leaves_the_new_clients_loop_recorded() {
+        let (claim, alerts) = (LoopClaim::new(), CriticalAlerts::new());
+        let (first, rebuilt) = (Arc::new(0u8), Arc::new(0u8));
+        let (_, replaced) = claim.claim("a@nest1", &first, &alerts);
+        assert_eq!(
+            arm_of(&claim, "a@nest1", &rebuilt, &alerts),
+            SweepArm::ReestablishedLoop
+        );
+
+        drop(replaced);
+
+        assert_eq!(
+            arm_of(&claim, "a@nest1", &rebuilt, &alerts),
+            SweepArm::OnePass
+        );
+    }
+
+    /// A shell naming its client by key (web) gets the same split: its own key
+    /// runs one pass, a new key a re-established loop, a teardown a fresh loop.
+    #[test]
+    fn a_keyed_client_gets_the_same_split() {
+        let (claim, alerts) = (LoopClaim::<()>::new(), CriticalAlerts::new());
+        let (arm, _ticket) = claim.claim_keyed("a", 1, &alerts);
+        assert_eq!(arm, SweepArm::Loop);
+        assert_eq!(claim.claim_keyed("a", 1, &alerts).0, SweepArm::OnePass);
+        let (arm, _newer) = claim.claim_keyed("a", 2, &alerts);
+        assert_eq!(arm, SweepArm::ReestablishedLoop);
+        alerts.clear_all();
+        assert_eq!(claim.claim_keyed("a", 2, &alerts).0, SweepArm::Loop);
+    }
+
+    /// A loop that ended (its connect failed, or its client was torn down) no
+    /// longer covers the identity, which lives on: the next hook re-establishes it
+    /// with a loop, even on the same client.
+    #[test]
+    fn a_loop_that_ended_hands_the_next_hook_a_reestablished_loop() {
+        let (claim, alerts, client) = (LoopClaim::new(), CriticalAlerts::new(), Arc::new(0u8));
+        let (arm, ticket) = claim.claim("a@nest1", &client, &alerts);
+        assert_eq!(arm, SweepArm::Loop);
+
+        drop(ticket);
+
+        assert_eq!(
+            arm_of(&claim, "a@nest1", &client, &alerts),
+            SweepArm::ReestablishedLoop
+        );
+    }
+
+    #[test]
+    fn another_identity_or_nest_claims_a_loop_of_its_own() {
+        let (claim, alerts, client) = (LoopClaim::new(), CriticalAlerts::new(), Arc::new(0u8));
+        assert_eq!(arm_of(&claim, "a@nest1", &client, &alerts), SweepArm::Loop);
+        assert_eq!(arm_of(&claim, "b@nest1", &client, &alerts), SweepArm::Loop);
+        assert_eq!(arm_of(&claim, "b@nest2", &client, &alerts), SweepArm::Loop);
+    }
+
+    /// `critical-alerts.md` § Mechanism → *Lifetime*: "session" means identity. An
+    /// identity teardown (`clear_all`, which every shell already calls there)
+    /// forgets the identity — the next sign-in, even as the same actor on the same
+    /// client, starts a sign-in's loop; nothing per-shell has to say so.
+    #[test]
+    fn an_identity_teardown_forgets_the_identity() {
+        let (claim, alerts, client) = (LoopClaim::new(), CriticalAlerts::new(), Arc::new(0u8));
+        assert_eq!(arm_of(&claim, "a@nest1", &client, &alerts), SweepArm::Loop);
+
+        alerts.clear_all();
+
+        assert_eq!(arm_of(&claim, "a@nest1", &client, &alerts), SweepArm::Loop);
+    }
+
+    /// The record never keeps a client alive: a torn-down session's client is
+    /// freed when its shell lets go of it.
+    #[test]
+    fn the_claim_holds_its_client_only_weakly() {
+        let (claim, alerts, client) = (LoopClaim::new(), CriticalAlerts::new(), Arc::new(0u8));
+        let (_, _ticket) = claim.claim("a@nest1", &client, &alerts);
+        assert_eq!(Arc::strong_count(&client), 1);
     }
 
     /// The e2e seam's contract: a wake ends ONE wait early and the loop sweeps

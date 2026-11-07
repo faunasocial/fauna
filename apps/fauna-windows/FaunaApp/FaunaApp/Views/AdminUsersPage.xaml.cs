@@ -306,10 +306,9 @@ public sealed partial class AdminUsersPage : Page
 
     /// <summary>Fill an age-band ComboBox from the shared <c>age_band_options()</c>
     /// catalog (not-set + the four bands, in the ratified order) and select
-    /// <paramref name="selectedValue"/> — Content is the localized label while
-    /// AutomationProperties.Name is the option VALUE, so FlaUI's exact-Name
-    /// <c>Select()</c>/<c>get_text</c> speak what <c>driver.select(id, value)</c> sends
-    /// (the registration-mode picker's shape). No per-app spelling of the vocabulary.</summary>
+    /// <paramref name="selectedValue"/> — each item paints the localized label and is
+    /// keyed by the option VALUE (<see cref="FaunaApp.Helpers.PickerOption"/>), what
+    /// <c>driver.select(id, value)</c> sends. No per-app spelling of the vocabulary.</summary>
     private void PopulateAgeBandCombo(ComboBox combo, string selectedValue)
     {
         _initializingAgeBandCombo = true;
@@ -318,8 +317,7 @@ public sealed partial class AdminUsersPage : Page
             combo.Items.Clear();
             foreach (var option in uniffi.fauna_ffi.FaunaFfiMethods.AgeBandOptions())
             {
-                var item = new ComboBoxItem { Content = S.Resolve(option.@label), Tag = option.@value };
-                Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(item, option.@value);
+                var item = FaunaApp.Helpers.PickerOption.Create(S.Resolve(option.@label), option.@value);
                 combo.Items.Add(item);
                 if (option.@value == selectedValue) combo.SelectedItem = item;
             }
@@ -433,13 +431,11 @@ public sealed partial class AdminUsersPage : Page
 
     /// <summary>Fill the registration-mode ComboBox from the shared
     /// <c>registration_mode_options()</c> catalog (wire value + localized label) and
-    /// select <paramref name="selectedWireValue"/> — Content is the LOCALIZED label
-    /// (display) while AutomationProperties.Name is the raw wire value: the two
-    /// must differ so FlaUI's exact-Name <c>Select()</c>/<c>get_text</c> can target
-    /// what <c>driver.select(id, value)</c> drives and dispatches — mirrors
-    /// <c>TaskDelegationRowVm.OptionKey</c>'s picker (SettingsTaskDelegationPage) /
-    /// <c>EmailFilterPanel</c>'s static items, since the tier pickers' Content==wire
-    /// shortcut doesn't hold here (the mode's label is genuinely localized text).</summary>
+    /// select <paramref name="selectedWireValue"/> — each item paints the LOCALIZED
+    /// label and is keyed by the raw wire value (<see cref="FaunaApp.Helpers.PickerOption"/>),
+    /// what <c>driver.select(id, value)</c> drives and the page dispatches; the tier
+    /// pickers' Content==wire shortcut doesn't hold here (the mode's label is
+    /// genuinely localized text).</summary>
     private void PopulateRegistrationModeCombo(ComboBox combo, string selectedWireValue)
     {
         _initializingRegistrationCombo = true;
@@ -448,8 +444,7 @@ public sealed partial class AdminUsersPage : Page
             combo.Items.Clear();
             foreach (var option in uniffi.fauna_ffi.FaunaFfiMethods.RegistrationModeOptions())
             {
-                var item = new ComboBoxItem { Content = S.Resolve(option.@label), Tag = option.@value };
-                Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(item, option.@value);
+                var item = FaunaApp.Helpers.PickerOption.Create(S.Resolve(option.@label), option.@value);
                 combo.Items.Add(item);
                 if (option.@value == selectedWireValue) combo.SelectedItem = item;
             }

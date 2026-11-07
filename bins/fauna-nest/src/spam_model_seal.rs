@@ -15,6 +15,34 @@ use std::collections::BTreeSet;
 
 use fauna_mail::spam::SpamModel;
 
+/// Slack a seal's envelope (HPKE encapsulation, tag, dag-cbor framing) adds on
+/// top of the plaintext it wraps. The nest cannot open a seal, so every opaque
+/// field is bounded by its plaintext bound plus this.
+pub const SEAL_ENVELOPE_SLACK: usize = 4 * 1024;
+
+/// Cap on a sealed model blob and on a holder's re-sealed copy: the model's own
+/// `cap_to_bytes` bound plus the envelope.
+pub const SEALED_MODEL_MAX_BYTES: usize =
+    fauna_mail::spam::MODEL_MAX_BYTES_DEFAULT + SEAL_ENVELOPE_SLACK;
+
+/// Cap on a history row's sealed delta. A delta that could not fit in a model
+/// under its own cap is of no use to an undo, so the model bound applies.
+pub const SEALED_DELTA_MAX_BYTES: usize =
+    fauna_mail::spam::MODEL_MAX_BYTES_DEFAULT + SEAL_ENVELOPE_SLACK;
+
+/// Cap on a history row's sealed subject: one subject line plus the envelope.
+pub const SEALED_SUBJECT_MAX_BYTES: usize = 4 * 1024;
+
+/// Cap on a history row's opaque `message_id`: the mail path's 32-byte content
+/// id and the conversation path's id string (`conv:<64 hex>:<seq>`, or a
+/// bridged `<row@bridged>`) both fit; the id is never hashed or interpreted.
+pub const HISTORY_MESSAGE_ID_MAX_BYTES: usize = 256;
+
+/// Per-actor ceiling on `spam_training_history` rows. The insert prunes the
+/// actor's oldest rows beyond it in the same transaction (a rate limit would
+/// silently drop lessons from a bulk Junk move).
+pub const SPAM_HISTORY_MAX_ROWS_PER_ACTOR: i64 = 10_000;
+
 /// True iff `bytes` is a **non-empty** blob that does not decode as a plaintext
 /// `SpamModel` — i.e. an opaque sealed model. An empty blob is not sealed; a
 /// valid plaintext model decodes; a sealed `wrapped_blob` (dag-cbor, not the

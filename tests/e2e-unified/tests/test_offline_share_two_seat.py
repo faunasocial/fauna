@@ -924,7 +924,11 @@ def test_a_concurrent_edit_is_reviewed_on_the_losing_seat_and_its_version_restor
         diagnose=lambda: f"no review row on the losing seat; {diagnose()}",
     )
     assert name in loser.driver.get_text("conflict-file-info", index=0)
-    assert loser.driver.is_visible("conflict-type-badge")
+    # The review list closes a page that, with two sets bound, runs past the
+    # window: the row is one scroll away, never absent. A bare `is_visible`
+    # reads windows' UIA IsOffscreen and is False for a correct build below
+    # the fold (`drivers/base.py` `is_visible_scrolled`).
+    assert loser.driver.is_visible_scrolled("conflict-type-badge")
     # The winner lost nothing, so it has nothing to review.
     winner.backups.navigate_folders()
     assert winner.driver.count("conflict-resolve-button") == 0

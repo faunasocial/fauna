@@ -1159,16 +1159,9 @@ private fun certStatusText(cert: CertStatusRow?): String {
     if (cert == null) {
         return "$label ${stringResource(R.string.admin_dns_status_checking)}"
     }
-    // `CertHealthState`'s serde/wire variant name — what `certStatusView` (shared
-    // Rust, `fauna_core::format::cert_status_view`) matches against; it takes the
-    // raw string rather than the typed enum because `fauna_core` does not depend
-    // on `fauna-client-dns`.
-    val stateWire = when (cert.state) {
-        CertHealthState.VALID_TRUSTED -> "ValidTrusted"
-        CertHealthState.ON_FLOOR_RENEW_NEEDED -> "OnFloorRenewNeeded"
-        CertHealthState.EXPIRING -> "Expiring"
-    }
-    val view = com.fauna.ffi.certStatusView(stateWire, cert.isFloor, cert.notAfterUnix)
+    // The typed row crosses the FFI whole: shared Rust (`cert_row_status_view`)
+    // owns the CertHealthState -> wire-name -> label mapping.
+    val view = com.fauna.ffi.certRowStatusView(cert)
     val state = localized(view.state) ?: view.state.key
     val expiresAtUnix = view.expiresAtUnix
     return when {

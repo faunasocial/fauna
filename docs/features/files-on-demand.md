@@ -67,31 +67,31 @@ Stamped 2026-09-19 at 25eff180d4.
 | macos | ⚠ partial | 0.1.5-dev+790eb749 standalone |
 | ios | ⚠ partial | 0.1.5-dev+2922f9ed standalone |
 | android |  no run recorded | |
-| tui | ⚠ partial | 0.1.2-dev+fccdae11.dirty standalone |
+| tui | ⚠ partial | 0.1.5-dev+02e5676e standalone |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
 | 1 | app | `tests/e2e-unified/tests/test_folder_on_demand_toggle.py::test_folder_on_demand_toggle_defaults_on_and_a_flip_survives_re_entry` | macos (macos): passed, ios (macos): passed |
 | 1 | app | `tests/e2e-unified/tests/test_folder_on_demand_toggle.py::test_folder_on_demand_toggle_yields_to_a_bound_folder` | macos (macos): passed, ios (macos): skipped |
-| 1 | app | `tests/e2e-unified/tests/test_folder_location_mode_toggle.py::test_folder_location_mode_toggle_flip_survives_re_entry` | linux (linux): passed, windows (windows): passed, tui (linux): passed, tui (macos): skipped, tui (windows): passed |
+| 1 | app | `tests/e2e-unified/tests/test_folder_location_mode_toggle.py::test_folder_location_mode_toggle_flip_survives_re_entry` | linux (linux): passed, windows (windows): passed, tui (linux): passed, tui (windows): passed |
 | 2 | nest | `tests/e2e-unified/tests/platform/macos/test_file_provider_read_path.py::test_file_provider_read_path` | nest (macos): failed |
 | 2 | nest | `tests/e2e-unified/tests/platform/ios/test_file_provider_eviction.py::test_file_provider_eviction_ios` | nest (macos): passed |
 | 2 | nest | `tests/e2e-unified/tests/platform/ios/test_file_provider_eviction.py::test_file_provider_read_of_a_fetched_body_records_nothing_ios` | nest (macos): passed |
-| 3 | app | `tests/e2e-unified/tests/test_folder_on_demand_read_path_linux.py::test_on_demand_folder_is_read_and_written_through_its_mount` | linux (linux): passed, tui (linux): passed, tui (macos): skipped |
+| 3 | app | `tests/e2e-unified/tests/test_folder_on_demand_read_path_linux.py::test_on_demand_folder_is_read_and_written_through_its_mount` | linux (linux): passed, tui (linux): passed |
 | 3 | app | `tests/e2e-unified/tests/test_folder_on_demand_read_path_windows.py::test_on_demand_folder_is_written_through_its_cloud_files_root` | windows (windows): passed |
-| 4 | app | `tests/e2e-unified/tests/test_folder_location_free_space.py::test_freeing_keeps_the_file_listed_and_never_deletes_it` — requires `folder-location-free-space-button` (not built: web, macos, ios, android) | linux (linux): passed, windows (windows): passed, tui (linux): passed, tui (macos): skipped, tui (windows): passed |
-| 5 | app | `tests/e2e-unified/tests/test_folder_location_free_space.py::test_an_unrecorded_change_is_kept` — requires `folder-location-free-space-button` (not built: web, macos, ios, android) | linux (linux): passed, windows (windows): passed, tui (linux): passed, tui (macos): skipped, tui (windows): passed |
-| 6 | app | `tests/e2e-unified/tests/test_folder_location_free_space.py::test_several_on_demand_folders_each_switch_leaves_the_others_working` | linux (linux): passed, windows (windows): passed, tui (linux): passed, tui (macos): skipped, tui (windows): passed |
+| 4 | app | `tests/e2e-unified/tests/test_folder_location_free_space.py::test_freeing_keeps_the_file_listed_and_never_deletes_it` — requires `folder-location-free-space-button` (not built: web, macos, ios, android) | linux (linux): passed, windows (windows): passed, tui (linux): passed, tui (windows): passed |
+| 5 | app | `tests/e2e-unified/tests/test_folder_location_free_space.py::test_an_unrecorded_change_is_kept` — requires `folder-location-free-space-button` (not built: web, macos, ios, android) | linux (linux): passed, windows (windows): passed, tui (linux): passed, tui (windows): passed |
+| 6 | app | `tests/e2e-unified/tests/test_folder_location_free_space.py::test_several_on_demand_folders_each_switch_leaves_the_others_working` | linux (linux): passed, windows (windows): passed, tui (linux): passed, tui (windows): passed |
 | 7 | nest | `tests/e2e-unified/tests/platform/macos/test_file_provider_read_path.py::test_file_provider_read_path` | nest (macos): failed |
-| 8 | app | `tests/e2e-unified/tests/test_folder_location_free_space.py::test_turning_on_demand_off_keeps_an_unsent_change` | linux (linux): passed, windows (windows): passed, tui (linux): passed, tui (macos): skipped, tui (windows): failed |
+| 8 | app | `tests/e2e-unified/tests/test_folder_location_free_space.py::test_turning_on_demand_off_keeps_an_unsent_change` | linux (linux): passed, windows (windows): passed, tui (linux): passed, tui (windows): failed |
 | 9 | app | `tests/e2e-unified/tests/test_folder_on_demand_toggle.py::test_folder_on_demand_toggle_on_enrols_a_place_less_device_once` | macos (macos): passed, ios (macos): passed |
 | 9 | app | `tests/e2e-unified/tests/test_folder_location_on_demand_enrol.py::test_showing_a_folder_on_demand_enrols_a_place_less_device_once` | linux (linux): passed, tui (linux): passed, tui (windows): passed |
 | 10 | app | `tests/e2e-unified/tests/test_folder_on_demand_toggle.py::test_folder_on_demand_toggle_on_a_member_row_is_hide_only` | macos (macos): passed, ios (macos): passed |
 | 11 | app | `tests/e2e-unified/tests/test_folder_on_demand_hydrate_linux.py::test_a_file_from_another_device_lists_as_a_placeholder_and_hydrates_on_open` | linux (linux): passed, tui (linux): passed |
-| 11 | app | `tests/e2e-unified/tests/test_folder_on_demand_hydrate_linux.py::test_tui_a_file_from_another_device_lists_as_a_placeholder_and_hydrates_on_open` | tui (linux): passed, tui (macos): skipped |
+| 11 | app | `tests/e2e-unified/tests/test_folder_on_demand_hydrate_linux.py::test_tui_a_file_from_another_device_lists_as_a_placeholder_and_hydrates_on_open` | tui (linux): passed |
 | 11 | app | `tests/e2e-unified/tests/test_folder_on_demand_hydrate_windows.py::test_a_file_from_another_device_lists_as_a_cloud_only_placeholder_and_hydrates_on_open` | windows (windows): passed, tui (windows): passed |
 | 12 | app | `tests/e2e-unified/tests/test_folder_on_demand_hydrate_linux.py::test_a_file_from_another_device_lists_as_a_placeholder_and_hydrates_on_open` | linux (linux): passed, tui (linux): passed |
-| 12 | app | `tests/e2e-unified/tests/test_folder_on_demand_hydrate_linux.py::test_tui_a_file_from_another_device_lists_as_a_placeholder_and_hydrates_on_open` | tui (linux): passed, tui (macos): skipped |
+| 12 | app | `tests/e2e-unified/tests/test_folder_on_demand_hydrate_linux.py::test_tui_a_file_from_another_device_lists_as_a_placeholder_and_hydrates_on_open` | tui (linux): passed |
 | 12 | app | `tests/e2e-unified/tests/test_folder_on_demand_hydrate_windows.py::test_a_file_from_another_device_lists_as_a_cloud_only_placeholder_and_hydrates_on_open` | windows (windows): passed, tui (windows): passed |
 | 13 | nest | `tests/e2e-unified/tests/platform/ios/test_file_provider_eviction.py::test_file_provider_own_record_reopens_after_eviction_ios` | nest (macos): passed |
 <!-- features-render:end -->

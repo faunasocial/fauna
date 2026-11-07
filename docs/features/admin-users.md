@@ -117,7 +117,7 @@ Stamped 2026-10-01 at e129e78aa0.
 |---|---|---|
 | web | ✅ full | 0.1.5-dev+acde58f9 standalone |
 | linux | ✅ full | 0.1.5-dev+acde58f9 standalone |
-| windows | ⚠ partial | 0.1.5-dev+acde58f9 standalone |
+| windows | ✅ full | 0.1.5-dev+acde58f9 standalone |
 | macos | ✅ full | 0.1.5-dev+409ac563 standalone |
 | ios | ✅ full | 0.1.5-dev+407a19e1 standalone |
 | android |  no run recorded | |
@@ -143,7 +143,7 @@ Stamped 2026-10-01 at e129e78aa0.
 | 7 | app | `tests/e2e-unified/tests/test_admin_serving_indicator.py::test_admin_sees_user_serving_status_read_only` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 8 | app | `tests/e2e-unified/tests/test_admin_users_action_error.py::test_users_action_error_routes_to_dedicated_element` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 9 | nest | `tests/e2e-unified/tests/api/test_admin_auth.py::test_admin_management` | nest (linux): passed |
-| 10 | app | `tests/e2e-unified/tests/test_admin_picker_label_collision.py::test_admin_users_guardian_picker_stays_injective_when_labels_collide` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 10 | app | `tests/e2e-unified/tests/test_admin_picker_label_collision.py::test_admin_users_guardian_picker_stays_injective_when_labels_collide` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 11 | app | `tests/e2e-unified/tests/test_admin_picker_all_accounts.py::test_admin_users_guardian_picker_offers_an_account_older_than_the_newest_page` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 12 | app | `tests/e2e-unified/tests/test_admin_pending_actions.py::test_a_scheduled_grant_is_listed_and_cancellable_from_the_admin_console` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 13 | nest | `tests/e2e-unified/tests/api/test_pending_action_audience.py::test_the_target_of_an_admin_deletion_is_told_and_can_cancel_it` | nest (linux): passed |

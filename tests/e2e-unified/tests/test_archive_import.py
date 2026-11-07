@@ -37,6 +37,7 @@ from actions.api_actor import ApiActor
 from actions.archive_import import ArchiveImportActions
 from actions.backups import BackupsActions
 from actions.contacts import ContactsActions
+from actions.feed import FeedActions
 from common.auth import create_actor_and_register
 from helpers import budgets
 from helpers.e2e_session import login_as
@@ -140,6 +141,26 @@ def _login(request, app, nest, user, handle: str) -> None:
         app, nest, user, handle=handle, device_id="test-device-archive",
         request=request, spa_url_fixture="archive_spa_url",
     )
+
+
+def _like_count_after_a_reload(app, feed: FeedActions, post_id: str, expected: int) -> str:
+    """Failure-path only (e2e rules 5 and 6): the like count after the feed's
+    next natural reload — leave the feed and come back, the repost's anchor.
+
+    It splits a like that never moved the nest's counter (still short after
+    the reload) from one the nest counted but the loaded window lost (the
+    reload brings it in)."""
+    try:
+        ArchiveImportActions(app.driver).navigate()
+        feed.return_to_feed_page()
+        got = feed.wait_for_interaction_count_by_id(post_id, "like", expected, timeout=budgets.RPC_ROUNDTRIP_S)
+        row = feed.post_state_by_id(post_id) or {}
+        return (
+            f"after a reload the row reads like_count={got!r} viewer_liked={row.get('viewer_liked')!r} "
+            f"({'the nest counted it: the window lost the fold' if got == expected else 'the nest never counted it'})"
+        )
+    except Exception as e:  # noqa: BLE001 — diagnostic only
+        return f"the reload re-read failed: {type(e).__name__}: {e}"
 
 
 def _cards_with_badge(driver, tier: str) -> list[int]:
@@ -1062,17 +1083,28 @@ def test_an_imported_post_can_be_liked_replied_to_and_reposted_by_the_owner_and_
     for n, (who, handle) in enumerate(((owner, None), (follower, _unique("e2e-archive-fan"))), start=1):
         if handle:
             _login(request, app, archive_nest, who, handle=handle)
-            assert wait_until(
-                lambda: feed.post_state_by_id(post_id),
-                budgets.RPC_ROUNDTRIP_S,
-                diagnose=lambda: f"the follower's feed never listed the imported post; "
-                f"error-message={app.error_text()!r}",
-            )
-        feed.like_post(feed.post_index_by_id(post_id))
-        assert feed.wait_for_interaction_count_by_id(post_id, "like", n) == n, (
-            f"like #{n} on the imported post did not land; error={app.error_text()!r}"
+        # The ♥ toggles off the row's own `viewer_liked`, so the tap waits for THIS
+        # viewer's window: the post listed, not liked by them, at the likes so far.
+        # Right after a sign-in the state can still be the outgoing account's
+        # window, and a tap aimed through it unlikes the owner's ♥ or lands on
+        # another card.
+        before = wait_until(
+            lambda: (lambda r: r if r and not r.get("viewer_liked") and r.get("like_count") == n - 1 else None)(
+                feed.post_state_by_id(post_id)
+            ),
+            budgets.RPC_ROUNDTRIP_S,
+            diagnose=lambda: f"like #{n}'s viewer never saw the imported post un-liked by them at "
+            f"{n - 1} like(s): {feed.post_state_by_id(post_id)!r}; error-message={app.error_text()!r}",
         )
-        feed.reply_post(_unique(f"reply-{n}"), index=feed.post_index_by_id(post_id))
+        index = feed.card_index_by_id(post_id)
+        feed.like_post(index)
+        assert feed.wait_for_interaction_count_by_id(post_id, "like", n) == n, (
+            f"like #{n} on the imported post did not land; error={app.error_text()!r}; "
+            f"before the tap the row read like_count={before.get('like_count')!r}; "
+            f"{feed.like_landing_diagnosis(index, post_id)}; "
+            f"{_like_count_after_a_reload(app, feed, post_id, n)}"
+        )
+        feed.reply_post(_unique(f"reply-{n}"), index=feed.card_index_by_id(post_id))
         # Like the repost below, the reply's count is not re-read at the tap
         # (ruling 3: the nest's interact door refuses a non-`fauna` native
         # token), so it is read after the reload the return to the feed starts
@@ -1081,7 +1113,7 @@ def test_an_imported_post_can_be_liked_replied_to_and_reposted_by_the_owner_and_
         assert feed.wait_for_interaction_count_by_id(post_id, "reply", n) == n, (
             f"reply #{n} on the imported post did not land; error={app.error_text()!r}"
         )
-        feed.repost_post(feed.post_index_by_id(post_id))
+        feed.repost_post(feed.card_index_by_id(post_id))
         # The tap does not re-read an imported post's counts — the nest's
         # interact door refuses every non-`fauna` native token
         # (`FeedManager::repost`, ruling 3) — so the count is read after the
@@ -1460,7 +1492,7 @@ def test_a_comment_on_the_owners_post_is_folded_under_it_for_the_owner_alone(
         diagnose=lambda: f"the follower's feed never listed the link post; error-message={app.error_text()!r}",
     )
     assert seen.get("reply_count", 0) == 0, seen
-    assert _archive_comments_on(app, feed.post_index_by_id(post_id)) == []
+    assert _archive_comments_on(app, feed.card_index_by_id(post_id)) == []
     assert not any(FRIEND_TWO_COMMENT in feed.post_text(k) for k in range(feed.post_count()))
 
 

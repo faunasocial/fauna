@@ -101,8 +101,7 @@ public sealed partial class PaymentsAuthorSections : UserControl
         ProviderForm.Visibility = _vm.ShowProviderForm ? Visibility.Visible : Visibility.Collapsed;
         // TierNames may have grown/shrunk this hydrate (a tier created/deleted) —
         // keep the §4/§5 tier pickers' options in sync, preserving the VM's
-        // current selection (the §3 TierSelect pattern, value/Tag split for
-        // FlaUI Select() exactness — reference_windows_flaui_select_exact_name).
+        // current selection (the §3 TierSelect pattern).
         PopulateComboBox(ProviderTierSelect, _vm.TierNames, _vm.ProviderFormTier);
         PopulateComboBox(ClaimTierSelect, _vm.TierNames, _vm.ClaimTier);
     }
@@ -195,10 +194,9 @@ public sealed partial class PaymentsAuthorSections : UserControl
     private void KeepClaim_Click(object sender, RoutedEventArgs e) => _vm?.CancelVoidClaim();
 
     /// <summary>Rebuild <paramref name="combo"/>'s items from <paramref name="values"/>
-    /// (Content = the value; <c>Tag</c> + an explicit <c>AutomationProperties.Name</c>
-    /// also carry the raw value, so <c>driver.select(id, value)</c> matches exactly —
-    /// reference_windows_flaui_select_exact_name, the folder-conflict-policy-select
-    /// precedent). Preserves <paramref name="selected"/>
+    /// (Content = the value, which is also its <c>Tag</c> and its name: a tier or
+    /// provider name paints as itself, so it needs no separate key and
+    /// <c>driver.select(id, value)</c> names the painted label). Preserves <paramref name="selected"/>
     /// if still present, else the first item.</summary>
     /// <remarks>Travelled here with its only three call sites (the provider-kind,
     /// provider-tier and claim-tier pickers); ProfilePage's own §3 picker binds

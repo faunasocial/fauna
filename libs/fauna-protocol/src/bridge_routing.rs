@@ -5042,7 +5042,7 @@ pub struct ListMailboxesRequest {
 }
 
 /// Per-mailbox metadata returned by `list_mailboxes`.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct MailboxEntry {
     pub name: String,
     pub uid_validity: u32,
@@ -5052,6 +5052,12 @@ pub struct MailboxEntry {
     pub exists: u32,
     /// Number of messages whose flag set lacks `\Seen`.
     pub unseen: u32,
+    /// The RFC 6154 SPECIAL-USE attributes IMAP LIST shows for this mailbox
+    /// (`crate::email::special_use_attrs`): one for each standard mailbox but
+    /// INBOX, empty otherwise. The nest fills it from that shared table; the
+    /// MDA writes these verbatim. `#[serde(default)]`: additive.
+    #[serde(default)]
+    pub attrs: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -11411,6 +11417,7 @@ mod tests {
                     highestmodseq: 2,
                     exists: 2,
                     unseen: 1,
+                    attrs: vec![],
                 },
                 MailboxEntry {
                     name: "Sent".into(),
@@ -11419,6 +11426,7 @@ mod tests {
                     highestmodseq: 1,
                     exists: 0,
                     unseen: 0,
+                    attrs: vec!["\\Sent".into()],
                 },
             ],
         };

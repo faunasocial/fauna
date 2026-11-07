@@ -6,6 +6,7 @@ using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Navigation;
 using FaunaApp.Core.Services;
 using FaunaApp.Core.ViewModels;
+using FaunaApp.Helpers;
 using uniffi.fauna_ffi;
 using FaunaApp.UiIds;
 
@@ -21,10 +22,9 @@ namespace FaunaApp.Views;
 /// <c>apps/fauna-linux/src/settings/task_delegation.rs</c>.
 ///
 /// Rows are built imperatively (not an x:Bind DataTemplate) so each picker's
-/// <c>ComboBoxItem</c> can carry a visible localized Content distinct from its
-/// <c>AutomationProperties.Name</c> — FlaUI's <c>Select()</c> matches Name to
-/// the raw stable key ("automatic"/"this-device") EXACTLY, no normalization
-/// (reference_windows_flaui_select_exact_name) — mirroring AdminUsersPage's
+/// <c>ComboBoxItem</c> can carry the visible localized label apart from the raw
+/// stable key ("automatic"/"this-device") a driver selects by
+/// (<c>FaunaApp.Helpers.PickerOption</c>) — mirroring AdminUsersPage's
 /// code-behind tier ComboBox (<c>PopulateTierCombo</c>).
 /// </summary>
 public sealed partial class SettingsTaskDelegationPage : Page
@@ -144,11 +144,10 @@ public sealed partial class SettingsTaskDelegationPage : Page
 
     /// <summary>Build the assignment picker: one <c>ComboBoxItem</c> per
     /// <c>row.PinOptions</c>, rendered VERBATIM in the shared layer's order.
-    /// Content is the localized label the user reads; the item's
-    /// AutomationProperties.Name is the raw stable key
-    /// (<see cref="TaskDelegationRowVm.OptionKey"/>) — the two must differ so
-    /// FlaUI's exact-Name <c>Select()</c> can target an option a locale renders
-    /// differently. Selection is set BEFORE the change handler attaches, so the
+    /// Each item paints the localized label the user reads and is keyed by the raw
+    /// stable key (<see cref="TaskDelegationRowVm.OptionKey"/>, <see cref="PickerOption"/>),
+    /// so a driver can target an option a locale renders differently; its Tag stays
+    /// the option itself. Selection is set BEFORE the change handler attaches, so the
     /// initial programmatic selection doesn't fire a spurious pin write.</summary>
     private ComboBox BuildAssignmentPicker(TaskDelegationRowVm row, Dictionary<string, string> labels)
     {
@@ -162,12 +161,10 @@ public sealed partial class SettingsTaskDelegationPage : Page
             for (var i = 0; i < row.PinOptions.Count; i++)
             {
                 var option = row.PinOptions[i];
-                var item = new ComboBoxItem
-                {
-                    Content = TaskDelegationRowVm.OptionLabel(option, labels),
-                    Tag = option,
-                };
-                AutomationProperties.SetName(item, TaskDelegationRowVm.OptionKey(option));
+                var item = PickerOption.Create(
+                    TaskDelegationRowVm.OptionLabel(option, labels),
+                    TaskDelegationRowVm.OptionKey(option),
+                    tag: option);
                 picker.Items.Add(item);
                 if (Equals(option, row.Assignment)) selectedIndex = i;
             }

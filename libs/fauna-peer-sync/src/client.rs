@@ -75,10 +75,10 @@ pub struct AdmissionOutcome {
 pub type CustodyRevocationView<'a> = &'a (dyn Fn(&[u8]) -> bool + Sync);
 
 /// A borrowed removed-device view for one admission exchange (`true` = that
-/// account has withdrawn that device key) — the pull-side twin of the serve
-/// config's `crate::server::DeviceRemovedFn`, whose doc owns the rule
-/// (refuse on `Removed` only; an absent row admits; a custodied account
-/// answers from the held grants' lists).
+/// account has withdrawn that device key, or never verifiably enrolled it) —
+/// the pull-side twin of the serve config's `crate::server::DeviceRemovedFn`,
+/// whose doc owns the rule (the own account admits verified members only; a
+/// custodied account answers from the held grants' lists).
 pub type DeviceRemovedView<'a> = &'a (dyn Fn(&[u8; 32], &[u8; 32]) -> bool + Sync);
 
 /// What THIS side answers about the witness it receives — the evaluator's
@@ -205,13 +205,13 @@ pub async fn admit_over_as(
     // The device twin: a sibling that the fleet removed must not be walked
     // either — "sides admit independently" cuts both ways, and this side's
     // own merged device-set state is the only thing that can sever a
-    // never-expiring fleet cert. No view (or no `Removed` row) admits; the
-    // view's own doc owns that rule.
+    // never-expiring fleet cert. No view admits; the view's own doc owns
+    // what it refuses.
     if let Some(device_key) = &evaluated.device_key
         && let Some(removed) = views.device_removed
         && removed(expected_account, device_key)
     {
-        bail!("the peer device is removed from this account's fleet");
+        bail!("the peer device is not a verified member of this account's fleet");
     }
     Ok(AdmissionOutcome {
         verdict: evaluated.verdict,

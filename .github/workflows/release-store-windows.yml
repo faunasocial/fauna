@@ -220,6 +220,64 @@ jobs:
           --identity-name "$env:STORE_IDENTITY_NAME"
           --publisher "$env:STORE_PUBLISHER"
 
+      # Certify the PACKAGE with the Windows App Certification Kit the hosted
+      # image carries (probed 2026-11-06: appcert.exe in the Windows Kits 10
+      # tree, 24 static tests in under a minute, an arm64 package certified by
+      # the x64 kit as well). The kit installs what it tests, and an unsigned
+      # package cannot install, so it certifies a COPY signed with a certificate
+      # minted in this run for exactly the Store publisher and trusted on this
+      # runner alone. The upload below stays the unsigned package; the signed
+      # copy and its key never leave the runner.
+      - name: Certify a test-signed copy
+        id: certify
+        shell: powershell
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $kit = 'C:\Program Files (x86)\Windows Kits\10\App Certification Kit\appcert.exe'
+          if (-not (Test-Path $kit)) { Write-Output "::error::the runner image carries no App Certification Kit at $kit"; exit 1 }
+          $signtool = Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\bin\*\x64\signtool.exe' |
+            Where-Object { $_.Directory.Parent.Name -match '^\d+(\.\d+)+$' } | Sort-Object { [version]$_.Directory.Parent.Name } | Select-Object -Last 1
+          if (-not $signtool) { Write-Output "::error::the runner image carries no Windows SDK signtool.exe"; exit 1 }
+          $work = Join-Path $env:RUNNER_TEMP 'certify'
+          New-Item -ItemType Directory -Force $work | Out-Null
+          $copy = Join-Path $work "Fauna-Store-$env:ARCH.msix"
+          Copy-Item "build\installer\Fauna-Store-$env:ARCH.msix" $copy
+          $cert = New-SelfSignedCertificate -Type Custom -Subject $env:STORE_PUBLISHER -KeyUsage DigitalSignature `
+            -FriendlyName 'Fauna Store certification (this run only)' -CertStoreLocation 'Cert:\CurrentUser\My' `
+            -TextExtension @('2.5.29.37={text}1.3.6.1.5.5.7.3.3', '2.5.29.19={text}')
+          $public = Join-Path $work 'certify.cer'
+          Export-Certificate -Cert $cert -FilePath $public | Out-Null
+          Import-Certificate -FilePath $public -CertStoreLocation 'Cert:\LocalMachine\TrustedPeople' | Out-Null
+          & $signtool.FullName sign /fd SHA256 /sha1 $cert.Thumbprint /s My $copy
+          if ($LASTEXITCODE -ne 0) { Write-Output "::error::signtool could not sign the certification copy"; exit 1 }
+          & $kit reset
+          $report = Join-Path (Resolve-Path 'build\installer') "certification-$env:ARCH.xml"
+          & $kit test -appxpackagepath $copy -reportoutputpath $report
+          if ($LASTEXITCODE -ne 0) { Write-Output "::error::appcert.exe exited $LASTEXITCODE" }
+          if (-not (Test-Path $report)) { Write-Output "::error::the kit wrote no report"; exit 1 }
+
+      # Grade the kit's report test by test: a test that did not pass fails the
+      # job unless the allowlist names it, its verdict and this arch with a
+      # reason. The report's texts are tool output, printed as data.
+      - name: Grade the certification
+        run: >
+          python grader/scripts/grade-store-certification.py
+          --report build/installer/certification-${{ matrix.arch }}.xml
+          --arch ${{ matrix.arch }}
+          --allowlist grader/apps/fauna-windows/installer/store/certification-allowlist.toml
+
+      # The report goes with the run whatever its grade: it is how a failed
+      # certification is read.
+      - name: Keep the certification report
+        if: always() && steps.certify.outcome != 'skipped'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        with:
+          name: certification-${{ matrix.arch }}
+          path: build/installer/certification-${{ matrix.arch }}.xml
+          if-no-files-found: warn
+
       - name: SHA-256
         shell: bash
         working-directory: build/installer

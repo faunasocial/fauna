@@ -244,6 +244,15 @@ fn create_handler() -> RpcHandler {
                             "a create names its set by name or by a 32-byte name_hash",
                         )
                     })?;
+                // The `__` refusal above tests `req.name`, empty on this arm:
+                // refuse the address of a reserved rail too.
+                if crate::db::snapshots::is_reserved_set_hash(&hash) {
+                    return Err(coded(
+                        FS,
+                        "invalid_request",
+                        "the \"__\" folder namespace is reserved for the nest",
+                    ));
+                }
                 if req.name_sealed.is_none() {
                     return Err(coded(
                         FS,

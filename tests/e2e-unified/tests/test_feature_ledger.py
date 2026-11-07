@@ -2014,7 +2014,7 @@ COMMIT_A, COMMIT_B = "a" * 40, "c" * 40
 
 
 def _lg_session(monkeypatch, directory, outcomes, *, commit=COMMIT_A, dirty=False,
-                tagged=(), config=None):
+                tagged=(), config=None, directory_platform="linux"):
     """One pytest session of the directory's event, driven through the live conftest's
     own hooks: collection (`_apply_feature_axis`), a report per phase per test
     (`pytest_runtest_logreport`) and the session-end merge. `outcomes` maps a pytest
@@ -2032,7 +2032,7 @@ def _lg_session(monkeypatch, directory, outcomes, *, commit=COMMIT_A, dirty=Fals
                 fl.note_skip_class(outcome.partition(":")[2])
             for report in _phases(nodeid, outcome):
                 real.pytest_runtest_logreport(report)
-        path = lg.write(directory, platform="linux")
+        path = lg.write(directory, platform=directory_platform)
         baseline = copy.deepcopy(real._baseline_results)
         ledger = copy.deepcopy(fl._records)
     fl.reset_test_state()
@@ -2084,6 +2084,33 @@ def test_a_red_then_a_green_on_a_dirty_tree_is_no_flake(tmp_path, _origin, red_d
     rec = tests[LG_KEY_A]
     assert rec["flaky"]["count"] == 0, rec
     assert rec["red_since"] is None and rec["last_green"]["dirty"] is green_dirty
+
+
+@pytest.mark.parametrize("moved", ["rebased", "edited"])
+def test_a_tree_that_moves_under_the_run_marks_the_run_dirty(tmp_path, _origin, moved):
+    """Dirt is read again at the session's end: a run whose tree was rebased or
+    edited while it ran is not the commit collection read, so its red and a later
+    clean green there are no flake — the text checks of a script edited under a
+    long tier_1 run were filed as flaky this way (mac, 2026-11-02)."""
+    import conftest as real
+
+    _origin.setenv(lg.HOME_ENV, str(tmp_path))
+    heads = iter([COMMIT_B, COMMIT_A if moved == "rebased" else COMMIT_B])
+    dirt = iter([[], [] if moved == "rebased" else [" M README.md"]])
+    _origin.setattr(fl, "head_commit", lambda repo=None: next(heads))
+    _origin.setattr(fl, "main_base", lambda c, repo=None: RUN_BASE)
+    _origin.setattr(fl, "tree_dirt", lambda repo=None: next(dirt))
+    with _isolated_last_green():
+        real._apply_feature_axis(_LgConfig(), [_Item([], LG_A)])
+        for report in _phases(LG_A, "failed"):
+            real.pytest_runtest_logreport(report)
+        real._write_last_green(None)
+    fl.reset_test_state()
+    rec = lg.load(tmp_path / f"{fl.host_platform()}.json")[LG_KEY_A]
+    assert rec["last"] == {**rec["last"], "outcome": "red", "commit": COMMIT_B, "dirty": True}, rec
+    tests = _lg_session(_origin, tmp_path, {LG_A: "passed"}, commit=COMMIT_B,
+                        directory_platform=fl.host_platform())
+    assert tests[LG_KEY_A]["flaky"]["count"] == 0, tests[LG_KEY_A]
 
 
 def test_a_red_twice_is_broken_and_its_last_green_stays(tmp_path, _origin):

@@ -816,62 +816,25 @@ abstract class KidsExcisedApi {
         api.nestClient?.let { com.fauna.ffi.buildWebClient(it) }
 
     /**
-     * Run the feeders that have no page of their own, at the same universal
-     * post-auth hook as [selfHealDeploymentSeedCustody]
-     * (`critical-alerts.md` § Mechanism → *Who runs the detector*). tui's
-     * `critical_alerts::spawn_session_start_sweep` (`session::establish`) is
-     * the reference; [com.fauna.ffi.runCriticalAlertSweep] is the one FFI
-     * export android shares with windows/apple. Fire-and-forget:
-     * sign-in must not fail, or even wait, on a nest that cannot answer the
-     * recovery/directory planes.
-     */
-    suspend fun runCriticalAlertSweep() =
-        com.fauna.ffi.runCriticalAlertSweep(api.backupNest(), api.backupSecret())
-
-    /**
-     * [runCriticalAlertSweep]'s repeating twin (`critical-alerts.md` §
-     * Mechanism → *Who runs the detector*, ratified 2026-08-02): sweeps
-     * immediately, then every `RE_SWEEP_INTERVAL_SECS` for as long as the
-     * identity lives. Never returns under normal operation — callers MUST
-     * launch this on a scope that outlives the caller
-     * ([CriticalAlertsHost.startSweepLoop]), never a short-lived
-     * ViewModel/Composable scope.
-     */
-    suspend fun runCriticalAlertSweepLoop() =
-        com.fauna.ffi.runCriticalAlertSweepLoop(api.backupNest(), api.backupSecret())
-
-    /**
      * The post-auth hook's one entry point (`critical-alerts.md` § Mechanism →
      * *Who runs the detector*), called from both post-auth sites — the nav
-     * host's effect and the e2e `session` patch, which never recomposes it:
-     * a first or identity-changing sign-in starts [runCriticalAlertSweepLoop];
-     * a same-identity re-establish runs ONE [runCriticalAlertSweep]
-     * ([CriticalAlertsHost.startSweep]). Fire-and-forget on the host's own
-     * process-wide scope, so it returns at once; a failure is logged, never
-     * thrown — sign-in must not wait on a nest that cannot answer.
+     * host's effect and the e2e `session` patch, which never recomposes it.
+     * The split (loop / one pass / loop on a re-established client) is the
+     * shared `com.fauna.ffi.startCriticalAlertSweep`'s, run through
+     * [CriticalAlertsHost.startSweep] on the host's own process-wide scope, so
+     * this returns at once; a failure is logged, never thrown — sign-in must
+     * not wait on a nest that cannot answer.
      */
     fun startCriticalAlertSweep() {
-        val identity = api.sweepIdentityKey() ?: run {
+        val nest = api.nestClient ?: run {
+            ShellLog.w("CriticalAlertSweepGlue", "sweep not started: no nest connection")
+            return
+        }
+        val secret = runCatching { api.backupSecret() }.getOrNull() ?: run {
             ShellLog.w("CriticalAlertSweepGlue", "sweep not started: the API client holds no secret")
             return
         }
-        api.criticalAlertsHost.startSweep(
-            identity,
-            loop = {
-                try {
-                    runCriticalAlertSweepLoop()
-                } catch (e: Exception) {
-                    ShellLog.w("CriticalAlertSweepGlue", "runCriticalAlertSweepLoop failed: ${e.message}")
-                }
-            },
-            onePass = {
-                try {
-                    runCriticalAlertSweep()
-                } catch (e: Exception) {
-                    ShellLog.w("CriticalAlertSweepGlue", "runCriticalAlertSweep failed: ${e.message}")
-                }
-            },
-        )
+        api.criticalAlertsHost.startSweep(nest, secret, api.nodeUrl)
     }
 
     /** §1 create — encrypted-mode mint path: record the fresh period key, then create. */

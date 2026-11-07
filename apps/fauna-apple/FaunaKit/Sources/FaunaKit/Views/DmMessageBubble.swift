@@ -183,6 +183,10 @@ public struct DmMessageBubble: View {
     /// the same shape as `mutedRevealed`, and likewise never persisted. A
     /// `block` has no reveal at all, so this can only ever un-collapse.
     @State private var contentRevealed = false
+    /// The received picture open in the shared `image-lightbox` (`conversations.md`
+    /// § User actions: activating a `dm-attachment-image` enlarges it; dismiss closes
+    /// it) — the feed card's own trigger shape (`PostCardBody`), one bubble's state.
+    @State private var lightboxItem: LightboxItem?
 
     /// The device's region content plane (`region-blocking.md`), injected at
     /// the app root beside `ContentPolicyStore`; `nil` in a preview.
@@ -392,6 +396,7 @@ public struct DmMessageBubble: View {
                 onResolveLinkPreview(url)
             }
         }
+        .imageLightbox(item: $lightboxItem)
     }
 
     /// Tombstone for a deleted message (conversations.md § Reactions & message
@@ -969,14 +974,22 @@ public struct DmMessageBubble: View {
             let declared = "\(filename) (\(ValueFormat.byteSize(sizeBytes)))"
             VStack(alignment: .leading, spacing: 2) {
                 if isImage, let data = loadAttachment(blobHash), let img = FaunaImage.decode(data) {
+                    // A tap opens the shared lightbox on the bytes already decoded here; the
+                    // same action is what the in-process driver's click invokes (it performs
+                    // no real gestures). A placeholder has no picture to enlarge, so it stays inert.
+                    let openLightbox = { lightboxItem = LightboxItem(source: .decoded(img)) }
                     Image(platformImage: img)
                         .resizable()
                         .scaledToFit()
                         .frame(maxWidth: 240, maxHeight: 240, alignment: .leading)
                         .help(declared)
+                        .contentShape(Rectangle())
+                        .onTapGesture(perform: openLightbox)
                         .accessibilityIdentifier(Ids.dmAttachmentImage)
                         .accessibilityLabel(declared)
-                        .automationValue(Ids.dmAttachmentImage, text: { declared }, value: { "painted" })
+                        .accessibilityAddTraits(.isButton)
+                        .automationActivate(Ids.dmAttachmentImage, text: { declared }, value: { "painted" },
+                                            perform: openLightbox)
                 } else if isImage {
                     Label(declared, systemImage: "photo")
                         .font(.caption)

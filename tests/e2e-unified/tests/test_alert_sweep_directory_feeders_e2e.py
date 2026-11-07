@@ -243,9 +243,12 @@ def _mint_hosted_identity(app, request, directory, nest, tmp_path_factory, metho
     bs.select_depth("hosted_visible")
     assert bs.wait_for_card(), f"no transition card: {bs.page_error_text()!r}"
     if method == "web":
+        # "in the tree" tells a radio the app never rendered from one the read
+        # could not reach (convention 6).
         assert bs.is_did_method_visible(), (
             f"the DID-method radio must be visible once staging the hosted "
-            f"transition: {bs.page_error_text()!r}"
+            f"transition: in the tree={not app.driver.is_absent('atproto-did-method')} "
+            f"err={bs.page_error_text()!r}"
         )
         bs.select_did_method("web")
     bs.confirm_transition()

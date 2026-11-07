@@ -1603,6 +1603,7 @@ their own"** — this section owns the text contract that makes that true):
   same decision-here/date-there split as § Relative time's
   `RelativeTimeDisplay`). `expires_at_unix` is `None` for the floor, and for the
   `0` a nest with no TLS resolver at all reports.
+- `cert_row_status_view(row: CertStatusRow) -> CertStatusView` (FFI, `fauna-ffi`'s `mail_admin`) — the same view fed from the typed row: it takes the state name from `CertHealthState::as_str` (pinned to serde by a unit test), so the UniFFI apps (apple, android) hand-map no enum to a string; apps holding only the wire string (web, windows) keep calling `cert_status_view`.
 
 **A floor cert's expiry is withheld, and this is the whole point.** The
 self-signed floor carries a *genuine, far-future* `not_after` (the nest mints it

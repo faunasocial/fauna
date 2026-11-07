@@ -837,6 +837,54 @@ pub fn validate_label(label: &str) -> Result<(), InvalidLabel> {
     Ok(())
 }
 
+// ── Standard IMAP mailboxes ────────────────────────────────────────
+
+/// The six standard IMAP mailboxes (`imap-server.md` § Standard mailboxes):
+/// seeded for every actor on first AUTH, reserved against CREATE/DELETE/RENAME.
+/// INBOX is renamable per RFC 9051 §6.3.6's special case; the other five are
+/// immovable. This is the one home of the set and of its attributes
+/// ([`standard_mailbox_attrs`]): the nest seeds and guards from it, and the Go
+/// MDA reads the attributes off `bridge_routing::MailboxEntry::attrs` rather
+/// than keeping a table of its own.
+pub const STANDARD_MAILBOXES: &[&str] = &["INBOX", "Archive", "Drafts", "Sent", "Trash", "Junk"];
+
+/// The standard `\Junk` mailbox — the spam-training mailbox of `mail-spam.md`
+/// § Training signal sources. The Go MDA's COPY/MOVE training trigger mirrors
+/// this name as `wsrpc.JunkMailbox`, pinned to it by the
+/// `reply-list-mailboxes.cbor` cross-language fixture.
+pub const JUNK_MAILBOX: &str = "Junk";
+
+/// The placement-record role of INBOX. Not an RFC 6154 attribute (RFC 6154
+/// defines none for INBOX, which IMAP identifies by name), so
+/// [`special_use_attrs`] leaves it off the LIST wire.
+pub const INBOX_ROLE_ATTR: &str = "\\Inbox";
+
+/// The attribute(s) a standard mailbox carries in `MailPlacementRecord::Create`
+/// — the RFC 6154 SPECIAL-USE attribute, or [`INBOX_ROLE_ATTR`] for INBOX — or
+/// an empty Vec for any other name (user-created mailboxes and the guardian
+/// held mailbox carry none).
+pub fn standard_mailbox_attrs(name: &str) -> Vec<String> {
+    let attr = match name {
+        "INBOX" => INBOX_ROLE_ATTR,
+        "Archive" => "\\Archive",
+        "Drafts" => "\\Drafts",
+        "Sent" => "\\Sent",
+        "Trash" => "\\Trash",
+        JUNK_MAILBOX => "\\Junk",
+        _ => return Vec::new(),
+    };
+    vec![attr.to_string()]
+}
+
+/// The RFC 6154 SPECIAL-USE attributes IMAP LIST shows for `name`: the
+/// [`standard_mailbox_attrs`] minus INBOX's role marker. The nest fills
+/// `bridge_routing::MailboxEntry::attrs` from this; the MDA writes it verbatim.
+pub fn special_use_attrs(name: &str) -> Vec<String> {
+    let mut attrs = standard_mailbox_attrs(name);
+    attrs.retain(|a| a != INBOX_ROLE_ATTR);
+    attrs
+}
+
 // ── FileInto target validation ─────────────────────────────────────
 
 /// The ward's **held mailbox** (`family-safety.md` § The mail gate): where cold
@@ -1582,6 +1630,23 @@ pub struct FlagChangesReply {
 mod tests {
     use super::*;
     use crate::codec::{decode_strict as decode, encode_canonical};
+
+    #[test]
+    fn standard_mailboxes_each_have_one_attr_and_list_drops_only_inbox_role() {
+        assert!(STANDARD_MAILBOXES.contains(&JUNK_MAILBOX));
+        for name in STANDARD_MAILBOXES {
+            assert_eq!(standard_mailbox_attrs(name).len(), 1, "{name}");
+            let want: Vec<String> = if *name == "INBOX" {
+                vec![]
+            } else {
+                standard_mailbox_attrs(name)
+            };
+            assert_eq!(special_use_attrs(name), want, "{name}");
+        }
+        assert_eq!(special_use_attrs(JUNK_MAILBOX), vec!["\\Junk".to_string()]);
+        assert!(standard_mailbox_attrs(GUARDIAN_HELD_MAILBOX).is_empty());
+        assert!(special_use_attrs("Projects").is_empty());
+    }
 
     fn sample_filter() -> EmailFilter {
         EmailFilter {

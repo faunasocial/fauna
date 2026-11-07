@@ -71,11 +71,7 @@ public enum ConversationsUI {
     /// (`fauna_conversations::snapshot`); purely a diagnostic/read value — no
     /// client feeds this string back into an API.
     public static func sortLabel(_ order: FaunaFFISwift.SortOrder) -> String {
-        switch order {
-        case .latestActivity: "LatestActivity"
-        case .oldestFirst:    "OldestFirst"
-        case .unread:         "Unread"
-        }
+        sortOrderName(order: order)
     }
 }
 

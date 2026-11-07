@@ -49,8 +49,15 @@ fn classify(err: impl std::fmt::Display, code: &str, i18n: &str) -> RpcError {
     // inner: …`); the plain form is the outermost `.context(..)` alone, which
     // is how nearly every DB-layer failure arrives — and would hide the SQLite
     // phrase beneath it. Every other `Display` ignores the flag.
-    if is_schema_shape_error(&format!("{err:#}")) {
+    let chain = format!("{err:#}");
+    if is_schema_shape_error(&chain) {
         return RpcError::nest_schema_mismatch();
+    }
+    // A reserved set's mint lost its address to the caller's own set created
+    // by hash alone: a refusal the caller recovers from (delete that set),
+    // never an internal error a client would retry forever.
+    if let Some(at) = chain.find(crate::db::snapshots::RESERVED_ADDRESS_TAKEN) {
+        return reserved_address_taken(&chain[at..]);
     }
     let mut e = RpcError::new(code, i18n);
     e.details = Some(Box::new(Value::String(s)));
@@ -86,6 +93,24 @@ pub(crate) fn map_peer_relay_error(peer_err: RpcError, what: &str) -> RpcError {
     } else {
         peer_err
     }
+}
+
+/// The wire code of a reserved set's mint refused because one of the caller's
+/// own sets, created by name hash alone, holds that set's address
+/// ([`crate::db::snapshots::refuse_a_squatted_rail_address`]). In the
+/// `folders` namespace whatever kind reached the mint, because the recovery
+/// is a `fauna.folders.delete`; not `Transient`, so a client never retries it.
+pub(crate) const CODE_RESERVED_ADDRESS_TAKEN: &str = "fauna.folders.reserved_address_taken";
+
+/// The [`CODE_RESERVED_ADDRESS_TAKEN`] refusal, carrying `detail` (which names
+/// the reserved set and the recovery).
+pub(crate) fn reserved_address_taken(detail: impl std::fmt::Display) -> RpcError {
+    let mut e = RpcError::new(
+        CODE_RESERVED_ADDRESS_TAKEN,
+        "error.folders.reserved_address_taken",
+    );
+    e.details = Some(Box::new(Value::String(detail.to_string())));
+    e
 }
 
 /// The standard internal-error seam: `fauna.protocol.internal` (Transient) for a

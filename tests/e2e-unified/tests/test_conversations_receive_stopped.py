@@ -59,6 +59,12 @@ def _wait_visible(driver, want: bool) -> bool:
 @pytest.mark.macos
 @pytest.mark.ios
 @pytest.mark.feature("conversations")
+# The seam marks a death only once a real receive loop has claimed its
+# generation. linux, web and tui run the real session at every e2e login; the
+# native apps launch it only behind the real_conversations gate (conftest's
+# `_apply_real_conversations_env`), so without the marker windows' seam answers
+# "pending" until the driver gives up ("the app's receive loop never began").
+@pytest.mark.real_conversations
 def test_a_stopped_receive_loop_says_so_until_a_newer_loop_replaces_it(logged_in_app):
     app = logged_in_app
 

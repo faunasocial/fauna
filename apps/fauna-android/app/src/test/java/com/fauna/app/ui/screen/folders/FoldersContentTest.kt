@@ -317,6 +317,7 @@ class FoldersContentTest {
         versionRetentionEdits: Map<String, VersionRetentionEdit> = emptyMap(),
         onDemand: Map<OnDemandRowKey, OnDemandRow> = emptyMap(),
         unverifiedPublicFolders: Set<String> = emptySet(),
+        accessRevoked: Set<OnDemandRowKey> = emptySet(),
     ) {
         composeTestRule.setContent {
             FoldersContent(
@@ -342,6 +343,7 @@ class FoldersContentTest {
                     )
                 },
                 onDemand = onDemand,
+                accessRevoked = accessRevoked,
             )
         }
     }
@@ -1924,6 +1926,42 @@ class FoldersContentTest {
         render(snapshot(folders = listOf(own)), onDemand = mapOf(onDemandRow(own, stronger = true)))
         composeTestRule.onNodeWithTag("folder-on-demand-toggle").assertDoesNotExist()
         composeTestRule.onNodeWithText(context.getString(R.string.devices_on_demand_bound_hint)).assertExists()
+    }
+
+    // ── folder-access-revoked-warning on a member row — file-sync.md § Multi-writer
+    // shared sets → *Revocation on a capability host*: it heads the row's one
+    // device-local presence, the toggle ──
+
+    @Test
+    fun aParkedMemberRowPaintsTheRevokedWarningAboveTheToggle() {
+        val (own, shared) = ownAndShared()
+        render(
+            snapshot(folders = listOf(own, shared)),
+            onDemand = mapOf(onDemandRow(own), onDemandRow(shared)),
+            accessRevoked = setOf(OnDemandRowKey.of(shared)),
+        )
+        val warning = composeTestRule.onNodeWithTag("folder-access-revoked-warning")
+        warning.assertExists()
+            .assertTextEquals(context.getString(R.string.devices_access_revoked_warning))
+        // Exactly one: the owner row is not warned.
+        composeTestRule.onAllNodesWithTag("folder-access-revoked-warning").assertCountEquals(1)
+        // It heads the member's toggle (the second one on the page). Unclipped
+        // positions: `boundsInRoot` clips to the viewport, and the scrolled
+        // column leaves both below it.
+        val warningTop = warning.fetchSemanticsNode().positionInRoot.y
+        val toggleTop = composeTestRule.onAllNodesWithTag("folder-on-demand-toggle")[1]
+            .fetchSemanticsNode().positionInRoot.y
+        assertTrue("warning at $warningTop must head the toggle at $toggleTop", warningTop < toggleTop)
+    }
+
+    @Test
+    fun anUnparkedMemberRowPaintsNoRevokedWarning() {
+        val (own, shared) = ownAndShared()
+        render(
+            snapshot(folders = listOf(own, shared)),
+            onDemand = mapOf(onDemandRow(own), onDemandRow(shared)),
+        )
+        composeTestRule.onNodeWithTag("folder-access-revoked-warning").assertDoesNotExist()
     }
 
     @Test

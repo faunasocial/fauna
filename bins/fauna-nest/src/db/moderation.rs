@@ -1419,6 +1419,21 @@ impl CacheDb {
                         sealed_subject,
                     ],
                 )?;
+                // Per-actor row ceiling (): drop the actor's oldest rows
+                // beyond it, in this transaction. Order matches the listing
+                // index (created_at, history_id), newest first.
+                tx.execute(
+                    "DELETE FROM spam_training_history
+                     WHERE actor_id = ?1 AND history_id IN (
+                        SELECT history_id FROM spam_training_history
+                        WHERE actor_id = ?1
+                        ORDER BY created_at DESC, history_id DESC
+                        LIMIT -1 OFFSET ?2)",
+                    rusqlite::params![
+                        actor_id.as_slice(),
+                        crate::spam_model_seal::SPAM_HISTORY_MAX_ROWS_PER_ACTOR
+                    ],
+                )?;
                 (Some(history_id), None)
             }
             Some(SpamHistoryDbOp::Delete { history_id }) => {

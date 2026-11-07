@@ -156,24 +156,39 @@ pub async fn unaccounted_members<B: StoreBackend>(
     Ok(FleetMembersView { me, unaccounted })
 }
 
-/// The fleet ids this replica's merged device-set state **excludes** — the
-/// admission half's whole question, where [`removal_facts`] answers the
+/// The fleet ids this replica's merged device-set state **excludes** — what
+/// a removal-scoped consumer asks (the custody grant's exclusion list, the
+/// group-authority revocation sweep), where [`removal_facts`] answers the
 /// devices page's. One derivation, one owner: [`FleetView`] over the live
 /// `fauna.state.device-set` rows, whose `Removed` exclusion is unconditional
 /// (`fauna_core::generation`'s module ruling — attribution is advisory, so a
 /// "stop trusting" signal is never refused on verification grounds).
-///
-/// Consumed by the peer leg's pump-refreshed removed-device snapshot
-/// (`peer_leg::refresh_removed_devices`), which is what severs a removed
-/// sibling's peer-plane admission — its fleet cert carries no expiry of its
-/// own (`account-sync-plane.md` § The peer leg → *Validity and severance*).
-/// Public so the peer-leg pins derive the set exactly as the pump does.
 pub async fn removed_device_ids<B: StoreBackend>(
     store: &AccountStore<B>,
     trust: &GenerationTrust,
 ) -> Result<std::collections::HashSet<[u8; 32]>> {
     let view = fleet_view(store, trust).await?;
     Ok(view.removed().map(|(id, _)| *id).collect())
+}
+
+/// The fleet ids this replica's merged device-set state **verifies as
+/// members** — enrolled under the account root, no `Removed` row
+/// ([`FleetView::is_verified_member`], the dial filter's predicate).
+///
+/// Consumed by the peer leg's pump-refreshed fleet-member snapshot
+/// (`peer_leg::refresh_fleet_members`): an own-account fleet cert is admitted
+/// only for a device this set names, which is what severs a removed
+/// sibling's peer-plane admission — its cert carries no expiry of its own —
+/// and refuses one this replica never saw enrolled
+/// (`account-sync-plane.md` § The admission seam → *Validity and
+/// severance*). Public so the peer-leg pins derive the set exactly as the
+/// pump does.
+pub async fn verified_member_ids<B: StoreBackend>(
+    store: &AccountStore<B>,
+    trust: &GenerationTrust,
+) -> Result<std::collections::HashSet<[u8; 32]>> {
+    let view = fleet_view(store, trust).await?;
+    Ok(view.wrap_targets().map(|m| m.device_id).collect())
 }
 
 /// Every fleet id this replica's verified view names — its members and its

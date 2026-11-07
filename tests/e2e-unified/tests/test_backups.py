@@ -3439,6 +3439,23 @@ def test_after_losing_the_nest_the_devices_copy_restores_the_mail_onto_the_rebui
     until its shell lands. web is a declared absence (a browser cannot hold the
     sealed store).
     """
+    _lose_the_nest_and_restore_from_this_device(
+        app, request, nest_mode, tmp_path_factory, with_folder=with_folder)
+
+
+def _lose_the_nest_and_restore_from_this_device(
+    app, request, nest_mode, tmp_path_factory, *, with_folder, seal=None
+):
+    """The after-loss re-seed journey both tests above and below run: box A
+    holds the owner's mail (and, with ``with_folder``, a covered folder), this
+    device holds a copy, A is lost, B is rebuilt under the same seed, and the
+    owner restores from the app.
+
+    ``seal`` (the ``run_seal_helper`` fixture) adds every other backed-up kind
+    to box A before the device takes its copy — a calendar event, a contact
+    card and a post — and makes the journey read each one back through its
+    ordinary door on B after the restore (`nest/box-recovery.md` § Goal, item 2).
+    """
     from common.auth import claim_admin
     from conftest import _login_app_as, _start_dedicated_nest
 
@@ -3455,6 +3472,7 @@ def test_after_losing_the_nest_the_devices_copy_restores_the_mail_onto_the_rebui
     app.backups.require_reseed_supported()
     _seed_one_mail_segment(app, box_a, owner)
     assert _inbox_count(box_a, owner) == 1
+    others = _seed_every_other_kind(box_a, owner, seal) if seal is not None else None
 
     app.backups.navigate()
     app.backups.wait_for_destination_count(0)
@@ -3547,6 +3565,16 @@ def test_after_losing_the_nest_the_devices_copy_restores_the_mail_onto_the_rebui
         f"the restore must report the corpus whole: result={result!r} "
         f"error={app.error_text()!r}"
     )
+    if others is not None:
+        # Each kind's own line names it as restored, never refused: the
+        # driver delivers and materializes every backed-up kind it holds.
+        for label in (S.backups.reseed_set_calendar, S.backups.reseed_set_card,
+                      S.backups.reseed_set_post):
+            line = S.backups.reseed_set_restored(set=label, count="\0").split("\0")
+            assert re.search(re.escape(line[0]) + r"[1-9]\d*" + re.escape(line[1]), result), (
+                f"the result view must name {label!r} as restored: "
+                f"result={result!r} error={app.error_text()!r}"
+            )
 
     # Nest-side, independent of the page (convention 5): the owner's mail scope
     # on the rebuilt box now holds live records, which is exactly what makes a
@@ -3586,6 +3614,9 @@ def test_after_losing_the_nest_the_devices_copy_restores_the_mail_onto_the_rebui
         app.backups.wait_for_folder_row(folder)
         app.backups.navigate()
 
+    if others is not None:
+        _read_every_other_kind_back(box_b, owner, others, result)
+
     # The post-ceremony duty: this device is the rebuilt box's custodian again.
     app.backups.wait_for_destination_count(1)
     assert not app.backups.orphaned_store_visible(), (
@@ -3608,6 +3639,173 @@ def test_after_losing_the_nest_the_devices_copy_restores_the_mail_onto_the_rebui
         f"box; INBOX holds {restored} message(s). A live record in no mailbox "
         f"means the placement journal was not restored with the content."
     )
+
+
+def _seal_fixture(seal, kind: str, plaintext: bytes) -> bytes:
+    """A genuine sealed record envelope of ``kind`` — what the nest's calendar
+    and address-book doors accept — sealed to a throwaway recipient. Nothing in
+    this journey opens it: the read-back compares the bytes the rebuilt box
+    serves with the bytes box A was given."""
+    import base64
+
+    from nacl.public import PrivateKey
+
+    return seal("seal-mail-record", {
+        "plaintext_b64": base64.b64encode(plaintext).decode(),
+        "recipient_x25519_pubkey_b64": base64.b64encode(
+            PrivateKey.generate().public_key.encode()).decode(),
+        "kind": kind,
+    })
+
+
+def _seed_every_other_kind(nest, owner, seal) -> dict:
+    """Give the owner one calendar event, one contact card and one post on
+    ``nest``, each through the production door that kind's data arrives by
+    (the ``fauna.bridges.*`` calendar and address-book doors a calendar or
+    contacts app reaches, ``fauna.posts.create``), and return what each read
+    door must serve back after the restore.
+
+    Precondition-only, like ``_seed_one_mail_segment`` (convention 8 exempts
+    fixture setup): the gestures under test are the enroll and the restore.
+    """
+    from clients.ws_rpc_admin_client import WsRpcAdminClient
+    from tests.api.bare import sign_and_encode_post
+
+    actor = owner["actor_id_bytes"]
+    calendar_id, event_uid = secrets.token_bytes(32), secrets.token_bytes(32)
+    book_id, card_uid = secrets.token_bytes(32), secrets.token_bytes(32)
+    event = _seal_fixture(seal, "calendar", b"BEGIN:VEVENT\r\nSUMMARY:kept\r\nEND:VEVENT\r\n")
+    card = _seal_fixture(seal, "card", b"BEGIN:VCARD\r\nFN:Kept\r\nEND:VCARD\r\n")
+    post = sign_and_encode_post(
+        owner["signing_key"], int(time.time() * 1_000_000),
+        f"restored with the box {secrets.token_hex(8)}", tags=[])
+
+    with WsRpcAdminClient(
+        nest["url"], actor_id=actor, signing_key=bytes(owner["signing_key"]),
+    ) as client:
+        made = client.call("fauna.bridges.provision_calendar", {
+            "actor_id": actor, "calendar_id": calendar_id,
+            "encrypted_metadata": _seal_fixture(seal, "calendar", b"Personal"),
+            "update_metadata": False,
+        })
+        assert made["outcome"] == "created", f"provision the calendar: {made!r}"
+        put = client.call("fauna.bridges.put_event_ciphertext", {
+            "actor_id": actor, "calendar_id": calendar_id, "uid_hash": event_uid,
+            "encrypted_body": event,
+            "encrypted_index_hint": _seal_fixture(seal, "mail", b"hint-event"),
+            "timestamp": int(time.time()), "ciphertext_size": len(event),
+            "if_match": None,
+        })
+        assert put["outcome"] == "created", f"put the event: {put!r}"
+
+        made = client.call("fauna.bridges.provision_addressbook", {
+            "actor_id": actor, "addressbook_id": book_id,
+            "encrypted_metadata": _seal_fixture(seal, "card", b"Contacts"),
+            "update_metadata": False,
+        })
+        assert made["outcome"] == "created", f"provision the address book: {made!r}"
+        put = client.call("fauna.bridges.put_card_ciphertext", {
+            "actor_id": actor, "addressbook_id": book_id, "uid_hash": card_uid,
+            "encrypted_body": card,
+            "encrypted_index_hint": _seal_fixture(seal, "mail", b"hint-card"),
+            "timestamp": int(time.time()), "ciphertext_size": len(card),
+            "if_match": None,
+        })
+        assert put["outcome"] == "created", f"put the card: {put!r}"
+
+        post_id = client.call("fauna.posts.create", {"body": bytes(post)})["post_id"]
+
+    return {
+        "calendar": (calendar_id, event_uid, event),
+        "card": (book_id, card_uid, card),
+        "post": (post_id, post),
+    }
+
+
+def _read_every_other_kind_back(nest, owner, seeded: dict, result: str) -> None:
+    """Every kind ``_seed_every_other_kind`` gave box A reads back on the
+    rebuilt ``nest`` through its ordinary read door, as the owner: the
+    calendar's and the address book's query doors (what CalDAV and CardDAV
+    serve from), the by-id post door and the author feed.
+
+    A door that refuses the owner here is a real gap, never routed around:
+    the call raises with the door's own code, and the failure carries it."""
+    from clients.ws_rpc_admin_client import WsRpcAdminClient
+
+    actor = owner["actor_id_bytes"]
+    calendar_id, event_uid, event = seeded["calendar"]
+    book_id, card_uid, card = seeded["card"]
+    post_id, post = seeded["post"]
+
+    with WsRpcAdminClient(
+        nest["url"], actor_id=actor, signing_key=bytes(owner["signing_key"]),
+    ) as client:
+        events = client.call("fauna.bridges.query_events", {
+            "actor_id": actor, "calendar_id": calendar_id,
+            "since_modseq": None, "after_event_id": None, "limit": 50,
+        })
+        cards = client.call("fauna.bridges.query_cards", {
+            "actor_id": actor, "addressbook_id": book_id,
+            "since_modseq": None, "after_card_id": None, "limit": 50,
+        })
+        got_post = bytes(client.call("fauna.posts.get", {"post_id": post_id})["body"])
+        feed = client.call("fauna.feed.author.posts", {"author": actor.hex()})["posts"]
+
+    served = {bytes(e["uid_hash"]): bytes(e["encrypted_body"])
+              for e in events.get("events", [])}
+    assert served.get(event_uid) == event, (
+        f"NEST-SIDE failure: the page says {result!r}, but the rebuilt box's "
+        f"calendar does not serve the event under its uid: {events!r}"
+    )
+    served = {bytes(c["uid_hash"]): bytes(c["encrypted_body"])
+              for c in cards.get("cards", [])}
+    assert served.get(card_uid) == card, (
+        f"NEST-SIDE failure: the page says {result!r}, but the rebuilt box's "
+        f"address book does not serve the card under its uid: {cards!r}"
+    )
+    assert got_post == bytes(post), (
+        f"NEST-SIDE failure: the page says {result!r}, but the post {post_id} "
+        f"reads back {len(got_post)} bytes, not the {len(post)} it was"
+    )
+    assert post_id in {p["post_id"] for p in feed}, (
+        f"NEST-SIDE failure: the post {post_id} reads by id but the owner's "
+        f"author feed does not list it: {[p['post_id'] for p in feed]!r}"
+    )
+
+
+@pytest.mark.tui
+@pytest.mark.linux
+@pytest.mark.windows
+@pytest.mark.macos
+@pytest.mark.ios
+@pytest.mark.android
+# web is a declared absence, as in the mail journey above.
+@pytest.mark.real_sync_agent
+@pytest.mark.isolated_sync_agent
+@pytest.mark.feature("recover-a-lost-nest")
+def test_after_losing_the_nest_every_kind_comes_back_onto_the_rebuilt_one(
+    app, request, nest_mode, tmp_path_factory, run_seal_helper
+):
+    """**Once the new nest is up, the owner's posts, mail, calendar, files and
+    contacts come back from their backup destinations** (`recover-a-lost-nest`
+    outcome 4; `nest/box-recovery.md` § Goal, item 2; the ceremony
+    `behavior/backup-destinations.md` § Re-seed).
+
+    The mail journey above with every backed-up kind on box A: mail, a covered
+    folder with a file, a calendar event, a contact card and a post. This
+    device takes one copy of them all, A is lost, B is rebuilt under the same
+    deployment seed, and the owner restores from the app. Then each kind reads
+    back on B through its ordinary door: the INBOX, the folder listing, the
+    calendar and address-book query doors, the post by id and the author feed.
+
+    The restored copy lands under ``__landing/<kind>`` and the materialize
+    files it where it was (`reserved-folders.md` § __mail Sync → *The landing
+    set*); a door refusing the owner afterwards is a gap of its own, never
+    routed around here.
+    """
+    _lose_the_nest_and_restore_from_this_device(
+        app, request, nest_mode, tmp_path_factory, with_folder=True,
+        seal=run_seal_helper)
 
 
 @pytest.mark.tui

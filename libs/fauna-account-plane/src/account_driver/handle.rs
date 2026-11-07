@@ -3559,8 +3559,7 @@ impl AccountStoreHandle {
         rx.await.map_err(|_| anyhow::anyhow!(RUNTIME_GONE))?
     }
 
-    /// The fleet ids this replica's merged device-set state excludes — the
-    /// same derivation the peer leg's removed-device snapshot runs
+    /// The fleet ids this replica's merged device-set state excludes
     /// (`fleet_removal::removed_device_ids` over this runtime's store and
     /// `GenerationTrust`). The custody witness's mint reads it through the
     /// ceremony's registry-writer seam. A local read.

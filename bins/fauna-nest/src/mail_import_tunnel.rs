@@ -289,7 +289,7 @@ impl LoopbackAdmission {
         if !self.ports.contains(&open.port) {
             return None;
         }
-        let ip = if host == "localhost" {
+        let ip = if fauna_core::resolve::is_localhost_name(&host) {
             std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)
         } else {
             host.parse::<std::net::IpAddr>().ok()?

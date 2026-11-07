@@ -1835,13 +1835,26 @@ pub struct MySubscriptionRow {
     pub since: i64,
 }
 
+/// The pragmas every nest connection runs before migrations.
+///
+/// - `foreign_keys`: FK enforcement (A1b).
+/// - `secure_delete`: SQLite zeroes the bytes a write frees, both in-page and
+///   on the freelist. Without it, a row rewrite leaves the old row image in the
+///   page's free space. A sealed set's name is blanked at runtime by every
+///   folders writer (`migrations::BLANK_SEALED_FOLDER_NAME`), and so is every
+///   other plaintext a later write replaces, so the old image would rest in
+///   `nest.db` and in each hot copy of it until SQLite happened to reuse the
+///   space. The boot scrub's `VACUUM` covers only a boot that cleared
+///   something (`encryption-at-rest.md` § Carve-outs: names and paths are
+///   content; pinned by `tests/conformance_at_rest_byte_scan.rs`).
+const CONNECTION_PRAGMAS: &str = "PRAGMA foreign_keys = ON; PRAGMA secure_delete = ON;";
+
 impl CacheDb {
     /// Open (or create) the database at `path` and run migrations.
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let conn = Connection::open(path.as_ref()).context("open sqlite")?;
-        // A1b: enable FK enforcement before running migrations
-        conn.execute_batch("PRAGMA foreign_keys = ON;")
-            .context("enable foreign_keys")?;
+        conn.execute_batch(CONNECTION_PRAGMAS)
+            .context("set the connection pragmas")?;
         // A database the genesis did not write is refused before anything
         // reads or writes it (`migrations.rs` § Genesis).
         migrations::check_genesis(&conn)?;
@@ -1878,9 +1891,8 @@ impl CacheDb {
     /// Open an in-memory database (for tests).
     pub fn open_in_memory() -> Result<Self> {
         let conn = Connection::open_in_memory().context("open in-memory sqlite")?;
-        // A1b: enable FK enforcement before running migrations
-        conn.execute_batch("PRAGMA foreign_keys = ON;")
-            .context("enable foreign_keys")?;
+        conn.execute_batch(CONNECTION_PRAGMAS)
+            .context("set the connection pragmas")?;
         migrations::run_migrations(&conn)?;
         Ok(Self {
             conn: Mutex::new(conn),
@@ -2583,6 +2595,18 @@ impl CacheDb {
     ) -> anyhow::Result<i64> {
         let conn = self.conn.lock().await;
         crate::db::snapshots::get_or_create_reserved_folder(&conn, actor_id, kind)
+    }
+
+    /// [`crate::db::snapshots::refuse_a_squatted_rail_address`] for a mint that
+    /// runs outside the snapshot DAO — the two custody-copy provisioners, whose
+    /// create found no row of its reserved `name` afterwards.
+    pub async fn refuse_a_squatted_rail_address(
+        &self,
+        name: &str,
+        actor_id: &[u8; 32],
+    ) -> anyhow::Result<()> {
+        let conn = self.conn.lock().await;
+        crate::db::snapshots::refuse_a_squatted_rail_address(&conn, name, &actor_id[..])
     }
 
     /// Get or create the per-channel `__conv/<channel_hex>` pseudo folder
@@ -5500,7 +5524,7 @@ mod tests {
         db.create_folder("documents-abc", &actor).await.unwrap();
         // … alongside reserved internal sets the actor accumulates from
         // config/index/mail writes.
-        db.get_or_create_reserved_folder(&actor, "config")
+        db.get_or_create_reserved_folder(&actor, "drafts")
             .await
             .unwrap();
         db.get_or_create_reserved_folder(&actor, "index")

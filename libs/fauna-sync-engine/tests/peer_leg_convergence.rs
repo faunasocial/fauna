@@ -125,21 +125,36 @@ struct Replica {
     device: u8,
     store: AccountStore<SqliteBackend>,
     transport: Arc<MemTransport>,
-    /// The pump-refreshed removed-device snapshot, shared with this
-    /// replica's serve config and its dial the way `peer_leg::PeerLegState`
-    /// shares its own, and derived by the same
-    /// `fleet_removal::removed_device_ids` ([`Replica::refresh_removed_devices`]).
-    /// It models a DERIVED snapshot only — empty until the first refresh,
-    /// which is why every other test in this file is untouched by it. The
-    /// production type (`peer_leg::WithdrawalSnapshot`, behind
-    /// `account-runtime`, which this file does not build with) also has an
-    /// underived state that refuses; that half is pinned in `peer_leg`'s own
-    /// tests over the production ensure step.
-    removed_devices: Arc<std::sync::RwLock<std::collections::HashSet<[u8; 32]>>>,
+    /// The pump-refreshed fleet-member snapshot, shared with this replica's
+    /// serve config and its dial the way `peer_leg::PeerLegState` shares its
+    /// own, and derived by the same `fleet_removal::verified_member_ids`
+    /// ([`Replica::refresh_fleet_members`]): a device it does not list is
+    /// refused. It models a DERIVED snapshot only — `None` (no view at all,
+    /// admitting) until the first refresh, which is why every other test in
+    /// this file is untouched by it. The production type
+    /// (`peer_leg::MemberSnapshot`, behind `account-runtime`, which this file
+    /// does not build with) refuses while underived instead; that half, and
+    /// the refusal of a device never enrolled here, are pinned in
+    /// `peer_leg`'s own tests over the production ensure step.
+    fleet_members: FleetMembers,
     // Held for their Drop: the listener lives exactly as long as the node
     // (wormability rule 5 — no unconditional bind).
     _node: fauna_peer_channel::PeerNode,
     _dir: tempfile::TempDir,
+}
+
+/// A replica's modelled fleet-member snapshot ([`Replica::fleet_members`]).
+type FleetMembers = Arc<std::sync::RwLock<Option<std::collections::HashSet<[u8; 32]>>>>;
+
+/// The own-account device view over [`FleetMembers`], in the shape both
+/// halves take: refuse a device the derived set does not list.
+fn refuses(members: &FleetMembers, acct: &[u8; 32], device_key: &[u8; 32]) -> bool {
+    *acct == account()
+        && members
+            .read()
+            .unwrap()
+            .as_ref()
+            .is_some_and(|set| !set.contains(device_key))
 }
 
 /// The advertised set every start goes through (rule 7's gate).
@@ -175,8 +190,7 @@ async fn replica(
 
     let now = Arc::clone(now);
     let now_fn: NowFn = Arc::new(move || now.load(Ordering::SeqCst));
-    let removed_devices: Arc<std::sync::RwLock<std::collections::HashSet<[u8; 32]>>> =
-        Arc::new(std::sync::RwLock::new(std::collections::HashSet::new()));
+    let fleet_members: FleetMembers = Arc::new(std::sync::RwLock::new(None));
     let server = Arc::new(PeerSyncServer::new(
         ServeStoreHandle::spawn(serve_store),
         account(),
@@ -186,9 +200,9 @@ async fn replica(
             own_witness_kind: fauna_protocol::peer_sync::WITNESS_DEVICE_AUTHORIZATION.to_string(),
             custody_revoked: None,
             device_removed: Some({
-                let removed = Arc::clone(&removed_devices);
+                let members = Arc::clone(&fleet_members);
                 Arc::new(move |acct: &[u8; 32], device_key: &[u8; 32]| {
-                    *acct == account() && removed.read().unwrap().contains(device_key)
+                    refuses(&members, acct, device_key)
                 })
             }),
             file_chunks: None,
@@ -210,7 +224,7 @@ async fn replica(
         device,
         store,
         transport,
-        removed_devices,
+        fleet_members,
         _node: node,
         _dir: dir,
     }
@@ -255,12 +269,11 @@ impl Replica {
         let channel = PeerChannel::open(conn).await.expect("channel");
         // Client side of the exchange: present ours, independently verify the
         // responder's witness against the channel-proven identity — and
-        // against THIS side's own removed-device snapshot, the production
-        // dial's views (`peer_leg::dial_one`).
-        let removed = Arc::clone(&self.removed_devices);
-        let removed_view = move |acct: &[u8; 32], device_key: &[u8; 32]| {
-            *acct == account() && removed.read().unwrap().contains(device_key)
-        };
+        // against THIS side's own fleet-member snapshot, the production
+        // dial's views (`peer_leg::connect_and_admit_sibling`).
+        let members = Arc::clone(&self.fleet_members);
+        let removed_view =
+            move |acct: &[u8; 32], device_key: &[u8; 32]| refuses(&members, acct, device_key);
         admit_over_as(
             &channel,
             fauna_protocol::peer_sync::WITNESS_DEVICE_AUTHORIZATION,
@@ -277,16 +290,16 @@ impl Replica {
         Ok(Arc::new(channel))
     }
 
-    /// Re-derive this replica's removed-device snapshot from its own merged
-    /// device-set rows — the pump's `refresh_removed_devices` step, through
-    /// the same `fleet_removal::removed_device_ids` derivation production
-    /// uses. Returns how many ids the view now excludes.
-    async fn refresh_removed_devices(&self) -> usize {
-        let next = fauna_sync_engine::fleet_removal::removed_device_ids(&self.store, &trust())
+    /// Re-derive this replica's fleet-member snapshot from its own merged
+    /// device-set rows — the pump's `refresh_fleet_members` step, through
+    /// the same `fleet_removal::verified_member_ids` derivation production
+    /// uses. Returns how many members the view now admits.
+    async fn refresh_fleet_members(&self) -> usize {
+        let next = fauna_sync_engine::fleet_removal::verified_member_ids(&self.store, &trust())
             .await
-            .expect("removed-device snapshot");
+            .expect("fleet-member snapshot");
         let n = next.len();
-        *self.removed_devices.write().unwrap() = next;
+        *self.fleet_members.write().unwrap() = Some(next);
         n
     }
 
@@ -1880,10 +1893,9 @@ async fn a_removed_device_is_refused_at_the_next_handshake_in_both_directions() 
     )
     .await;
     assert_eq!(
-        a.refresh_removed_devices().await,
-        0,
-        "an enrolled fleet excludes nobody — the check must be about the Removed row, \
-         never about mere presence"
+        a.refresh_fleet_members().await,
+        2,
+        "an enrolled fleet verifies both devices"
     );
 
     // 2. A removes B — the plane-side leg of the devices-page gesture.
@@ -1895,9 +1907,9 @@ async fn a_removed_device_is_refused_at_the_next_handshake_in_both_directions() 
     )
     .await;
     assert_eq!(
-        a.refresh_removed_devices().await,
+        a.refresh_fleet_members().await,
         1,
-        "A's merged device-set state now excludes exactly one id"
+        "A's merged device-set state now verifies only A"
     );
 
     // 3. A writes a row only a still-admitted peer may ever see.
@@ -1957,7 +1969,7 @@ async fn a_removed_device_is_refused_at_the_next_handshake_in_both_directions() 
         Err(e) => e,
     };
     assert!(
-        format!("{mirror:#}").contains("removed from this account's fleet"),
+        format!("{mirror:#}").contains("not a verified member of this account's fleet"),
         "the dialer refuses on its own view, not on the peer's: {mirror:#}"
     );
 }
@@ -2014,7 +2026,7 @@ async fn removal_severs_a_live_connection_at_its_next_request() {
         None,
     )
     .await;
-    assert_eq!(a.refresh_removed_devices().await, 1);
+    assert_eq!(a.refresh_fleet_members().await, 1);
     a.put_local(
         &sync_prefs_item(),
         sync_prefs_with("after-removal"),

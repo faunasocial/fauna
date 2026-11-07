@@ -5,7 +5,12 @@
 //! import a plugin makes served under its principal rows.
 //!
 //! **One task per plugin** owns its [`PluginInstance`] and serves a command
-//! channel (ingress, stop). A [`PluginFault`] ends the instance; the task
+//! channel (ingress, stop). Every export call runs under a wall-clock bound
+//! ([`PLUGIN_CALL_MAX_WALL`] — fuel is not spent while the host awaits an
+//! import, so fuel alone cannot end a call parked on a slow fetch) and under
+//! the plugin's cancel token: uninstall and the developer reinstall trip it
+//! before they ask for the best-effort `stop`, so a call still in flight ends
+//! there and writes nothing more under a principal that is going away. A [`PluginFault`] ends the instance; the task
 //! counts it, waits a backoff ([`FAULT_BACKOFF_START`] doubling to
 //! [`FAULT_BACKOFF_MAX`]) and re-instantiates — `fauna.plugins.list` shows the
 //! count and the last fault so the ADMIN decides whether to uninstall. A
@@ -40,7 +45,8 @@ use std::time::Duration;
 use bytes::Bytes;
 use fauna_plugin_host::{
     BoxFut, CompiledPlugin, HolderKey, HostServices, HttpRequest, HttpResponse, IngressRequest,
-    IngressResponse, LogLevel, OutboundPolicy, PluginEngine, PluginInstance, RpcRefusal,
+    IngressResponse, LogLevel, OutboundPolicy, PluginEngine, PluginFault, PluginInstance,
+    RpcRefusal,
 };
 use fauna_protocol::atproto_pds::ConsentInstallInfo;
 use fauna_protocol::kind_manifest::IngressEntry;
@@ -49,6 +55,7 @@ use fauna_protocol::plugins::{
 };
 use sha2::Digest as _;
 use tokio::sync::{mpsc, oneshot};
+use tokio_util::sync::CancellationToken;
 
 use crate::db::CacheDb;
 use crate::db::third_party_principals::{HostedPluginMint, HostedPluginRow};
@@ -65,8 +72,14 @@ pub const FAULT_BACKOFF_MAX: Duration = Duration::from_secs(5 * 60);
 /// [`fauna_plugin_host::PLUGIN_MAX_MEMORY_BYTES`].
 pub const PLUGIN_HTTP_MAX_BYTES: usize = 4 * 1024 * 1024;
 /// How long uninstall waits for a plugin's best-effort `stop` before it drops
-/// the task.
+/// the task — and the bound on that `stop` call itself.
 const STOP_GRACE: Duration = Duration::from_secs(5);
+/// The wall-clock bound on one export call (`start`, one ingress request),
+/// however its time is spent: a call past it ends as a fault, the instance is
+/// dropped and re-instantiated like any other. Generous beside the call's
+/// fuel (about a second of CPU), since a call may await several outbound
+/// fetches.
+pub const PLUGIN_CALL_MAX_WALL: Duration = Duration::from_secs(30);
 /// The module file under a plugin's directory.
 pub const MODULE_FILE: &str = "plugin.wasm";
 /// The holder secret under a plugin's directory (mode 0600).
@@ -168,6 +181,8 @@ struct Entry {
     /// `None` for a plugin listed `stopped` that has no task (its files are
     /// missing or its module does not compile).
     tx: Option<mpsc::Sender<Command>>,
+    /// Tripped by [`PluginRunner::halt`]: ends a call in flight.
+    cancel: CancellationToken,
     status: Arc<Mutex<Status>>,
     /// The path prefixes and whole-name labels its document declared
     /// (`ingress`), which [`PluginRunner::route`] and
@@ -277,6 +292,10 @@ impl PluginRunner {
     }
 
     fn plugin_dir(&self, principal_id: &[u8]) -> Option<PathBuf> {
+        // An empty id would join to the plugins root itself: never name it.
+        if principal_id.is_empty() {
+            return None;
+        }
         self.plugins_dir
             .as_ref()
             .map(|d| d.join(hex::encode(principal_id)))
@@ -559,6 +578,7 @@ impl PluginRunner {
             principal_id,
             Entry {
                 tx: None,
+                cancel: CancellationToken::new(),
                 status: Arc::new(Mutex::new(Status::stopped(reason))),
                 ingress,
             },
@@ -599,6 +619,7 @@ impl PluginRunner {
             client_id,
             holder,
         });
+        let cancel = CancellationToken::new();
         let supervisor = Supervisor {
             engine,
             compiled,
@@ -606,6 +627,7 @@ impl PluginRunner {
             policy: OutboundPolicy::new(hosts),
             status: status.clone(),
             principal: hex::encode(&principal_id),
+            cancel: cancel.clone(),
         };
         {
             let mut entries = self.entries.lock().unwrap_or_else(|p| p.into_inner());
@@ -613,6 +635,7 @@ impl PluginRunner {
                 principal_id,
                 Entry {
                     tx: Some(tx),
+                    cancel,
                     status,
                     ingress,
                 },
@@ -638,12 +661,17 @@ impl PluginRunner {
 
     /// End a plugin's task and forget it, keeping its files — [`Self::stop`]'s
     /// first half, and the development reinstall's before it swaps the module.
+    /// A call in flight ends at once (the cancel token); an idle plugin gets
+    /// its best-effort `stop`, bounded by [`STOP_GRACE`]. Either way the task
+    /// is over when this returns, or within that grace.
     async fn halt(&self, principal_id: &[u8]) {
         let entry = {
             let mut entries = self.entries.lock().unwrap_or_else(|p| p.into_inner());
             entries.remove(principal_id)
         };
-        if let Some(tx) = entry.and_then(|e| e.tx) {
+        let Some(entry) = entry else { return };
+        entry.cancel.cancel();
+        if let Some(tx) = entry.tx {
             let (ack, done) = oneshot::channel();
             if tx.send(Command::Stop(ack)).await.is_ok() {
                 let _ = tokio::time::timeout(STOP_GRACE, done).await;
@@ -735,12 +763,44 @@ struct Supervisor {
     policy: OutboundPolicy,
     status: Arc<Mutex<Status>>,
     principal: String,
+    /// The entry's cancel token: [`PluginRunner::halt`] trips it.
+    cancel: CancellationToken,
 }
 
 /// How a served instance ended.
 enum Ended {
     Stopped,
     Faulted,
+}
+
+/// Why a bounded call did not return a value.
+enum CallEnd {
+    /// A fault, or the wall-clock bound: the instance is done.
+    Fault(String),
+    /// The plugin is being halted: the task ends.
+    Cancelled,
+}
+
+/// Run one export call under the wall-clock bound and the cancel token. A
+/// call cut off either way leaves the instance mid-call, so it is never used
+/// again.
+async fn bounded<T>(
+    cancel: &CancellationToken,
+    limit: Duration,
+    call: impl std::future::Future<Output = Result<T, PluginFault>>,
+) -> Result<T, CallEnd> {
+    tokio::select! {
+        biased;
+        () = cancel.cancelled() => Err(CallEnd::Cancelled),
+        r = tokio::time::timeout(limit, call) => match r {
+            Ok(Ok(v)) => Ok(v),
+            Ok(Err(fault)) => Err(CallEnd::Fault(fault.to_string())),
+            Err(_) => Err(CallEnd::Fault(format!(
+                "the call ran past its {}-second wall-clock bound",
+                limit.as_secs()
+            ))),
+        },
+    }
 }
 
 impl Supervisor {
@@ -789,23 +849,34 @@ impl Supervisor {
         }
     }
 
+    /// A halt ended the call in flight: the task ends, listed stopped.
+    fn cancelled(&self) -> Ended {
+        self.set(|s| s.state = PLUGIN_STATE_STOPPED);
+        Ended::Stopped
+    }
+
     /// One instance, from instantiation to a fault or a stop.
     async fn instance_life(&self, rx: &mut mpsc::Receiver<Command>) -> Ended {
-        let mut instance = match PluginInstance::instantiate(
-            &self.engine,
-            &self.compiled,
-            self.services.clone(),
-            self.policy.clone(),
-        )
-        .await
-        {
+        let instantiated = bounded(&self.cancel, PLUGIN_CALL_MAX_WALL, async {
+            PluginInstance::instantiate(
+                &self.engine,
+                &self.compiled,
+                self.services.clone(),
+                self.policy.clone(),
+            )
+            .await
+            .map_err(|e| PluginFault::Host(format!("instantiation failed: {e:#}")))
+        })
+        .await;
+        let mut instance = match instantiated {
             Ok(i) => i,
-            Err(e) => {
-                self.fault(format!("instantiation failed: {e:#}"));
+            Err(CallEnd::Cancelled) => return self.cancelled(),
+            Err(CallEnd::Fault(what)) => {
+                self.fault(what);
                 return Ended::Faulted;
             }
         };
-        match instance.start().await {
+        match bounded(&self.cancel, PLUGIN_CALL_MAX_WALL, instance.start()).await {
             Ok(Ok(())) => self.set(|s| {
                 s.state = PLUGIN_STATE_RUNNING;
                 s.reason = None;
@@ -818,29 +889,50 @@ impl Supervisor {
                 });
                 return self.serve_stopped(rx).await;
             }
-            Err(fault) => {
-                self.fault(fault.to_string());
+            Err(CallEnd::Cancelled) => return self.cancelled(),
+            Err(CallEnd::Fault(what)) => {
+                self.fault(what);
                 return Ended::Faulted;
             }
         }
         while let Some(cmd) = rx.recv().await {
             match cmd {
-                Command::Ingress(req, reply) => match instance.handle_ingress(req).await {
+                Command::Ingress(req, reply) => match bounded(
+                    &self.cancel,
+                    PLUGIN_CALL_MAX_WALL,
+                    instance.handle_ingress(req),
+                )
+                .await
+                {
                     Ok(resp) => {
                         let _ = reply.send(Ok(resp));
                     }
-                    Err(fault) => {
+                    Err(CallEnd::Cancelled) => {
+                        let _ = reply.send(Err("the plugin was stopped".into()));
+                        return self.cancelled();
+                    }
+                    Err(CallEnd::Fault(what)) => {
                         // Counted before the caller hears of it, so whoever
                         // reads the status after the reply sees this fault.
-                        let what = fault.to_string();
                         self.fault(what.clone());
                         let _ = reply.send(Err(what));
                         return Ended::Faulted;
                     }
                 },
                 Command::Stop(ack) => {
-                    if let Err(fault) = instance.stop().await {
-                        tracing::info!(principal = %self.principal, "plugin stop faulted: {fault}");
+                    // Best-effort and bounded; the cancel token is already
+                    // tripped by the halt that sent this, so it is not
+                    // consulted here.
+                    match tokio::time::timeout(STOP_GRACE, instance.stop()).await {
+                        Ok(Ok(())) => {}
+                        Ok(Err(fault)) => tracing::info!(
+                            principal = %self.principal,
+                            "plugin stop faulted: {fault}"
+                        ),
+                        Err(_) => tracing::info!(
+                            principal = %self.principal,
+                            "plugin stop ran past its grace"
+                        ),
                     }
                     self.set(|s| s.state = PLUGIN_STATE_STOPPED);
                     let _ = ack.send(());
@@ -976,21 +1068,29 @@ impl HostServices for NestServices {
         })
     }
 
-    fn state_put(&self, key: String, value: Vec<u8>) -> BoxFut<'_, anyhow::Result<()>> {
+    fn state_put(
+        &self,
+        key: String,
+        value: Vec<u8>,
+    ) -> BoxFut<'_, anyhow::Result<Result<(), String>>> {
         Box::pin(async move {
-            self.state
+            Ok(self
+                .state
                 .db
                 .plugin_state_put(&self.principal_id, &key, &value)
-                .await
+                .await?
+                .map_err(|refused| refused.to_string()))
         })
     }
 
-    fn state_delete(&self, key: String) -> BoxFut<'_, anyhow::Result<()>> {
+    fn state_delete(&self, key: String) -> BoxFut<'_, anyhow::Result<Result<(), String>>> {
         Box::pin(async move {
-            self.state
+            Ok(self
+                .state
                 .db
                 .plugin_state_delete(&self.principal_id, &key)
-                .await
+                .await?
+                .map_err(|refused| refused.to_string()))
         })
     }
 
@@ -1021,5 +1121,56 @@ impl HostServices for NestServices {
             LogLevel::Warn => tracing::warn!(target: "plugin", %principal, "{message}"),
             LogLevel::Error => tracing::error!(target: "plugin", %principal, "{message}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    ///  A call parked on an await — no fuel spent — ends at the
+    /// wall-clock bound as a fault, and at once when the plugin is halted.
+    #[tokio::test(start_paused = true)]
+    async fn a_parked_call_ends_at_its_bound_or_its_halt() {
+        let parked = || async {
+            std::future::pending::<()>().await;
+            Ok::<(), PluginFault>(())
+        };
+        let cancel = CancellationToken::new();
+        let r = bounded(&cancel, PLUGIN_CALL_MAX_WALL, parked()).await;
+        assert!(
+            matches!(&r, Err(CallEnd::Fault(w)) if w.contains("wall-clock")),
+            "the bound ends a parked call"
+        );
+
+        let halted = CancellationToken::new();
+        // spawn-ok(test): the parked call, awaited below inside this test.
+        let call = tokio::spawn({
+            let halted = halted.clone();
+            async move { bounded(&halted, PLUGIN_CALL_MAX_WALL, parked()).await }
+        });
+        tokio::task::yield_now().await;
+        halted.cancel();
+        assert!(matches!(call.await.unwrap(), Err(CallEnd::Cancelled)));
+
+        let done = bounded(&cancel, PLUGIN_CALL_MAX_WALL, async {
+            Ok::<_, PluginFault>(7)
+        })
+        .await;
+        assert!(matches!(done, Ok(7)));
+    }
+
+    /// An empty id would name the plugins root itself.
+    #[test]
+    fn plugin_dir_never_names_the_root() {
+        let runner = PluginRunner::new(Some(PathBuf::from("/tmp/plugins-row-3927")));
+        assert_eq!(runner.plugin_dir(&[]), None);
+        assert_eq!(
+            runner.plugin_dir(&[0xAB; 16]),
+            Some(PathBuf::from(format!(
+                "/tmp/plugins-row-3927/{}",
+                "ab".repeat(16)
+            )))
+        );
     }
 }

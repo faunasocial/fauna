@@ -60,6 +60,8 @@ repeat tap moves nothing, and a local guess would be right once and wrong every
 time after. An absent `counts` (older nest, bridged source, `unrepost`) leaves
 the rendered counts untouched.
 
+**A reload already fetching does not undo the act (ruled 2026-11-06).** The fold lands on the loaded window, and a `reload` replaces that window wholesale with the page it fetched. A page fetched before the act carries the pre-act counters and viewer fields, so committing it bare would put the number back down, the ♥ back out and a deleted post back on screen, with no error and no later reload coming to correct it. So every act the manager folds into the window on the viewer's own tap — the post-act counters and reaction tally, the per-viewer `viewer_liked` / `viewer_repost_id` / `viewer_react_id`, and a post taken out of the window (a delete, the viewer's own repost row an `unrepost` drops) — is recorded with the reload generation current when it folded, and a page that lands under that same generation (its reload began before the act) gets it re-folded, as it gets resolved media and open unlocks re-folded. A reload that began after the act carries the nest's own answer, and the record is dropped at its commit. Like the fold, this lives once in `libs/fauna-feed`; no app reloads or patches around it.
+
 **Repost is a toggle, and a repost is a post (ratified 2026-08-10).** The at-rest
 truth was settled in the original 2026-03 app-design data model and has held since:
 a repost is a `Post` — author = the reposter, **empty body**, `Reference::Repost {
@@ -534,6 +536,8 @@ An app is done with the Feed page when:
 
 
 ## Implementation status today
+
+- **A reload already fetching does not undo the act (§ Interaction bar) — BUILT 2026-11-06 in shared Rust, so on all seven apps.** `FeedManager::acted` records each fold — `interact_folding_counts`, `set_viewer_liked`, `set_viewer_repost`, `set_viewer_react`, `delete_post` and `unrepost`'s row removal — inside the `state` write that makes it, stamped with `reload_gen` (`record_act`). `reapply_acted` re-folds the records on `reload`'s commit and on `load_more`'s, and first drops every record stamped below the committing generation. The interact fold and the re-fold share `fold_counts`. Pinned in `libs/fauna-feed` by `a_like_folded_while_a_reload_fetches_survives_the_page_fetched_before_it` (which also checks that a reload begun after the like is taken as the truth), `an_unlike_…`, `a_repost_folded_while_a_reload_fetches_keeps_its_carrier` and `a_post_deleted_while_a_reload_fetches_stays_gone`. Each test parks a reload before its fetch with the test-only reload hold. Found while diagnosing the windows red of `test_archive_import.py::test_an_imported_post_can_be_liked_replied_to_and_reposted_by_the_owner_and_others`, but it was not that red's cause: the follower's tap there landed on the neighbouring card, aimed through a state list a left Feed page had republished for the outgoing account ([`../architecture/apps/windows.md`](../architecture/apps/windows.md) § Client lifetime).
 
 - **The repost-row predicate and its activation target — BUILT 2026-11-06 in shared Rust.** `PostSummary::is_repost_row()` and `PostSummary::detail_target_id()` (`libs/fauna-feed/src/snapshot.rs`) are the one owner of "this row is a repost" and "activation opens the ORIGINAL's detail"; tui and linux consume them (list card, detail pills, profile Posts tab). The Swift, C#, Kotlin and web hand copies of the one-field check remain, each pending a UniFFI/WASM face.
 

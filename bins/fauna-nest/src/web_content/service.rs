@@ -1277,16 +1277,8 @@ impl WebContentService {
                 return None;
             }
         };
-        use fauna_core::data::PostBody;
-        let text = match &body {
-            PostBody::Text { content, .. } | PostBody::TextWithMedia { content, .. } => {
-                content.clone()
-            }
-            PostBody::Structured { content, .. } => content.clone().unwrap_or_default(),
-            PostBody::Media { alt_text, .. } => alt_text.clone().unwrap_or_default(),
-            PostBody::Video { .. } => String::new(),
-        };
-        Some((text, seal_key))
+        // Which variants carry text is `PostBody::text`'s one home.
+        Some((body.text(), seal_key))
     }
 
     // ---- Private helpers ----

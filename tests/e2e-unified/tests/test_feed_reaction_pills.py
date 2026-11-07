@@ -116,11 +116,11 @@ def test_reaction_pill_paints_counts_and_toggles_my_own_reaction(
     wait_until(reads(1, "off"), REPAINT_BUDGET_S, diagnose=diagnose)
 
     # My tap joins the tally, highlighted.
-    feed.toggle_reaction_pill(feed.post_index_by_id(target_id))
+    feed.toggle_reaction_pill(feed.card_index_by_id(target_id))
     wait_until(reads(2, "on"), REPAINT_BUDGET_S, diagnose=diagnose)
 
     # A second tap takes my reaction back; theirs stands.
-    feed.toggle_reaction_pill(feed.post_index_by_id(target_id))
+    feed.toggle_reaction_pill(feed.card_index_by_id(target_id))
     wait_until(reads(1, "off"), REPAINT_BUDGET_S, diagnose=diagnose)
 
     # The repost row of the same post paints no pill.
@@ -129,14 +129,14 @@ def test_reaction_pill_paints_counts_and_toggles_my_own_reaction(
         f"the other actor's repost of {mine!r} should be in the window; "
         f"error={app.error_text()!r}"
     )
-    repost_at = feed.post_index_by_id(repost_row["post_id"])
+    repost_at = feed.card_index_by_id(repost_row["post_id"])
     assert repost_at >= 0 and feed.reaction_pills(repost_at) == [], (
         f"a repost row paints no reaction pill; got "
         f"{feed.reaction_pills(repost_at) if repost_at >= 0 else 'no card'!r}"
     )
 
     # The post's detail paints the same pill, unscoped.
-    feed.open_post_detail(feed.post_index_by_id(target_id))
+    feed.open_post_detail(feed.card_index_by_id(target_id))
     app.driver.wait_for("feed-post-detail-dialog")
     detail = wait_until(
         lambda: feed.reaction_pills(None) or None,

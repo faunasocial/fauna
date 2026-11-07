@@ -30,7 +30,7 @@ Stamped 2026-10-01 at e129e78aa0.
    - `tests/e2e-unified/tests/api/test_box_recovery.py::test_rebuilt_box_readopts_custodied_seed_identity`
    - `tests/e2e-unified/tests/api/test_box_recovery.py::test_claim_handoff_seed_derives_to_nest_info_identity`
 4. [app] Once the new nest is up, your posts, mail, calendar, files and contacts come back from your backup destinations — `docs/goal/architecture/nest/box-recovery.md` § Goal
-   - (none)
+   - `tests/e2e-unified/tests/test_backups.py::test_after_losing_the_nest_every_kind_comes_back_onto_the_rebuilt_one`
 5. [app] When the nest a device was signed in to is gone, that device still offers to recover it, from what the device itself holds — `docs/goal/architecture/nest/box-recovery.md` § The plane-era recovery floor
    - `tests/e2e-unified/tests/test_box_recovery_two_nest.py::test_launch_recover_button_appears_when_the_saved_nest_is_dead`
 6. [app] A nest identity that was rotated away is never offered for recovery — `docs/goal/architecture/nest/box-recovery.md` § Custody after rotation
@@ -47,7 +47,7 @@ Stamped 2026-10-01 at e129e78aa0.
 | macos | ⚠ partial | 0.1.5-dev+5a9a5fa8 standalone |
 | ios | ⚠ partial | 0.1.5-dev+56c8dd96.dirty standalone |
 | android |  no run recorded | |
-| tui | ⚠ partial | 0.1.5-dev+5a9a5fa8 standalone |
+| tui | ✅ full | 0.1.5-dev+5a9a5fa8 standalone |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
@@ -60,7 +60,7 @@ Stamped 2026-10-01 at e129e78aa0.
 | 2 | app | `tests/e2e-unified/tests/test_box_recovery_two_nest.py::test_linking_a_box_custodies_it_and_a_fresh_device_recovers_both` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 3 | nest | `tests/e2e-unified/tests/api/test_box_recovery.py::test_rebuilt_box_readopts_custodied_seed_identity` | nest (linux): passed |
 | 3 | nest | `tests/e2e-unified/tests/api/test_box_recovery.py::test_claim_handoff_seed_derives_to_nest_info_identity` | nest (linux): passed |
-| 4 | app | (none) | — |
+| 4 | app | `tests/e2e-unified/tests/test_backups.py::test_after_losing_the_nest_every_kind_comes_back_onto_the_rebuilt_one` | tui (linux): passed |
 | 5 | app | `tests/e2e-unified/tests/test_box_recovery_two_nest.py::test_launch_recover_button_appears_when_the_saved_nest_is_dead` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 6 | app | `tests/e2e-unified/tests/test_box_recovery_two_nest.py::test_a_rotated_away_identity_is_never_offered_for_recovery` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 <!-- features-render:end -->
