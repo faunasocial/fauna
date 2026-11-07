@@ -481,13 +481,15 @@ daily file, and no plist a Fauna artifact writes carries
 `social.fauna.nest` LaunchDaemon, whose Rust `fauna-nest-daemon` now installs
 `fauna_log::init` on its data dir; the `social.fauna.bridge` LaunchDaemon, whose
 Rust `fauna-bridge-supervisor` does the same on its `bridge/` dir and pipes the
-Go MDA child's output into it (`fauna_mda_supervisor::spawn_at`); and,
+Go MDA child's output into it (`fauna_mda_supervisor::spawn_at`); on Windows,
+whose SCM discards a service's stdout and stderr, `fauna-nest-service` on its
+data dir and, since 2026-11-06, `fauna-bridge-service` on
+`%PROGRAMDATA%\Fauna\bridge` (or its `--data-dir`), which holds the MDA child's
+output the same way; and,
 until the daemon's removal on 2026-10-02, `fauna-sync install`'s plist, which wired
 `FAUNA_LOG_DIR` for `file_layer` instead. A `.pkg` upgrade rewrites a changed daemon plist, and a changed sync LaunchAgent too: an upgrade over a pre-fix install drops the old redirect (`common.sh::install_launchagent`, pinned on the real pre-fix bytes by the tier_1 `test_macos_sync_postinstall_upgrade.py`, the dry-run `.pkg` leg and the sudo full-install leg). A pre-fix install that is never upgraded stays unbounded, so on the dev VMs the SessionStart hook names one ([`session-protocol.md`](../session-protocol.md) § Startup → *Launch mode*). Pinned headlessly by
 each binary's `init_logging` test, the MDA capture test and the installer's
-dry-run plist assertions. **Open:** the Windows `fauna-bridge-service` still
-installs a stdout-only subscriber, which the SCM discards — it gains the
-captured MDA output only once it also calls `fauna_log::init`.
+dry-run plist assertions.
 
 **tui's `admin-logs` page closed 2026-07-29** (`apps/fauna-tui/src/admin/logs.rs`)
 — it was the second pending leg, having sat outside `navigation.admin_pages` and

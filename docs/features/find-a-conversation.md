@@ -34,7 +34,7 @@ Stamped 2026-09-19 at e9152e3330.
 |---|---|---|
 | web | ✅ full | 0.1.5 docker |
 | linux | ✅ full | 0.1.5-dev+cbd813be standalone |
-| windows | ⚠ partial | 0.1.3-dev+3a518178 standalone |
+| windows | ✅ full | 0.1.3-dev+3a518178 standalone |
 | macos | ✅ full | 0.1.5-dev+3f9f2b95 standalone |
 | ios | ✅ full | 0.1.5-dev+79c80402 standalone |
 | android |  no run recorded | |
@@ -48,5 +48,5 @@ Stamped 2026-09-19 at e9152e3330.
 | 1 | app | `tests/e2e-unified/tests/test_conversations_search.py::test_search_finds_a_term_past_the_visible_snippet` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 2 | app | `tests/e2e-unified/tests/test_messaging.py::test_conversation_sort_button_cycles_three_orders_without_error` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 3 | app | `tests/e2e-unified/tests/test_messaging.py::test_conversation_row_shows_unread_until_its_thread_is_opened` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
-| 3 | app | `tests/e2e-unified/tests/test_messaging.py::test_conversation_row_shows_when_it_last_moved` | web (linux): passed, linux (linux): passed, windows (windows): failed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 3 | app | `tests/e2e-unified/tests/test_messaging.py::test_conversation_row_shows_when_it_last_moved` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 <!-- features-render:end -->

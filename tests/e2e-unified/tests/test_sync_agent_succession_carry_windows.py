@@ -42,24 +42,27 @@ capability, so everything read after it is about the successor's scope.
    the half only the successor's engine can produce: a re-connect over a kept
    registration re-registers no shell entry, so ``sync root registered with
    shell`` does not appear again.
-3. **The take-over re-records.** ``succession take-over: re-recorded on a
-   nonce gain`` (``fauna_sync_engine::engine``'s take-over pass): the engine the
-   carry brought up found the predecessor's head under the retired nonce and
-   re-recorded it as the successor. A refusal the engine never retries
-   (``TAKE_OVER_TERMINAL``) ends the wait at once, quoted.
+3. **The take-over re-records.** ``succession take-over: re-recorded history
+   heads as this identity`` (the closing line of ``fauna_sync_engine::engine``'s
+   take-over pass): the engine the carry brought up found the predecessor's head
+   under the retired nonce and re-recorded it as the successor. On an on-demand
+   root that pass runs in the engine start's corpus passes
+   (``always_resident::converge_corpus_at_start``), never in a pull: the root's
+   inbound rail is the placeholder fold, so the pull's ``re-recorded on a nonce
+   gain`` line never comes on windows. A verdict the engine does not revisit
+   before its next start (``TAKE_OVER_TERMINAL``) ends the wait at once, quoted.
 
-**Expected state on windows: red at assertion 3 until the windows app hands
-its sync-agent provisioner the account registry.** Measured 2026-10-23, one run with
-``--strict-app``: assertions 1 and 2 green — the carry moved the binding,
-``ListLocations`` listed it under the successor, and the successor's engine
-connected the root over the kept registration under the same Id — and the
-take-over ran (``candidates=1``) and refused the one head as ``sealed under a
-root its signer may not open``. ``NestRpcClient.BuildSyncAgentProvisionerAsync``
-passes no ``accounts``, so the capability carries no
-``predecessor_keys_by_actor`` pair and the agent opens a predecessor-signed head
-under no retired root: the gap ``sync-agent-credentials.md`` § Implementation
-status today declares for windows. tui pushes the pairs, and its journey
-re-records (``rerecorded=1``).
+**State on windows: green, three runs with ``--strict-app`` on 2026-11-06**
+(71 s, 86 s, 49 s warm). The agent log reads, in order: the carry
+(``moved=2``), ``sync root connected`` for the bound folder, ``succession
+take-over candidates=1``, then the pass's closing ``re-recorded history heads as
+this identity … rerecorded=1 complete=true``, 100 ms later. Two reds came before
+it. Until 2026-10-23 the windows provisioner sent no ``accounts``, so the
+capability carried no ``predecessor_keys_by_actor`` pair, and the take-over
+refused the head as ``sealed under a root its signer may not open``. After that
+the take-over re-recorded, but this test waited for the pull's ``re-recorded on a
+nonce gain``, which an on-demand root never logs, and timed out at assertion 3
+until the pass got a closing line of its own.
 
 **Why ``real_conversations``.** The take-over runs on the nonce gain that the
 cut's re-mint produces, and on windows the launch reconcile that runs the cut
@@ -114,15 +117,20 @@ CARRY_LINE = "carried the attested predecessor's per-actor scope into the succes
 #: `fauna_cfapi::connect`'s line, logged once a root's provider connection is
 #: up — the agent's on-demand roots connect only through it.
 ROOT_CONNECTED_LINE = "sync root connected"
-#: `fauna_sync_engine::engine`'s take-over line, logged when it re-recorded ≥ 1.
-TAKE_OVER_LINE = "succession take-over: re-recorded on a nonce gain"
-#: A take-over refusal that ends a head's carry for good: the engine notes a
-#: signer-bound refusal (its error reads `permanently un-appliable`) and a head
-#: no root of this account opens (`held, not carried`) and never retries them,
-#: so waiting on after one only spends the budget. Every other refusal says
-#: `this pass` / `next pass` and is retried at the next pull.
+#: The take-over pass's own closing line when it re-recorded ≥ 1
+#: (`fauna_sync_engine::engine`'s `take_over_history_heads`), whichever door ran
+#: it. Not the pull's `re-recorded on a nonce gain`: an on-demand root's inbound
+#: rail is the placeholder fold, never `pull_remote_changes`, so on windows the
+#: take-over runs in the engine start's corpus passes and that line never comes.
+TAKE_OVER_LINE = "succession take-over: re-recorded history heads as this identity"
+#: A take-over verdict that ends the carry for this engine's life: the engine
+#: notes a signer-bound refusal (its error reads `permanently un-appliable`) and
+#: a head no root of this account opens (`held, not carried`) and never retries
+#: them, and a pass that re-recorded nothing closes on `re-recorded nothing`
+#: with its skip counts — on an on-demand root the next pass is the next engine
+#: start, so waiting on after any of them only spends the budget.
 TAKE_OVER_PREFIX = "succession take-over:"
-TAKE_OVER_TERMINAL = ("permanently un-appliable", "held, not carried")
+TAKE_OVER_TERMINAL = ("permanently un-appliable", "held, not carried", "re-recorded nothing")
 
 #: The successor's first provision reaching the agent: the app's hydration
 #: start under the new identity (nest connect, grant mint, first convergence

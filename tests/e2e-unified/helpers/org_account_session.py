@@ -226,14 +226,16 @@ ACCOUNT_TIMEOUT_S = 120
 MESSAGE_TIMEOUT_S = 120
 
 
-def admit_accounts(app, accounts: dict[str, dict]) -> None:
+def admit_accounts(app, accounts: dict[str, dict]) -> list[str]:
     """As the nest's admin: admit each account's public key under its handle at
     the free tier, through Admin → Users → Admit. An account already admitted
     (a rerun) is left as it is. An account may carry its seed (the drive's
     org accounts) or only its public key (``actor_hex`` — a witness host's
-    tester from the tracked registry, `staging_box.witness_testers_for`)."""
+    tester from the tracked registry, `staging_box.witness_testers_for`).
+    Returns the local parts this call had to admit, in order."""
     from helpers.staging_box import account_actor
 
+    admitted: list[str] = []
     app.admin.navigate_users()
     for localpart, account in accounts.items():
         actor = account_actor(account)
@@ -249,6 +251,8 @@ def admit_accounts(app, accounts: dict[str, dict]) -> None:
         poll(_admitted, f"{localpart} ({actor[:12]}…) admitted", ACCOUNT_TIMEOUT_S,
              interval=2.0)
         print(f"[org-account] {localpart}: admitted")
+        admitted.append(localpart)
+    return admitted
 
 
 def wait_reachable(app, localpart: str) -> None:

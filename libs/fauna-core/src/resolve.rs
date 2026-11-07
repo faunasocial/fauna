@@ -506,6 +506,90 @@ pub fn strip_ipv6_brackets(host: &str) -> &str {
         .unwrap_or(host)
 }
 
+/// Returns true iff `host` is a **localhost name**: `localhost` or any name
+/// under it (`a.localhost`), case-insensitive, a trailing root dot allowed
+/// (`LOCALHOST.`). RFC 6761 § 6.3 reserves the whole `.localhost` tree for the
+/// loopback interface, so every such name means *this machine* and a resolver
+/// answers it without a query; `localhost.example.com` is a public name under
+/// `example.com` and is not one. An IP literal is never a name: judge it with
+/// `IpAddr::is_loopback`, or take both at once through [`is_loopback_host`].
+///
+/// The ONE owner of "does this host name mean the local machine" across the
+/// workspace: every refusal of a local target (the nest's SSRF guard and
+/// peer-dial gates, the relay and PDS dial guards, discovery, the public-DNS
+/// classifiers below) and every carve-out that admits one (the same-box
+/// self-signed-cert and plaintext acceptances, the loopback-origin checks, the
+/// test far-end hooks) reads this predicate and keeps no hand copy, so the two
+/// directions can never disagree on what a localhost name is. Authority:
+/// `docs/goal/architecture/nest/domains-and-tls-bootstrap.md` § Claim →
+/// *Which host names mean this machine*.
+pub fn is_localhost_name(host: &str) -> bool {
+    let name = host.trim_end_matches('.').to_ascii_lowercase();
+    name == "localhost" || name.ends_with(".localhost")
+}
+
+/// Returns true iff `host` is an **mDNS `.local` name** (`pi.local`): a
+/// self-hosted LAN target that OS-level multicast DNS resolves at connect time
+/// (RFC 6762), not a registrable domain. Case-insensitive, a trailing root dot
+/// allowed; the bare label `local` (no dot) is not one. Kept apart from
+/// [`is_localhost_name`] because the two mean different things — a `.local`
+/// name is *some* box on the LAN, a localhost name is *this* one — and a
+/// caller that means both says so ([`is_public_dns_name`],
+/// [`is_private_network_target`]).
+pub fn is_mdns_local_name(host: &str) -> bool {
+    host.trim_end_matches('.')
+        .to_ascii_lowercase()
+        .ends_with(".local")
+}
+
+/// Returns true iff `host` — a bare host, a bracketed IPv6 literal allowed —
+/// names this machine: a loopback IP literal (`127.0.0.0/8`, `::1`) or a
+/// [localhost name](is_localhost_name). No DNS is consulted: a public name
+/// that happens to resolve to loopback is not loopback here.
+pub fn is_loopback_host(host: &str) -> bool {
+    match strip_ipv6_brackets(host).parse::<IpAddr>() {
+        Ok(ip) => ip.is_loopback(),
+        Err(_) => is_localhost_name(host),
+    }
+}
+
+/// Returns true iff `host` — a bare host, a bracketed IPv6 literal allowed —
+/// names this machine **whichever resolver the dialer uses**: a loopback IP
+/// literal (`127.0.0.0/8`, `::1`) or exactly the name `localhost`
+/// (case-insensitive), which the hosts file answers on every platform before
+/// any DNS query. A name *under* `localhost` (`x.localhost`) and the
+/// fully-qualified `localhost.` are NOT: a resolver without a local answer for
+/// them (glibc `hosts: files dns` without `nss-myhostname`, the common
+/// container shape) forwards the query, and whoever answers it chooses the
+/// destination.
+///
+/// The name side of a carve-out that admits a local target by NAME while a
+/// dialer it does not control resolves that name — the client's same-box
+/// self-signed acceptance (the foreign HTTP stacks dial), the device-scope
+/// plaintext carve-out (the URL is validated now and dialed later). Where
+/// Fauna's own code makes the dial it reads [`is_loopback_host`] and dials
+/// [`loopback_dial_addr`] instead, so no resolver is consulted at all.
+/// Authority: `docs/goal/architecture/nest/domains-and-tls-bootstrap.md`
+/// § Claim → *Which host names mean this machine*.
+pub fn is_loopback_host_without_dns(host: &str) -> bool {
+    match strip_ipv6_brackets(host).parse::<IpAddr>() {
+        Ok(ip) => ip.is_loopback(),
+        Err(_) => host.eq_ignore_ascii_case("localhost"),
+    }
+}
+
+/// The address a dial Fauna makes itself goes to when `host` is a
+/// [localhost name](is_localhost_name): `127.0.0.1:port`, never the resolver's
+/// answer for the name (RFC 6761 § 6.3 lets an application map the whole tree
+/// to loopback). `None` for any other host, which the caller dials as it
+/// would. A carve-out that admits a host because its NAME means this machine
+/// dials this address, so the admission and the destination cannot part.
+/// Authority: `docs/goal/architecture/nest/domains-and-tls-bootstrap.md`
+/// § Claim → *Which host names mean this machine*.
+pub fn loopback_dial_addr(host: &str, port: u16) -> Option<std::net::SocketAddr> {
+    is_localhost_name(host).then(|| std::net::SocketAddr::from((Ipv4Addr::LOCALHOST, port)))
+}
+
 /// Returns true iff `host` is a name resolved via **public unicast DNS** —
 /// i.e. NOT a loopback name (`localhost`/`*.localhost`), NOT an mDNS `.local`
 /// name, and NOT an IP literal (bracketed or bare). This is the form test the
@@ -531,15 +615,10 @@ pub fn strip_ipv6_brackets(host: &str) -> &str {
 /// accepted. Authority: `docs/goal/architecture/nest/domains-and-tls-bootstrap.md`
 /// § "by handle, no domain auto-registered" (the local-target carve-out).
 pub fn is_public_dns_name(host: &str) -> bool {
-    let unbracketed = strip_ipv6_brackets(host);
-    let lower = host.to_ascii_lowercase();
-    let is_loopback_name = host.eq_ignore_ascii_case("localhost") || lower.ends_with(".localhost");
-    // A `.local` mDNS name (`pi.local`) is a self-hosted LAN target resolved by
-    // OS-level multicast DNS at connect time — not a registrable domain. The
-    // bare label `local` (no dot) is *not* an mDNS name.
-    let is_mdns_local = lower.ends_with(".local");
-    let is_ip_literal = unbracketed.parse::<std::net::IpAddr>().is_ok();
-    !(is_loopback_name || is_mdns_local || is_ip_literal)
+    let is_ip_literal = strip_ipv6_brackets(host)
+        .parse::<std::net::IpAddr>()
+        .is_ok();
+    !(is_localhost_name(host) || is_mdns_local_name(host) || is_ip_literal)
 }
 
 /// Returns true iff `host` looks like a **private-network** (not
@@ -557,10 +636,7 @@ pub fn is_private_network_target(host: &str) -> bool {
     if let Ok(ip) = unbracketed.parse::<std::net::IpAddr>() {
         return !is_global_ip(ip);
     }
-    let lower = host.to_ascii_lowercase();
-    host.eq_ignore_ascii_case("localhost")
-        || lower.ends_with(".localhost")
-        || lower.ends_with(".local")
+    is_localhost_name(host) || is_mdns_local_name(host)
 }
 
 /// Returns `true` iff `ip` is a *globally-routable* public address — i.e. NOT
@@ -950,6 +1026,100 @@ mod tests {
         // A lone bracket on one side only isn't a match — passes through whole.
         assert_eq!(strip_ipv6_brackets("[::1"), "[::1");
         assert_eq!(strip_ipv6_brackets("::1]"), "::1]");
+    }
+
+    /// The one reading of "this host names the local machine", pinned on the
+    /// shapes the fifteen former hand copies disagreed on: a
+    /// name under `localhost` IS localhost (RFC 6761), a public name ending in
+    /// the label is not, an IP literal is never a name.
+    #[test]
+    fn is_localhost_name_is_the_rfc_6761_tree() {
+        for (host, want) in [
+            ("localhost", true),
+            ("LOCALHOST.", true),
+            ("a.localhost", true),
+            ("A.B.LocalHost.", true),
+            ("localhost.example.com", false),
+            ("notlocalhost", false),
+            ("localhost-2", false),
+            ("127.0.0.1", false),
+            ("[::1]", false),
+            ("::1", false),
+            ("pi.local", false),
+            ("", false),
+        ] {
+            assert_eq!(is_localhost_name(host), want, "{host:?}");
+        }
+    }
+
+    #[test]
+    fn is_loopback_host_joins_the_name_and_the_literal() {
+        for (host, want) in [
+            ("localhost", true),
+            ("LOCALHOST.", true),
+            ("a.localhost", true),
+            ("localhost.example.com", false),
+            ("127.0.0.1", true),
+            ("127.5.6.7", true),
+            ("[::1]", true),
+            ("::1", true),
+            ("192.168.1.5", false),
+            ("8.8.8.8", false),
+            ("[fd00::1]", false),
+            ("nest.example.com", false),
+            ("", false),
+        ] {
+            assert_eq!(is_loopback_host(host), want, "{host:?}");
+        }
+    }
+
+    /// The carve-out reading for a dialer Fauna does not control: only what no resolver forwards — the literals and
+    /// the bare name the hosts file answers.
+    #[test]
+    fn is_loopback_host_without_dns_admits_only_what_no_resolver_forwards() {
+        for (host, want) in [
+            ("localhost", true),
+            ("LocalHost", true),
+            ("127.0.0.1", true),
+            ("127.5.6.7", true),
+            ("[::1]", true),
+            ("::1", true),
+            ("localhost.", false),
+            ("a.localhost", false),
+            ("A.LOCALHOST.", false),
+            ("localhost.example.com", false),
+            ("192.168.1.5", false),
+            ("nest.example.com", false),
+            ("", false),
+        ] {
+            assert_eq!(is_loopback_host_without_dns(host), want, "{host:?}");
+        }
+    }
+
+    /// A localhost name dials loopback by address, whatever a resolver would
+    /// answer for it; any other host is the caller's to dial.
+    #[test]
+    fn loopback_dial_addr_maps_the_localhost_tree_to_127_0_0_1() {
+        let lo = |port| Some(std::net::SocketAddr::from((Ipv4Addr::LOCALHOST, port)));
+        assert_eq!(loopback_dial_addr("localhost", 80), lo(80));
+        assert_eq!(loopback_dial_addr("x.LOCALHOST.", 8443), lo(8443));
+        assert_eq!(loopback_dial_addr("localhost.example.com", 443), None);
+        assert_eq!(loopback_dial_addr("127.0.0.1", 443), None);
+        assert_eq!(loopback_dial_addr("nest.example.com", 443), None);
+    }
+
+    #[test]
+    fn is_mdns_local_name_is_the_dot_local_suffix() {
+        for (host, want) in [
+            ("pi.local", true),
+            ("PI.LOCAL.", true),
+            ("local", false),
+            ("pi.localhost", false),
+            ("example.com", false),
+            ("pi.local.example.com", false),
+        ] {
+            assert_eq!(is_mdns_local_name(host), want, "{host:?}");
+        }
     }
 
     #[test]

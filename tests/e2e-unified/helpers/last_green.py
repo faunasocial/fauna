@@ -107,6 +107,21 @@ def begin_run(*, commit: str, base: str | None, dirty: bool, node_ids: dict,
     _observed.clear()
 
 
+def settle_dirt(*, commit: str, dirty: bool) -> bool:
+    """The tree read again at the run's end: a HEAD other than the one collection
+    read, or dirt now, marks the whole run dirty — a tree edited, rebased or
+    checked out while the run ran is not the commit it started at, so none of its
+    reds or greens may count toward `flaky` (a long tier_1 run recorded the
+    text-only checks of a script being edited under it as reds at a clean commit,
+    and a later clean green there as flaky). True when it marked the run."""
+    if not _run or _run["dirty"]:
+        return False
+    if commit != _run["commit"] or dirty:
+        _run["dirty"] = True
+        return True
+    return False
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 

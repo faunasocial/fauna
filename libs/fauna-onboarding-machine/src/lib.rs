@@ -31,7 +31,7 @@ pub use helpers::{
     server_type_label, update_channel_description_key,
 };
 pub use machine::{
-    EmergencyLockoutOutcome, OnboardingMachine, RecoveryEntryOutcome,
+    EmergencyLockoutOutcome, OnboardingMachine, RecoveryEntryOutcome, UpdateChannelRow,
     emergency_lockout_outcome_message, recovery_entry_outcome_message,
 };
 /// The machine-free E2E-bridge dispatcher — the arms every app can drive

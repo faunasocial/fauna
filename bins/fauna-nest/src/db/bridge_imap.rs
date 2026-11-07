@@ -30,13 +30,10 @@ pub(super) fn cid_from_col(blob: Vec<u8>, col: usize) -> rusqlite::Result<Cid> {
 
 // ── Private connection-level helpers ─────────────────────────────────────────
 
-/// The six standard IMAP mailboxes from `docs/goal/behavior/imap-server.md`
-/// § Standard mailboxes. Seeded on first AUTH (idempotent), reserved
-/// against CREATE/DELETE/RENAME — the names map to RFC 6154 SPECIAL-USE
-/// attributes `\Inbox` / `\Archive` / `\Drafts` / `\Sent` / `\Trash` /
-/// `\Junk`. INBOX is renamable per RFC 9051 §6.3.6's special-case; the
-/// other five are immovable.
-pub const STANDARD_MAILBOXES: &[&str] = &["INBOX", "Archive", "Drafts", "Sent", "Trash", "Junk"];
+// The six standard IMAP mailboxes and their attributes
+// (`imap-server.md` § Standard mailboxes) live in `fauna_protocol::email`, the
+// one home the Go MDA's LIST and Junk trigger read from over the wire.
+pub use fauna_protocol::email::{STANDARD_MAILBOXES, standard_mailbox_attrs};
 
 // The ward's held mailbox (`family-safety.md` § The mail gate) — never `Junk`,
 // never a seventh standard mailbox; the constant carries the full rationale. It
@@ -61,24 +58,6 @@ pub fn is_reserved_mailbox(name: &str) -> bool {
 /// before a first hold auto-creates it (`family-safety.md` § The mail gate).
 pub fn is_protected_mailbox(name: &str) -> bool {
     is_reserved_mailbox(name) || name == GUARDIAN_HELD_MAILBOX
-}
-
-/// Return the RFC 6154 SPECIAL-USE attribute(s) for a standard mailbox
-/// name, or an empty Vec for user-created mailboxes. Used to populate
-/// `MailPlacementRecord::Create::attrs` when emitting placement events
-/// for the six bootstrap mailboxes seeded by
-/// `ensure_bridge_imap_mailboxes` (per goal-doc `imap-server.md` §
-/// Standard mailboxes table).
-pub fn standard_mailbox_attrs(name: &str) -> Vec<String> {
-    match name {
-        "INBOX" => vec!["\\Inbox".to_string()],
-        "Archive" => vec!["\\Archive".to_string()],
-        "Drafts" => vec!["\\Drafts".to_string()],
-        "Sent" => vec!["\\Sent".to_string()],
-        "Trash" => vec!["\\Trash".to_string()],
-        "Junk" => vec!["\\Junk".to_string()],
-        _ => Vec::new(),
-    }
 }
 
 /// One mailbox row newly inserted by `ensure_bridge_imap_mailboxes` in

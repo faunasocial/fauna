@@ -30,7 +30,8 @@
 //! * The two predicates every custodian applies before it signs:
 //!   [`grant_admits`] (does the principal's live grant name this class?) and
 //!   [`RateWindow`] (the hard-constant ceiling). Window liveness is
-//!   [`window_live`]. Each custodian adds its own class-specific policy on top
+//!   [`window_live`] client-side; the nest's oracle checks a grant blob's
+//!   window through the one check every authorizing decode names. Each custodian adds its own class-specific policy on top
 //!   (the Nostr custodian's kind set lives beside the NIP-46 code, in
 //!   `fauna_bridge_nostr::nip46`), and records every operation it performs.
 //!
@@ -361,8 +362,12 @@ pub fn grant_admits<'a>(
         .any(|t| t.class == CLASS && t.kind == Some(class.name()))
 }
 
-/// Is a grant window `[start, end]` (unix seconds) live at `now`? Both ends
-/// bind: a post-dated grant admits nothing until its start.
+/// Is a grant window `[start, end)` (unix seconds, half-open) live at `now`?
+/// Both ends bind: a post-dated grant admits nothing until its start, and
+/// nothing from its end second on. The nest's oracle decodes a grant blob
+/// through `fauna_mls::wrapped_blob::grant_window_is_open` instead, whose end
+/// is inclusive (one second wider), so a client-side custodian using this is
+/// never the looser of the two.
 #[must_use]
 pub const fn window_live(start: u64, end: u64, now: u64) -> bool {
     start <= now && now < end

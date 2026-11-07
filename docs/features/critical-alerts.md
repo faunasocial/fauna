@@ -16,7 +16,7 @@ and shows a banner on every page until the condition clears; it never treats
 
 ## Coverage contract
 
-Stamped 2026-09-19 at 8ac16765e4.
+Stamped 2026-11-06 at a3fb0f6c4f.
 
 1. [app] A pending replacement of your recovery kit is announced on the feed after the next start — `docs/goal/behavior/critical-alerts.md` § Mechanism
    - `tests/e2e-unified/tests/test_session_start_alert_sweep.py::test_session_start_sweep_raises_the_pending_replacement_on_a_page_it_never_visited`
@@ -35,6 +35,7 @@ Stamped 2026-09-19 at 8ac16765e4.
    - `tests/e2e-unified/tests/test_critical_alert_lifetime.py::test_switching_accounts_takes_every_standing_alert_with_it`
 6. [app] A condition that arises while the app is already open is announced without a restart — `docs/goal/behavior/critical-alerts.md` § Mechanism
    - `tests/e2e-unified/tests/test_critical_alert_lifetime.py::test_a_condition_arising_mid_session_is_announced_without_a_restart`
+   - `tests/e2e-unified/tests/test_critical_alert_lifetime.py::test_a_condition_arising_after_a_same_identity_re_establish_is_announced`
 7. [app] A hosted identity your app itself knows about is still checked when the nest stops naming it, and a standing identity alarm is never cleared by the nest's silence or an unreadable directory — `docs/goal/behavior/atproto-identity-custody.md` § The audit floor and the departed-DID alarm
    - `tests/e2e-unified/tests/test_audit_floor_nest_silence.py::test_the_audit_floor_outlives_the_nests_silence`
 8. [app] A lapsing deployment domain warns people who are not admins too, with the remedy that is theirs — `docs/goal/architecture/nest/domains-and-tls-bootstrap.md` § Domain loss: lapse and seizure
@@ -48,11 +49,11 @@ Stamped 2026-09-19 at 8ac16765e4.
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ✅ full | |
-| linux | ✅ full | 0.1.5-dev+cbd813be standalone |
-| windows | ⚠ partial | |
-| macos | ✅ full | 0.1.5-dev+3ef45f1b standalone |
-| ios | ✅ full | 0.1.5-dev+17b5832c standalone |
+| web | ⚠ partial | |
+| linux | ⚠ partial | 0.1.5-dev+cbd813be standalone |
+| windows | ⚠ partial | 0.1.6-dev+6313dfdf.dirty standalone |
+| macos | ⚠ partial | 0.1.5-dev+3ef45f1b standalone |
+| ios | ⚠ partial | 0.1.5-dev+17b5832c standalone |
 | android |  no run recorded | |
 | tui | ✅ full | 0.1.5-dev+646e0070 standalone |
 
@@ -60,17 +61,18 @@ Stamped 2026-09-19 at 8ac16765e4.
 |---|---|---|---|
 | 1 | app | `tests/e2e-unified/tests/test_session_start_alert_sweep.py::test_session_start_sweep_raises_the_pending_replacement_on_a_page_it_never_visited` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 2 | app | `tests/e2e-unified/tests/test_domain_expiry_alert_e2e.py::test_a_lapsing_registration_reaches_the_every_page_banner_and_a_renewal_clears_it` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
-| 2 | app | `tests/e2e-unified/tests/test_domain_expiry_alert_e2e.py::test_an_rdap_failure_leaves_a_standing_alarm_alone` | web (linux): passed, linux (linux): passed, windows (windows): failed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 2 | app | `tests/e2e-unified/tests/test_domain_expiry_alert_e2e.py::test_an_rdap_failure_leaves_a_standing_alarm_alone` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 3 | app | `tests/e2e-unified/tests/test_alert_sweep_directory_feeders_e2e.py::test_directory_feeders_alarm_via_session_start_sweep` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
-| 3 | app | `tests/e2e-unified/tests/test_alert_sweep_directory_feeders_e2e.py::test_did_web_identity_never_triggers_handle_binding_alarm` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
-| 3 | app | `tests/e2e-unified/tests/test_alert_sweep_directory_feeders_e2e.py::test_custody_alarm_reaches_a_fresh_sign_in_before_the_runtime_assembles` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 3 | app | `tests/e2e-unified/tests/test_alert_sweep_directory_feeders_e2e.py::test_did_web_identity_never_triggers_handle_binding_alarm` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 3 | app | `tests/e2e-unified/tests/test_alert_sweep_directory_feeders_e2e.py::test_custody_alarm_reaches_a_fresh_sign_in_before_the_runtime_assembles` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 3 | app | `tests/e2e-unified/tests/test_atproto_custody_alarm.py::test_genesis_seniority_alarm_end_to_end` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
-| 4 | app | `tests/e2e-unified/tests/test_critical_alert_lifetime.py::test_a_standing_alert_carries_no_way_to_dismiss_it` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 4 | app | `tests/e2e-unified/tests/test_critical_alert_lifetime.py::test_a_standing_alert_carries_no_way_to_dismiss_it` | web (linux): passed, linux (linux): passed, windows (windows): failed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 5 | app | `tests/e2e-unified/tests/test_critical_alert_lifetime.py::test_signing_out_takes_every_standing_alert_with_it` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 5 | app | `tests/e2e-unified/tests/test_critical_alert_lifetime.py::test_switching_accounts_takes_every_standing_alert_with_it` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 6 | app | `tests/e2e-unified/tests/test_critical_alert_lifetime.py::test_a_condition_arising_mid_session_is_announced_without_a_restart` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 6 | app | `tests/e2e-unified/tests/test_critical_alert_lifetime.py::test_a_condition_arising_after_a_same_identity_re_establish_is_announced` | windows (windows): passed, tui (linux): passed |
 | 7 | app | `tests/e2e-unified/tests/test_audit_floor_nest_silence.py::test_the_audit_floor_outlives_the_nests_silence` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 8 | app | `tests/e2e-unified/tests/test_domain_expiry_alert_e2e.py::test_a_lapsing_registration_reaches_the_every_page_banner_and_a_renewal_clears_it` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 8 | app | `tests/e2e-unified/tests/test_domain_expiry_alert_e2e.py::test_an_admin_is_warned_with_the_remedy_that_is_theirs` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
-| 9 | app | `tests/e2e-unified/tests/test_eviction_warning_alert_e2e.py::test_an_evicted_member_is_warned_with_both_dates_and_a_cancel_clears_it` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 9 | app | `tests/e2e-unified/tests/test_eviction_warning_alert_e2e.py::test_an_evicted_member_is_warned_with_both_dates_and_a_cancel_clears_it` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 <!-- features-render:end -->

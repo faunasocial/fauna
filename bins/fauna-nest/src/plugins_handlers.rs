@@ -752,6 +752,11 @@ fn uninstall_handler() -> RpcHandler {
         Box::pin(async move {
             require_permission(&state, &actor_id, "fauna.plugins.uninstall").await?;
             let req: UninstallPluginRequest = decode(&payload).map_err(malformed)?;
+            // A principal id has one width; an empty or odd-length id names no
+            // plugin and must never reach the runner's directory arithmetic.
+            if req.principal_id.len() != crate::db::third_party_principals::PRINCIPAL_ID_LEN {
+                return Err(malformed("principal_id has the wrong length"));
+            }
             let bound: Vec<[u8; 32]> = state
                 .db
                 .list_hosted_plugins()
@@ -766,12 +771,13 @@ fn uninstall_handler() -> RpcHandler {
                 .uninstall_hosted_plugin(&req.principal_id)
                 .await
                 .map_err(internal)?;
-            // After the commit: the rows are gone, so a call the plugin makes
-            // while it stops is already refused at the chokepoint.
-            state.plugins.stop(&req.principal_id).await;
+            // An unknown id matched no row: touch no runner and no file.
             let Some(ended) = ended else {
                 return encode_reply(&UninstallPluginReply::default());
             };
+            // After the commit: the rows are gone, so a call the plugin makes
+            // while it stops is already refused at the chokepoint.
+            state.plugins.stop(&req.principal_id).await;
             if ended.grants_ended > 0 {
                 for account in &bound {
                     crate::bridge_atproto_handlers::notify_atproto_sessions_changed(

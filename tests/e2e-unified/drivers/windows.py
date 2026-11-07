@@ -15,7 +15,7 @@ import urllib.request
 import weakref
 from pathlib import Path
 
-from .base import detached_agent_log_text, stitch_agent_log
+from .base import ViewportUndecided, detached_agent_log_text, stitch_agent_log
 from .http_bridge import HttpBridgeDriver, LaunchWitnesses, launch_timeout_report
 from .local_launch import is_ntstatus_crash
 from .port_util import drain_pipes, popen_group_kwargs, reap_descendants_of
@@ -436,6 +436,11 @@ class WindowsBridgeDriver(HttpBridgeDriver):
         bounding rectangles do.
 
         Read-only: it never scrolls, unlike `scroll_to_visible_fraction` below.
+        So it cannot take the second reading that tells a sliver from a whole
+        element, and WinUI clips each UIA rect to its ``ScrollViewer``: the
+        bridge answers only once both of the rect's edges are proven the
+        element's own (`ScrollPolicy.ReadInViewport`), and otherwise answers
+        ``undecided: <why>``, raised here as :class:`ViewportUndecided`.
         """
         value = self.get_attr(element_id, "in-viewport", index, scope=scope)
         if value is None:
@@ -444,27 +449,63 @@ class WindowsBridgeDriver(HttpBridgeDriver):
                 "element is missing or its geometry could not be read; "
                 f"{self.diagnose(element_id, scope=scope)}"
             )
+        if value.startswith("undecided"):
+            raise ViewportUndecided(
+                f"windows cannot say whether {element_id!r}[{index}] is in view: "
+                f"{value.partition(':')[2].strip()}"
+            )
+        if value not in ("true", "false"):
+            raise AssertionError(
+                f"windows answered in-viewport={value!r} for {element_id!r}[{index}], "
+                "neither true, false nor undecided — the bridge and this driver disagree "
+                "on the attribute's grammar"
+            )
         return value == "true"
+
+    def scroll_to(self, element_id: str, index: int = 0, *, scope: str | None = None) -> None:
+        """The base contract (centre, whole element), over the bridge's
+        ``POST /element/scroll-into-view`` with ``whole: true``.
+
+        The bare route stops as soon as UIA calls the element on screen, which
+        can be a sliver of it, and WinUI clips an element's UIA rect to its
+        ``ScrollViewer``, so the sliver even measures whole. ``whole`` makes the
+        bridge go on (``Actions.MakeWhole``): it centres the element and reads
+        its true extent from how the rect moves as the list moves — the same
+        height at a new place is a whole element, a rect that does not move is
+        one taller than the viewport (two moves, about 200 ms, for a sliver of
+        a feed card, measured 2026-11-06). ``wait_for``'s best-effort reveal
+        (``_scroll_into_view``) keeps the bare route.
+
+        Raises ``LookupError`` on an absent element, as every driver does."""
+        body: dict = {"id": element_id, "index": index, "whole": True}
+        wire = self._scope_wire(scope)
+        if wire:
+            body["scope"] = wire
+        resp = self._post("/element/scroll-into-view", body)
+        if not resp.get("found", False):
+            raise LookupError(
+                f"scroll_to({element_id!r}[{index}]): {resp.get('error', 'not found')}"
+            )
 
     def scroll_to_visible_fraction(
         self, element_id: str, min_fraction: float, *, index: int = 0,
         scope: str | None = None
     ) -> float:
-        """Targeted scroll to a MEASURED visibility fraction — the precise
-        sibling of the base `scroll_to()` / `wait_for`'s targeted scroll,
-        whose "found" is UIA's own `IsOffscreen`, which flips as soon as any
-        sliver of the element is on screen (empirically as low as ~25% in a
-        typical feed post-card layout — `Actions.ScrollIntoView`'s own doc
-        comment). Use this when a test needs a specific mid-list visibility
-        (e.g. proving a real "substantially visible" dwell exposure), not
-        merely "on screen at all".
+        """Targeted scroll to a MEASURED visibility fraction: the bridge
+        brings the element in whole the way :meth:`scroll_to` does
+        (``Actions.ScrollIntoViewFraction`` over ``Actions.MakeWhole``) and
+        answers the share of the element's own height that then shows — 1.0
+        for a whole element, measured from the element's true extent, never
+        from UIA's viewport-clipped rect (which reads any visible sliver as
+        whole).
 
-        Returns the achieved fraction (0.0-1.0) once the bridge's scroll
-        sweep ends, whether or not `min_fraction` was reached — the caller
-        decides what to do with a fraction that fell short. Raises
-        `LookupError` when the element itself was never found (mirrors
-        `scroll_to`'s fail-loud contract: a dwell test must never silently
-        measure nothing).
+        Returns that fraction whether or not ``min_fraction`` was reached —
+        the caller decides what to do with one that fell short. Raises
+        ``LookupError`` when the element itself was never found (mirrors
+        ``scroll_to``'s fail-loud contract: a dwell test must never silently
+        measure nothing), and ``AssertionError`` with the bridge's reason when
+        the element's share cannot be measured — taller than its viewport, or
+        a list that would not move — rather than inventing one.
         """
         body: dict = {"id": element_id, "min_fraction": min_fraction, "index": index}
         wire = self._scope_wire(scope)
@@ -475,7 +516,12 @@ class WindowsBridgeDriver(HttpBridgeDriver):
             raise LookupError(
                 f"scroll_to_visible_fraction({element_id!r}[{index}]): not found"
             )
-        return float(resp.get("fraction", 0.0))
+        if resp.get("fraction") is None:
+            raise AssertionError(
+                f"scroll_to_visible_fraction({element_id!r}[{index}]): the bridge "
+                f"could not measure the share that shows — {resp.get('error', 'no reason given')}"
+            )
+        return float(resp["fraction"])
 
     # ------------------------------------------------------------------
     # Window-level ops (graceful quit — mirrors linux driver's window_close/

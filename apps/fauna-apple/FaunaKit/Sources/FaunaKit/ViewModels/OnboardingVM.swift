@@ -95,6 +95,9 @@ public final class OnboardingVM {
         // statement is still true — going Back to identity_choice still owes the
         // user the line (`signOutResidue`'s doc).
         _observerTick &+= 1
+        // The pending-invite poll is armed from the machine's own ticks, never
+        // only from a render (`armInvitePollIfNeeded`).
+        armInvitePollIfNeeded()
     }
     private var _observerTick: UInt64 = 0
 
@@ -597,31 +600,71 @@ public final class OnboardingVM {
         Task { _ = await recheckInviteStatus() }
     }
 
-    /// True while the invite-request snapshot is `PendingReview` — the predicate
-    /// the pending-invite poll loop below arms and disarms itself on. Submitting
-    /// the request or a relaunch hydration (`seed_pending_invite`) arms it; an
-    /// admin decision or a not-found refutation (`recheckInviteStatus` above)
-    /// disarms it. `onboarding.md` § The pending-invite surface.
-    public var isInvitePendingReview: Bool {
+    /// True while an invite request is pending — the predicate the pending-invite
+    /// poll loop below arms and disarms itself on. Submitting the request or a
+    /// relaunch hydration (`seed_pending_invite`) arms it; an admin decision or a
+    /// not-found refutation (`recheckInviteStatus` above) disarms it.
+    /// `onboarding.md` § The pending-invite surface.
+    ///
+    /// "Pending" is shared Rust's answer (`pendingInviteSlot()`): `PendingReview`,
+    /// or `Rechecking` from one — never the bare `PendingReview` case. The poll's
+    /// own recheck passes through `Rechecking`, so a predicate that read only
+    /// `PendingReview` flipped false and back on every tick; as the poll task's
+    /// `.task(id:)` key that cancelled and restarted the task from inside its own
+    /// work, and under load the churn could leave no task running at all — the
+    /// requester sat on `PendingReview` and never noticed the approval (macOS e2e,
+    /// `test_admin_approval_advances_the_requester_with_no_user_action`).
+    public var isInviteRequestPending: Bool {
         _ = _observerTick
-        if case .pendingReview = machine.inviteRequestSnapshot().state { return true }
-        return false
+        return machine.pendingInviteSlot() != nil
     }
 
-    /// Client-owned poll loop for the `invite_request` page's `PendingReview`
-    /// state (`onboarding.md` § The pending-invite surface — "First poll fires
+    /// Whether the pending-invite poll should run: a request is pending AND the
+    /// wizard is on the `invite_request` page (Back leaves the slot pending but
+    /// moves the step, which stops the poll — `onboarding.md` § The pending-invite
+    /// surface, "while the page is visible").
+    private var invitePollWanted: Bool {
+        guard case .inviteRequest = machine.step() else { return false }
+        return machine.pendingInviteSlot() != nil
+    }
+
+    /// The one running pending-invite poll, or nil.
+    private var invitePollTask: Task<Void, Never>?
+
+    /// Start the pending-invite poll if it is wanted and not already running.
+    /// Idempotent, so it is safe from every trigger: each machine tick
+    /// (`onMachineChanged`) arms it, which is what makes the poll independent
+    /// of SwiftUI rendering — the views' `.task(id: vm.isInviteRequestPending)`
+    /// arm is a second trigger only. Before this, the loop lived inside that
+    /// `.task` alone, so it ran only when a render observed the right key at the
+    /// right moment; on macOS under load it was measured not running at all
+    /// after an approval (the requester sat on `PendingReview` for 150 s with no
+    /// `invite_request.status` call, while a pressed Recheck admitted at once).
+    public func armInvitePollIfNeeded() {
+        guard invitePollTask == nil, invitePollWanted else { return }
+        invitePollTask = Task { @MainActor [weak self] in
+            await self?.pollPendingInviteWhileNeeded()
+            // No suspension between the loop's last check and this reset, and
+            // every tick arrives on the main actor, so a request that becomes
+            // pending again re-arms from its own tick.
+            self?.invitePollTask = nil
+        }
+    }
+
+    /// Client-owned poll loop for the `invite_request` page's pending request
+    /// (`onboarding.md` § The pending-invite surface — "First poll fires
     /// immediately… then on the interval while the page is visible"). Shared by
-    /// both apple views (priority #2): attach as `.task(id: vm.isInvitePendingReview)`
-    /// on the invite view so SwiftUI restarts this task the instant the page
-    /// enters `PendingReview` (submit or relaunch hydration) and tears it down
-    /// structurally — cancelled — when the page leaves that state or the view
-    /// disappears, the same shape as `AwaitingManualDnsView`'s DNS poll. The
-    /// cadence is read live from shared Rust (`inviteRecheckPollMs()`), never a
-    /// literal — read by all 7 apps, never seven hand-copied numbers.
-    public func pollPendingInviteWhileNeeded() async {
-        while !Task.isCancelled && isInvitePendingReview {
+    /// both apple apps (priority #2) and started only through
+    /// `armInvitePollIfNeeded`, so at most one runs. It ends when the request
+    /// resolves (an admission or a refutation) or the wizard leaves the page. A
+    /// tick that finds a recheck already in flight (the user pressed Recheck)
+    /// gets an immediate no-op from the machine and waits for the next interval.
+    /// The cadence is read live from shared Rust (`inviteRecheckPollMs()`),
+    /// never a literal — read by all 7 apps, never seven hand-copied numbers.
+    private func pollPendingInviteWhileNeeded() async {
+        while !Task.isCancelled && invitePollWanted {
             _ = await recheckInviteStatus()
-            guard !Task.isCancelled, isInvitePendingReview else { break }
+            guard !Task.isCancelled, invitePollWanted else { break }
             try? await Task.sleep(for: .milliseconds(inviteRecheckPollMs()))
         }
     }

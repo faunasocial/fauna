@@ -243,12 +243,23 @@ async fn writable_or_provisioned_backup_set(
         )
         .await;
 
-    let fs = state
+    let Some(fs) = state
         .db
         .get_folder_for_actor(name, actor_id)
         .await
         .map_err(internal)?
-        .ok_or_else(|| internal("backup custody set missing immediately after create"))?;
+    else {
+        // The create lost to the owner's own set created by hash alone on
+        // this name's address: the coded, recoverable refusal.
+        state
+            .db
+            .refuse_a_squatted_rail_address(name, actor_id)
+            .await
+            .map_err(internal)?;
+        return Err(internal(
+            "backup custody set missing immediately after create",
+        ));
+    };
     // A live rail of this name already held the key: the role holding live
     // state wins, the newcomer is refused (`reserved-folders.md` § Destination
     // capability).
@@ -1867,10 +1878,14 @@ pub(crate) async fn put_state_entry(
     for row in &req.replaces {
         let writer = parse_device_id(&row.writer_id)
             .ok_or_else(|| state_coded("invalid_request", "invalid replaces writer_id hex"))?;
-        let item_key: [u8; 32] =
+        let row_item_key: [u8; 32] =
             row.item_key.as_ref().try_into().map_err(|_| {
                 state_coded("invalid_request", "replaces item_key must be 32 bytes")
             })?;
+        // No own-item check: a carry's put names the predecessor's row at the
+        // predecessor schedule's item key (part (2)), and keys are blinded, so
+        // the nest cannot tell it from any other item's. The no-gate supersede
+        // rests on the covering row landing in the same transaction.
         if row.writer_seq < 0 {
             return Err(state_coded(
                 "invalid_request",
@@ -1878,7 +1893,7 @@ pub(crate) async fn put_state_entry(
             ));
         }
         replaces.push(crate::db::account_state::ReplacedCoordinate {
-            item_key,
+            item_key: row_item_key,
             writer,
             writer_seq: row.writer_seq,
         });

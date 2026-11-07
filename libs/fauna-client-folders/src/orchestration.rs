@@ -2282,8 +2282,10 @@ where
     /// under the post-Remove epoch would hand the departing member the
     /// window; the removal's own drive publishes), and an envelope of this
     /// identity's at the current epoch that **does not open** (nothing is
-    /// published on a failed read). An envelope that names custody's live
-    /// nonce as retired is left alone: this device lags a cut.
+    /// published on a failed read). An envelope of this identity's that names
+    /// custody's live nonce as retired is left alone: this device lags a cut.
+    /// An envelope any other key signed is never joined — it is replaced by
+    /// custody alone (ruling (11)(b)).
     ///
     /// Custody is read as a write reads it (a fresh fetch). Best-effort per
     /// set: one set's failure is logged, never another's. Returns how many
@@ -2384,7 +2386,14 @@ where
                 // Ruling (11): an envelope a member cannot use is re-sealed.
                 let reseal = current.is_some_and(|c| (reply.epoch as u64) < c)
                     || !signed.as_ref().is_some_and(|v| v.signer == identity);
-                match signed.and_then(|v| self.group.open_envelope(channel, &v.sealed).ok()) {
+                // Ruling (11)(b): only an envelope this identity signed — the
+                // owner's own other devices sign as it — is joined. Anything
+                // another key signed is replaced by custody alone: never a
+                // join that would launder its generations into the owner's
+                // re-signed envelope, never a `None` that suppresses the
+                // republish.
+                let own = signed.filter(|v| v.signer == identity);
+                match own.and_then(|v| self.group.open_envelope(channel, &v.sealed).ok()) {
                     Some(published) => custody::envelope_join(&published, &expected)
                         .and_then(|(joined, ahead)| (ahead || reseal).then_some(joined)),
                     None => reseal.then_some(expected),
@@ -4436,7 +4445,7 @@ mod tests {
                         .unwrap()
                         .iter()
                         .rev()
-                        .find(|p| p.name == req.name)
+                        .find(|p| p.name == req.name && p.name_hash == req.name_hash)
                         .cloned();
                     let Some(stored) = stored else {
                         return Err(FakeErr::Rejected(fauna_protocol::RpcError::new(
@@ -8421,6 +8430,160 @@ mod tests {
         assert_eq!(block_on(a.converge_envelopes()).unwrap(), 0);
         assert_eq!(nest.puts.lock().unwrap().len(), before, "left alone");
         assert_eq!(stored_payload(&nest), newer);
+    }
+
+    /// Store `payload` as `CH`'s envelope under `signer`'s signature — what a
+    /// hostile nest holds after taking a member's `content_key.put`.
+    #[cfg(feature = "mls")]
+    fn plant_envelope(
+        nest: &FakeNest,
+        group: &Arc<FakeGroup>,
+        signer: &ActorKeypair,
+        payload: &fauna_core::folder_keys::ContentKeyEnvelopePayload,
+    ) {
+        let (sealed, epoch) = FolderGroupCrypto::seal_envelope(group, &CH, payload).unwrap();
+        let blob = fauna_protocol::folder_envelope_sig::sign(signer, &CH, &sealed);
+        // As the wire carries it: by the set's hash, the name taken off.
+        nest.puts
+            .lock()
+            .unwrap()
+            .push(fauna_protocol::folders::addressed(ContentKeyPutRequest {
+                name: "docs".into(),
+                epoch: epoch as i64,
+                sealed: hex::encode(&blob),
+                current_version: payload.keys.current_version(),
+                ..Default::default()
+            }));
+    }
+
+    /// A set this identity minted (a live nonce) and keyed at `CH` — one of
+    /// [`custody::owned_bound_sets`].
+    #[cfg(feature = "mls")]
+    fn owned_docs(a: &Author) {
+        block_on(a.update_custody(|cfg| {
+            custody::record_created_set(cfg, "docs", [1; 32], None, 10);
+            custody::key_named_set(cfg, "docs", CH, [7; 32], 10);
+        }))
+        .unwrap();
+        assert_eq!(
+            custody::owned_bound_sets(&load_cfg(a)),
+            vec![("docs".to_string(), CH)]
+        );
+    }
+
+    /// Custody's generations for `CH`, as `envelope_matches` compares them.
+    #[cfg(feature = "mls")]
+    fn generations_of(keys: &FolderContentKeys) -> Vec<(u64, u64, [u8; 32])> {
+        let mut g: Vec<_> = keys
+            .generations()
+            .map(|g| (g.version, g.rotated_at, *g.key))
+            .collect();
+        g.sort_unstable();
+        g
+    }
+
+    /// Ruling (11)(b): a member-signed envelope carrying
+    /// an extra, higher generation is replaced by custody alone — its
+    /// generation is never joined into what the owner re-signs.
+    #[cfg(feature = "mls")]
+    #[test]
+    fn a_member_signed_envelope_is_replaced_never_joined() {
+        let nest = Arc::new(FakeNest::default());
+        let group = FakeGroup::with_members(&[]);
+        let a = author(nest.clone(), group.clone());
+        owned_docs(&a);
+        let cfg = load_cfg(&a);
+        let custody_keys = custody::content_keys(&cfg, &CH).unwrap();
+        let mut hostile = custody::envelope_payload(&cfg, Some("docs"), &CH, custody_keys.clone());
+        hostile.keys = hostile.keys.merge(
+            &FolderContentKeys::from_generations(vec![ContentKeyGeneration {
+                version: 1_000_000,
+                key: [0xEE; 32].into(),
+                rotated_at: 900,
+            }])
+            .unwrap(),
+        );
+        plant_envelope(
+            &nest,
+            &group,
+            &ActorKeypair::from_secret([0xB1; 32]),
+            &hostile,
+        );
+        let before = nest.puts.lock().unwrap().len();
+
+        assert_eq!(block_on(a.converge_envelopes()).unwrap(), 1);
+        assert_eq!(nest.puts.lock().unwrap().len(), before + 1, "re-published");
+        let blob = hex::decode(&nest.puts.lock().unwrap().last().unwrap().sealed).unwrap();
+        let signed = fauna_protocol::folder_envelope_sig::verify(&blob, &CH).unwrap();
+        assert_eq!(signed.signer, a.keypair.actor_id(), "owner-signed");
+        let payload = stored_payload(&nest);
+        assert_eq!(
+            generations_of(&payload.keys),
+            generations_of(&custody_keys),
+            "custody's generations alone"
+        );
+    }
+
+    /// A member-signed envelope that names custody's live nonce as retired is
+    /// still replaced — the join's `None` never suppresses the republish.
+    #[cfg(feature = "mls")]
+    #[test]
+    fn a_member_signed_envelope_retiring_the_live_nonce_is_still_replaced() {
+        let nest = Arc::new(FakeNest::default());
+        let group = FakeGroup::with_members(&[]);
+        let a = author(nest.clone(), group.clone());
+        owned_docs(&a);
+        let cfg = load_cfg(&a);
+        let custody_keys = custody::content_keys(&cfg, &CH).unwrap();
+        let expected = custody::envelope_payload(&cfg, Some("docs"), &CH, custody_keys.clone());
+        let live = expected.set_nonce.expect("a live nonce");
+        let mut hostile = expected.clone();
+        hostile.set_nonce = Some([0xC3; 32]);
+        hostile.retired_set_nonces.insert(
+            0,
+            fauna_core::folder_keys::RetiredSetNonce {
+                nonce: live,
+                minted_by: None,
+            },
+        );
+        plant_envelope(
+            &nest,
+            &group,
+            &ActorKeypair::from_secret([0xB1; 32]),
+            &hostile,
+        );
+        let before = nest.puts.lock().unwrap().len();
+
+        assert_eq!(block_on(a.converge_envelopes()).unwrap(), 1);
+        assert_eq!(nest.puts.lock().unwrap().len(), before + 1, "re-published");
+        assert_eq!(stored_payload(&nest), expected);
+    }
+
+    /// The case the join exists for: an envelope the owner's own other device
+    /// signed, carrying a later serve stamp, is joined — the stamp survives.
+    #[cfg(feature = "mls")]
+    #[test]
+    fn an_own_device_envelope_with_a_later_serve_stamp_is_joined() {
+        let nest = Arc::new(FakeNest::default());
+        let group = FakeGroup::with_members(&[]);
+        let a = author(nest.clone(), group.clone());
+        owned_docs(&a);
+        let cfg = load_cfg(&a);
+        let custody_keys = custody::content_keys(&cfg, &CH).unwrap();
+        let mut sibling = custody::envelope_payload(&cfg, Some("docs"), &CH, custody_keys.clone());
+        assert!(sibling.served_at.is_none(), "this device never served");
+        sibling.served_at = Some(5_000);
+        // The owner's other device signs as the same identity.
+        plant_envelope(&nest, &group, &a.keypair, &sibling);
+        let before = nest.puts.lock().unwrap().len();
+
+        assert_eq!(
+            block_on(a.converge_envelopes()).unwrap(),
+            0,
+            "already the join"
+        );
+        assert_eq!(nest.puts.lock().unwrap().len(), before, "left alone");
+        assert_eq!(stored_payload(&nest).served_at, Some(5_000));
     }
 
     /// A channel with a staged pending removal is skipped: its Remove may be

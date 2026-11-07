@@ -4,6 +4,7 @@ using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Navigation;
 using FaunaApp.Core.Services;
 using FaunaApp.Core.ViewModels;
+using FaunaApp.Helpers;
 using uniffi.fauna_ffi;
 using S = FaunaApp.Core.Services.Strings;
 
@@ -28,11 +29,7 @@ public sealed partial class EventDetailPage : Page
         // Reminder presets from the shared catalog (events.md § Where logic lives)
         // instead of hard-coded English ComboBoxItems.
         foreach (var preset in FaunaFfiMethods.ReminderPresets())
-        {
-            var item = new ComboBoxItem { Content = S.Resolve(preset.label), Tag = preset.value };
-            AutomationProperties.SetName(item, preset.value);
-            ReminderSelect.Items.Add(item);
-        }
+            ReminderSelect.Items.Add(PickerOption.Create(S.Resolve(preset.label), preset.value));
     }
 
     protected override void OnNavigatedTo(NavigationEventArgs e)

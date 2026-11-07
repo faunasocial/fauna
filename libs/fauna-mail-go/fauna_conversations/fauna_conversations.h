@@ -1213,6 +1213,11 @@ int8_t uniffi_fauna_conversations_fn_func_keypackages_low(uint64_t count, RustCa
 RustBuffer uniffi_fauna_conversations_fn_func_next_sort_order(RustBuffer current, RustCallStatus *out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_CONVERSATIONS_FN_FUNC_SORT_ORDER_NAME
+#define UNIFFI_FFIDEF_UNIFFI_FAUNA_CONVERSATIONS_FN_FUNC_SORT_ORDER_NAME
+RustBuffer uniffi_fauna_conversations_fn_func_sort_order_name(RustBuffer order, RustCallStatus *out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_FFI_FAUNA_CONVERSATIONS_RUSTBUFFER_ALLOC
 #define UNIFFI_FFIDEF_FFI_FAUNA_CONVERSATIONS_RUSTBUFFER_ALLOC
 RustBuffer ffi_fauna_conversations_rustbuffer_alloc(uint64_t size, RustCallStatus *out_status
@@ -1716,6 +1721,12 @@ uint16_t uniffi_fauna_conversations_checksum_func_keypackages_low(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_CONVERSATIONS_CHECKSUM_FUNC_NEXT_SORT_ORDER
 #define UNIFFI_FFIDEF_UNIFFI_FAUNA_CONVERSATIONS_CHECKSUM_FUNC_NEXT_SORT_ORDER
 uint16_t uniffi_fauna_conversations_checksum_func_next_sort_order(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_CONVERSATIONS_CHECKSUM_FUNC_SORT_ORDER_NAME
+#define UNIFFI_FFIDEF_UNIFFI_FAUNA_CONVERSATIONS_CHECKSUM_FUNC_SORT_ORDER_NAME
+uint16_t uniffi_fauna_conversations_checksum_func_sort_order_name(void
     
 );
 #endif

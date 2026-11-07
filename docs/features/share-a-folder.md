@@ -53,6 +53,7 @@ Stamped 2026-11-01 at a6047fbd8b.
     - `tests/e2e-unified/tests/test_folder_member_media_decrypt.py::test_a_second_share_keeps_the_first_members_access_and_everything_readable`
 12. [app] When the owner takes your write access away, your app stops syncing that folder and says so, and leaves your own files and unsent changes alone — `docs/goal/behavior/file-sync.md` § Multi-writer shared sets
     - `tests/e2e-unified/tests/test_folder_writer_revocation.py::test_a_demoted_writer_sees_the_folder_stop_syncing_and_keeps_their_files`
+    - `tests/e2e-unified/tests/test_folder_writer_revocation.py::test_a_demoted_writer_on_the_documents_provider_is_told_and_keeps_the_unsent_edit`
 13. [nest] What a member stores counts against the owner's storage, and a member who would pass the limit the owner set for them is refused — `docs/goal/behavior/file-sync.md` § Multi-writer shared sets
     - `tests/e2e-unified/tests/api/test_shared_folder_member_cap.py::test_a_members_bytes_charge_the_owner_and_their_cap_refuses_them`
 14. [app] Declining a shared folder takes you off the owner's list of people it is shared with — `docs/goal/ui/folders.md` § Sharing a folder (cross-user)
@@ -79,12 +80,12 @@ Stamped 2026-11-01 at a6047fbd8b.
 | App | Status | Stamp |
 |---|---|---|
 | web | ⚠ partial | 0.1.5-dev+8755c14e standalone |
-| linux | ✅ full | 0.1.5-dev+8755c14e standalone |
+| linux | ⚠ partial | 0.1.5-dev+8755c14e standalone |
 | windows | 🚧 unbuilt | 0.1.5-dev+8755c14e standalone |
 | macos | ✅ full | 0.1.5-dev+8755c14e standalone |
 | ios | ⚠ partial | 0.1.5-dev+8755c14e standalone |
 | android |  no run recorded | |
-| tui | ✅ full | 0.1.5-dev+8755c14e standalone |
+| tui | ⚠ partial | 0.1.5-dev+8755c14e standalone |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
@@ -107,6 +108,7 @@ Stamped 2026-11-01 at a6047fbd8b.
 | 10 | app | `tests/e2e-unified/tests/test_folder_member_media_decrypt.py::test_a_removed_member_cannot_open_what_is_added_afterwards` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
 | 11 | app | `tests/e2e-unified/tests/test_folder_member_media_decrypt.py::test_a_second_share_keeps_the_first_members_access_and_everything_readable` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
 | 12 | app | `tests/e2e-unified/tests/test_folder_writer_revocation.py::test_a_demoted_writer_sees_the_folder_stop_syncing_and_keeps_their_files` | linux (linux): passed, windows (windows): passed, macos (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 12 | app | `tests/e2e-unified/tests/test_folder_writer_revocation.py::test_a_demoted_writer_on_the_documents_provider_is_told_and_keeps_the_unsent_edit` | — |
 | 13 | nest | `tests/e2e-unified/tests/api/test_shared_folder_member_cap.py::test_a_members_bytes_charge_the_owner_and_their_cap_refuses_them` | nest (linux): passed, nest (macos): passed, nest (windows): passed |
 | 14 | app | `tests/e2e-unified/tests/test_folders.py::test_folder_pending_share_accept_decline` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
 | 15 | app | `tests/e2e-unified/tests/test_crash_recovery_journeys.py::test_kill_owner_between_a_member_removals_stage_and_publish_relaunch_finishes_it` — requires `unclean-kill` (test harness) (not built: android) | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |

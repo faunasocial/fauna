@@ -989,7 +989,6 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
                 links: edit
                     .links
                     .iter()
-                    .filter(|(l, u)| !l.trim().is_empty() || !u.trim().is_empty())
                     .map(|(l, u)| ProfileLink {
                         label: l.clone(),
                         uri: u.clone(),

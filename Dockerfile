@@ -317,7 +317,8 @@ RUN --mount=type=bind,from=wasm32-cc,target=/mnt/wasm32-cc \
     mkdir -p /opt/wasm32-cc \
     && tar -xJf /mnt/wasm32-cc/llvm.tar.xz -C /opt/wasm32-cc --strip-components=1 \
        --wildcards '*/bin/clang' '*/bin/clang-[0-9]*' '*/bin/llvm-ar' '*/lib/clang/*/include' \
-    && /opt/wasm32-cc/bin/clang --version \
+    && /opt/wasm32-cc/bin/clang --version > /opt/wasm32-cc/version.txt \
+    && cat /opt/wasm32-cc/version.txt \
     && printf '#include <stddef.h>\n#include <stdint.h>\nsize_t f(uint8_t x) { return x; }\n' \
        | /opt/wasm32-cc/bin/clang --target=wasm32-unknown-unknown -O2 -c -x c - -o /tmp/probe.o \
     && /opt/wasm32-cc/bin/llvm-ar rcs /tmp/probe.a /tmp/probe.o \
@@ -386,8 +387,11 @@ ARG BUILDARCH
 #
 # Three RUNs, so the compile has no network (build-compile-cache.md § The
 # boundary's scope and what OFF means, decision (5); image-pipeline.md § The
-# Dockerfile's stages compile hermetically): (1) fetch the locked graph for
-# wasm32 and for the build host (build scripts and proc-macros run there);
+# Dockerfile's stages compile hermetically): (1) fetch the WHOLE locked graph,
+# every target's packages — wasm-pack's own `cargo metadata` in (3) resolves
+# the graph for all platforms under CARGO_NET_OFFLINE, so a target-filtered
+# fetch leaves it a package to download and it fails offline (the 0.1.6
+# public image build, android_system_properties);
 # (2) compile every chunk with `--network=none`, with exactly the cargo
 # arguments wasm-pack passes (`build --lib --release --target
 # wasm32-unknown-unknown --locked`, measured Fresh behind it 2026-11-05);
@@ -399,7 +403,7 @@ ARG BUILDARCH
 # line in BOTH (2) and (3): the WASM-chunk parity gate holds the two lists equal.
 RUN --mount=type=cache,id=cargo-registry-wasm,target=/usr/local/cargo/registry \
     --mount=type=cache,id=cargo-git-wasm,target=/usr/local/cargo/git \
-    cargo fetch --locked --target wasm32-unknown-unknown --target "$(rustc -vV | sed -n 's/^host: //p')"
+    cargo fetch --locked
 RUN --network=none \
     --mount=type=cache,id=cargo-registry-wasm,target=/usr/local/cargo/registry \
     --mount=type=cache,id=cargo-git-wasm,target=/usr/local/cargo/git \
@@ -609,6 +613,13 @@ RUN --mount=type=cache,id=deno-dir,target=/deno-dir deno task build
 # final image's path: nothing below copies from it.
 FROM scratch AS web-tree
 COPY --from=web-builder /src/apps/fauna-web/build/ /
+
+# The `clang --version` of the wasm32 C compiler that built the chunks above,
+# exported beside the web tree (never inside it): the asset manifest records
+# the compiler that built the tree, and the workflow host does not hold it
+# (`scripts/web-asset-manifest.py write --wasm32-cc-version-file`).
+FROM scratch AS wasm32-cc-version
+COPY --from=rust-wasm /opt/wasm32-cc/version.txt /wasm32-cc-version.txt
 
 # ── Final image ─────────────────────────────────────────────────────
 FROM debian:bookworm-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171

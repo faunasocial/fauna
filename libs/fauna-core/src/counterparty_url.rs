@@ -146,10 +146,12 @@ pub fn validate_counterparty_nest_url_scoped(
                  carve-out is a device-scoped acceptance, not a nest one",
             );
         }
-        let loopback = host.eq_ignore_ascii_case("localhost")
-            || host
-                .parse::<std::net::IpAddr>()
-                .is_ok_and(|ip| ip.is_loopback());
+        // The name side is bare `localhost` only: this URL is dialed later by a
+        // resolver this check does not control, and a forwarded `x.localhost`
+        // would hand the plaintext dial to whoever answers
+        // (`domains-and-tls-bootstrap.md` § Claim → *Which host names mean
+        // this machine*).
+        let loopback = crate::resolve::is_loopback_host_without_dns(host);
         if !loopback {
             return Err("plaintext http/ws is loopback-only — a reachable nest speaks https/wss");
         }
@@ -377,6 +379,11 @@ mod tests {
             "ws://nest.example.com",    // plaintext to the internet
             "http://10.0.0.5:6379",     // internal service
             "http://localhost.evil.io", // a NAME that merely contains localhost
+            // A name under `localhost` a forwarding resolver would hand to
+            // whoever answers it, and the fully-qualified
+            // spelling no hosts file is promised to answer.
+            "http://x.localhost:3000",
+            "ws://LOCALHOST.:3000",
         ] {
             assert!(validate(bad).is_err(), "{bad} must refuse");
         }

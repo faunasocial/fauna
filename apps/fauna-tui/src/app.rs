@@ -3159,7 +3159,7 @@ impl App {
     /// (`atproto-custody:<did>`) and nothing re-checks a departed DID, so one
     /// left standing accuses an account the user no longer has, on every page,
     /// un-dismissably — **and** the call bumps `CriticalAlerts::teardown_epoch`,
-    /// the only stop signal `critical_alerts::spawn_session_start_sweep`'s
+    /// the only stop signal `critical_alerts::spawn_post_auth_sweep`'s
     /// 6-hourly loop watches.
     fn begin_identity_teardown(&mut self) {
         self.session_generation = self.session_generation.saturating_add(1);
@@ -5242,7 +5242,7 @@ pub(crate) mod tests {
     ///
     /// ⚠ The alert half is the one with a live consequence, and it is why this
     /// asserts `teardown_epoch` and not merely an empty `active()`: the epoch is
-    /// the ONLY stop signal `critical_alerts::spawn_session_start_sweep`'s
+    /// the ONLY stop signal `critical_alerts::spawn_post_auth_sweep`'s
     /// 6-hourly loop watches, and the `NestIdentityChanged` surface's Trust
     /// action re-`route`s straight back into `session::establish`, which spawns a
     /// fresh one. Un-bumped, every re-trust leaks a loop that keeps polling the

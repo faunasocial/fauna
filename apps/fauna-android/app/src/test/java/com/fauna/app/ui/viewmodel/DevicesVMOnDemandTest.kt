@@ -162,6 +162,39 @@ class DevicesVMOnDemandTest {
     }
 
     @Test
+    fun theProvidersParkReachesTheRowOnLoadAndAfterEachReconcile() = runTest {
+        // `file-sync.md` § Multi-writer shared sets → *Revocation on a capability
+        // host*: the fold runs on the folder-list refresh and on the presence
+        // reconcile — the host writes its mark at its own edge, which no push
+        // announces, so the page watches rather than waits to be told.
+        val f = makeVm()
+        val shared = folder("docs", 3L, role = "member")
+        f.vm.loadOnDemand(listOf(shared))
+        assertFalse(f.vm.onDemand.value.getValue(OnDemandRowKey.of(shared)).parked)
+
+        f.toggle.parked += "local:3"
+        f.toggle.reconcile()
+        assertTrue(f.vm.onDemand.value.getValue(OnDemandRowKey.of(shared)).parked)
+
+        // A re-grant clears the host's mark; the next reconcile clears the row.
+        f.toggle.parked -= "local:3"
+        f.toggle.reconcile()
+        assertFalse(f.vm.onDemand.value.getValue(OnDemandRowKey.of(shared)).parked)
+    }
+
+    @Test
+    fun aHideFlipKeepsTheRowsParkReading() = runTest {
+        val f = makeVm()
+        val shared = folder("docs", 3L, role = "member")
+        f.toggle.parked += "local:3"
+        f.vm.loadOnDemand(listOf(shared))
+
+        f.vm.setFolderOnDemand(shared, false)
+
+        assertTrue(f.vm.onDemand.value.getValue(OnDemandRowKey.of(shared)).parked)
+    }
+
+    @Test
     fun anUnwritableStoreRevertsTheFlipAndReplansNothing() = runTest {
         val f = makeVm(failSetShown = true)
         val own = folder("photos", 1L)

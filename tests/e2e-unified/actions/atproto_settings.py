@@ -327,7 +327,13 @@ class AtprotoSettingsActions:
         return not self.driver.is_absent("atproto-hosted-handle")
 
     def is_did_method_visible(self) -> bool:
-        return self.driver.is_visible("atproto-did-method")
+        """The radio lives in the hosted panel, BELOW the transition card that
+        staging a hosted level opens — on windows' 600x600 viewport that is
+        below the ScrollViewer fold, and windows' ``is_visible`` is
+        ``!IsOffscreen``, so a bare read answered False for a painted radio
+        (measured 2026-11-06). A positive read, so the scrolled form; a negative
+        one is ``is_absent``."""
+        return self.driver.is_visible_scrolled("atproto-did-method")
 
     def is_delete_presence_visible(self) -> bool:
         return not self.driver.is_absent("atproto-delete-presence")

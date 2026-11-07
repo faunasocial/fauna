@@ -522,18 +522,18 @@ pub fn authority_of(nest_url: &str) -> String {
 }
 
 /// True if the `host[:port]` authority (see [`authority_of`]) names a loopback
-/// host — IPv4 `127.0.0.0/8`, IPv6 `::1`, or `localhost`. The residual-HTTP
+/// host — IPv4 `127.0.0.0/8`, IPv6 `::1`, or the bare name `localhost` (the
+/// shared `fauna_core::resolve::is_loopback_host_without_dns`). Not a name
+/// under `localhost`: every app's own HTTP stack makes the dial and resolves
+/// the name, and a resolver that forwards `x.localhost` would hand this
+/// carve-out to whoever answers it. The residual-HTTP
 /// cert-validation callback uses this to accept a same-box self-signed nest (the
 /// sanctioned `danger_accept_invalid_certs` / `InsecureSkipVerify` prior art,
 /// installers/windows.md) — including the unauthenticated health check that can run
 /// before any handshake graduates a pin. Private LAN, public domains, and
 /// unparseable authorities are non-loopback.
 pub fn is_loopback_authority(authority: &str) -> bool {
-    let host = host_of_authority(authority);
-    host.eq_ignore_ascii_case("localhost")
-        || host
-            .parse::<std::net::IpAddr>()
-            .is_ok_and(|ip| ip.is_loopback())
+    fauna_core::resolve::is_loopback_host_without_dns(host_of_authority(authority))
 }
 
 /// `host[:port]` → bare `host`, ready to `parse::<IpAddr>()`. Handles bracketed
@@ -996,6 +996,12 @@ mod tests {
             ("localhost:443", true),
             ("localhost", true),
             ("LocalHost", true), // case-insensitive
+            // A name under localhost is the resolver's to answer, and the app's
+            // HTTP stack resolves it — refused, as is the
+            // fully-qualified spelling.
+            ("a.localhost:443", false),
+            ("localhost.:443", false),
+            ("localhost.example.com", false),
             ("[::1]:443", true),
             ("::1", true),
             ("192.168.1.5:443", false),

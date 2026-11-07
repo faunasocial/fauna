@@ -1,9 +1,8 @@
 //! tier_3: the **at-rest byte-scan proof** — after the production writers
 //! run and the next boot's plaintext scrub executes, the raw
 //! `nest.db` file holds **zero bytes** of any user-chosen name, path, label,
-//! tag or detail, except the one still-gated `folders.name` plane (honest
-//! red flag) and the ARMED `retention_policy` knobs (nest-parsed, not a
-//! label).
+//! tag or detail, except the ARMED `retention_policy` knobs (nest-parsed, not
+//! a label).
 //!
 //! Proof obligation (`docs/goal/behavior/file-sync.md` § Sealed names & paths →
 //! *Migration*, implementing the 2026-07-29 paths-are-content ruling in
@@ -36,9 +35,7 @@
 //!   sealed twin now rests, and a boot that cleared anything `VACUUM`s, so no
 //!   freed page keeps the old bytes.
 //!
-//! Asserted PRESENT after everything: `folders.name` (apps still address
-//!   folders by name — the S5b hash arm has no production sender) and `folders.retention_policy`
-//!   (the ARMED auto-prune ruling: the nest parses its numeric knobs
+//! Asserted PRESENT after everything: `folders.retention_policy` (the ARMED auto-prune ruling: the nest parses its numeric knobs
 //!   server-side — `encryption-at-rest.md` § Carve-outs). A green run states,
 //!   precisely: *everything the sealed planes claim stops resting has stopped
 //!   resting, everything they defer is still visibly there, and the write path
@@ -141,14 +138,13 @@ fn conflict_details() -> String {
 const FRAG_CUSTODY: &str = "deed_scan_originals";
 /// `import_sessions.source_descriptor` — scrubbed; the per-source lock keys
 /// on `source_hash`. Deliberately OVERFLOW-SIZED (~15KB, vs. the 4KB page),
-/// like `sync_conflicts.details` once was: this is the plane that makes the
-/// boot scrub's `VACUUM` load-bearing. The scrub's `UPDATE … = NULL` frees the
-/// value's overflow pages to the freelist with their content intact
-/// (`secure_delete` is OFF — SQLite's default; `CacheDb::open` sets no
-/// pragma), and only `VACUUM` discards them; the small in-page values above
-/// are overwritten by the cell rewrite with or without it. Verified by
-/// mutation (disabling the VACUUM reddens exactly this marker's absence
-/// assert).
+/// like `sync_conflicts.details` once was. The scrub's `UPDATE … = NULL` frees
+/// the value's overflow pages to the freelist, and their content survives
+/// unless either the connection's `secure_delete` (`CacheDb::open`) zeroes
+/// them or the boot scrub's `VACUUM` discards them; this marker's absence
+/// assert pins that one of the two does. Small in-page values are no safer:
+/// whether a freed cell is overwritten is page-layout luck, which is why
+/// `runtime_blanked_set_names_leave_no_bytes` blanks several names.
 const FRAG_IMPORT: &str = "lawfirm-familia";
 
 fn import_descriptor() -> String {
@@ -689,4 +685,115 @@ fn resting_bytes_recursive(dir: &std::path::Path) -> Vec<u8> {
         }
     }
     all
+}
+
+/// Sets whose names are blanked AT RUNTIME leave no byte of them in the file,
+/// with no boot `VACUUM` behind the assert: the set names are the ONLY
+/// plaintext this fixture ever rests, so no other plane makes a boot scrub
+/// clear something and rewrite the file (the vacuous-pin shape the header
+/// warns about). Each set is created keyless and updated keyless once — so the
+/// row, and its `UNIQUE(name, actor_id)` index entry, are rewritten with the
+/// name still in them — then the keyed backfill stamps its seal, whose update
+/// blanks the name in the same transaction (`BLANK_SEALED_FOLDER_NAME`). Each
+/// of those writes freed a copy of the name, and `secure_delete` on the nest's
+/// connection (`CacheDb::open`) zeroes every freed copy. Several sets, because
+/// whether one freed cell happens to be overwritten by the next allocation is
+/// page-layout luck: verified by mutation — without the pragma most of the
+/// markers rest after the blank.
+#[tokio::test]
+async fn runtime_blanked_set_names_leave_no_bytes() {
+    const SETS: usize = 8;
+    let marker = |i: usize| format!("mediation-notes-{i:02}-2026");
+    let data_dir = tempfile::tempdir().unwrap();
+    let db_path = data_dir.path().join("nest.db");
+    let db = Arc::new(CacheDb::open(&db_path).unwrap());
+    let state = {
+        let rpc_router = Arc::new({
+            let mut b = RpcRouter::builder();
+            fauna_nest::folder_handlers::register_folders_handlers(&mut b);
+            b.build()
+        });
+        Arc::new(AppState {
+            rpc_router,
+            ..AppState::for_test(db.clone())
+        })
+    };
+    for i in 0..SETS {
+        db.create_folder_with_options(
+            &marker(i),
+            &actor(),
+            fauna_nest::db::FolderOptions {
+                set_nonce: Some(common::SET_NONCE.to_vec()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        // A keyless update rewrites the row with the name still in it.
+        dispatch(
+            &state,
+            actor(),
+            "fauna.folders.update",
+            Bytes::from(
+                encode_canonical(&FolderUpdateRequest {
+                    name: marker(i),
+                    conflict_policy: Some("latest_wins_always".to_string()),
+                    ..Default::default()
+                })
+                .unwrap()
+                .to_vec(),
+            ),
+        )
+        .await;
+    }
+    let resting = |bytes: &[u8]| -> Vec<String> {
+        (0..SETS)
+            .map(marker)
+            .filter(|m| contains(bytes, m))
+            .collect()
+    };
+    db.flush().await.unwrap();
+    assert_eq!(
+        resting(&resting_bytes(data_dir.path())).len(),
+        SETS,
+        "positive control: every keyless set's name rests before its seal"
+    );
+
+    // The keyed backfill stamps the seals; each update blanks its name.
+    let folders = fauna_client_folders::FoldersClient::new(HandlerRequester {
+        state: Arc::clone(&state),
+        actor: actor(),
+    })
+    .with_label_custody(LabelCustody::owner_only(owner_key()));
+    let report = folders.backfill_sealed_fields().await.unwrap();
+    assert_eq!(report.names, SETS, "every set's name_sealed stamped");
+    {
+        let conn = db.conn().await;
+        let named: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM folders WHERE name IS NOT NULL",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(named, 0, "the runtime blank ran on every set");
+    }
+    db.flush().await.unwrap();
+    let left = resting(&resting_bytes(data_dir.path()));
+    assert!(
+        left.is_empty(),
+        "set names blanked at runtime still rest in the raw DB file: {left:?}"
+    );
+
+    // The next boot finds nothing to scrub, so runs no VACUUM: the bytes must
+    // already be gone, and stay gone.
+    drop(folders);
+    drop(state);
+    drop(db);
+    let _db = CacheDb::open(&db_path).unwrap();
+    let left = resting(&resting_bytes(data_dir.path()));
+    assert!(
+        left.is_empty(),
+        "set names blanked at runtime rest in the raw DB file after the boot: {left:?}"
+    );
 }

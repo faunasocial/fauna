@@ -438,7 +438,7 @@ def test_a_repost_of_a_room_post_shows_an_outsider_the_teaser_and_the_lock(
             ROOM_POST_TIER,
             "the outsider's repost card carrying the reserved-tier badge",
         )
-        card = outsider.app.feed.post_index_by_id(row["post_id"])
+        card = outsider.app.feed.card_index_by_id(row["post_id"])
         # The repost row's own body is empty; its words are the folded embed,
         # which some apps paint as `feed-post-text` and web as the `quoted-post`
         # embed, resolved lazily after the card first paints.
@@ -939,7 +939,7 @@ def test_a_rooms_labels_show_on_a_room_posts_card_for_its_members_only(
         body = _open_and_read_detail(outsider, preview)
         assert marker not in body, "the outsider's detail stays the teaser"
         outsider.app.feed.close_post_detail()
-        card = outsider.app.feed.post_index_by_id(outsider_post)
+        card = outsider.app.feed.card_index_by_id(outsider_post)
         assert card >= 0, f"the post is still listed\n{seat_story(outsider)}"
         assert outsider.app.driver.count("content-label-badge", scope=f"post-card[{card}]") == 0, (
             "the room's verdicts are served to its members only: "

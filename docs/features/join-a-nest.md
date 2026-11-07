@@ -70,7 +70,7 @@ Stamped 2026-10-17 at 7295eb4a13.
 | web | ✅ full | 0.1.5-dev+52eff9ec standalone |
 | linux | ✅ full | 0.1.5-dev+52eff9ec standalone |
 | windows | ⚠ partial | 0.1.5-dev+52eff9ec standalone |
-| macos | ⚠ partial | 0.1.5-dev+3f9f2b95 standalone |
+| macos | ✅ full | 0.1.5-dev+3f9f2b95 standalone |
 | ios | ✅ full | 0.1.5-dev+52eff9ec standalone |
 | android |  no run recorded | |
 | tui | ✅ full | 0.1.5-dev+52eff9ec standalone |
@@ -81,7 +81,7 @@ Stamped 2026-10-17 at 7295eb4a13.
 | 1 | app | `tests/e2e-unified/tests/test_handle_entry_outcomes.py::test_already_on_nest_handle_matches_enables_continue` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 1 | app | `tests/e2e-unified/tests/test_handle_entry_outcomes.py::test_probe_error_transient_shows_retry` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 2 | app | `tests/e2e-unified/tests/test_invite_request_submit_roundtrip.py::test_invite_request_submit_reaches_pending_review` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
-| 3 | app | `tests/e2e-unified/tests/test_pending_invite_journey.py::test_admin_approval_advances_the_requester_with_no_user_action` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): failed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 3 | app | `tests/e2e-unified/tests/test_pending_invite_journey.py::test_admin_approval_advances_the_requester_with_no_user_action` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 4 | app | `tests/e2e-unified/tests/test_pending_invite_journey.py::test_a_denied_requester_reads_the_reason_and_can_resubmit` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 4 | app | `tests/e2e-unified/tests/test_invite_request_states.py::test_denied_shows_reason_disables_continue` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 5 | app | `tests/e2e-unified/tests/test_invite_request_states.py::test_oob_valid_enables_continue` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |

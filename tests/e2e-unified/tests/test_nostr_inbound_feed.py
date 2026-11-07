@@ -173,18 +173,7 @@ def test_posts_from_someone_you_follow_on_nostr_arrive_in_your_feed(
 
     app.feed.navigate()
 
-    def card():
-        i = app.feed.post_index_by_id(post_id)
-        return i + 1 if i >= 0 else 0  # truthy for index 0 too
-
-    index = wait_until(
-        card, PAINT_S,
-        diagnose=lambda: (
-            f"the swept note {post_id} is on the wire but not in the app's feed; "
-            f"app feed ids={[p.get('post_id') for p in app.feed._feed_posts_from_state()]!r}; "
-            f"error={app.error_text()!r}"
-        ),
-    ) - 1
+    index = app.feed.card_index_by_id(post_id, timeout=PAINT_S)
     card_text = app.feed.post_text(index).strip()
     assert card_text == text, (
         f"the followed author's note shows its text {text!r}; got {card_text!r}; "

@@ -633,7 +633,7 @@ pub fn establish(
     // A fresh wake per identity, so the e2e poke can only ever reach THIS
     // session's loop (`critical_alerts::SweepWake`).
     app.alert_sweep_wake = crate::critical_alerts::SweepWake::default();
-    crate::critical_alerts::spawn_session_start_sweep(
+    crate::critical_alerts::spawn_post_auth_sweep(
         Arc::clone(&client),
         // Feeder #1 reads the held rotation keyring from this session's
         // account runtime — the slot the assembly below fills.
@@ -2813,7 +2813,7 @@ pub fn apply_session_patch(
 /// `ConnectionState`/reconnect pumps, the drafts rails, the subscriptions
 /// author pump) are NOT re-run: they are still alive on this very client, and
 /// a second copy would duplicate every event they carry. The sweep is the same
-/// distinction drawn one level down — [`crate::critical_alerts::spawn_one_shot_sweep`]
+/// distinction drawn one level down — [`crate::critical_alerts::spawn_post_auth_sweep`]
 /// runs a single pass rather than a second `run_alert_sweep_loop`, whose first
 /// copy is still looping (that function's doc carries the reasoning, and
 /// windows' e2e seam ratified the same one-shot posture).
@@ -2868,11 +2868,12 @@ fn reconverge_post_auth(app: &App, secret_hex: &str, node_url: &str) {
     // The actor is unchanged by construction on this arm, so the alert keys the
     // pass posts under are the ones already on screen.
     match ActorKeypair::from_secret_hex(secret_hex) {
-        Ok(keypair) => crate::critical_alerts::spawn_one_shot_sweep(
+        Ok(keypair) => crate::critical_alerts::spawn_post_auth_sweep(
             client,
             Arc::clone(&app.settings.account_runtime),
             Arc::clone(&app.alerts),
             keypair.actor_id(),
+            app.alert_sweep_wake.clone(),
         ),
         Err(e) => tracing::warn!(error = %e, "[agent] session patch: converge sweep skipped"),
     }
@@ -3410,9 +3411,14 @@ pub(crate) mod tests {
     ///
     /// The observable is the sweep's own causal barrier — the started counter,
     /// bumped by `run_session_start_sweep_at` before any feeder reads anything,
-    /// so this test needs no reachable nest and no clock: it asserts a pass
-    /// **began**, which is exactly the property the e2e barrier asserts.
-    #[tokio::test]
+    /// so this test needs no reachable nest: it asserts a pass **began**,
+    /// which is exactly the property the e2e barrier asserts.
+    ///
+    /// The fixture mounts no account runtime, so the one-shot's wait for the
+    /// custody door (`fauna_client_alert_sweep::run_one_shot_sweep`) runs to
+    /// its bound before the pass begins; tokio's paused clock steps that bound
+    /// in virtual time, so the test still reads no wall clock.
+    #[tokio::test(start_paused = true)]
     async fn the_converge_arm_dispatches_another_sweep_pass() {
         let mut app = crate::app::tests::authed_app();
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
@@ -3431,15 +3437,21 @@ pub(crate) mod tests {
         });
         assert!(apply_session_patch(&mut app, &tx, &patch), "patch applies");
 
-        // The spawned pass bumps the counter before its first read; yield until
-        // it has been scheduled rather than sleeping for a duration
-        // (`e2e-latency-independent-assertions.md` § point 14 — the same
-        // discipline off the e2e path).
-        for _ in 0..1_000 {
+        // The spawned pass bumps the counter before its first read, once the
+        // custody door opens or its wait's bound passes. Step the paused clock
+        // a little past that bound, checking at every step, rather than
+        // sleeping for a wall-clock duration (`e2e-latency-independent-assertions.md`
+        // § point 14 — the same discipline off the e2e path).
+        let bound =
+            std::time::Duration::from_secs(fauna_client_alert_sweep::ONE_SHOT_READY_WAIT_SECS + 5);
+        let step = std::time::Duration::from_millis(100);
+        let mut waited = std::time::Duration::ZERO;
+        while waited <= bound {
             if app.alerts.sweep_passes_started() > before {
                 return;
             }
-            tokio::task::yield_now().await;
+            tokio::time::sleep(step).await;
+            waited += step;
         }
         panic!(
             "the converge arm must dispatch a sweep pass: started stayed at {before} — \

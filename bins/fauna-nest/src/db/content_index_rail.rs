@@ -23,6 +23,11 @@
 use super::CacheDb;
 use anyhow::Context;
 
+/// The kind of the content-index rail, `__index` — its one spelling, read by
+/// the mint below and by the reserved-address enumeration
+/// ([`crate::db::snapshots::reserved_rail_names`]).
+pub const INDEX_RAIL_KIND: &str = "index";
+
 /// One live `__index` path and the blob it points at, as
 /// [`CacheDb::list_index_blobs`] returns it.
 pub struct IndexBlobRow {
@@ -55,7 +60,7 @@ impl CacheDb {
     ) -> anyhow::Result<i64> {
         let fs_id = {
             let conn = self.conn.lock().await;
-            crate::db::snapshots::get_or_create_reserved_folder(&conn, actor_id, "index")?
+            crate::db::snapshots::get_or_create_reserved_folder(&conn, actor_id, INDEX_RAIL_KIND)?
         };
         let path_hash: [u8; 32] = fauna_core::sync::path_hash(path);
         let seq = self

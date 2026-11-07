@@ -44,7 +44,11 @@ public class FamilyApprovalRowTests
     // must exercise that real round-trip rather than assert against a value they
     // set themselves (which would prove nothing about the shared derivation).
     private static FamilyApprovalRow Row(string kind, string summary, string peerAddress) =>
-        FamilyApprovalRow.From(new FfiFamilyApprovalEntry(
+        FamilyApprovalRow.From(Entry(kind, summary, peerAddress, createdAtSecs: 0L));
+
+    private static FfiFamilyApprovalEntry Entry(
+        string kind, string summary, string peerAddress, long createdAtSecs) =>
+        new(
             supervisedActorId: new byte[32],
             supervisedHandle: "ward",
             kind: kind,
@@ -56,7 +60,57 @@ public class FamilyApprovalRowTests
             bridgeId: "",
             operation: "",
             target: "",
-            createdAt: 0L));
+            createdAt: createdAtSecs);
+
+    // ── When a held mail arrived (family-safety.md § Implementation status today, the
+    // held-mail time paragraph): the shared approval_timestamp_display bucket of the
+    // hold's created_at (SECONDS on the wire), joined to the sender " · " exactly as the
+    // shared approval_item_text joins it on tui and linux. A fixed now and offset keep
+    // the bucket deterministic.
+    private const long NowMs = 1_700_000_000_000L; // 2023-11-14 22:13:20 UTC (Tue)
+    private const long HourMs = 3_600_000L;
+
+    [Fact]
+    public void MailHold_ReadsItsSenderThenWhenItArrived()
+    {
+        var row = FamilyApprovalRow.From(
+            Entry("mail_hold", summary: "", peerAddress: "stranger@example.com",
+                createdAtSecs: (NowMs - 2 * HourMs) / 1000),
+            NowMs, utcOffsetSeconds: 0);
+        Assert.Equal("stranger@example.com · 20:13", row.DisplayText);
+    }
+
+    [Fact]
+    public void MailHold_WithNoStamp_ReadsItsSenderAlone_NeverAnInventedTime()
+    {
+        var row = FamilyApprovalRow.From(
+            Entry("mail_hold", summary: "", peerAddress: "stranger@example.com", createdAtSecs: 0L),
+            NowMs, utcOffsetSeconds: 0);
+        Assert.Equal("stranger@example.com", row.DisplayText);
+    }
+
+    [Fact]
+    public void Contact_WithAStamp_ReadsItsSummaryAlone_TheTimeIsAMailHoldsOnly()
+    {
+        var row = FamilyApprovalRow.From(
+            Entry("contact", summary: "alice wants to connect", peerAddress: "",
+                createdAtSecs: NowMs / 1000),
+            NowMs, utcOffsetSeconds: 0);
+        Assert.Equal("alice wants to connect", row.DisplayText);
+    }
+
+    [Fact]
+    public void NullPathMailHold_WithAStamp_ReadsTheNoSenderLabelThenTheTime()
+    {
+        Strings.Initialize(new FakeLocalizer(new()
+        {
+            ["family/approval_no_sender"] = "No sender (delivery notice)",
+        }));
+        var row = FamilyApprovalRow.From(
+            Entry("mail_hold", summary: "", peerAddress: "", createdAtSecs: NowMs / 1000),
+            NowMs, utcOffsetSeconds: 0);
+        Assert.Equal("No sender (delivery notice) · 22:13", row.DisplayText);
+    }
 
     [Fact]
     public void MailHold_DisplaysThePeerAddress_BecauseItsSummaryIsDeliberatelyEmpty()

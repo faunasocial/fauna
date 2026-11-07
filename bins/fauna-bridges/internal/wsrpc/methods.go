@@ -2512,18 +2512,28 @@ type listMailboxesRequest struct {
 	SubscribedOnly bool   `cbor:"subscribed_only"`
 }
 
-// MailboxEntry mirrors bridge_routing.rs:MailboxEntry. Special-use
-// attributes (\Drafts, \Sent, …) and the path separator (`/`) are
-// derived MDA-side from the canonical mailbox name, not carried on
-// the wire — see internal/mda/imap/list.go.
+// MailboxEntry mirrors bridge_routing.rs:MailboxEntry. Attrs carries
+// the RFC 6154 SPECIAL-USE attributes (\Drafts, \Sent, …) the nest
+// assigns (fauna_protocol::email::special_use_attrs, the one owner per
+// imap-server.md § Standard mailboxes); LIST writes them verbatim. The
+// path separator (`/`) is fixed MDA-side — see internal/mda/imap/list.go.
 type MailboxEntry struct {
-	Name          string `cbor:"name"`
-	UIDValidity   uint32 `cbor:"uid_validity"`
-	UIDNext       uint32 `cbor:"uid_next"`
-	HighestModseq int64  `cbor:"highestmodseq"`
-	Exists        uint32 `cbor:"exists"`
-	Unseen        uint32 `cbor:"unseen"`
+	Name          string   `cbor:"name"`
+	UIDValidity   uint32   `cbor:"uid_validity"`
+	UIDNext       uint32   `cbor:"uid_next"`
+	HighestModseq int64    `cbor:"highestmodseq"`
+	Exists        uint32   `cbor:"exists"`
+	Unseen        uint32   `cbor:"unseen"`
+	Attrs         []string `cbor:"attrs"`
 }
+
+// JunkMailbox mirrors fauna_protocol::email::JUNK_MAILBOX: the standard
+// mailbox carrying \Junk, whose COPY/MOVE in or out is a spam-training
+// signal (mail-spam.md § Training signal sources). The COPY/MOVE path
+// has only mailbox names in hand, so it keys on this name;
+// TestJunkMailboxPinnedToRustFixture pins it to the Rust owner through
+// the reply-list-mailboxes.cbor fixture.
+const JunkMailbox = "Junk"
 
 // listMailboxesReply mirrors bridge_routing.rs:ListMailboxesReply.
 type listMailboxesReply struct {

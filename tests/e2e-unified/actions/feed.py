@@ -1110,41 +1110,47 @@ class FeedActions:
         self.bring_post_into_dwell_view(index)
         self.accrue_dwell(index, seconds)
 
-    # fauna_core::scoring::cues::CUE_LONG_DWELL_VISIBLE_PM / 1000 — the share
-    # of a card that must show for its dwell to count toward watch-complete.
-    CUE_LONG_DWELL_VISIBLE = 0.75
-
     def bring_post_into_dwell_view(self, index: int) -> None:
         """Bring ``post-card[index]`` into view the way a reader settles on it:
-        whole where it fits, and at least at long-dwell visibility.
+        whole where it fits, and so at least at long-dwell visibility
+        (``fauna_core::scoring::cues::CUE_LONG_DWELL_VISIBLE_PM``) — the
+        base driver's ``scroll_to`` contract (centre, whole element), on every
+        app. A placement that falls short shows as the dwell crediting no
+        long-dwell time (:meth:`accrue_dwell` names the card and its probe)."""
+        self.driver.scroll_to("post-card", index=index)
 
-        Every app's ``scroll_to`` centres the element (the base driver's
-        contract). windows' stops as soon as UIA calls the card on screen,
-        which can be a sliver of it, and the bridge's measured sibling
-        (``scroll_to_visible_fraction``) reads UIA's bounding rect, which UIA
-        clips to the viewport — a card 28 % in view measured whole on
-        2026-11-04 and was never scrolled. So on windows the card is placed
-        through the app's own pixel step (``feed_cue_scroll_by``), from the
-        unclipped geometry its capture measured — the list is not
-        virtualized, so every card is in the probe — and the share that
-        shows is asserted from the step's own probe."""
-        if not self.driver.is_windows():
-            self.driver.scroll_to("post-card", index=index)
-            return
+    def post_card_visible_share(self, index: int) -> float:
+        """The share of ``post-card[index]``'s own height that shows in the
+        feed's viewport, from the app's own capture geometry — a fresh sample
+        of the laid-out list, nothing moved (every app but tui, whose step is
+        a focus stop). This is the app's measurement, never a driver's: on
+        windows the bridge reads UIA rects clipped to the viewport, which
+        cannot tell a sliver from a whole card, so a witness of a driver's
+        placement reads the share here."""
         post_id = self._post_id_of_card(index)
         _, probe = self._scroll_feed_by(0)  # a fresh measurement, nothing moved
+        return self._visible_share(probe, post_id)
+
+    def place_post_at_bottom_edge_by_pixel_step(self, index: int, fraction: float) -> float:
+        """Leave ``post-card[index]`` with about ``fraction`` of its height
+        above the feed's bottom edge through the app's own pixel step
+        (``feed_cue_scroll_by``; every app but tui), and return the share the
+        step's own sample measured. The driver-independent twin of
+        :meth:`place_post_at_bottom_edge` — a witness of the driver's own
+        scroll starts from a card it did not place."""
+        post_id = self._post_id_of_card(index)
+        _, probe = self._scroll_feed_by(0)
         card = self._probe_card(probe, post_id)
+        _, end = probe["band"]
+        _, probe = self._scroll_feed_by(card["top"] - (end - fraction * card["height"]))
+        return self._visible_share(probe, post_id)
+
+    @classmethod
+    def _visible_share(cls, probe: dict, post_id: str) -> float:
+        card = cls._probe_card(probe, post_id)
         start, end = probe["band"]
-        _, probe = self._scroll_feed_by(
-            (card["top"] + card["height"] / 2) - (start + end) / 2
-        )
-        card = self._probe_card(probe, post_id)
         shown = min(card["top"] + card["height"], end) - max(card["top"], start)
-        visible = max(0.0, shown) / card["height"]
-        assert visible >= self.CUE_LONG_DWELL_VISIBLE, (
-            f"centring post-card[{index}] ({post_id[:12]}) left it only "
-            f"{visible:.0%} visible — under the long-dwell gate: {probe!r}"
-        )
+        return max(0.0, shown) / card["height"]
 
     @staticmethod
     def _probe_card(probe: dict, post_id: str) -> dict:
@@ -1651,6 +1657,52 @@ class FeedActions:
             if p.get("post_id") == post_id:
                 return i
         return -1
+
+    def card_index_by_id(self, post_id: str, timeout: float = RPC_ROUNDTRIP_S) -> int:
+        """The index to aim a scoped card click at for the post ``post_id``:
+        :meth:`post_index_by_id`'s answer, but only once the RENDERED card at
+        that index carries ``post_id`` itself.
+
+        The state list agrees with the rendered cards only once the render has
+        caught up. On a fresh sign-in, a reload landing or a repost row joining
+        the window can shift the cards between the read and the tap, and a click
+        aimed by the state index alone then lands on the neighbouring card: the
+        windows archive-import interaction red, where a follower's like landed
+        on the gated post beside the target, no error anywhere. So the card's
+        own identity is read: linux's ``post`` attr, windows' HelpText, web's
+        ``data-post-id``. An app that exposes none answers the state's index
+        unchecked, as before. Fails, naming what the state and the card said,
+        when no rendered card shows the post within ``timeout``.
+        """
+        def card_identity(index: int) -> str | None:
+            for attr in ("post", "post-id"):
+                try:
+                    shown = self.driver.get_attr("post-card", attr, index=index)
+                except Exception:  # noqa: BLE001 — an app without the attr
+                    shown = None
+                if shown:
+                    return shown
+            return None
+
+        seen: list = []
+
+        def aligned():
+            index = self.post_index_by_id(post_id)
+            if index < 0:
+                seen[:] = [index, None]
+                return None
+            shown = card_identity(index)
+            seen[:] = [index, shown]
+            return (index,) if shown in (None, post_id) else None
+
+        found = wait_until(
+            aligned,
+            timeout,
+            diagnose=lambda: f"no rendered card shows post {post_id[:12]}: the state "
+            f"put it at card {seen[0] if seen else '?'}, which shows "
+            f"{(seen[1] or '')[:12]!r}",
+        )
+        return found[0]
 
     def like_landing_diagnosis(self, index: int, post_id: str) -> str:
         """Failure-path only (e2e rule 6): where a like aimed at card ``index``

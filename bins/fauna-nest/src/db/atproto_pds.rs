@@ -2417,14 +2417,17 @@ impl CacheDb {
         // The ceiling is per bucket, and a bucket is (account-or-unassigned,
         // start) — `IS` rather than `=` so the unassigned pool and the browser
         // start (both NULL) are buckets of their own rather than matching
-        // nothing.
+        // nothing. Only live rows count and are evicted: an expired approved
+        // row the sweep keeps until its code can no longer be redeemed is no
+        // longer a question, and evicting it would drop the record its
+        // consent-time grant is swept by.
         let start_column = start.column();
         let actor_column = actor_id.as_ref().map(|a| a.to_vec());
         let over: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM atproto_consent_requests
-                  WHERE actor_id IS ?1 AND consent_start IS ?2",
-                rusqlite::params![&actor_column, start_column],
+                  WHERE actor_id IS ?1 AND consent_start IS ?2 AND expires_at > ?3",
+                rusqlite::params![&actor_column, start_column, now],
                 |row| row.get(0),
             )
             .context("count pending consent requests")?;
@@ -2433,9 +2436,9 @@ impl CacheDb {
                 .execute(
                     "DELETE FROM atproto_consent_requests WHERE consent_id = (
                          SELECT consent_id FROM atproto_consent_requests
-                          WHERE actor_id IS ?1 AND consent_start IS ?2
+                          WHERE actor_id IS ?1 AND consent_start IS ?2 AND expires_at > ?3
                           ORDER BY expires_at ASC LIMIT 1)",
-                    rusqlite::params![&actor_column, start_column],
+                    rusqlite::params![&actor_column, start_column, now],
                 )
                 .context("evict oldest pending consent request")?;
             if evicted == 0 {
@@ -2841,6 +2844,19 @@ impl CacheDb {
     }
 }
 
+/// How long past its `expires_at` an approved consent's code may still be
+/// redeemed: a browser flow outlives its row by
+/// [`crate::oauth_as_ceremony::AUTHORIZE_FLOW_SLACK_SECS`] and may release its
+/// code at the very end of it, and the code lives
+/// [`crate::oauth_as_ceremony::AUTH_CODE_TTL_SECS`] more (a polled start's
+/// flow ends with the row, inside both). Until then an approved row is kept
+/// and its consent-time grant is not swept — the principal row a redemption
+/// mints may still arrive.
+pub(crate) const CONSENT_REDEMPTION_GRACE_MILLIS: i64 =
+    (crate::oauth_as_ceremony::AUTHORIZE_FLOW_SLACK_SECS
+        + crate::oauth_as_ceremony::AUTH_CODE_TTL_SECS)
+        * 1000;
+
 /// Drop every expired consent request — and, first, the capability grants an
 /// approved one left wrapped to a holder no principal row names
 /// (`third-party-kinds.md` § The record doors: the approving device mints the
@@ -2851,7 +2867,25 @@ impl CacheDb {
 /// selected by the expired request's attested holder; a holder some row of
 /// the account names — the ceremony was redeemed, or an earlier one was — is
 /// that row's, and kept. Answers how many requests were dropped.
+///
+/// **Only what the consent minted.** The attested holder key is the client's
+/// word, checked only when `/oauth/token` mints the principal row — so an
+/// unredeemed ceremony may name any key, an enrolled bridge's included. A
+/// grant is therefore ended only when it was minted to that holder between
+/// the request's opening and its approval: the window in which the approving
+/// device's consent-time mint lands (mint before resolve). A grant the
+/// account already held to that key — the mail bridge's, the paywall
+/// holder's — predates the card and is never this sweep's. Grants are stamped in seconds, the request in milliseconds;
+/// the window is widened to whole seconds on both ends.
+///
+/// **Not while its code may still be redeemed.** An approved request is
+/// settled — its grants swept, its row dropped — only
+/// [`CONSENT_REDEMPTION_GRACE_MILLIS`] after `expires_at`, so an approval made
+/// just before expiry keeps both the grant and the row its flow reads until
+/// the redemption could no longer come. An unapproved one goes at
+/// `expires_at`, as before.
 fn sweep_expired_consents(conn: &rusqlite::Connection, now: i64) -> Result<usize> {
+    let settled = now.saturating_sub(CONSENT_REDEMPTION_GRACE_MILLIS);
     let ended = conn
         .execute(
             "DELETE FROM capability_grants
@@ -2859,12 +2893,14 @@ fn sweep_expired_consents(conn: &rusqlite::Connection, now: i64) -> Result<usize
                     SELECT 1 FROM atproto_consent_requests c
                      WHERE c.expires_at <= ?1 AND c.approved = 1
                        AND c.actor_id = capability_grants.owner_actor_id
-                       AND c.holder_x25519 = capability_grants.holder_pubkey)
+                       AND c.holder_x25519 = capability_grants.holder_pubkey
+                       AND capability_grants.created_at >= c.created_at / 1000
+                       AND capability_grants.created_at <= (c.resolved_at + 999) / 1000)
                 AND NOT EXISTS (
                     SELECT 1 FROM third_party_principals p
                      WHERE p.actor_id = capability_grants.owner_actor_id
                        AND p.holder_x25519 = capability_grants.holder_pubkey)",
-            rusqlite::params![now],
+            rusqlite::params![settled],
         )
         .context("end unredeemed consent grants")?;
     if ended > 0 {
@@ -2874,8 +2910,9 @@ fn sweep_expired_consents(conn: &rusqlite::Connection, now: i64) -> Result<usize
         );
     }
     conn.execute(
-        "DELETE FROM atproto_consent_requests WHERE expires_at <= ?1",
-        rusqlite::params![now],
+        "DELETE FROM atproto_consent_requests
+          WHERE expires_at <= ?1 AND (approved IS NOT 1 OR expires_at <= ?2)",
+        rusqlite::params![now, settled],
     )
     .context("sweep expired consent requests")
 }
@@ -5186,11 +5223,18 @@ mod tests {
         {
             let conn = db.conn.lock().await;
             for (i, holder) in [orphan, redeemed, unrelated].iter().enumerate() {
+                // Minted while the card was up: inside the window the sweep
+                // reads as this consent's own mint.
                 conn.execute(
                     "INSERT INTO capability_grants
                         (owner_actor_id, grant_id, holder_pubkey, blob, epoch_end, created_at)
-                     VALUES (?1, ?2, ?3, x'00', 0, 0)",
-                    rusqlite::params![&ACTOR[..], &[i as u8; 16][..], &holder[..]],
+                     VALUES (?1, ?2, ?3, x'00', 0, ?4)",
+                    rusqlite::params![
+                        &ACTOR[..],
+                        &[i as u8; 16][..],
+                        &holder[..],
+                        now_epoch_millis() / 1000
+                    ],
                 )
                 .unwrap();
             }
@@ -5203,9 +5247,8 @@ mod tests {
                 rusqlite::params![&ACTOR[..], &redeemed[..]],
             )
             .unwrap();
-            conn.execute("UPDATE atproto_consent_requests SET expires_at = 0", [])
-                .unwrap();
         }
+        expire_past_redemption(&db).await;
         assert_eq!(
             db.sweep_expired_atproto_consent_requests().await.unwrap(),
             2
@@ -5220,6 +5263,192 @@ mod tests {
             .collect::<std::result::Result<_, _>>()
             .unwrap();
         assert_eq!(left, vec![redeemed.to_vec(), unrelated.to_vec()]);
+    }
+
+    /// Push every consent row's expiry far enough back that its code can no
+    /// longer be redeemed, so the sweep settles it.
+    async fn expire_past_redemption(db: &CacheDb) {
+        let settled = now_epoch_millis() - CONSENT_REDEMPTION_GRACE_MILLIS - 1;
+        db.conn
+            .lock()
+            .await
+            .execute(
+                "UPDATE atproto_consent_requests SET expires_at = ?1",
+                rusqlite::params![settled],
+            )
+            .unwrap();
+    }
+
+    /// Open one approved browser consent attesting `holder` for [`ACTOR`].
+    async fn approve_consent_attesting(db: &CacheDb, holder: [u8; 32]) -> ConsentRequestRow {
+        let row = db
+            .open_atproto_consent_request_for(
+                ConsentStartKind::Browser,
+                Some(ACTOR),
+                "https://app.example/client-metadata.json",
+                None,
+                "fauna:records:rw:ext.app.example.*",
+                &[],
+                &ConsentBinding {
+                    attested: crate::db::third_party_principals::AttestedKeys {
+                        holder_x25519: Some(holder),
+                        writer_ed25519: None,
+                    },
+                    fauna_manifest: None,
+                },
+                TTL,
+            )
+            .await
+            .unwrap();
+        db.resolve_atproto_consent_request(&row.consent_id, &ACTOR, true)
+            .await
+            .unwrap()
+            .unwrap()
+    }
+
+    async fn put_grant(db: &CacheDb, id: u8, holder: [u8; 32], created_at_secs: i64) {
+        db.conn
+            .lock()
+            .await
+            .execute(
+                "INSERT INTO capability_grants
+                    (owner_actor_id, grant_id, holder_pubkey, blob, epoch_end, created_at)
+                 VALUES (?1, ?2, ?3, x'00', 0, ?4)",
+                rusqlite::params![&ACTOR[..], &[id; 16][..], &holder[..], created_at_secs],
+            )
+            .unwrap();
+    }
+
+    async fn grant_ids(db: &CacheDb) -> Vec<u8> {
+        let conn = db.conn.lock().await;
+        let mut stmt = conn
+            .prepare("SELECT grant_id FROM capability_grants ORDER BY grant_id")
+            .unwrap();
+        stmt.query_map([], |r| r.get::<_, Vec<u8>>(0))
+            .unwrap()
+            .map(|id| id.unwrap()[0])
+            .collect()
+    }
+
+    /// **The sweep ends only what the consent minted**
+    /// (`third-party-kinds.md` § The record doors). A third-party app attests
+    /// the X25519 key of a bridge enrolled on the nest — the mail bridge, the
+    /// web paywall's holder — the user approves, the app never redeems, and
+    /// the request expires: the next consent open must leave the account's
+    /// grants to that bridge, minted before the card was shown, untouched. Only
+    /// the grant minted while the card was up — the consent-time mint — ends.
+    /// Mutation: drop the mint-time window from `sweep_expired_consents` →
+    /// the bridge's own grant goes too and this reds.
+    #[tokio::test]
+    async fn an_unredeemed_consent_attesting_a_bridge_key_spares_the_bridges_grants() {
+        let db = CacheDb::open_in_memory().unwrap();
+        let bridge = [0xB1; 32];
+        db.conn
+            .lock()
+            .await
+            .execute(
+                "INSERT INTO bridge_service_users
+                    (ed25519_pubkey, x25519_pubkey, role, bridge_id, status, created_at)
+                 VALUES (?1, ?2, 'mda', 'mail', 'approved', 0)",
+                rusqlite::params![&[0xB0u8; 32][..], &bridge[..]],
+            )
+            .unwrap();
+        let before_card = now_epoch_millis() / 1000 - 3600;
+        put_grant(&db, 1, bridge, before_card).await;
+        let approved = approve_consent_attesting(&db, bridge).await;
+        // The consent-time mint, between the card opening and the approval.
+        put_grant(&db, 2, bridge, approved.created_at / 1000).await;
+        expire_past_redemption(&db).await;
+
+        // Another consent opening runs the sweep.
+        approve_consent_attesting(&db, [0xC1; 32]).await;
+
+        assert_eq!(grant_ids(&db).await, vec![1]);
+    }
+
+    /// **A renew while the card is up does not make an older grant the
+    /// consent's**. The account holds a grant to the
+    /// bridge's key from before the card; while the card is up an app renews it
+    /// (`fauna.capabilities.renew` re-stores the same `grant_id` through
+    /// [`CacheDb::put_capability_grant`]); the user approves, the app never
+    /// redeems, the grace passes. The bridge's grant must survive: a replace
+    /// keeps the row's first `created_at`, so the sweep's mint-time window
+    /// still reads it as predating the card. Mutation: stamp `created_at = now`
+    /// on a replace → the renewed grant reads as minted inside the window and
+    /// this reds.
+    #[tokio::test]
+    async fn a_bridge_grant_renewed_while_the_card_is_up_survives_the_sweep() {
+        let db = CacheDb::open_in_memory().unwrap();
+        let bridge = [0xB2; 32];
+        let grant_id = [7u8; 16];
+        db.put_capability_grant(&ACTOR, &grant_id, &bridge, i64::MAX, b"first")
+            .await
+            .unwrap();
+        // Back-date the first mint to well before the card.
+        db.conn
+            .lock()
+            .await
+            .execute(
+                "UPDATE capability_grants SET created_at = ?1",
+                rusqlite::params![now_epoch_millis() / 1000 - 3600],
+            )
+            .unwrap();
+        approve_consent_attesting(&db, bridge).await;
+        // The renew, inside the card's window: same grant id, new blob.
+        db.put_capability_grant(&ACTOR, &grant_id, &bridge, i64::MAX, b"renewed")
+            .await
+            .unwrap();
+        expire_past_redemption(&db).await;
+
+        // Another consent opening runs the sweep.
+        approve_consent_attesting(&db, [0xC2; 32]).await;
+
+        assert_eq!(grant_ids(&db).await, vec![7]);
+        assert_eq!(
+            db.get_capability_grant(&ACTOR, &grant_id).await.unwrap(),
+            Some(b"renewed".to_vec())
+        );
+    }
+
+    /// **An approval whose code may still be redeemed keeps its grant**. An approval made just before
+    /// `expires_at` releases a code that may be exchanged up to
+    /// [`CONSENT_REDEMPTION_GRACE_MILLIS`] later; a sweep in that gap must
+    /// neither end the consent-time grant nor drop the row it is read from.
+    /// Once the grace has passed, the unredeemed grant ends as before.
+    /// Mutation: sweep an approved row at `expires_at` → this reds.
+    #[tokio::test]
+    async fn an_approval_whose_code_may_still_be_redeemed_keeps_its_grant() {
+        let db = CacheDb::open_in_memory().unwrap();
+        let holder = [0xD1; 32];
+        let approved = approve_consent_attesting(&db, holder).await;
+        put_grant(&db, 3, holder, approved.created_at / 1000).await;
+        db.conn
+            .lock()
+            .await
+            .execute(
+                "UPDATE atproto_consent_requests SET expires_at = ?1",
+                rusqlite::params![now_epoch_millis() - 1],
+            )
+            .unwrap();
+
+        assert_eq!(
+            db.sweep_expired_atproto_consent_requests().await.unwrap(),
+            0
+        );
+        assert_eq!(grant_ids(&db).await, vec![3]);
+        assert!(
+            db.get_atproto_consent_request(&approved.consent_id)
+                .await
+                .unwrap()
+                .is_some()
+        );
+
+        expire_past_redemption(&db).await;
+        assert_eq!(
+            db.sweep_expired_atproto_consent_requests().await.unwrap(),
+            1
+        );
+        assert!(grant_ids(&db).await.is_empty());
     }
 
     /// A manifest past the document cap is refused — the table bounds what it

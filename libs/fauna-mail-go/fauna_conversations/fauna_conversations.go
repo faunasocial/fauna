@@ -746,6 +746,15 @@ func uniffiCheckChecksums() {
 	}
 	{
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_fauna_conversations_checksum_func_sort_order_name()
+		})
+		if checksum != 53782 {
+			// If this happens try cleaning and rebuilding your project
+			panic("fauna_conversations: uniffi_fauna_conversations_checksum_func_sort_order_name: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_fauna_conversations_checksum_method_conversationsmanager_accept_add_participant_chip()
 		})
 		if checksum != 28076 {
@@ -13290,6 +13299,16 @@ func NextSortOrder(current SortOrder) SortOrder {
 	return FfiConverterSortOrderINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) RustBufferI {
 		return GoRustBuffer{
 			inner: C.uniffi_fauna_conversations_fn_func_next_sort_order(FfiConverterSortOrderINSTANCE.Lower(current), _uniffiStatus),
+		}
+	}))
+}
+
+// [`SortOrder::name`] over UniFFI — the stable label a cycle-button's
+// automation value reads (Swift `ConversationsUI.sortLabel` hand-wrote it).
+func SortOrderName(order SortOrder) string {
+	return FfiConverterStringINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) RustBufferI {
+		return GoRustBuffer{
+			inner: C.uniffi_fauna_conversations_fn_func_sort_order_name(FfiConverterSortOrderINSTANCE.Lower(order), _uniffiStatus),
 		}
 	}))
 }

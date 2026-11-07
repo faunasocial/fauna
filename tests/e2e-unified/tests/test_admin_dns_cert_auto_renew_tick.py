@@ -5,13 +5,13 @@ device renews a managed or delegated domain's certificate with no admin tap").
 The auto-renew SETTING beside it (default on, the toggle) is
 ``test_admin_dns_cert_auto_renew.py``'s.
 
-**What is real.** The tick is the app's production loop
-(`admin::spawn_auto_renew_cadence` over the shared `auto_renew_scan` /
-`auto_renew_issue`); only its six-hour WAIT is raced, by the compile-gated
+**What is real.** The tick is the app's production loop (tui's
+`admin::spawn_auto_renew_cadence`, each app's own cadence over the shared
+`auto_renew_scan` / `auto_renew_issue`); only its six-hour WAIT is raced, by the compile-gated
 `auto_renew_wake` poke (convention 14, `fauna_e2e_agent::AUTO_RENEW_WAKE`). The
 order is a real ACME order against the harness's pebble CA, reached through the
 compile-gated e2e ACME directory seed on the managed `IssueCert` path
-(`e2e-automation-surface-gating.md` § The ACME directory seed); pebble validates
+(`e2e-gated-seeds.md` § The ACME directory seed); pebble validates
 the DNS-01 challenge against the stack's fake name server, which serves the TXT
 because the app's fake DNS provider published it there (an RFC 2136 UPDATE
 over TCP to the seed's name server). The issued certificate is sealed to the nest,
@@ -30,14 +30,15 @@ precedent, ``test_admin_dns_managed.py``). Delegated domains reach the same tick
 through the same `IssueCert`; their witness would need a CNAME in the fake name
 server, which it does not serve, so this file walks the managed shape.
 
-**Which apps.** tui leads; linux, android, web, macos and ios carry their own
-`auto_renew_wake` leg (linux's `loop_wake::LoopWake`, android's debug
+**Which apps.** tui leads; linux, android, web, macos, ios and windows carry
+their own `auto_renew_wake` leg (linux's `loop_wake::LoopWake`, android's debug
 `AutoRenewWake`, web's `#lib/loop-wake` behind `__FAUNA_E2E_AUTOMATION__`, the
 tick itself `#lib/cert-auto-renew` in the SPA shell, its pass line on the console
 ring; macos + ios share FaunaKit's `DnsAutoRenewCadence` and its `#if DEBUG`
-`CadenceWake`; their walk waits on a pebble route to the docker-less macOS host), and windows rides on the same shared seed once it has its
-leg. Web reads the seed through
-*The web order* (`e2e-gated-seeds.md`).
+`CadenceWake`; windows' `AutoRenewWake` under `#if DEBUG || FAUNA_E2E_AGENT`,
+its pass line in the launch's own log file). The walks on macos, ios and windows
+wait on a pebble route to the docker-less macOS and Windows.
+Web reads the seed through *The web order* (`e2e-gated-seeds.md`).
 """
 
 import secrets
@@ -57,6 +58,7 @@ pytestmark = [
     pytest.mark.web,
     pytest.mark.macos,
     pytest.mark.ios,
+    pytest.mark.windows,
     # Starts pebble + the fake name server for the session and seeds
     # FAUNA_E2E_ACME_* into every app launch.
     pytest.mark.acme_pebble,

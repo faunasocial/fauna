@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
+using FaunaApp.Core.Helpers;
 using FaunaApp.Core.Models;
 using FaunaApp.Core.Services;
 using uniffi.fauna_ffi;
@@ -475,16 +476,9 @@ public partial class BridgesViewModel : ViewModelBase
     private Task<uniffi.fauna_client_connected_apps.IConnectedAppsMachine> BuildCardMachineAsync() =>
         _cardMachineFactory is { } factory
             ? factory()
-            : _rpc.BuildConnectedAppsMachineAsync(new NoCardObserver(), null);
-
-    /// <summary>The bridges page paints the cards from its own re-read, so the machine's
-    /// change notifications have no listener here.</summary>
-    private sealed class NoCardObserver : uniffi.fauna_client_connected_apps.ConnectedAppsObserver
-    {
-        public void OnChanged()
-        {
-        }
-    }
+            // The bridges page paints the cards from its own re-read, so the machine's
+            // change notifications have no listener here.
+            : _rpc.BuildConnectedAppsMachineAsync(new UnobservedConnectedApps(), null);
 
     /// <summary>A plugin card's settings row committed a value: <c>fauna.plugins.set_settings</c>
     /// for this account's own setting, then the cards are re-read (nest-side clamping means

@@ -295,6 +295,20 @@ pub struct FeedManager<R> {
     /// was torn down and remounted idle mid-tap (render-model.md § D6c → *Inline
     /// playback*). In-memory only.
     resolved_media: RwLock<HashMap<String, ResolvedMedia>>,
+    /// The viewer's own acts folded into the loaded window — a like's or
+    /// repost's post-act counters, the per-viewer pair, a reaction's carrier, a
+    /// post taken out of the window — keyed by the post's hex id, each stamped
+    /// with the [`reload_gen`](Self::reload_gen) current when it folded.
+    /// [`reapply_acted`](Self::reapply_acted) re-folds them onto every page a
+    /// reload or `load_more` lands, because a reload that BEGAN before the act
+    /// may have fetched before it, and committing that page bare undoes the act
+    /// on screen with no error and no later reload to put it right
+    /// (`ui/feed.md` § Interaction bar → *A reload already fetching does not
+    /// undo the act*). An act stamped below a committing reload's generation is
+    /// dropped: that reload began after the nest had answered the act, so its
+    /// page carries it. Written in the same `state` write as the fold it
+    /// records (lock order state → acted), so no commit falls between the two.
+    acted: RwLock<HashMap<String, ActedFold>>,
     /// Per-post remote-image reveal set (render-model.md § D3) — the feed twin of
     /// `ConversationsManager`'s set, keyed by the post's hex id. The single source
     /// of truth for "the user opted into loading this post's remote images";
@@ -784,6 +798,55 @@ struct ResolvedMedia {
     authoring_origin: AuthoringOriginStatus,
 }
 
+/// One post's entry in [`FeedManager::acted`]: what the viewer's own acts
+/// folded into its row since the reload generation `stamp`, each field `None`
+/// (or empty) when no act touched it.
+#[derive(Clone, Default)]
+struct ActedFold {
+    /// The `reload_gen` current when the newest of these acts folded.
+    stamp: u64,
+    /// The nest's post-act counters and reaction tally ([`fold_counts`]).
+    counts: Option<fauna_protocol::posts::PostEngagementCounts>,
+    viewer_liked: Option<bool>,
+    viewer_repost_id: Option<Option<String>>,
+    /// Per emoji, the viewer's own reaction post id (`None` = taken back).
+    viewer_react: Vec<(String, Option<String>)>,
+    /// The post left the window (deleted, or the viewer's own repost row
+    /// `unrepost` dropped).
+    removed: bool,
+}
+
+impl ActedFold {
+    fn fold_onto(&self, p: &mut PostSummary) {
+        if let Some(counts) = &self.counts {
+            fold_counts(p, counts);
+        }
+        if let Some(liked) = self.viewer_liked {
+            p.viewer_liked = liked;
+        }
+        if let Some(repost_id) = &self.viewer_repost_id {
+            p.viewer_repost_id = repost_id.clone();
+        }
+        for (emoji, react_id) in &self.viewer_react {
+            for g in p.reactions.iter_mut().filter(|g| &g.emoji == emoji) {
+                g.viewer_react_id = react_id.clone();
+            }
+        }
+    }
+}
+
+/// Fold the nest's post-act counters into one row — the four counts and the
+/// per-emoji tally beside them, the nest's own projection for the caller
+/// (ruling 5). Shared by [`FeedManager::interact`]'s fold and the re-fold of
+/// [`ActedFold`], so the two cannot drift.
+fn fold_counts(p: &mut PostSummary, counts: &fauna_protocol::posts::PostEngagementCounts) {
+    p.like_count = counts.like_count;
+    p.reply_count = counts.reply_count;
+    p.repost_count = counts.repost_count;
+    p.quote_count = counts.quote_count;
+    p.reactions = counts.reactions.iter().cloned().map(Into::into).collect();
+}
+
 impl<R: RpcRequester + Clone> FeedManager<R> {
     /// Construct over the WS-RPC transport `nest` and the local actor's 32-byte
     /// signing secret. The snapshot starts empty + `Loading`.
@@ -802,6 +865,7 @@ impl<R: RpcRequester + Clone> FeedManager<R> {
             observers: RwLock::new(Vec::new()),
             resolved_quotes: RwLock::new(HashMap::new()),
             resolved_media: RwLock::new(HashMap::new()),
+            acted: RwLock::new(HashMap::new()),
             revealed_remote: RwLock::new(HashSet::new()),
             unlock_purchase_requested: RwLock::new(HashSet::new()),
             resolved_previews: RwLock::new(HashMap::new()),
@@ -1594,6 +1658,8 @@ impl<R: RpcRequester + Clone> FeedManager<R> {
                     // Newly-paged posts arrive sealed; re-fold this reader's open
                     // unlocks so scrolling never reverts a post to its teaser.
                     self.reapply_unlocked(&mut s.posts);
+                    // A page fetched before a delete would re-append the post.
+                    self.reapply_acted(generation, &mut s.posts);
                     s.has_more = has_more;
                 }
                 {
@@ -1733,6 +1799,9 @@ impl<R: RpcRequester + Clone> FeedManager<R> {
                     // freshly-fetched list arrives sealed and would otherwise revert
                     // an open unlock to the teaser (the iOS reload-revert).
                     self.reapply_unlocked(&mut s.posts);
+                    // And the viewer's own acts since this reload began — its
+                    // page may have been fetched before them (`acted`).
+                    self.reapply_acted(generation, &mut s.posts);
                     s.has_more = has_more;
                     s.status = FeedStatus::Loaded;
                     // A sealed scorer that failed to load is a *non-fatal*
@@ -2445,15 +2514,10 @@ impl<R: RpcRequester + Clone> FeedManager<R> {
                 .chain(deep_linked_post.iter_mut())
                 .filter(|p| p.post_id == post_id)
             {
-                p.like_count = counts.like_count;
-                p.reply_count = counts.reply_count;
-                p.repost_count = counts.repost_count;
-                p.quote_count = counts.quote_count;
-                // The per-emoji tally rides beside the four, the nest's own
-                // post-act projection for the caller (ruling 5).
-                p.reactions = counts.reactions.iter().cloned().map(Into::into).collect();
+                fold_counts(p, &counts);
                 changed = true;
             }
+            self.record_act(&post_id, |a| a.counts = Some(counts));
         }
         // A post the window does not hold needs no repaint — and `notify` is not
         // free on every app (it walks observers and re-renders a frame).
@@ -2662,6 +2726,7 @@ impl<R: RpcRequester + Clone> FeedManager<R> {
                     {
                         s.deep_linked_post = None;
                     }
+                    self.record_act(&repost_id, |a| a.removed = true);
                 }
                 self.set_viewer_repost(&post_id, None);
                 // Ruling 3 (`archive-import.md` § Compatibility → *Slice-3
@@ -2688,6 +2753,7 @@ impl<R: RpcRequester + Clone> FeedManager<R> {
                 p.viewer_repost_id = repost_id.clone();
                 changed = true;
             }
+            self.record_act(post_id, |a| a.viewer_repost_id = Some(repost_id));
         }
         if changed {
             self.notify();
@@ -2789,6 +2855,10 @@ impl<R: RpcRequester + Clone> FeedManager<R> {
                 g.viewer_react_id = react_id.clone();
                 changed = true;
             }
+            self.record_act(post_id, |a| {
+                a.viewer_react.retain(|(e, _)| e != emoji);
+                a.viewer_react.push((emoji.to_string(), react_id));
+            });
         }
         if changed {
             self.notify();
@@ -2868,6 +2938,7 @@ impl<R: RpcRequester + Clone> FeedManager<R> {
                 p.viewer_liked = liked;
                 changed = true;
             }
+            self.record_act(post_id, |a| a.viewer_liked = Some(liked));
         }
         if changed {
             self.notify();
@@ -3045,6 +3116,8 @@ impl<R: RpcRequester + Clone> FeedManager<R> {
             {
                 s.deep_linked_post = None;
             }
+            // Nor come back on a page fetched before the delete.
+            self.record_act(&post_id, |a| a.removed = true);
         }
         self.notify();
         Ok(())
@@ -4605,6 +4678,48 @@ impl<R: RpcRequester + Clone> FeedManager<R> {
                 // reload restores the reader's photos and not merely their text.
                 fold_unlocked_body(p, full, quote.as_ref());
                 self.fold_room_post_labels(p);
+            }
+        }
+    }
+
+    /// Record one of the viewer's own acts on `post_id` in
+    /// [`acted`](Self::acted), stamped with the current reload generation. An
+    /// entry stamped below it is reset first: the reload that claimed the
+    /// newer generation began after those acts were answered, so its page
+    /// carries them. Call it inside the `state` write that folds the act (lock
+    /// order state → acted), never after it.
+    fn record_act(&self, post_id: &str, act: impl FnOnce(&mut ActedFold)) {
+        use std::sync::atomic::Ordering;
+        let stamp = self.reload_gen.load(Ordering::SeqCst);
+        let mut acted = self.acted.write().unwrap();
+        let entry = acted.entry(post_id.to_string()).or_default();
+        if entry.stamp < stamp {
+            *entry = ActedFold {
+                stamp,
+                ..ActedFold::default()
+            };
+        }
+        act(entry);
+    }
+
+    /// Re-fold the viewer's own acts ([`acted`](Self::acted)) onto a landed
+    /// page — `reload`'s, committing under `generation`, or `load_more`'s
+    /// under the generation it pages — so a page fetched before an act does
+    /// not undo it: the counters and ♥ stay, a repost keeps its carrier, a
+    /// deleted post stays gone. First drops every act stamped below
+    /// `generation` (that reload began after the act was answered). A no-op,
+    /// one map read, when the viewer has acted on nothing since. Caller holds
+    /// the `state` write lock.
+    fn reapply_acted(&self, generation: u64, posts: &mut Vec<PostSummary>) {
+        let mut acted = self.acted.write().unwrap();
+        acted.retain(|_, a| a.stamp >= generation);
+        if acted.is_empty() {
+            return;
+        }
+        posts.retain(|p| !acted.get(&p.post_id).is_some_and(|a| a.removed));
+        for p in posts.iter_mut() {
+            if let Some(a) = acted.get(&p.post_id) {
+                a.fold_onto(p);
             }
         }
     }
@@ -9350,6 +9465,172 @@ mod tests {
         nest.push_page(vec![post("cc", 3)], None);
         block_on(m.refresh_current_feed());
         assert_eq!(m.snapshot().posts[0].post_id, "cc");
+    }
+
+    /// Start a reload that parks before its fetch, so the page the mock serves
+    /// it is the one queued NOW — a page fetched before whatever the caller
+    /// does next. Returns the parked reload for [`release_and_land`].
+    fn park_a_reload_on<'a>(
+        m: &'a FeedManager<Arc<MockNest>>,
+        nest: &MockNest,
+        stale_page: Vec<FeedPostItem>,
+    ) -> std::pin::Pin<Box<impl std::future::Future<Output = ()> + 'a>> {
+        nest.push_page(stale_page, None);
+        m.hold_next_reload_for_test();
+        let mut refresh = Box::pin(m.refresh_current_feed());
+        assert!(
+            poll_once(&mut refresh).is_pending(),
+            "the reload parks before its fetch"
+        );
+        refresh
+    }
+
+    fn release_and_land(
+        m: &FeedManager<Arc<MockNest>>,
+        mut refresh: std::pin::Pin<Box<impl std::future::Future<Output = ()>>>,
+    ) {
+        m.release_held_reload_for_test();
+        assert!(
+            poll_once(&mut refresh).is_ready(),
+            "released, the reload commits"
+        );
+        let (started, _, committed) = m.reload_counts();
+        assert_eq!(
+            started, committed,
+            "the stale page committed — it was not superseded"
+        );
+    }
+
+    /// `ui/feed.md` § Interaction bar → *A reload already fetching does not undo
+    /// the act*. A like folds the nest's post-act counters and the ♥ into the
+    /// loaded window; a reload that began BEFORE the like then lands a page
+    /// fetched before it. Committed bare, that page puts the count back down and
+    /// the ♥ back out — no error, and no further reload comes to correct it (the
+    /// windows red of the archive-import interaction journey: `like #2 … did not
+    /// land; error=''`, the count stuck at 1). An archive-imported target, as
+    /// there: native, so the like toggles.
+    #[test]
+    fn a_like_folded_while_a_reload_fetches_survives_the_page_fetched_before_it() {
+        let target = "cc".repeat(32);
+        let imported = || {
+            let mut p = post(&target, 2);
+            p.source = fauna_core::source::FACEBOOK.into();
+            p.like_count = 1;
+            p
+        };
+        let nest = MockNest::arc();
+        nest.push_page(vec![imported()], None);
+        let m = mgr(nest.clone());
+        block_on(m.select_feed(None));
+
+        let refresh = park_a_reload_on(&m, &nest, vec![imported()]);
+        nest.set_interact_counts(2, 0, 0, 0);
+        block_on(m.like(target.clone())).expect("like ok");
+        assert_eq!(
+            m.snapshot().posts[0].like_count,
+            2,
+            "the like folds at once"
+        );
+        release_and_land(&m, refresh);
+
+        let snap = m.snapshot();
+        let row = snap.find_post(&target).expect("the post stays listed");
+        assert_eq!(
+            row.like_count, 2,
+            "a page fetched before the like must not put its count back down"
+        );
+        assert!(row.viewer_liked, "nor put the ♥ back out");
+
+        // A reload that began AFTER the like reads the nest's own answer: the
+        // re-fold is spent, so a later count (someone else liked too) shows.
+        let mut later = imported();
+        later.like_count = 3;
+        later.viewer_liked = true;
+        nest.push_page(vec![later], None);
+        block_on(m.refresh_current_feed());
+        let snap = m.snapshot();
+        let row = snap.find_post(&target).unwrap();
+        assert_eq!(
+            row.like_count, 3,
+            "a reload begun after the act is the truth"
+        );
+        assert!(row.viewer_liked);
+    }
+
+    /// The same rule for the other per-viewer half: an un-like folded while a
+    /// reload fetches stays un-liked over the page fetched before it.
+    #[test]
+    fn an_unlike_folded_while_a_reload_fetches_survives_the_page_fetched_before_it() {
+        let target = "cc".repeat(32);
+        let liked = || {
+            let mut p = post(&target, 2);
+            p.viewer_liked = true;
+            p.like_count = 1;
+            p
+        };
+        let nest = MockNest::arc();
+        nest.push_page(vec![liked()], None);
+        let m = mgr(nest.clone());
+        block_on(m.select_feed(None));
+
+        let refresh = park_a_reload_on(&m, &nest, vec![liked()]);
+        nest.set_interact_counts(0, 0, 0, 0);
+        block_on(m.like(target.clone())).expect("unlike ok");
+        release_and_land(&m, refresh);
+
+        let snap = m.snapshot();
+        let row = snap.find_post(&target).unwrap();
+        assert!(!row.viewer_liked, "the ♥ stays out");
+        assert_eq!(row.like_count, 0, "and the count stays down");
+    }
+
+    /// A repost folded while a reload fetches keeps its carrier: the toggle's
+    /// next tap must still name the repost to undo.
+    #[test]
+    fn a_repost_folded_while_a_reload_fetches_keeps_its_carrier() {
+        let target = "cc".repeat(32);
+        let nest = MockNest::arc();
+        nest.push_page(vec![post(&target, 2)], None);
+        let m = mgr(nest.clone());
+        block_on(m.select_feed(None));
+
+        let refresh = park_a_reload_on(&m, &nest, vec![post(&target, 2)]);
+        block_on(m.repost(target.clone())).expect("repost ok");
+        release_and_land(&m, refresh);
+
+        let snap = m.snapshot();
+        let row = snap.find_post(&target).unwrap();
+        assert_eq!(
+            row.viewer_repost_id.as_deref(),
+            Some("ab".repeat(32).as_str()),
+            "the carrier the repost folded survives the stale page"
+        );
+    }
+
+    /// A post deleted while a reload fetches stays gone: the page fetched
+    /// before the delete still lists it, and committing it bare would put a
+    /// post back on screen that the nest no longer has.
+    #[test]
+    fn a_post_deleted_while_a_reload_fetches_stays_gone() {
+        let gone = "cc".repeat(32);
+        let kept = "dd".repeat(32);
+        let page = || vec![post(&gone, 2), post(&kept, 1)];
+        let nest = MockNest::arc();
+        nest.push_page(page(), None);
+        let m = mgr(nest.clone());
+        block_on(m.select_feed(None));
+
+        let refresh = park_a_reload_on(&m, &nest, page());
+        block_on(m.delete_post(gone.clone())).expect("delete ok");
+        release_and_land(&m, refresh);
+
+        let ids: Vec<String> = m
+            .snapshot()
+            .posts
+            .iter()
+            .map(|p| p.post_id.clone())
+            .collect();
+        assert_eq!(ids, vec![kept], "the deleted post does not come back");
     }
 
     /// The `{started, completed, committed_gen}` reload triple behind

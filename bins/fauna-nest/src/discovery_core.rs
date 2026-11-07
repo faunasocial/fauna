@@ -542,7 +542,13 @@ pub async fn resolve_nest_core(domain: &str) -> Result<String, DiscoveryError> {
         return Err(DiscoveryError::InvalidDomain("IP addresses not allowed"));
     }
     let lower = domain.to_lowercase();
-    if lower == "localhost" || lower.ends_with(".local") || lower.ends_with(".internal") {
+    // The reserved trees that never name a nest on the internet: RFC 6761's
+    // `localhost` and RFC 6762's mDNS `.local` (the shared predicates), and
+    // ICANN's private-use `.internal`.
+    if fauna_core::resolve::is_localhost_name(domain)
+        || fauna_core::resolve::is_mdns_local_name(domain)
+        || lower.ends_with(".internal")
+    {
         return Err(DiscoveryError::InvalidDomain(
             "internal domains not allowed",
         ));

@@ -186,13 +186,37 @@ pub enum BindRefused {
     Changed,
 }
 
-/// The key a bound account's settings rest under in the plugin's state scope
-/// (`third-party.md` § The principal model → *Hosted principals*): one entry
-/// per account, `settings/<actor hex>`, which the plugin reads through its
-/// `state` import. Written only by the account's own
+/// The reserved prefix of the plugin's state keys under which each bound
+/// account's settings are read (they rest in `plugin_account_settings`, the
+/// account's own table, never in the plugin's scope). The plugin's own `state.put` / `state.delete`
+/// refuse it ([`PluginStateRefused::Reserved`]).
+pub const PLUGIN_SETTINGS_PREFIX: &str = "settings/";
+
+/// The key a bound account's settings are read under through the plugin's
+/// `state` import (`third-party.md` § The principal model → *Hosted
+/// principals*): `settings/<actor hex>`. Written only by the account's own
 /// `fauna.plugins.set_settings`, deleted with the account's binding.
 pub fn plugin_settings_key(actor_id: &[u8; 32]) -> String {
-    format!("settings/{}", hex::encode(actor_id))
+    format!("{PLUGIN_SETTINGS_PREFIX}{}", hex::encode(actor_id))
+}
+
+/// Why a plugin's own `state.put` / `state.delete` wrote nothing — answered
+/// to the plugin as the import's `err`, never a fault.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum PluginStateRefused {
+    /// The key is under [`PLUGIN_SETTINGS_PREFIX`]: a bound account's
+    /// settings, which only that account writes.
+    #[error("keys under \"settings/\" hold the bound accounts' own settings and are read-only")]
+    Reserved,
+    /// The write would take the plugin's state scope past
+    /// [`fauna_plugin_host::PLUGIN_STATE_MAX_BYTES`].
+    #[error("the plugin's state scope is full")]
+    Quota,
+    /// No install row names the principal — it was uninstalled (the plugin's
+    /// best-effort `stop` export runs after the uninstall commit), so a write
+    /// would land under a deleted principal id.
+    #[error("the plugin is no longer installed")]
+    NotInstalled,
 }
 
 /// What one uninstall ended.
@@ -1894,9 +1918,10 @@ impl CacheDb {
             return Err(anyhow!(BindRefused::NotBound));
         }
         tx.execute(
-            "INSERT INTO plugin_state (principal_id, key, value) VALUES (?1, ?2, ?3)
-             ON CONFLICT (principal_id, key) DO UPDATE SET value = excluded.value",
-            rusqlite::params![install_id, plugin_settings_key(actor_id), value],
+            "INSERT INTO plugin_account_settings (actor_id, principal_id, value)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT (actor_id, principal_id) DO UPDATE SET value = excluded.value",
+            rusqlite::params![&actor_id[..], install_id, value],
         )
         .context("write plugin settings")?;
         tx.commit().context("commit put plugin settings")?;
@@ -1910,8 +1935,15 @@ impl CacheDb {
         actor_id: &[u8; 32],
         install_id: &[u8],
     ) -> Result<Option<Vec<u8>>> {
-        self.plugin_state_get(install_id, &plugin_settings_key(actor_id))
-            .await
+        let conn = self.conn.lock().await;
+        conn.query_row(
+            "SELECT value FROM plugin_account_settings
+              WHERE actor_id = ?1 AND principal_id = ?2",
+            rusqlite::params![&actor_id[..], install_id],
+            |r| r.get(0),
+        )
+        .optional()
+        .context("read plugin settings")
     }
 
     /// Uninstall — the admin's one verb over a hosted plugin
@@ -1972,6 +2004,13 @@ impl CacheDb {
                 rusqlite::params![principal_id],
             )
             .context("delete plugin state")?;
+        // Every binding's settings went with its revoke above; a row no
+        // binding backs any longer goes with the plugin all the same.
+        tx.execute(
+            "DELETE FROM plugin_account_settings WHERE principal_id = ?1",
+            rusqlite::params![principal_id],
+        )
+        .context("delete plugin settings")?;
         ended.state_entries_deleted = u32::try_from(n).unwrap_or(u32::MAX);
         tx.execute(
             "DELETE FROM hosted_plugins WHERE principal_id = ?1",
@@ -1985,12 +2024,23 @@ impl CacheDb {
         Ok(Some(ended))
     }
 
-    /// `state.get` for a hosted plugin.
+    /// `state.get` for a hosted plugin. A key under
+    /// [`PLUGIN_SETTINGS_PREFIX`] reads that account's settings for the
+    /// plugin (`settings/<actor hex>`), anything else the plugin's own scope.
     pub async fn plugin_state_get(
         &self,
         principal_id: &[u8],
         key: &str,
     ) -> Result<Option<Vec<u8>>> {
+        if let Some(hex_actor) = key.strip_prefix(PLUGIN_SETTINGS_PREFIX) {
+            let Some(actor) = hex::decode(hex_actor)
+                .ok()
+                .and_then(|b| <[u8; 32]>::try_from(b).ok())
+            else {
+                return Ok(None);
+            };
+            return self.get_plugin_account_settings(&actor, principal_id).await;
+        }
         let conn = self.conn.lock().await;
         conn.query_row(
             "SELECT value FROM plugin_state WHERE principal_id = ?1 AND key = ?2",
@@ -2001,33 +2051,82 @@ impl CacheDb {
         .context("read plugin state")
     }
 
-    /// `state.put` for a hosted plugin — upsert.
+    /// `state.put` for a hosted plugin — upsert, refused under the reserved
+    /// settings prefix and past the scope's byte quota (keys plus values,
+    /// [`fauna_plugin_host::PLUGIN_STATE_MAX_BYTES`]), with nothing written.
     pub async fn plugin_state_put(
         &self,
         principal_id: &[u8],
         key: &str,
         value: &[u8],
-    ) -> Result<()> {
-        let conn = self.conn.lock().await;
-        conn.execute(
+    ) -> Result<std::result::Result<(), PluginStateRefused>> {
+        if key.starts_with(PLUGIN_SETTINGS_PREFIX) {
+            return Ok(Err(PluginStateRefused::Reserved));
+        }
+        let mut conn = self.conn.lock().await;
+        let tx = conn.transaction().context("begin plugin state write")?;
+        if !plugin_installed_in_tx(&tx, principal_id)? {
+            return Ok(Err(PluginStateRefused::NotInstalled));
+        }
+        let others: i64 = tx
+            .query_row(
+                "SELECT COALESCE(SUM(length(CAST(key AS BLOB)) + length(value)), 0)
+                   FROM plugin_state WHERE principal_id = ?1 AND key != ?2",
+                rusqlite::params![principal_id, key],
+                |r| r.get(0),
+            )
+            .context("measure plugin state")?;
+        let total = usize::try_from(others)
+            .unwrap_or(usize::MAX)
+            .saturating_add(key.len())
+            .saturating_add(value.len());
+        if total > fauna_plugin_host::PLUGIN_STATE_MAX_BYTES {
+            return Ok(Err(PluginStateRefused::Quota));
+        }
+        tx.execute(
             "INSERT INTO plugin_state (principal_id, key, value) VALUES (?1, ?2, ?3)
              ON CONFLICT (principal_id, key) DO UPDATE SET value = excluded.value",
             rusqlite::params![principal_id, key, value],
         )
         .context("write plugin state")?;
-        Ok(())
+        tx.commit().context("commit plugin state write")?;
+        Ok(Ok(()))
     }
 
-    /// `state.delete` for a hosted plugin.
-    pub async fn plugin_state_delete(&self, principal_id: &[u8], key: &str) -> Result<()> {
-        let conn = self.conn.lock().await;
-        conn.execute(
+    /// `state.delete` for a hosted plugin, refused under the reserved
+    /// settings prefix.
+    pub async fn plugin_state_delete(
+        &self,
+        principal_id: &[u8],
+        key: &str,
+    ) -> Result<std::result::Result<(), PluginStateRefused>> {
+        if key.starts_with(PLUGIN_SETTINGS_PREFIX) {
+            return Ok(Err(PluginStateRefused::Reserved));
+        }
+        let mut conn = self.conn.lock().await;
+        let tx = conn.transaction().context("begin plugin state delete")?;
+        if !plugin_installed_in_tx(&tx, principal_id)? {
+            return Ok(Err(PluginStateRefused::NotInstalled));
+        }
+        tx.execute(
             "DELETE FROM plugin_state WHERE principal_id = ?1 AND key = ?2",
             rusqlite::params![principal_id, key],
         )
         .context("delete plugin state")?;
-        Ok(())
+        tx.commit().context("commit plugin state delete")?;
+        Ok(Ok(()))
     }
+}
+
+/// Whether an install row still names `principal_id` — read inside the
+/// caller's transaction, so it serializes against uninstall's.
+fn plugin_installed_in_tx(tx: &rusqlite::Transaction<'_>, principal_id: &[u8]) -> Result<bool> {
+    tx.query_row(
+        "SELECT EXISTS (SELECT 1 FROM hosted_plugins WHERE principal_id = ?1)",
+        rusqlite::params![principal_id],
+        |r| r.get(0),
+    )
+    .context("check plugin install row")
 }
 
 /// The revoke cascade inside the caller's transaction — what
@@ -2052,12 +2151,13 @@ fn revoke_principal_in_tx(
         return Ok(None);
     };
     // A binding to a hosted plugin leaves no settings behind: the account's
-    // entry in the plugin's state scope goes with the row.
+    // settings row for the plugin goes with the binding row. (Account deletion
+    // and succession reach the same row through the actor-table registry.)
     tx.execute(
-        "DELETE FROM plugin_state
-          WHERE key = ?1
+        "DELETE FROM plugin_account_settings
+          WHERE actor_id = ?1
             AND principal_id IN (SELECT principal_id FROM hosted_plugins WHERE client_id = ?2)",
-        rusqlite::params![plugin_settings_key(actor_id), client_id],
+        rusqlite::params![&actor_id[..], client_id],
     )
     .context("delete the binding's plugin settings")?;
 
@@ -2785,9 +2885,11 @@ mod tests {
         );
     }
 
-    /// A bound account's settings rest in the plugin's state scope under the
-    /// account's own key, written only while the account is bound, and its
-    /// revoke deletes them with the binding.
+    /// A bound account's settings rest in the account's own row, read through
+    /// the plugin's state scope under the account's reserved key, written
+    /// only while the account is bound, and its revoke deletes them with the
+    /// binding.  The plugin's own `state.put` / `state.delete` refuse
+    /// the reserved prefix — for a bound account and one not yet bound.
     #[tokio::test]
     async fn an_accounts_plugin_settings_follow_its_binding() {
         let db = CacheDb::open_in_memory().unwrap();
@@ -2823,10 +2925,198 @@ mod tests {
             Some(br#"{"room":"x"}"#.to_vec())
         );
 
+        for target in [&ALICE, &BOB] {
+            let forged = plugin_settings_key(target);
+            assert_eq!(
+                db.plugin_state_put(&pid, &forged, br#"{"room":"forged"}"#)
+                    .await
+                    .unwrap(),
+                Err(PluginStateRefused::Reserved)
+            );
+            assert_eq!(
+                db.plugin_state_delete(&pid, &forged).await.unwrap(),
+                Err(PluginStateRefused::Reserved)
+            );
+        }
+        assert_eq!(
+            db.get_plugin_account_settings(&ALICE, &pid).await.unwrap(),
+            Some(br#"{"room":"x"}"#.to_vec())
+        );
+        assert_eq!(
+            db.get_plugin_account_settings(&BOB, &pid).await.unwrap(),
+            None
+        );
+        assert_eq!(
+            db.plugin_state_put(&pid, "settings", b"x").await.unwrap(),
+            Ok(()),
+            "only the prefix is reserved"
+        );
+
         db.revoke_third_party_principal(&ALICE, &binding)
             .await
             .unwrap();
         assert_eq!(db.plugin_state_get(&pid, &key).await.unwrap(), None);
+    }
+
+    ///  The plugin's state scope holds at most
+    /// `PLUGIN_STATE_MAX_BYTES` of keys and values: a put past it is refused
+    /// and writes nothing; overwriting an entry counts its new size only.
+    #[tokio::test]
+    async fn a_put_past_the_state_quota_is_refused() {
+        let db = CacheDb::open_in_memory().unwrap();
+        let pid = db
+            .mint_hosted_plugin(&plugin_mint([0x11; 32]))
+            .await
+            .unwrap();
+        let max = fauna_plugin_host::PLUGIN_STATE_MAX_BYTES;
+        let big = vec![7u8; max - 1 - 1];
+        assert_eq!(db.plugin_state_put(&pid, "a", &big).await.unwrap(), Ok(()));
+        assert_eq!(
+            db.plugin_state_put(&pid, "b", b"xx").await.unwrap(),
+            Err(PluginStateRefused::Quota)
+        );
+        assert_eq!(db.plugin_state_get(&pid, "b").await.unwrap(), None);
+        assert_eq!(db.plugin_state_put(&pid, "b", b"").await.unwrap(), Ok(()));
+        assert_eq!(
+            db.plugin_state_put(&pid, "a", &big[1..]).await.unwrap(),
+            Ok(()),
+            "an overwrite counts the entry's new size, not both"
+        );
+    }
+
+    ///  A `state.put` / `state.delete` after the uninstall commit —
+    /// the plugin's best-effort `stop` export runs after it — writes nothing:
+    /// no install row names the principal, so the store refuses.
+    #[tokio::test]
+    async fn a_state_write_after_the_uninstall_commit_is_refused() {
+        let db = CacheDb::open_in_memory().unwrap();
+        let pid = db
+            .mint_hosted_plugin(&plugin_mint([0x11; 32]))
+            .await
+            .unwrap();
+        db.uninstall_hosted_plugin(&pid).await.unwrap().unwrap();
+        assert_eq!(
+            db.plugin_state_put(&pid, "late", b"x").await.unwrap(),
+            Err(PluginStateRefused::NotInstalled)
+        );
+        assert_eq!(
+            db.plugin_state_delete(&pid, "late").await.unwrap(),
+            Err(PluginStateRefused::NotInstalled)
+        );
+        assert_eq!(db.plugin_state_get(&pid, "late").await.unwrap(), None);
+    }
+
+    ///  The refusal keys on the install row, so a live
+    /// install writes, and the developer reinstall — same principal id, row
+    /// updated in place — keeps its state scope writable.
+    #[tokio::test]
+    async fn a_live_and_a_reinstalled_plugin_still_write_their_state() {
+        let db = CacheDb::open_in_memory().unwrap();
+        let pid = db
+            .mint_hosted_plugin(&plugin_mint([0x11; 32]))
+            .await
+            .unwrap();
+        db.plugin_state_put(&pid, "before", b"1")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            db.replace_hosted_plugin(&pid, &plugin_mint([0x11; 32]))
+                .await
+                .unwrap()
+        );
+        db.plugin_state_put(&pid, "after", b"2")
+            .await
+            .unwrap()
+            .unwrap();
+        db.plugin_state_delete(&pid, "before")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(db.plugin_state_get(&pid, "before").await.unwrap(), None);
+        assert_eq!(
+            db.plugin_state_get(&pid, "after").await.unwrap().as_deref(),
+            Some(&b"2"[..])
+        );
+    }
+
+    /// A bound account with settings, for the deletion and succession legs.
+    async fn bound_with_settings(db: &CacheDb) -> Vec<u8> {
+        let pid = db
+            .mint_hosted_plugin(&plugin_mint([0x11; 32]))
+            .await
+            .unwrap();
+        db.bind_account_to_plugin(&ALICE, PLUGIN, "atproto", None, None, None)
+            .await
+            .unwrap();
+        db.put_plugin_account_settings(&ALICE, &pid, br#"{"room":"x"}"#)
+            .await
+            .unwrap();
+        pid
+    }
+
+    ///  Account deletion takes the account's plugin settings with
+    /// its binding row: nothing of the account's stays for the plugin to read.
+    #[tokio::test]
+    async fn account_deletion_deletes_the_accounts_plugin_settings() {
+        let db = CacheDb::open_in_memory().unwrap();
+        let pid = bound_with_settings(&db).await;
+        db.purge_orphaned_actor_rows(&ALICE).await.unwrap();
+        assert!(
+            db.list_third_party_principals(&ALICE)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            db.get_plugin_account_settings(&ALICE, &pid).await.unwrap(),
+            None
+        );
+        assert_eq!(
+            db.plugin_state_get(&pid, &plugin_settings_key(&ALICE))
+                .await
+                .unwrap(),
+            None
+        );
+    }
+
+    ///  Identity succession burns the binding row, and the
+    /// settings with it — on neither the retired id nor the successor.
+    #[tokio::test]
+    async fn succession_burns_the_accounts_plugin_settings() {
+        let db = CacheDb::open_in_memory().unwrap();
+        let pid = bound_with_settings(&db).await;
+        {
+            let conn = db.conn.lock().await;
+            conn.execute(
+                "INSERT OR IGNORE INTO tiers (name, max_inbox_bytes, max_storage_bytes, max_devices, max_blob_size)
+                 VALUES ('free', 1, 1, 1, 1)",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO users (actor_id, tier, label, created_at, handle)
+                 VALUES (?1, 'free', 'the label', 1, 'alice')",
+                rusqlite::params![&ALICE[..]],
+            )
+            .unwrap();
+        }
+        db.record_succession(&ALICE, &BOB, b"s", 1)
+            .await
+            .unwrap()
+            .unwrap();
+        for actor in [&ALICE, &BOB] {
+            assert_eq!(
+                db.get_plugin_account_settings(actor, &pid).await.unwrap(),
+                None
+            );
+            assert_eq!(
+                db.plugin_state_get(&pid, &plugin_settings_key(actor))
+                    .await
+                    .unwrap(),
+                None
+            );
+        }
     }
 
     /// Uninstall ends every binding through the revoke cascade, the state,
@@ -2843,14 +3133,23 @@ mod tests {
         db.put_capability_grant(&ALICE, &[1; 16], &key, NEVER, b"g1")
             .await
             .unwrap();
-        db.plugin_state_put(&id, "cursor", b"42").await.unwrap();
-        db.plugin_state_put(&id, "cursor", b"43").await.unwrap();
+        db.plugin_state_put(&id, "cursor", b"42")
+            .await
+            .unwrap()
+            .unwrap();
+        db.plugin_state_put(&id, "cursor", b"43")
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(
             db.plugin_state_get(&id, "cursor").await.unwrap(),
             Some(b"43".to_vec())
         );
-        db.plugin_state_put(&id, "other", b"x").await.unwrap();
-        db.plugin_state_delete(&id, "other").await.unwrap();
+        db.plugin_state_put(&id, "other", b"x")
+            .await
+            .unwrap()
+            .unwrap();
+        db.plugin_state_delete(&id, "other").await.unwrap().unwrap();
         assert_eq!(db.plugin_state_get(&id, "other").await.unwrap(), None);
 
         let ended = db

@@ -1104,6 +1104,20 @@ impl fauna_protocol::RpcRequester for NestClient {
     fn nest_info_memo(&self) -> Option<&fauna_protocol::NestInfoMemo> {
         Some(&self.nest_info)
     }
+
+    /// The `torn_down` mark [`Self::disconnect`] sets. Subscribed BEFORE the
+    /// mark is read, so a disconnect landing between the read and the wait is
+    /// still seen: it marks first and then `send_replace`s the state, which
+    /// wakes this receiver (the order `disconnect` documents). The sender is
+    /// this client's own, so the channel cannot close while `&self` lives.
+    async fn torn_down(&self) {
+        let mut rx = self.connection_state_tx.subscribe();
+        while !self.torn_down.load(std::sync::atomic::Ordering::SeqCst) {
+            if rx.changed().await.is_err() {
+                core::future::pending::<()>().await;
+            }
+        }
+    }
 }
 
 /// A [`NestClient`] whose holder is its only owner — nothing else ever calls
@@ -1257,6 +1271,48 @@ mod tests {
             !client.dial_demand.is_waiting(),
             "a request that stopped waiting must stop counting"
         );
+    }
+
+    /// **A torn-down client says so, and only then.** The requester's
+    /// `torn_down` signal is what a consumer that outlives one request ends on
+    /// — the critical-alert sweep loop, which rides one client and ends with it
+    /// (`critical-alerts.md` § Mechanism → *How often the detector runs*). A
+    /// connected client's signal stays pending; `disconnect()` resolves both a
+    /// waiter already parked on it and every later call.
+    ///
+    /// Paused time bounds the pending half without a wall clock: the timeout
+    /// elapses only on the virtual clock, which advances once nothing else can
+    /// run.
+    #[tokio::test(start_paused = true)]
+    async fn torn_down_resolves_at_disconnect_and_not_before() {
+        use fauna_protocol::RpcRequester as _;
+        let client = unreachable_bearer_only_client();
+        client
+            .connect()
+            .await
+            .expect("connect (the auth is static)");
+
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_secs(60), client.torn_down())
+                .await
+                .is_err(),
+            "a connected client is not torn down"
+        );
+
+        let parked = tokio::spawn({
+            let client = Arc::clone(&client);
+            async move { client.torn_down().await }
+        });
+        tokio::task::yield_now().await;
+        client.disconnect().await;
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), parked)
+            .await
+            .expect("disconnect wakes a waiter already parked on the signal")
+            .expect("the waiter task");
+        tokio::time::timeout(std::time::Duration::from_secs(1), client.torn_down())
+            .await
+            .expect("a client torn down earlier answers at once");
     }
 
     /// **A request on a disconnected client fails at once, not at its

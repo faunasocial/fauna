@@ -8,6 +8,7 @@ using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Navigation;
 using FaunaApp.Core.Services;
 using FaunaApp.Core.ViewModels;
+using FaunaApp.Helpers;
 using uniffi.fauna_client_mail_settings;
 using S = FaunaApp.Core.Services.Strings;
 
@@ -119,11 +120,11 @@ public sealed partial class AdminMailReportsPage : Page
         RawText.Text = _vm.RawXml ?? string.Empty;
     }
 
-    /// <summary>Paint both pickers from the VM. Each option's automation Name is its
-    /// RAW value (the day count / the domain) and its Content the label: the FlaUI
-    /// bridge selects and reads a ComboBoxItem by Name, and matches a value by
-    /// AutomationId first — the every-domain option (raw value "") carries neither,
-    /// so <c>select("")</c> lands on it as the first item with an empty id.</summary>
+    /// <summary>Paint both pickers from the VM. Each option paints its label and is
+    /// keyed by its RAW value, the day count or the domain (<see cref="PickerOption"/>):
+    /// the FlaUI bridge matches a value by AutomationId first and reads the selected
+    /// option's key back — the every-domain option (raw value "") carries no id, so
+    /// <c>select("")</c> lands on it as the only item with an empty id.</summary>
     private void RenderPickers()
     {
         if (_vm is null) return;
@@ -144,11 +145,7 @@ public sealed partial class AdminMailReportsPage : Page
         combo.Items.Clear();
         foreach (var opt in options)
         {
-            var item = new ComboBoxItem { Content = opt.Label, Tag = opt.Value };
-            if (opt.Value.Length > 0)
-            {
-                AutomationProperties.SetName(item, opt.Value);
-            }
+            var item = PickerOption.Create(opt.Label, opt.Value);
             combo.Items.Add(item);
             if (opt.Value == selected) combo.SelectedItem = item;
         }

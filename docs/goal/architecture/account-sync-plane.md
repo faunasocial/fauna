@@ -795,7 +795,7 @@ over a different transport** — one protocol, N transports — riding the exist
   family's fleet-only sibling scope (`state-fleet` — the kind's rung routes
   it there, § The audience ladder → *The device-endpoints rung*), so every
   replica learns its siblings' dial candidates *from the replica*, offline
-  included (the entries synced while connectivity lasted). The plane-published entry also carries the device's own statement of the nest row it enrolled on — not a dial candidate, and never on a carried copy; owner [`fleet-scope-reclamation.md`](fleet-scope-reclamation.md) § *Fleet-scope reclamation*, clause (4). **An entry is a dial candidate only while its device is a verified member of this replica's fleet view** (ruled 2026-10-02) — enrolled under the account root, not removed (owner of membership: [`account-data-taxonomy.md`](account-data-taxonomy.md) § The generation machinery, the device-set bullet). Nothing forgets a merged entry, so the entry of a removed device, of a signed-out device whose enrollment row has retired, and of every predecessor device after a succession (enrolled under a retired root, which the view never verifies) outlives its device and stays in merged state; the dial pass skips it rather than spend a failing dial on it every pass and show this device's addresses to whatever answers at that node id. The admission seam would refuse such a peer after the dial; this rule refuses it before. **An entry that does not decode is skipped, never fatal** (2026-10-12): latest-wins adoption checks the stamp and never decodes the value, so any key holder can merge an undecodable row, and it costs only its own dial — never the pass, its other siblings or its custodian dials. The three location-data readers (`fauna_peer_sync::discovery`: the sibling, custodian and share rows) apply the same canonical-or-skip rule that fleet-scope reclamation reads these entries by. Forgetting the entry instead was rejected: only the replica that sends the retire would forget it. The accepted cost: a sibling whose device-set row this replica has not merged yet is not dialed until it has — both rows ride the fleet-only scope and reach a replica from the nest together, and peer-only cold bootstrap is a declared non-goal (below). The owner-side custodian dials are not sibling candidates and are not filtered by membership (a custodian is no fleet member). **A candidate's connect is bounded apart from its interaction** (ruled 2026-10-12): a verified member can still be unreachable — an offline sibling, or the previous launch of this machine after a fresh-store relaunch — and every pass-bound command waits for the pass ([`account-client-lifecycle.md`](account-client-lifecycle.md) § The client-side lifecycle → *Commands and passes*), so the dial and the channel open together give up at a short connect budget (`peer_leg::CONNECT_BUDGET`, 10 s, one constant for the sibling and the custody dial passes alike), well before the generous whole-interaction budget or the transport's own connect timeout (~30 s, which a fresh-store tui prologue spent on one dead endpoint while a key rotation's awaited publish waited behind it). **Every target of a pass connects and admits at once; only the walks run one after another** (ruled 2026-10-14), so a pass pays one connect budget however many of its targets are unreachable. Admission rides with the connect, never with the walk: the serving node drops a connection whose dialer leaves its stream unopened past a short accept timeout ([`../behavior/p2p.md`](../behavior/p2p.md) § Wormability posture, rule 8), so a channel left silent until an earlier target's walk ends would be gone by its turn. A channel admitted early then idles through the earlier walks, which the transport survives (measured 2026-10-14: 300 s idle, no keep-alive configured). LAN candidacy applies the shipped arithmetic (RFC-1918 + shared
+  included (the entries synced while connectivity lasted). The plane-published entry also carries the device's own statement of the nest row it enrolled on — not a dial candidate, and never on a carried copy; owner [`fleet-scope-reclamation.md`](fleet-scope-reclamation.md) § *Fleet-scope reclamation*, clause (4). **An entry is a dial candidate only while its device is a verified member of this replica's fleet view** (ruled 2026-10-02) — enrolled under the account root, not removed (owner of membership: [`account-data-taxonomy.md`](account-data-taxonomy.md) § The generation machinery, the device-set bullet). Nothing forgets a merged entry, so the entry of a removed device, of a signed-out device whose enrollment row has retired, and of every predecessor device after a succession (enrolled under a retired root, which the view never verifies) outlives its device and stays in merged state; the dial pass skips it rather than spend a failing dial on it every pass and show this device's addresses to whatever answers at that node id. The admission seam refuses such a peer too — an own-account fleet cert is admitted only for a verified member of the same view (§ The admission seam → *Validity and severance*, (c)) — so this rule spends no dial on it. **An entry that does not decode is skipped, never fatal** (2026-10-12): latest-wins adoption checks the stamp and never decodes the value, so any key holder can merge an undecodable row, and it costs only its own dial — never the pass, its other siblings or its custodian dials. The three location-data readers (`fauna_peer_sync::discovery`: the sibling, custodian and share rows) apply the same canonical-or-skip rule that fleet-scope reclamation reads these entries by. Forgetting the entry instead was rejected: only the replica that sends the retire would forget it. The accepted cost: a sibling whose device-set row this replica has not merged yet is not dialed until it has — both rows ride the fleet-only scope and reach a replica from the nest together, and peer-only cold bootstrap is a declared non-goal (below). The owner-side custodian dials are not sibling candidates and are not filtered by membership (a custodian is no fleet member). **A candidate's connect is bounded apart from its interaction** (ruled 2026-10-12): a verified member can still be unreachable — an offline sibling, or the previous launch of this machine after a fresh-store relaunch — and every pass-bound command waits for the pass ([`account-client-lifecycle.md`](account-client-lifecycle.md) § The client-side lifecycle → *Commands and passes*), so the dial and the channel open together give up at a short connect budget (`peer_leg::CONNECT_BUDGET`, 10 s, one constant for the sibling and the custody dial passes alike), well before the generous whole-interaction budget or the transport's own connect timeout (~30 s, which a fresh-store tui prologue spent on one dead endpoint while a key rotation's awaited publish waited behind it). **Every target of a pass connects and admits at once; only the walks run one after another** (ruled 2026-10-14), so a pass pays one connect budget however many of its targets are unreachable. Admission rides with the connect, never with the walk: the serving node drops a connection whose dialer leaves its stream unopened past a short accept timeout ([`../behavior/p2p.md`](../behavior/p2p.md) § Wormability posture, rule 8), so a channel left silent until an earlier target's walk ends would be gone by its turn. A channel admitted early then idles through the earlier walks, which the transport survives (measured 2026-10-14: 300 s idle, no keep-alive configured). LAN candidacy applies the shipped arithmetic (RFC-1918 + shared
   /24, [`../behavior/p2p.md`](../behavior/p2p.md) § LAN detection) to those
   cached endpoints — no broadcast, no scanning. A fresh replica learns its
   first peers via the nest during enrollment; **peer-only cold bootstrap is
@@ -916,7 +916,8 @@ in code, ruled once for all three consumers:
   withdrawn this one* is the evaluating side's own question, answered beside
   the verifier from its own merged state: the custody-grant arm from the
   synced grant-event log, the `DeviceAuthorization` arm from the **served
-  account's merged `fauna.state.device-set` exclusion set**. Three properties
+  account's merged `fauna.state.device-set` state** (its verified members
+  for the own account, (c) below). Three properties
   bind both arms. **(a) Per request, not per connection** — a replica that
   learns of the withdrawal severs a connection already holding a verdict at
   its next request, not only at a next handshake the removed device need
@@ -944,10 +945,26 @@ in code, ruled once for all three consumers:
   relay plane either; and since only verified members are dial targets, a
   removed sibling's channel leaves the dialer's file-body registry at the
   first pass that no longer dials it, so no engine asks a removed device
-  for a chunk body. **(c) Refuse on the withdrawal record only** — for
-  devices, a `Removed` row; an *absent* row admits, which is what keeps the
-  check additive across version skew (a device enrolled before the
-  plane-side device-set existed has no row at all). **Residual, stated
+  for a chunk body. **(c) Own account: verified members only** (ruled
+  2026-11-06) — an own-account `DeviceAuthorization` is
+  admitted only for a device this replica's fleet view verifies as a member
+  (enrolled under the account root, no `Removed` row), the dial filter's own
+  predicate (§ The peer leg → *Discovery*): the device arm's snapshot is the
+  verified member set, and a device it does not list is refused. A
+  `Removed` row is not the only record a replica can lack: § The bind leg's
+  ruling 7 retires removal evidence once every linked replica has held it,
+  so a device enrolled after that never learns the removal, and refusing on
+  the `Removed` row alone admitted the removed device there on its valid,
+  never-expiring cert — and admitted any device this replica never saw
+  enrolled. The cost is the dial filter's: a sibling whose device-set row
+  has not merged here yet is refused until it has; both rows ride the
+  fleet-only scope and reach a replica together. The earlier rule (refuse
+  on the `Removed` row only, an absent row admits — kept for devices
+  enrolled before the plane-side device-set existed) is retired with that
+  case, which the 2026-09-24 baseline reset left nowhere. The `Removed`
+  signal itself stays unconditional and unverifiable by design (attribution
+  advisory), and a custodied account, whose rows a custodian cannot read,
+  still refuses on the held grants' lists alone. **Residual, stated
   rather than silently held:** a custodian evaluating an owner device's
   `DeviceAuthorization` for a custodied account cannot read that account's
   sealed `state-fleet` rows, so the plane gives it no exclusion set for that
@@ -1747,8 +1764,11 @@ The rules are owned by [`../behavior/p2p.md`](../behavior/p2p.md)
   carries the same view on `admit_over_as`
   (`fauna_peer_sync::AdmissionViews`). The snapshot behind it is
   pump-refreshed per pass from merged plane state
-  (`fauna_sync_engine::fleet_removal::removed_device_ids` →
-  `peer_leg::refresh_removed_devices`), beside the custody-revocation one;
+  (since 2026-11-06 the verified member set,
+  `fauna_sync_engine::fleet_removal::verified_member_ids` →
+  `peer_leg::refresh_fleet_members`; the 2026-11-06 verified-members entry
+  below), beside the
+  custody-revocation one;
   its bound is the bullet's own (*When it learns is the bound*). Pinned
   store↔store with no nest anywhere in
   `fauna-sync-engine/tests/peer_leg_convergence.rs`
@@ -1778,10 +1798,10 @@ The rules are owned by [`../behavior/p2p.md`](../behavior/p2p.md)
   deliver arm) from `CustodyRegistryWriter::removed_device_ids` — on the
   account runtime, `fleet_removal::removed_device_ids` over its store and
   trust. The custodian's map is `fauna_peer_sync::admission::CustodiedExclusions`,
-  held on `PeerLegState` beside `removed_devices`, re-derived in
+  held on `PeerLegState` beside `fleet_members`, re-derived in
   `custody_leg::CustodyLegState::serve_refresh` before the serve registry is
   fed, and read by the composed serve/dial view
-  (`WithdrawalSnapshot::device_removed_view` — own account from the
+  (`MemberSnapshot::device_refused_view` — own account from the
   snapshot, custodied accounts from the map) and by the custodian's own
   custody dial. Pinned in `fauna-peer-sync` `server::tests` (admit door, live
   connection, signer binding), `custody_leg::tests` (derivation + union) and
@@ -1790,9 +1810,10 @@ The rules are owned by [`../behavior/p2p.md`](../behavior/p2p.md)
   an unlisted owner device the in-test control).
 - **Built — both withdrawal snapshots fail closed until derived, and custody
   revocation severs per request (2026-09-22).** The bullet's bound is in
-  code on both arms. Both snapshots are
-  `fauna_sync_engine::peer_leg::WithdrawalSnapshot`s: refreshed side by side
-  right after the fleet walk and before the ensure step (the
+  code on both arms. Both snapshots share
+  `fauna_sync_engine::peer_leg::DerivedSet`'s posture (since 2026-11-06 the
+  custody arm a `WithdrawalSnapshot`, the device arm a `MemberSnapshot`):
+  refreshed side by side right after the fleet walk and before the ensure step (the
   custody-revocation derivation moved out of the later serve refresh into
   `custody_leg::CustodyLegState::refresh_revoked`), starting underived, and
   every view over an underived snapshot refuses its arm. Before this, a first
@@ -1812,6 +1833,26 @@ The rules are owned by [`../behavior/p2p.md`](../behavior/p2p.md)
   `a_withdrawal_view_refuses_until_derived_then_only_what_it_lists` beside it,
   `custody_leg::tests::an_unreadable_replica_leaves_the_revocation_view_refusing_until_one_reads`,
   and `fauna_peer_sync::server::tests::a_custody_grant_revoked_mid_connection_severs_at_the_next_request`.
+- **Built — admission admits verified fleet members only, own account
+  (2026-11-06).** *Validity and severance*'s (c) is in
+  code: the device arm's snapshot is `peer_leg::MemberSnapshot`, the
+  verified member set (`fleet_removal::verified_member_ids`, the dial
+  filter's `FleetView::is_verified_member` over the same rows), refreshed per
+  pass by `peer_leg::refresh_fleet_members`, and its view
+  (`MemberSnapshot::device_refused_view`) refuses an own-account device it
+  does not list — at the admit door, on every request and on the dialer's
+  reply check. Before, the snapshot held the `Removed` ids and admitted any
+  device without one: a device this replica never saw enrolled, or one whose
+  removal evidence it never merged, was admitted on its valid account-root
+  cert. The serve side's and the dialer's refusal text now reads "not a
+  verified member of this account's fleet". Pinned:
+  `peer_leg::tests::a_valid_cert_this_fleet_view_does_not_verify_is_refused_admission`
+  (the production refresh and ensure step; red before, the stranger
+  admitted), the answer table in
+  `a_withdrawal_view_refuses_until_derived_then_only_what_it_lists`, and the
+  store↔store pins in `tests/peer_leg_convergence.rs` and
+  `tests/peer_dial_convergence.rs` (whose serving replicas now hold their
+  dialer's enrollment, as production replicas do).
 - **Built — frontier compaction as a serve-order watermark, nest leg
   (2026-09-13).** § Feeds and cursors → *Compaction is a serve-order
   watermark, never a forgotten entry* (which replaced the unhonourable

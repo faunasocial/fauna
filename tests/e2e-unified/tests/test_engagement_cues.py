@@ -58,7 +58,6 @@ CAT_TEXT = "tabby kitten purring whiskers softly by the warm window"
 
 # fauna_core::scoring::cues — the shared thresholds the engine derives by.
 CUE_DWELL_LONG_S = 8.0  # CUE_DWELL_LONG_MS
-CUE_LONG_DWELL_VISIBLE = 0.75  # CUE_LONG_DWELL_VISIBLE_PM / 1000
 CUES_ROLLUP_FACTOR = "cues:v1"  # CUES_ROLLUP_FACTOR_V1
 
 
@@ -724,17 +723,12 @@ def test_engagement_dwell_derives_watch_complete_via_navigate_away_flush(
     **The on-topic post starts mid-list, below a newer decoy, as in its
     web/apple twin below — so the dwell moving it to the top is a re-rank
     recency cannot fake (`learn-from-my-activity.md` outcome 14).** The
-    FlaUI bridge's plain `POST /element/scroll-into-view`
-    (`Actions.ScrollIntoView`) stops as soon as UIA reports the element
-    `!IsOffscreen`, which on windows flips at a small, partial visibility
-    (empirically as low as ~25% of a post-card, under both the skip and the
-    long-dwell gates), so `dwell_on_post`'s plain scroll can leave a mid-list
-    card credited nothing. The dwell therefore scrolls with the bridge's
-    MEASURED sibling, `scroll_to_visible_fraction` (`Actions.
-    ScrollIntoViewFraction`: a sweep until the card's own rect overlaps the
-    viewport by the asked fraction), to the long-dwell visibility, and
-    asserts the fraction it reached. It ends the exposure by navigating AWAY
-    from Feed rather than scrolling — `FeedPage.OnNavigatedFrom` →
+    dwell is the shared `dwell_on_post`: the windows driver's `scroll_to`
+    brings the mid-list card in whole like every other driver's
+    (`Actions.MakeWhole` — UIA alone calls a sliver of a card on screen, and
+    reads it whole through its viewport-clipped rect, so the bridge reads the
+    card's true extent from how the rect moves). It ends the exposure by
+    navigating AWAY from Feed rather than scrolling — `FeedPage.OnNavigatedFrom` →
     `CueViewportObserver.Unwire()` → `FlushAll()`, the same "unmap ⇒ flush
     everything" path linux's `viewport.rs` exercises on page teardown.
 
@@ -823,22 +817,13 @@ def test_engagement_dwell_derives_watch_complete_via_navigate_away_flush(
         f"newer); error={app.error_text()!r}"
     )
 
-    # ── 6. The honest dwell: bring the mid-list on-topic card to long-dwell
-    # visibility with the MEASURED scroll (the docstring's reason the plain
-    # one is not enough; the capture samples that same scroll position, so
-    # the exposure is honest), advance the frozen clock past the long-dwell gate, then
-    # navigate AWAY from Feed to end the exposure — OnNavigatedFrom's
-    # Unwire()/FlushAll() emits the accumulated exposure deterministically ──
-    visible = app.driver.scroll_to_visible_fraction(
-        "post-card", CUE_LONG_DWELL_VISIBLE, index=target_index
-    )
-    assert visible >= CUE_LONG_DWELL_VISIBLE, (
-        f"the measured scroll left post-card[{target_index}] only "
-        f"{visible:.0%} visible — under the long-dwell gate, so no dwell can "
-        f"be credited; error={app.error_text()!r}"
-    )
-    # The hold is advanced on the frozen cue clock, never slept (convention 14).
-    app.feed.accrue_dwell(target_index, CUE_DWELL_LONG_S + 1.0)
+    # ── 6. The honest dwell: bring the mid-list on-topic card in whole with
+    # the shared targeted scroll (the capture samples that same scroll
+    # position, so the exposure is honest), advance the frozen clock past the
+    # long-dwell gate, then navigate AWAY from Feed to end the exposure —
+    # OnNavigatedFrom's Unwire()/FlushAll() emits the accumulated exposure
+    # deterministically. The hold is advanced, never slept (convention 14) ──
+    app.feed.dwell_on_post(target_index, CUE_DWELL_LONG_S + 1.0)
     app.personalization.navigate()
 
     reply = _wait_model_blob(port, test_user, factor_key)

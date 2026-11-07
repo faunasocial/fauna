@@ -279,7 +279,7 @@ fn build_bluesky_oauth_client(
         let loopback = match url.host() {
             Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
             Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
-            Some(url::Host::Domain(d)) => d == "localhost",
+            Some(url::Host::Domain(d)) => fauna_core::resolve::is_localhost_name(d),
             None => false,
         };
         anyhow::ensure!(

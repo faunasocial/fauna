@@ -1180,11 +1180,13 @@ pub const ACTOR_TABLES: &[ActorTable] = &[
         // question that minted it.
         //
         // And the question does not survive to be exported:
-        // `sweep_expired_atproto_consent_requests` is `DELETE ... WHERE
-        // expires_at <= now` with no carve-out for a resolved row, and its own
-        // docstring reads "Not user data: a consent request is a minutes-long
-        // question". Approved and denied rows alike are gone minutes after the
-        // ceremony; an export can only ever catch one mid-flight.
+        // `sweep_expired_atproto_consent_requests` deletes a row at its
+        // `expires_at` — an approved one only once its code can no longer be
+        // redeemed, a few minutes later (`CONSENT_REDEMPTION_GRACE_MILLIS`) —
+        // and its own docstring reads "Not user data: a consent request is a
+        // minutes-long question". Approved and denied rows alike are gone
+        // minutes after the ceremony; an export can only ever catch one
+        // mid-flight.
         //
         // ⚠ A DENIAL therefore leaves no durable trace anywhere. That is a
         // property of the sweep, not of this verdict — ruling `Verbatim` would
@@ -1335,6 +1337,24 @@ pub const ACTOR_TABLES: &[ActorTable] = &[
         // handle. The account's own audit of who holds reach over it — the
         // same *audited from the user's app* reading `atproto_oauth_grants`'
         // export takes, one table over.
+        export: Export::Verbatim,
+    },
+    ActorTable {
+        table: "plugin_account_settings",
+        column: "actor_id",
+        key: ActorKey::Blob,
+        policy: Policy::Purge,
+        succession: Succession::Burn(
+            "one account's settings for a hosted plugin it bound \
+             (`third-party.md` § The principal model → *Hosted principals*: \
+             \"deleted with the binding\"). The binding row in \
+             `third_party_principals` burns, so its settings burn with it: settings \
+             nothing backs would be read by the plugin under an id no account holds, \
+             and the successor binds and configures the plugin afresh by its own \
+             consent",
+        ),
+        // What the user typed into the plugin's settings card — their data,
+        // and nothing in it opens anything.
         export: Export::Verbatim,
     },
     ActorTable {
@@ -9261,13 +9281,14 @@ mod tests {
                  the oracle may sign requests to, never an actor id; `peer` is the \
                  fediverse word for another server",
             ),
-            // The same roster handle on the three tables that hang off a
-            // principal and belong to no account. `hosted_plugins` and
-            // `plugin_state` are the hosted half of an INSTALL, the nest's act
-            // and no account's (`third-party.md` § The principal model →
-            // *Hosted principals*): uninstall deletes them, and the one person
-            // on them, `hosted_plugins.installed_by`, is ruled in
-            // `SUCCESSION_REFERENCES`.
+            // The same roster handle on the tables that hang off a principal.
+            // `hosted_plugins` and `plugin_state` are the hosted half of an
+            // INSTALL, the nest's act and no account's (`third-party.md` § The
+            // principal model → *Hosted principals*): uninstall deletes them,
+            // and the one person on them, `hosted_plugins.installed_by`, is
+            // ruled in `SUCCESSION_REFERENCES`. An account's own settings for a
+            // plugin are `plugin_account_settings`, registered by its
+            // `actor_id`; its `principal_id` is the plugin it configures.
             (
                 "hosted_plugins",
                 "principal_id",
@@ -9281,6 +9302,13 @@ mod tests {
                 "principal_id",
                 "the hosted plugin whose state scope the row is -- the same install-row \
                  handle as `hosted_plugins.principal_id`, deleted with the plugin",
+            ),
+            (
+                "plugin_account_settings",
+                "principal_id",
+                "the hosted plugin the settings configure -- the install-row handle \
+                 (`hosted_plugins.principal_id`), an app and never an account; the row's \
+                 own actor is `actor_id`, registered",
             ),
             (
                 "folder_deposit_inbox",

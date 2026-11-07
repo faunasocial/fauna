@@ -3020,39 +3020,20 @@ public class APIClient {
     // MARK: - Critical alerts (critical-alerts.md § Mechanism)
 
 #if !FAUNA_KIDS
-    /// Run the critical-alerts session-start + periodic re-sweep loop
-    /// (`libs/fauna-client-alert-sweep::run_alert_sweep_loop`, over
-    /// `libs/fauna-ffi`'s `runCriticalAlertSweepLoop` free function) — the one
-    /// shared entry point every feeder rides with no page of its own
-    /// (critical-alerts.md § Mechanism → *Who runs the detector* + *How
-    /// often*; already adopted by tui/linux/web/android/windows). The loop
-    /// only returns once the identity tears down (`CriticalAlerts.clearAll`),
-    /// so the caller must launch this on a process-lifetime `Task`, never a
-    /// view-scoped one — mirrors `subscribeReconnects()`'s ensure-connected
-    /// shape.
-    public func startCriticalAlertSweepLoop() async throws {
+    /// The post-auth hook's critical-alert call: the shared
+    /// `startCriticalAlertSweep` (`libs/fauna-ffi/src/critical_alerts.rs`) on this
+    /// client's own connection, with the nest's literal URL. It decides the loop /
+    /// one-pass arm itself, keyed on the actor at that URL and on this client's
+    /// connection, and returns when the loop ends or the one pass is done — so
+    /// launch it on a process-lifetime `Task`, never a view-scoped one.
+    public func startCriticalAlertSweepForSession() async throws {
         guard let secret else { throw APIError.ffiError("No secret for critical-alert sweep") }
-        try await runCriticalAlertSweepLoop(nest: try await ensureNestConnected(), secret: hex_to_data(secret))
+        try await startCriticalAlertSweep(
+            nest: try await ensureNestConnected(),
+            secret: hex_to_data(secret),
+            nestUrl: nodeUrl.absoluteString)
     }
 #endif
-
-#if !FAUNA_KIDS
-    /// One sweep pass (`runCriticalAlertSweep`) — the same-identity re-establish
-    /// arm of `CriticalAlertsHost.startSweepLoop`, where the identity's loop is
-    /// already running and a second one would stack.
-    public func runCriticalAlertSweepOnce() async throws {
-        guard let secret else { throw APIError.ffiError("No secret for critical-alert sweep") }
-        try await runCriticalAlertSweep(nest: try await ensureNestConnected(), secret: hex_to_data(secret))
-    }
-#endif
-
-    /// The identity a critical-alert sweep loop covers — the actor AT a nest, so
-    /// a re-point at another nest gets a loop sweeping that nest. `nil` with no
-    /// secret (no identity to sweep for).
-    public var sweepIdentityKey: String? {
-        guard let secret, let actor = try? actor_id_from_secret(secret) else { return nil }
-        return "\(actor)@\(nodeUrl.absoluteString)"
-    }
 
     // MARK: - Mail-admin machines (shared FaunaKit, macOS + iOS)
     //

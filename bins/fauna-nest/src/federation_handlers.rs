@@ -4497,12 +4497,23 @@ async fn resolve_backup_custody_set(
         )
         .await;
 
-    let fs = state
+    let Some(fs) = state
         .db
         .get_folder_for_actor(&name, owner)
         .await
         .map_err(internal)?
-        .ok_or_else(|| internal("backup custody set missing immediately after create"))?;
+    else {
+        // The create lost to the owner's own set created by hash alone on
+        // this name's address: the coded, recoverable refusal.
+        state
+            .db
+            .refuse_a_squatted_rail_address(&name, owner)
+            .await
+            .map_err(internal)?;
+        return Err(internal(
+            "backup custody set missing immediately after create",
+        ));
+    };
     // A concurrent rail mint may have won the race: the same refusal as above.
     if !crate::db::snapshots::is_reserved_custody_copy(fs.custody_copy, &fs.name) {
         return Err(forbidden(

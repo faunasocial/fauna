@@ -59,6 +59,7 @@ pytestmark = [
     pytest.mark.android,
     pytest.mark.macos,
     pytest.mark.ios,
+    pytest.mark.windows,
 ]
 
 _MUA_PASSWORD = "token-refresh-plain-pw-1"

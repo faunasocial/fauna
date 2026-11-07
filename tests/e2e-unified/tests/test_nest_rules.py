@@ -253,7 +253,7 @@ def test_an_admins_keyword_rule_blocks_a_post_visibly_and_a_change_is_announced(
     assert app.driver.count("feed-post-text", scope=scope) == 0, "a blocked post renders no body"
     # Never loosenable: a nest block offers the member no reveal.
     assert app.driver.count("nest-collapsed-reveal-button", scope=scope) == 0
-    clean_scope = f"post-card[{app.feed.post_index_by_id(clean['post_id'])}]"
+    clean_scope = f"post-card[{app.feed.card_index_by_id(clean['post_id'])}]"
     assert app.driver.count("nest-blocked-notice", scope=clean_scope) == 0
     assert app.driver.count("feed-post-text", scope=clean_scope) >= 1
     _assert_block_render_witness(app, "the member's feed")

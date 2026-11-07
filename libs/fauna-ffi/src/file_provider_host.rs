@@ -84,6 +84,7 @@ use tokio::sync::{mpsc, oneshot};
 
 use fauna_core::folder_keys::FolderRef;
 use fauna_nest_http::{ApiError, BearerSource};
+use fauna_sync_engine::binding_edge::{ParkMark, park_mark_at_edge};
 use fauna_sync_engine::engine_lifecycle::{BuiltEngine, EdgeVerdict, build_engine};
 use fauna_sync_engine::provider_face;
 use fauna_sync_engine::provider_face::owned_tree::{BodyRoot, OwnedTree};
@@ -1793,6 +1794,10 @@ struct Resident {
     /// Set by every (re)build, taken by the worker loop — a new engine is a new
     /// binding, which re-arms the pre-bind re-seal pass.
     rebuilt: bool,
+    /// Whether the set's state DB carries the park mark (`file-sync.md`
+    /// § Multi-writer shared sets → *Revocation on a capability host*) —
+    /// loaded at the first build, kept in step by [`Self::apply_park`].
+    park_marked: bool,
 }
 
 impl Resident {
@@ -1887,22 +1892,114 @@ impl Resident {
         std::mem::take(&mut self.rebuilt)
     }
 
+    /// Run `f` on the set's state DB — the resident engine's own connection,
+    /// else one opened for the call (a refused build holds none).
+    fn with_state_db<T>(
+        &self,
+        f: impl FnOnce(&fauna_sync_engine::db::SyncDb) -> anyhow::Result<T>,
+    ) -> anyhow::Result<T> {
+        match &self.built {
+            Some(b) => f(b.engine.db()),
+            None => f(&fauna_sync_engine::db::SyncDb::open(
+                self.folder_ref.state_db_path(self.ctx.state_dir()),
+            )?),
+        }
+    }
+
+    /// Load the park mark from the state DB (a relaunched extension's only
+    /// memory of it). An unreadable DB reads unmarked: the next demotion edge
+    /// or gate flip writes it again.
+    fn load_park_mark(&mut self) {
+        self.park_marked = self
+            .with_state_db(|db| db.access_revoked_at())
+            .map(|at| at.is_some())
+            .unwrap_or_else(|e| {
+                tracing::warn!("file-provider host: the park mark could not be read: {e:#}");
+                false
+            });
+    }
+
+    /// Whether the resident engine's access gate has flipped — the nest refused
+    /// a record or a write-token mint typed.
+    fn gate_revoked(&self) -> bool {
+        self.built
+            .as_ref()
+            .is_some_and(|b| b.engine.access_gate().is_revoked())
+    }
+
+    /// Persist what [`park_mark_at_edge`] decided. A write that fails is
+    /// logged and retried at the next edge (the in-memory reading stays
+    /// unmarked); a clear that fails leaves the mark — fail closed.
+    fn apply_park(&mut self, action: ParkMark) {
+        let result = match action {
+            ParkMark::Leave => return,
+            ParkMark::Write => {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX));
+                self.with_state_db(|db| db.mark_access_revoked(now))
+            }
+            ParkMark::Clear => self.with_state_db(|db| db.clear_access_revoked()),
+        };
+        match result {
+            Ok(()) => {
+                self.park_marked = action == ParkMark::Write;
+                tracing::info!(
+                    "file-provider host ({}): access park mark {}",
+                    self.folder_ref.to_wire(),
+                    if self.park_marked {
+                        "written"
+                    } else {
+                        "cleared"
+                    }
+                );
+            }
+            Err(e) => tracing::warn!(
+                "file-provider host ({}): the access park mark could not be {}: {e:#}",
+                self.folder_ref.to_wire(),
+                if action == ParkMark::Write {
+                    "written"
+                } else {
+                    "cleared"
+                }
+            ),
+        }
+    }
+
+    /// The access gate, read after every served request and re-seal step: a
+    /// flip the nest caused while the row read was stale persists the park
+    /// mark at once, before the next edge reads the row.
+    fn note_gate(&mut self) {
+        if self.gate_revoked() && !self.park_marked {
+            self.apply_park(ParkMark::Write);
+        }
+    }
+
     /// Read the set's row — a cross-nest set's custody record, which is its row
     /// — and rebuild when the engine no longer answers it. `Err(())` = the read
-    /// failed: nothing is known about the row.
+    /// failed: nothing is known about the row. The park mark is kept in step
+    /// first, so a demotion is persisted before the read-only rebuild.
     async fn re_resolve(&mut self) -> Result<(), ()> {
         let row = self.ctx.binding_basis(self.folder_ref).await.ok_or(())?;
-        let rebuild = match &self.built {
-            // An engine built before the machine had a principal read no
-            // custody (a host reads it as the enrolled device it is), so it
-            // holds no set nonce and no content keys: once a signer is
-            // provisioned, the next edge — a refresh as much as a seal —
-            // rebuilds it over the custody it can now read.
-            Some(_) if !self.built_signed && self.signer.current().is_ok() => true,
-            Some(b) => b.edge_verdict(row.as_ref()) == EdgeVerdict::Rebuild,
-            // A refused build is retried once the set has a row again.
-            None => row.is_some(),
-        };
+        let park = park_mark_at_edge(
+            self.built.as_ref().and_then(|b| b.basis.access()),
+            row.as_ref(),
+            self.park_marked,
+            self.gate_revoked(),
+        );
+        self.apply_park(park);
+        let rebuild = park == ParkMark::Clear
+            || match &self.built {
+                // An engine built before the machine had a principal read no
+                // custody (a host reads it as the enrolled device it is), so it
+                // holds no set nonce and no content keys: once a signer is
+                // provisioned, the next edge — a refresh as much as a seal —
+                // rebuilds it over the custody it can now read.
+                Some(_) if !self.built_signed && self.signer.current().is_ok() => true,
+                Some(b) => b.edge_verdict(row.as_ref()) == EdgeVerdict::Rebuild,
+                // A refused build is retried once the set has a row again.
+                None => row.is_some(),
+            };
         if rebuild {
             self.build().await;
         }
@@ -2134,8 +2231,10 @@ async fn serve_requests(
         published,
         serving,
         rebuilt: false,
+        park_marked: false,
     };
     resident.build().await;
+    resident.load_park_mark();
 
     // Populate the SyncDb placeholder rows from the nest before serving the
     // OS's first `enumerate`. The FP host is control-inverted — it runs no
@@ -2222,6 +2321,7 @@ async fn serve_requests(
                 Ok(request) => request,
                 Err(mpsc::error::TryRecvError::Empty) => {
                     prebind.step_held_to_the_floor(&mut resident, &folder).await;
+                    resident.note_gate();
                     continue;
                 }
                 Err(mpsc::error::TryRecvError::Disconnected) => break,
@@ -2291,6 +2391,7 @@ async fn serve_requests(
             request,
         )
         .await;
+        resident.note_gate();
         if refresh {
             prebind = PrebindDrive::armed();
         }
@@ -2817,6 +2918,33 @@ pub fn sync_set_unrecorded_rels(
         FfiError::General {
             msg: format!("un-recorded rows check failed: {e}"),
         }
+    })
+}
+
+/// One set's capability-host park, for the member's row (`file-sync.md`
+/// § Multi-writer shared sets → *Revocation on a capability host*): whether
+/// the host persisted its park mark on the set's state DB, and how many rels
+/// hold local content the nest never recorded. The same cross-process WAL read
+/// as [`sync_set_unrecorded_rels`], under the same `state_dir` and
+/// `folder_id`; a missing DB reads unparked and empty, an unreadable one
+/// errors and the caller shows the set parked (fail closed). The app folds the
+/// reads with [`crate::on_demand_parked_presences`].
+#[uniffi::export]
+pub fn sync_set_park(
+    state_dir: String,
+    folder_id: String,
+) -> Result<fauna_folders_machine::on_demand_presence::SetPark, FfiError> {
+    let folder_ref = parse_folder_id(&folder_id)?;
+    let read =
+        fauna_sync_engine::db::set_park(&PathBuf::from(state_dir), folder_ref).map_err(|e| {
+            FfiError::General {
+                msg: format!("set park read failed: {e}"),
+            }
+        })?;
+    Ok(fauna_folders_machine::on_demand_presence::SetPark {
+        folder_id,
+        access_revoked: read.access_revoked_at.is_some(),
+        unrecorded: read.unrecorded,
     })
 }
 

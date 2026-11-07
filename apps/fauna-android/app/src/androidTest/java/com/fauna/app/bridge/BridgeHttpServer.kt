@@ -42,6 +42,7 @@ class BridgeHttpServer(
     port: Int,
     private val elementOps: ElementOps,
     private val launcher: AppLauncher,
+    private val documents: DocumentsOps,
 ) : NanoHTTPD("127.0.0.1", port) {
 
     private val commandQueue = ConcurrentLinkedQueue<JSONObject>()
@@ -180,6 +181,23 @@ class BridgeHttpServer(
                     (file.length() - from).coerceAtLeast(0L),
                 )
             }
+            // The documents provider as a picker drives it (`DocumentsOps`;
+            // `drivers/android.py`'s `documents_*` verbs): a directory's
+            // children, one document's bytes, and each presented set's park.
+            "/documents/children" -> {
+                val parent = session.parms["parent"] ?: return badReq("parent required")
+                json(Response.Status.OK, JSONObject().put("children", documents.children(parent)).toString())
+            }
+            "/documents/read" -> {
+                val id = session.parms["document_id"] ?: return badReq("document_id required")
+                val bytes = documents.read(id)
+                json(
+                    Response.Status.OK,
+                    JSONObject().put("body_b64", android.util.Base64.encodeToString(bytes, android.util.Base64.NO_WRAP))
+                        .toString(),
+                )
+            }
+            "/documents/parks" -> json(Response.Status.OK, JSONObject().put("parks", documents.parks()).toString())
             else -> json(Response.Status.NOT_FOUND, """{"error":"Unknown: GET $uri"}""")
         }
 
@@ -233,6 +251,24 @@ class BridgeHttpServer(
                         freshInstall = data.optBoolean("fresh_install", false),
                     )
                     json(Response.Status.CREATED, """{"session_id":"1"}""")
+                }
+                "/documents/create" -> {
+                    val d = JSONObject(body)
+                    val id = documents.create(d.getString("parent"), d.getString("name"))
+                    json(Response.Status.OK, JSONObject().put("document_id", id).toString())
+                }
+                "/documents/open-write" -> {
+                    val d = JSONObject(body)
+                    val handle = documents.openWrite(d.getString("document_id"))
+                    json(Response.Status.OK, JSONObject().put("handle", handle).toString())
+                }
+                "/documents/write-close" -> {
+                    val d = JSONObject(body)
+                    documents.writeClose(
+                        d.getInt("handle"),
+                        android.util.Base64.decode(d.getString("body_b64"), android.util.Base64.NO_WRAP),
+                    )
+                    json(Response.Status.OK, """{}""")
                 }
                 "/element/click" -> {
                     val d = JSONObject(body)

@@ -21,6 +21,8 @@ from pathlib import Path
 
 import pytest
 
+from helpers.outer_grant import no_outer_grant  # noqa: F401 — autouse: no outer grant reaches a test
+
 pytestmark = pytest.mark.tier_1
 
 _REPO = Path(__file__).resolve().parents[3]

@@ -102,4 +102,33 @@ public class FeedCueTrackerHostTests
             FeedManagerHost.ResetForActorChange();
         }
     }
+
+    /// <summary>The rule a left Feed page paints by: between the actor change's reset
+    /// and the page's own teardown, the outgoing manager still ticks, and a page that
+    /// repainted on it re-published the outgoing identity's window to the e2e state
+    /// after the reset had cleared it (the windows archive-import interaction red: the
+    /// follower's tap read the owner's ♥ and the owner's card order).</summary>
+    [Fact]
+    public async Task OnlyTheInstalledManagerIsHeld_NeverOneAnActorChangeOrARebuildLeftBehind()
+    {
+        using var nest = new FfiNestClient("wss://127.0.0.1:0/ws", new byte[32]);
+        using var outgoing = nest.FeedManager(new byte[32]);
+        using var incoming = nest.FeedManager(new byte[32]);
+        try
+        {
+            await Install(outgoing);
+            Assert.True(FeedManagerHost.Holds(outgoing));
+
+            FeedManagerHost.ResetForActorChange();
+            Assert.False(FeedManagerHost.Holds(outgoing));
+
+            await Install(incoming);
+            Assert.True(FeedManagerHost.Holds(incoming));
+            Assert.False(FeedManagerHost.Holds(outgoing));
+        }
+        finally
+        {
+            FeedManagerHost.ResetForActorChange();
+        }
+    }
 }

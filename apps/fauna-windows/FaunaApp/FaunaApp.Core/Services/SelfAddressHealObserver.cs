@@ -39,22 +39,55 @@ internal sealed class SelfAddressHealObserver : LaunchObserver
     /// </summary>
     public Action? Ticked { get; set; }
 
+    /// <summary>
+    /// Raised (on the machine's own thread) when the published identity's handle or domain
+    /// moved — resolved, renamed, or a primary-domain rename the verify reply carries — so
+    /// the profile SELF header repaints its <c>&lt;handle&gt;@&lt;current primary&gt;</c>
+    /// (<c>mail-primary-domain-rename.md</c> § Display-handle interaction; linux's
+    /// <c>repaint_self_headers</c>, tui's <c>SelfAddressRefreshed</c> push). Defaults to the
+    /// process-wide <see cref="SelfDisplayHandle.Moved"/> fan-out, so no construction site
+    /// wires it; it needs no conversations session.
+    /// </summary>
+    public Action? IdentityMoved { get; set; } = SelfDisplayHandle.RaiseMoved;
+
     private IConversationsSession? _session;
     private string? _lastApplied;
+    private (string Handle, string Domain)? _lastIdentity;
 
     public void OnChanged()
     {
-        Apply();
+        var identity = Machine?.Snapshot().identity;
+        Apply(identity);
+        NoteIdentity(identity);
         Ticked?.Invoke();
+    }
+
+    /// <summary>Raise <see cref="IdentityMoved"/> when the snapshot's identity differs from
+    /// the last one seen — never on a tick that moved something else (a token refresh).</summary>
+    private void NoteIdentity(LaunchIdentity? identity)
+    {
+        if (identity is null)
+        {
+            return;
+        }
+
+        var now = (identity.handle ?? "", identity.domain ?? "");
+        if (now == _lastIdentity)
+        {
+            return;
+        }
+
+        _lastIdentity = now;
+        IdentityMoved?.Invoke();
     }
 
     public void AttachSession(IConversationsSession session)
     {
         _session = session;
-        Apply();
+        Apply(Machine?.Snapshot().identity);
     }
 
-    private void Apply()
+    private void Apply(LaunchIdentity? identity)
     {
         var session = _session;
         if (session is null)
@@ -62,7 +95,6 @@ internal sealed class SelfAddressHealObserver : LaunchObserver
             return;
         }
 
-        var identity = Machine?.Snapshot().identity;
         var handle = identity?.handle ?? "";
         var domain = identity?.domain ?? "";
         // An unresolved half is dropped rather than composed: an empty local part or an empty

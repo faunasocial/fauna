@@ -81,21 +81,21 @@ Stamped 2026-10-01 at e5a7e5d758.
 | web | ✅ full | 0.1.5-dev+3b591c2e standalone |
 | linux | ✅ full | 0.1.5-dev+3b591c2e standalone |
 | windows | ✅ full | 0.1.5-dev+3b591c2e standalone |
-| macos | ⚠ partial | 0.1.5-dev+17f01f46 standalone |
+| macos | ✅ full | 0.1.5-dev+17f01f46 standalone |
 | ios | ✅ full | 0.1.5-dev+3b591c2e standalone |
 | android |  no run recorded | |
 | tui | ✅ full | 0.1.5-dev+cfe1a17b.dirty standalone |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
-| 1 | app | `tests/e2e-unified/tests/test_trained_topics.py::test_trained_topic_train_reranks_and_marker_survives_reload` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): failed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 1 | app | `tests/e2e-unified/tests/test_trained_topics.py::test_trained_topic_train_reranks_and_marker_survives_reload` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 2 | app | `tests/e2e-unified/tests/test_trained_topics.py::test_trained_factor_publishes_as_a_pruned_list_labeler` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
 | 2 | app | `tests/e2e-unified/tests/test_trained_topics.py::test_trained_factor_publishes_as_a_scrubbed_text_model` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
 | 3 | app | `tests/e2e-unified/tests/test_trained_topics.py::test_publish_name_too_long_error_survives_unrelated_rerender` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 3 | app | `tests/e2e-unified/tests/test_trained_topics.py::test_publish_error_clears_on_fresh_sheet_reopen` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
-| 4 | app | `tests/e2e-unified/tests/test_trained_topics.py::test_trained_topic_train_reranks_and_marker_survives_reload` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): failed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 4 | app | `tests/e2e-unified/tests/test_trained_topics.py::test_trained_topic_train_reranks_and_marker_survives_reload` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 5 | app | `tests/e2e-unified/tests/test_trained_topics.py::test_renaming_a_trained_topic_keeps_its_learning_and_a_deleted_topics_feed_keeps_working` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
-| 6 | app | `tests/e2e-unified/tests/test_trained_topics.py::test_trained_topic_train_reranks_and_marker_survives_reload` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): failed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 6 | app | `tests/e2e-unified/tests/test_trained_topics.py::test_trained_topic_train_reranks_and_marker_survives_reload` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 7 | app | `tests/e2e-unified/tests/test_trained_topics.py::test_renaming_a_trained_topic_keeps_its_learning_and_a_deleted_topics_feed_keeps_working` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 8 | app | `tests/e2e-unified/tests/test_trained_topics.py::test_untrained_topic_keeps_the_order_less_like_this_sinks_and_marks_switch_and_come_back` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 9 | app | `tests/e2e-unified/tests/test_trained_topics.py::test_untrained_topic_keeps_the_order_less_like_this_sinks_and_marks_switch_and_come_back` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |

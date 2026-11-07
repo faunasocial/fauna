@@ -1513,9 +1513,14 @@ internal sealed class MockNestRpcClient : INestRpcClient
     /// When set, <see cref="SelfHealDeploymentSeedCustodyAsync"/> throws — a leg
     /// the glue could not even reach.
     public bool DeploymentSeedCustodyThrows { get; set; }
-    /// Completes <see cref="RunCriticalAlertSweepLoopAsync"/> — the loop otherwise
-    /// runs until the test sets it, like the real one until identity teardown.
-    public TaskCompletionSource CriticalAlertSweepLoopEnds { get; } = new();
+    /// Completes <see cref="StartCriticalAlertSweepAsync"/> — the sweep otherwise
+    /// runs until the test sets it, like the real loop until its identity or its
+    /// connection is torn down.
+    public TaskCompletionSource CriticalAlertSweepEnds { get; } = new();
+
+    /// When set, <see cref="StartCriticalAlertSweepAsync"/> throws — a sweep the
+    /// glue could not even start.
+    public bool CriticalAlertSweepThrows { get; set; }
 
     public Task<LocalizedText?> SelfHealDeploymentSeedCustodyAsync()
     {
@@ -1525,16 +1530,12 @@ internal sealed class MockNestRpcClient : INestRpcClient
             : Task.FromResult(NextDeploymentSeedWarning);
     }
 
-    public Task RunCriticalAlertSweepAsync()
+    public Task StartCriticalAlertSweepAsync(string nestUrl)
     {
-        _calls.Add("RunCriticalAlertSweep");
-        return Task.CompletedTask;
-    }
-
-    public Task RunCriticalAlertSweepLoopAsync()
-    {
-        _calls.Add("RunCriticalAlertSweepLoop");
-        return CriticalAlertSweepLoopEnds.Task;
+        _calls.Add($"StartCriticalAlertSweep({nestUrl})");
+        return CriticalAlertSweepThrows
+            ? throw new InvalidOperationException("sweep failed to start")
+            : CriticalAlertSweepEnds.Task;
     }
 
     public Task ApplyPostClaimServingEnablementAsync(
@@ -1925,6 +1926,21 @@ internal sealed class MockNestRpcClient : INestRpcClient
         {
             receiveEnabled = receiveEnabled ?? NextMailSwitches.receiveEnabled,
             sendEnabled = sendEnabled ?? NextMailSwitches.sendEnabled,
+        };
+        return Task.FromResult(NextMailSwitches);
+    }
+
+    /// Last <c>fauna.bridges.set_mail_switches</c> scan-result-row write (null until one is sent).
+    public bool? LastScanResultVisibleSet { get; private set; }
+
+    public Task<MailSwitches> MailScanResultVisibleSetAsync(bool scanResultVisible)
+    {
+        _calls.Add("MailScanResultVisibleSet");
+        LastScanResultVisibleSet = scanResultVisible;
+        Throw();
+        NextMailSwitches = MailSwitchesReread ?? NextMailSwitches with
+        {
+            scanResultVisible = scanResultVisible,
         };
         return Task.FromResult(NextMailSwitches);
     }

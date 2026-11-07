@@ -77,6 +77,19 @@ def _split_agent_log(text: str) -> tuple[str, str]:
     return text, ""
 
 
+class ViewportUndecided(AssertionError):
+    """:meth:`PlatformDriver.in_viewport`'s refusal: what the driver can read
+    without moving the list cannot decide which side of the band the element's
+    centre lies on, and the message says why.
+
+    Raised, never answered as ``False`` or ``True``: a guess is how a sliver read
+    as in view on windows, whose bridge sees each element's rect clipped to its
+    viewport and so cannot always tell a sliver from a whole element. An
+    ``AssertionError``, so a caller that does not expect it fails loudly with
+    the reason; a caller to whom "not proven in view" is the honest reading
+    catches it (``ConversationsActions.message_in_view``)."""
+
+
 class PlatformDriver(ABC):
     """Abstract base for all platform-specific UI automation drivers.
 
@@ -408,9 +421,10 @@ class PlatformDriver(ABC):
 
     def scroll_to(self, element_id: str, index: int = 0, *, scope: str | None = None) -> None:
         """Targeted scroll: bring the (indexed, scoped) element into its scroll
-        container's viewport, driving the client's REAL scroll position (the
-        engagement-cue observer samples that same position, so a dwell driven
-        through this is an honest exposure).
+        container's viewport — centred, the whole element where it fits —
+        driving the client's REAL scroll position (the engagement-cue observer
+        samples that same position, so a dwell driven through this is an
+        honest exposure). Raises `LookupError` on an absent element.
 
         Concrete with a NotImplementedError default (the double_click pattern):
         bridges serving POST /element/scroll-into-view get the HttpBridgeDriver
@@ -429,7 +443,7 @@ class PlatformDriver(ABC):
 
         The sibling of `scroll_to()` (centre, whole element) and the
         generalisation of windows' `scroll_to_visible_fraction` (a measured
-        AT-LEAST fraction reached by a sweep): this one leaves the element
+        AT-LEAST fraction, reached by bringing the element in whole): this one leaves the element
         partly under the bottom edge — a card a reader has scrolled half out of
         view. The reached fraction can exceed ``fraction`` when the list cannot
         scroll that far (too little content above the element), so the caller
@@ -798,6 +812,11 @@ class PlatformDriver(ABC):
         driver that can answer the geometry question overrides this; the
         default raises, so a test built on it fails loudly on an app that
         cannot say rather than reading every row as in view.
+
+        The centre is the WHOLE element's. A driver that sees only the part of
+        an element its viewport shows (windows: UIA clips the rect) and cannot
+        prove that part is the whole raises :class:`ViewportUndecided` with
+        the reason, rather than answer from the clipped part's centre.
         """
         raise NotImplementedError(f"{type(self).__name__} does not implement in_viewport()")
 

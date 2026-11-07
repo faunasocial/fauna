@@ -1604,6 +1604,20 @@ public class TestAgent
                         "no authenticated session, so no sweep loop to wake");
                 }
                 return null;
+            case "auto_renew_wake":
+                // Contract: `fauna_e2e_agent::AUTO_RENEW_WAKE`: end the certificate
+                // auto-renew cadence's current WAIT so the production loop
+                // (App.RunAutoRenewCadenceAsync) runs its next pass now. The caller's
+                // barrier is that pass's `auto-renew pass:` log line, never this ack.
+                // Like `alert_sweep_wake` above it wakes the LOOP, never a one-shot
+                // pass. The tui arm is the reference.
+                if (FaunaApp.Core.Helpers.AutoRenewWake.Fire() is string noTick)
+                {
+                    // Convention 11: no cadence runs (before sign-in, or it could not
+                    // start), so the wake would be acked and read by nobody.
+                    ReportRefusedCommand(action, noTick);
+                }
+                return null;
             case "launch_refresh_token":
                 // Contract: `fauna_e2e_agent::LAUNCH_REFRESH_TOKEN` — force the held
                 // session bearer's refresh NOW through the production refresh path
@@ -1862,6 +1876,35 @@ public class TestAgent
                     try
                     {
                         uniffi.fauna_ffi.FaunaFfiMethods.SetTrustClockOffsetSecs(offsetSecs);
+                    }
+                    catch (Exception ex)
+                    {
+                        // Convention 11: never a silent drop. A build whose FFI
+                        // lacks the test-helpers setter must say so on
+                        // error-message rather than ack a clock that never moved.
+                        ReportCommandFailure(action, $"{ex.GetType().Name}: {ex.Message}");
+                    }
+                    return null;
+                }
+            // Moves the submission-token refresh's clock (convention 14) — the
+            // `now` the 7-day re-mint cadence and each re-minted token's
+            // `issued_at` are measured against (`fauna_client_mail_settings::
+            // token_refresh`; never the bearer clock). The cadence is a Rust
+            // constant and never a knob, so a journey can only witness "a mail
+            // app keeps sending past the first token's expiry" by moving the
+            // clock. `now_offset_secs: 0` resets it; the offset is process-wide
+            // and nothing auto-resets it. Nothing runs here: the shared
+            // connect-time trigger windows already spawns
+            // (`MailEpochSchedule.StartAsync` →
+            // `StartMailEpochRefreshOnEveryConnect`) reads the clock on its
+            // next pass — a reconnect or the daily tick. tui's `automation.rs`
+            // / linux's `main.rs` carry this arm's full rationale.
+            case "mail_token_refresh_advance_clock":
+                {
+                    var offsetSecs = CommandLong(command, "now_offset_secs");
+                    try
+                    {
+                        uniffi.fauna_ffi.FaunaFfiMethods.SetMailTokenRefreshClockOffsetSecs(offsetSecs);
                     }
                     catch (Exception ex)
                     {

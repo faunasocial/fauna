@@ -512,3 +512,69 @@ def test_a_condition_arising_mid_session_is_announced_without_a_restart(
         f"come without a restart (session_generation {generation} → "
         f"{session_generation(driver)})"
     )
+
+
+@pytest.mark.feature("critical-alerts")
+def test_a_condition_arising_after_a_same_identity_re_establish_is_announced(
+    app, nest_instance, request
+):
+    """The loop keeps sweeping on the session's LIVE connection after the same
+    identity re-establishes — a condition that arises afterwards still reaches
+    the banner on the loop's next pass.
+
+    `critical-alerts.md` § Mechanism → *How often the detector runs*: a loop
+    rides one client and ends with it. An app that rebuilds its client on a
+    same-identity re-establish (windows disposes the session's client and builds
+    another on every one) must start the new client's loop; one that left the
+    identity's only loop on the disposed client had every later pass fail at its
+    first nest read, so nothing was announced again until a restart.
+    An app that keeps its client keeps its loop, and this journey holds for it
+    unchanged.
+
+    Same poke as the mid-session journey: ``alert_sweep_wake`` ends the loop's
+    wait instead of waiting out its six hours (convention 14), and the barrier is
+    the sweep's own pass counter.
+    """
+    from conftest import _login_app_as, _make_user
+    from helpers.succession import register_recovery_kit, request_seed_alone_replacement
+
+    driver = app.driver
+    user = _make_user(nest_instance)
+    seed_hex = bytes(user["signing_key"]).hex()
+    register_recovery_kit(
+        nest_instance["url"], actor_id_hex=user["actor_id_hex"], identity_seed_hex=seed_hex
+    )
+
+    before_login, _ = alert_sweep_passes(driver) or (0, 0)
+    _login_app_as(app, request, nest_instance, user)
+    driver.navigate_to("feed")
+    await_sweep_pass_after(driver, before_login, budget_s=ALERT_SWEEP_PASS_S, what="the session-start sweep")
+
+    # ── The same identity re-establishes: the post-auth hook runs again on the
+    #    same actor (a second `_login_app_as`, test_session_start_alert_sweep.py's
+    #    technique). ──
+    before_reestablish, _ = alert_sweep_passes(driver) or (0, 0)
+    _login_app_as(app, request, nest_instance, user)
+    driver.navigate_to("feed")
+    await_sweep_pass_after(
+        driver, before_reestablish, budget_s=ALERT_SWEEP_PASS_S, what="the re-establish's pass"
+    )
+    assert _REPLACEMENT_FRAGMENT not in _alert_text(driver), (
+        "precondition: nothing pends yet, so no pass may raise the replacement alarm"
+    )
+
+    # ── The condition arises after the re-establish, and the loop's clock comes
+    #    round (poked, never waited out). ──
+    planted, _ = alert_sweep_passes(driver) or (0, 0)
+    request_seed_alone_replacement(
+        nest_instance["url"], actor_id_hex=user["actor_id_hex"], identity_seed_hex=seed_hex
+    )
+    driver.call_command(ALERT_SWEEP_WAKE)
+    await_sweep_pass_after(driver, planted, budget_s=ALERT_SWEEP_PASS_S, what="the woken re-sweep")
+    text = _poll_banner(driver, _REPLACEMENT_FRAGMENT, present=True)
+    assert _REPLACEMENT_FRAGMENT in text, (
+        "a replacement parked after a same-identity re-establish must reach the banner "
+        "on the loop's next pass — a loop left sweeping on the client the re-establish "
+        f"tore down fails every pass; banner reads {text!r}, error surface: "
+        f"{app.error_text()!r}"
+    )

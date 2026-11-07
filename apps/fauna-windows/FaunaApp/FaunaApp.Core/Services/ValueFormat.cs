@@ -67,12 +67,31 @@ public static class ValueFormat
     /// seconds. Exactly one of the returned <c>clock</c> / <c>localized</c> /
     /// <c>absoluteEpochMs</c> fields is set — the same null-localized → absolute
     /// path as <see cref="RelativeTime"/>.</summary>
-    public static string ConversationTimestamp(long nowMs, long thenMs, int utcOffsetSeconds)
+    public static string ConversationTimestamp(long nowMs, long thenMs, int utcOffsetSeconds) =>
+        Render(FaunaFfiMethods.ConversationTimestampDisplay(nowMs, thenMs, utcOffsetSeconds), thenMs);
+
+    /// <summary>When a held mail arrived, for its guardian's <c>family-approval-item</c> row
+    /// (<c>family-safety.md</c> § Implementation status today, the held-mail time paragraph):
+    /// the shared <c>approval_timestamp_display</c> — the conversation-timestamp bucket of the
+    /// hold's <c>created_at</c> — rendered as <see cref="ConversationTimestamp"/> renders a
+    /// bucket. <c>null</c> for every kind but <c>mail_hold</c> and for a hold with no stamp:
+    /// the row then shows its sender alone, never an invented time. The kind rule lives in
+    /// shared Rust; this only renders what it returns.</summary>
+    internal static string? ApprovalTimestamp(FfiFamilyApprovalEntry entry, long nowMs, int utcOffsetSeconds)
     {
-        var display = FaunaFfiMethods.ConversationTimestampDisplay(nowMs, thenMs, utcOffsetSeconds);
+        var display = FaunaFfiMethods.ApprovalTimestampDisplay(entry, nowMs, utcOffsetSeconds);
+        // created_at is epoch SECONDS on the wire; the absolute fallback wants ms.
+        return display is null ? null : Render(display, entry.@createdAt * 1000);
+    }
+
+    /// <summary>One shared conversation-timestamp bucket as text: the clock, the resolved
+    /// word, or the absolute native date (<paramref name="fallbackMs"/> when Rust names
+    /// none) — exactly one of the three is set.</summary>
+    private static string Render(uniffi.fauna_core.ConversationTimestampDisplay display, long fallbackMs)
+    {
         if (display.@clock is not null) return display.@clock;
         if (display.@localized is not null) return Strings.Resolve(display.@localized);
-        var absMs = display.@absoluteEpochMs ?? thenMs;
+        var absMs = display.@absoluteEpochMs ?? fallbackMs;
         return DateTimeOffset.FromUnixTimeMilliseconds(absMs).LocalDateTime.ToString("d");
     }
 

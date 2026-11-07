@@ -3892,10 +3892,10 @@ dependencies = [
  "anyhow",
  "clap",
  "fauna-ipc",
+ "fauna-log",
  "fauna-mda-supervisor",
  "tokio",
  "tracing",
- "tracing-subscriber",
  "windows-service",
 ]
 

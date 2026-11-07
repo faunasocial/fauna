@@ -194,5 +194,5 @@ Stamped 2026-11-01 at a6047fbd8b.
 | 29 | app | `tests/e2e-unified/tests/test_linked_nests.py::test_link_refuses_two_nests_holding_different_recovery_keys` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
 | 30 | nest | `tests/e2e-unified/tests/api/test_succession_linked_nests.py::test_a_nest_accepts_a_recovery_only_against_its_own_records` | nest (linux): passed |
 | 31 | nest | `tests/e2e-unified/tests/api/test_succession_linked_nests.py::test_a_linked_nest_the_recovery_has_not_reached_stays_owed_until_a_device_gets_through` | nest (linux): passed |
-| 32 | app | `tests/e2e-unified/tests/test_identity_succession_aftermath.py::test_the_successors_burned_signer_connection_reads_revoked` | web (linux): passed, linux (linux): passed, tui (linux): passed |
+| 32 | app | `tests/e2e-unified/tests/test_identity_succession_aftermath.py::test_the_successors_burned_signer_connection_reads_revoked` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
 <!-- features-render:end -->

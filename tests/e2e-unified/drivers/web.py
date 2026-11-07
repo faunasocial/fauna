@@ -170,6 +170,22 @@ class WebBridgeDriver(HttpBridgeDriver):
         here, exactly as ``WindowsDriver.is_nav_tab_revealed`` documents."""
         return self.count(element_id, scope=scope) >= 1
 
+    def in_viewport(self, element_id: str, *, index: int = 0,
+                    scope: str | None = None) -> bool:
+        """The bridge's ``in-viewport`` attribute (``web-bridge/server.py``,
+        ``_IN_VIEWPORT_JS``): true when the element's vertical centre lies
+        inside its nearest vertically scrolling ancestor's visible band. The
+        DOM keeps every rendered row attached, so ``is_visible`` reads a row
+        scrolled far out of view as visible; this asks the geometry."""
+        value = self.get_attr(element_id, "in-viewport", index, scope=scope)
+        if value is None:
+            raise AssertionError(
+                f"web answered no in-viewport for {element_id!r}[{index}] — the "
+                "element is missing; "
+                f"{self.diagnose(element_id, scope=scope)}"
+            )
+        return value == "true"
+
     # The web bridge serves POST /element/scroll-into-view (Playwright
     # scroll_into_view_if_needed), so `scroll_to` works on web too.
     _supports_scroll_into_view = True

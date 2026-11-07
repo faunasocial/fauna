@@ -109,13 +109,13 @@ def test_a_taken_down_post_shows_the_notice_in_a_quote_and_when_opened(admin_app
     # A quote and a repost compose without reloading the window (feed.md
     # § Interaction bar), so a marker compose is the barrier that brings both
     # rows in.
-    feed.quote_post(feed.post_index_by_id(target_id))
+    feed.quote_post(feed.card_index_by_id(target_id))
     _poll(
         lambda: (feed.post_state_by_id(target_id) or {}).get("quote_count") == 1,
         _REPAINT_BUDGET_S,
         "the quote of the target is composed",
     )
-    feed.repost_post(feed.post_index_by_id(target_id))
+    feed.repost_post(feed.card_index_by_id(target_id))
     feed.create_post(f"takedown notice repost barrier {token}")
     repost_row = feed.wait_for_repost_row_by_target(target_id, timeout=_REPAINT_BUDGET_S)
     assert repost_row is not None, (
@@ -191,7 +191,7 @@ def test_a_taken_down_post_shows_the_notice_in_a_quote_and_when_opened(admin_app
     # Opening the repost row opens its ORIGINAL (feed.md § Interaction bar →
     # Repost) — the taken-down post, through the by-id read that sees the
     # takedown marker.
-    feed.open_post_detail(feed.post_index_by_id(repost_id))
+    feed.open_post_detail(feed.card_index_by_id(repost_id))
     _poll(feed.post_detail_visible, _REPAINT_BUDGET_S, "the post detail opens")
     wait_until(
         lambda: feed.post_detail_body() == tombstone,

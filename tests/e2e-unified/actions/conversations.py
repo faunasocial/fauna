@@ -4,6 +4,8 @@ import re
 import time
 from typing import TYPE_CHECKING
 
+from drivers.base import ViewportUndecided
+
 if TYPE_CHECKING:
     from drivers.base import PlatformDriver
 
@@ -1082,10 +1084,23 @@ class ConversationsActions:
         has not realized it). A listed one is asked through
         ``driver.in_viewport``, which raises on an app that cannot answer
         rather than reading every row as in view.
+
+        True means PROVEN in view. A reading the driver cannot decide
+        (``ViewportUndecided``: windows sees a rect clipped to the viewport
+        and cannot always prove it whole) reads ``False``, and both uses stay
+        sound with that. The journey's wait for the jump polls until a reading
+        proves the bubble in view, so a frame caught mid-scroll is only "not
+        yet". The precondition before the jump may read an undecided bubble
+        as not in view, but an undecided reading only becomes a proven one
+        when the layout around it changes, so the later proof still shows the
+        jump moved something.
         """
         for i, text in enumerate(self.driver.get_texts("dm-message-text")):
             if body in (text or ""):
-                return self.driver.in_viewport("dm-message-text", index=i)
+                try:
+                    return self.driver.in_viewport("dm-message-text", index=i)
+                except ViewportUndecided:
+                    return False
         return False
 
     def scan_result_rows(self) -> list[str]:

@@ -27,7 +27,6 @@ from pathlib import Path
 
 import pytest
 
-from helpers.app_surface import declared_absence, skip_environment
 from helpers.fuse_mount import mount_type
 
 # Content sync crosses two processes and a nest round-trip; the engine is
@@ -211,28 +210,6 @@ def on_demand_root_stands(location: Path) -> bool:
 
         return is_sync_root(location)
     return on_demand_mount_stands(location)
-
-
-def require_fuse_host(driver) -> None:
-    """Skip, with its class, a witness that reads the linux FUSE root on a host
-    that serves none — tui runs on all three. ``driver`` is a driver or the app id.
-
-    A macOS host offers no per-binding on-demand root by design; a windows host
-    serves a cloud-files root, which the FUSE witnesses' mount table and block
-    counts cannot read (its legs are `test_folder_location_free_space.py` and
-    the `test_folder_on_demand_*_windows.py` twins).
-    """
-    if sys.platform == "darwin":
-        declared_absence(
-            driver,
-            capability="on-demand root over a bound location on a macOS host (always-resident)",
-            doc=(
-                "docs/goal/behavior/on-demand-files.md § On-Demand Files — \"on macOS a "
-                "bound location is always-resident by design (on-demand-files-apple.md § Apple File Provider binding)\""
-            ),
-        )
-    if sys.platform == "win32":
-        skip_environment("this witness reads a FUSE mount; a windows host serves cloud files")
 
 
 def bind_location_under_set(app, set_name: str, location: Path, *, seat: str) -> int:

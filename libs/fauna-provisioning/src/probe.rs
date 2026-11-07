@@ -210,9 +210,7 @@ pub fn resolve_handle_domain_with_local_port(
 ) -> HandleDomainTarget {
     let (host, port) = split_host_port(domain);
     let ip = host.parse::<IpAddr>().ok();
-    let is_loopback = host.eq_ignore_ascii_case("localhost")
-        || host.to_ascii_lowercase().ends_with(".localhost")
-        || ip.is_some_and(|a| a.is_loopback());
+    let is_loopback = fauna_core::resolve::is_loopback_host(host);
     // The public-DNS-name classification (false for IP literal /
     // `localhost`/`*.localhost` / `.local` mDNS) is the shared
     // `fauna_core::resolve::is_public_dns_name` — one source of truth with

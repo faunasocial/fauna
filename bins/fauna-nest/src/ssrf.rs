@@ -40,7 +40,9 @@ use std::net::{IpAddr, SocketAddr};
 // `fauna-core` (shared with the client host-address reporter
 // `fauna_client_dns::host_address` and the Nostr relay dialer); this guard
 // consumes them.
-use fauna_core::resolve::{AddrGuardError, is_global_ip, resolve_permitted_addrs};
+use fauna_core::resolve::{
+    AddrGuardError, is_global_ip, is_localhost_name, resolve_permitted_addrs,
+};
 
 /// Why an outbound URL was rejected.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -91,10 +93,7 @@ pub fn parse_https_url(url_str: &str) -> Result<url::Url, SsrfError> {
     let global = match url.host().ok_or(SsrfError::NoHost)? {
         url::Host::Ipv4(ip) => is_global_ip(IpAddr::V4(ip)),
         url::Host::Ipv6(ip) => is_global_ip(IpAddr::V6(ip)),
-        url::Host::Domain(name) => {
-            let name = name.trim_end_matches('.').to_ascii_lowercase();
-            name != "localhost" && !name.ends_with(".localhost")
-        }
+        url::Host::Domain(name) => !is_localhost_name(name),
     };
     if !global {
         return Err(SsrfError::NonGlobal);
@@ -150,15 +149,17 @@ pub async fn ssrf_safe_https_streaming_client(
     Ok((client, url))
 }
 
-/// Whether `host` names this machine: a loopback IP literal, or `localhost`
-/// (any case, a trailing root dot allowed). The one test every unattended,
-/// peer-triggered dial applies before it reaches the loopback carve-out of
-/// `federation_channel::validate_peer_url`.
+/// Whether `host` names this machine: a loopback IP literal, or a localhost
+/// name — `localhost` and every name under it, the shared RFC 6761 reading
+/// [`fauna_core::resolve::is_localhost_name`], so this gate and
+/// [`parse_https_url`] can never disagree on a name. The one test every
+/// unattended, peer-triggered dial applies before it reaches the loopback
+/// carve-out of `federation_channel::validate_peer_url`.
 pub(crate) fn is_loopback_host(host: &url::Host<&str>) -> bool {
     match host {
         url::Host::Ipv4(ip) => ip.is_loopback(),
         url::Host::Ipv6(ip) => ip.is_loopback(),
-        url::Host::Domain(d) => d.trim_end_matches('.').eq_ignore_ascii_case("localhost"),
+        url::Host::Domain(d) => is_localhost_name(d),
     }
 }
 
@@ -533,6 +534,32 @@ mod tests {
         );
         assert_eq!(peer_declared_origin("http://127.0.0.1:9000/x", true), None);
         assert_eq!(peer_declared_origin("http://court.example", true), None);
+    }
+
+    /// A name under `localhost` IS `localhost` (RFC 6761) at every gate of this
+    /// boundary: the peer-declared-origin gate refuses it on production state
+    /// and admits it on test state exactly as it does the bare name, and the
+    /// store-time text check reads it the same. Before the one owner the two
+    /// gates disagreed — `https://x.localhost` passed the origin gate as
+    /// non-loopback and only the later dial refused it.
+    #[test]
+    fn a_name_under_localhost_is_localhost_at_every_gate() {
+        for declared in [
+            "https://localhost",
+            "https://x.localhost",
+            "https://X.LOCALHOST.:8443",
+        ] {
+            assert_eq!(peer_declared_origin(declared, false), None, "{declared}");
+            assert!(peer_declared_origin(declared, true).is_some(), "{declared}");
+            assert_eq!(
+                parse_https_url(declared).unwrap_err(),
+                SsrfError::NonGlobal,
+                "{declared}"
+            );
+        }
+        // The label as a public name's leftmost part is not the tree.
+        assert!(peer_declared_origin("https://localhost.example", false).is_some());
+        assert!(parse_https_url("https://localhost.example/").is_ok());
     }
 
     fn v4(s: &str) -> IpAddr {

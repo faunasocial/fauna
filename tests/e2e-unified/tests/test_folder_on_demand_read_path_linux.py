@@ -57,12 +57,15 @@ from helpers.folder_content import (
     bind_location_under_set,
     mountable_location,
     on_demand_mount_stands,
-    require_fuse_host,
     upload_count,
 )
 from helpers.fuse_mount import run_through_mount
 
-pytestmark = pytest.mark.tier_3
+# A witness of the linux FUSE root: tui runs on all three hosts, but a macOS host
+# owes no on-demand root (always-resident by design) and a windows host serves
+# cloud files, which its own twins witness (feature-catalog.md § The ledger,
+# *Stale records*, ruling (i)).
+pytestmark = [pytest.mark.tier_3, pytest.mark.host_platform("linux")]
 
 # A ceiling, not an expectation: the agent mounts (or unmounts) after it has
 # answered the flip, restarting the folder's engine in between.
@@ -110,7 +113,6 @@ def test_on_demand_folder_is_read_and_written_through_its_mount(
     """Turning a bound folder on-demand serves it, at its own path, to every
     other process — and turning it off leaves an ordinary directory behind."""
     app, _nest, _owner = folder_share_owner_app
-    require_fuse_host(app.driver)
     loc = app.sync_locations
 
     set_name = f"ondemand-{secrets.token_hex(4)}"

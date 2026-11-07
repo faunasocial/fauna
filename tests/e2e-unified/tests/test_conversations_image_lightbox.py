@@ -1,4 +1,5 @@
-"""Conversations received image — ``image-lightbox`` (full-screen viewer): tui.
+"""Conversations received image — ``image-lightbox`` (full-screen viewer): tui,
+web, linux, macos, ios.
 
 ``tests/e2e-unified/ui.yaml`` ``components.image-lightbox`` lists
 ``conversations.conversation_detail`` in its ``used_in``, and the conversations
@@ -11,8 +12,15 @@ dismiss element inside the lightbox) closes it.
 tui leads (``docs/goal/architecture/testing.md`` § Default app and nest mode):
 it paints the lightbox from the one painter its feed already uses
 (``apps/fauna-tui/src/lightbox.rs``), re-rasterized at ``LIGHTBOX_COLS`` so the
-picture is genuinely enlarged. The other six apps follow; widen the marks as
-each one wires the trigger.
+picture is genuinely enlarged. web joined through the feed's own component:
+the bubble's picture is a ``C2paImage``, whose click opens ``Lightbox.svelte``.
+linux joined by giving the bubble's picture the feed ``post-image``'s shape (a
+flat button wrapping the ``gtk::Picture``) whose click opens
+``views/lightbox.rs::show_image_lightbox_paintable`` from the decoded texture,
+and the lightbox window binds Escape to close. macos and ios joined through the
+shared FaunaKit ``DmMessageBubble``, which opens the shared ``ImageLightbox`` (the
+feed card's trigger) on the decoded bytes it painted; the lightbox takes Escape.
+windows and android follow; widen the marks as each one wires the trigger.
 
 The attachment arrives through the inject seam (a *received* message, the row's
 subject) with bytes unique to this run, so the picture is this run's own and
@@ -34,6 +42,10 @@ from helpers.waiting import wait_until
 pytestmark = [
     pytest.mark.tier_3,
     pytest.mark.tui,
+    pytest.mark.web,
+    pytest.mark.linux,
+    pytest.mark.macos,
+    pytest.mark.ios,
 ]
 
 FIXTURE_IMAGE = Path(__file__).parent.parent / "fixtures" / "test-image.png"

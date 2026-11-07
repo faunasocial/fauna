@@ -4118,7 +4118,7 @@ fn handle_test_command(
                         c.run_deployment_seed_custody_leg();
                         c.refresh_mail_epoch_schedule();
                         c.publish_subscriber_encaps_key();
-                        c.run_critical_alert_sweep_once();
+                        c.run_critical_alert_sweep();
                         c.load_muted_keywords();
                         crate::report::load_hidden_content(c);
                     }

@@ -151,6 +151,8 @@ class DevicesVM @Inject constructor(
     // session, or a row that resolves no set ref).
     private val _onDemand = MutableStateFlow<Map<OnDemandRowKey, OnDemandRow>>(emptyMap())
     val onDemand: StateFlow<Map<OnDemandRowKey, OnDemandRow>> = _onDemand
+    /** The folder list [loadOnDemand] last read — re-read after each provider reconcile. */
+    @Volatile private var onDemandFolders: List<FolderSummary>? = null
 
     // Which rows the Compose screen currently has expanded — a VM-side shadow of
     // FolderRow's own local `expanded` boolean (Compose state the VM has no other
@@ -270,6 +272,14 @@ class DevicesVM @Inject constructor(
     private var machine: DevicesMachine? = null
 
     init {
+        // The provider's presence reconcile re-reads every row's park: the
+        // capability host writes its revocation mark at its own edge, which
+        // no push announces (`file-sync.md` § Multi-writer shared sets →
+        // *Revocation on a capability host* — the fold runs on the folder-list
+        // refresh, [loadOnDemand], and on the presence reconcile, here).
+        viewModelScope.launch {
+            onDemandToggle.reconciled.collect { onDemandFolders?.let { loadOnDemand(it) } }
+        }
         // `fauna.sync.changed` — a record landed in a folder this actor
         // participates in (own other device, or a fellow member). The push is
         // a nudge: re-read the machine snapshot so a collaborator's share/
@@ -968,6 +978,7 @@ class DevicesVM @Inject constructor(
      * Files: the choice is remembered).
      */
     fun loadOnDemand(folders: List<FolderSummary>) {
+        onDemandFolders = folders
         viewModelScope.launch {
             val identities = folders.mapNotNull { folder ->
                 onDemandToggle.identify(folder)?.let { OnDemandRowKey.of(folder) to it }
@@ -975,7 +986,7 @@ class DevicesVM @Inject constructor(
             val states = runCatching { onDemandToggle.read(identities.map { it.second }) }
                 .getOrDefault(emptyMap())
             _onDemand.value = identities.mapNotNull { (key, id) ->
-                states[id.scopedId]?.let { key to OnDemandRow(id.scopedId, it.shown, it.stronger) }
+                states[id.scopedId]?.let { key to OnDemandRow(id.scopedId, it.shown, it.stronger, it.parked) }
             }.toMap()
         }
     }
@@ -1388,5 +1399,10 @@ data class OnDemandRowKey(val id: Long, val homeNestUrl: String?) {
     }
 }
 
-/** One row's `folder-on-demand-toggle` paint: its scoped id, the preference, and the stronger presence. */
-data class OnDemandRow(val scopedId: String, val shown: Boolean, val stronger: Boolean)
+/**
+ * One row's `folder-on-demand-toggle` paint: its scoped id, the preference, the
+ * stronger presence, and whether the documents provider holds the set parked
+ * (the shared park fold — `binding_section`'s `parked` input, which the screen
+ * asks before it paints `folder-access-revoked-warning`).
+ */
+data class OnDemandRow(val scopedId: String, val shown: Boolean, val stronger: Boolean, val parked: Boolean = false)

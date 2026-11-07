@@ -5051,12 +5051,26 @@ pub(super) const MIGRATIONS_ATPROTO_PDS: &str = "
     -- A hosted plugin's own state scope: the key/value store behind its
     -- `state` import. Deleted with the plugin. Plaintext to the nest -- what
     -- a plugin keeps here is its working state, never a user's key (the
-    -- holder secret lives beside the module, above).
+    -- holder secret lives beside the module, above) and never an account's
+    -- settings (the table below).
     CREATE TABLE IF NOT EXISTS plugin_state (
         principal_id BLOB NOT NULL,
         key          TEXT NOT NULL,
         value        BLOB NOT NULL,
         PRIMARY KEY (principal_id, key)
+    );
+
+    -- One bound account's settings for a hosted plugin
+    -- (`fauna.plugins.set_settings`), keyed by the account so they leave with
+    -- it: revoke, uninstall, account deletion and identity succession each
+    -- delete the row. `principal_id` is the plugin's install row; the plugin
+    -- reads `value` through its `state` import under the reserved key
+    -- `settings/<actor hex>` and can never write it.
+    CREATE TABLE IF NOT EXISTS plugin_account_settings (
+        actor_id     BLOB NOT NULL,
+        principal_id BLOB NOT NULL,
+        value        BLOB NOT NULL,
+        PRIMARY KEY (actor_id, principal_id)
     );
 
     CREATE TABLE IF NOT EXISTS atproto_native_records (
@@ -5915,10 +5929,12 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
     // The nest-computable hash companions a writer left unset (reserved
     // folders are inserted without a `name_hash`).
     reconcile_path_sealing_companions(conn)?;
-    // Scrub resting plaintext wherever its sealed sibling now rests. A scrubbed
-    // value's page stays on the freelist with its bytes intact (`secure_delete`
-    // is off), so a boot that cleared anything rewrites the file: the byte-level
-    // guarantee `tests/conformance_at_rest_byte_scan.rs` pins, not merely the
+    // Scrub resting plaintext wherever its sealed sibling now rests. The
+    // connection's `secure_delete` (`CacheDb::open`) zeroes what this scrub
+    // frees, but not the copies an earlier write freed while the plaintext
+    // still rested (by a binary predating the pragma), so a boot that cleared
+    // anything still rewrites the file: the byte-level guarantee
+    // `tests/conformance_at_rest_byte_scan.rs` pins, not merely the
     // column-level one. Outside any transaction, which VACUUM requires.
     let scrubbed: usize = run_scrub_plaintext(conn)?.iter().map(|(_, n)| n).sum();
     if scrubbed > 0 {
@@ -6541,11 +6557,15 @@ fn reconcile_path_sealing_companions(conn: &Connection) -> Result<()> {
         rows.filter_map(|r| r.ok()).collect()
     };
     for (id, name) in sets {
-        conn.execute(
+        // A boot that a client-made row can stop is exactly the unrecoverable
+        // state `nest/common.md` forbids: a UNIQUE conflict (a squatter holds
+        // this hash) is logged and the row skipped, never propagated.
+        if let Err(e) = conn.execute(
             "UPDATE folders SET name_hash = ?1 WHERE id = ?2",
             rusqlite::params![fauna_core::path_crypto::set_name_hash(&name).to_vec(), id],
-        )
-        .context("fill in folders.name_hash")?;
+        ) {
+            tracing::warn!(folder_id = id, error = %e, "skipping folders.name_hash fill-in");
+        }
     }
 
     // `import_sessions.source_hash`.

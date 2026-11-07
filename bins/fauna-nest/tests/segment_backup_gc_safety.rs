@@ -783,11 +783,11 @@ async fn gc_still_classifies_a_real_rail_blob_as_direct_blob() {
     let actor: [u8; 32] = [0x52; 32];
     let device: [u8; 32] = [0x0A; 32];
 
-    db.get_or_create_reserved_folder(&actor, "config")
+    db.get_or_create_reserved_folder(&actor, "drafts")
         .await
         .unwrap();
     let fs = db
-        .get_folder_for_actor("__config", &actor)
+        .get_folder_for_actor("__drafts", &actor)
         .await
         .unwrap()
         .unwrap();

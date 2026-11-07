@@ -618,8 +618,11 @@ public sealed partial class BackupsPage : Page
             if (!FolderOptionsMatchViewModel())
             {
                 FolderSelector.Items.Clear();
+                // Each option paints its label — a kind entry lists as "Mail", never
+                // `backups.reseed_set_mail` (§ Snapshot-list shape → *Kind entries*) —
+                // and is keyed by the row's `name`, what the machine is handed back.
                 foreach (var option in _viewModel.FolderOptions)
-                    FolderSelector.Items.Add(FolderOption(option));
+                    FolderSelector.Items.Add(PickerOption.Create(option.Label, option.Name));
             }
             SelectFolderOption(_viewModel.SelectedFolder);
         }
@@ -627,22 +630,6 @@ public sealed partial class BackupsPage : Page
         {
             _suppressFolderSelection = false;
         }
-    }
-
-    /// <summary>One <c>backup-folder-selector</c> option. Its Name is the label it
-    /// paints — what a screen reader reads, and what the bridge's <c>options</c>
-    /// attribute answers, so a kind entry lists as "Mail", never
-    /// <c>backups.reseed_set_mail</c> (§ Snapshot-list shape → *Kind entries*). The
-    /// row's <c>name</c> is its Tag (what the machine is handed back) and its
-    /// AutomationId, which the bridge's <c>Select</c> matches as well as the Name,
-    /// so <c>driver.select</c> names the locale-stable key exactly as on every other
-    /// app (the <c>feed-factor-select</c> shape, <c>FeedPage.FactorOption</c>).</summary>
-    private static ComboBoxItem FolderOption(BackupFolderOption option)
-    {
-        var item = new ComboBoxItem { Content = option.Label, Tag = option.Name };
-        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(item, option.Label);
-        Microsoft.UI.Xaml.Automation.AutomationProperties.SetAutomationId(item, option.Name);
-        return item;
     }
 
     /// <summary>True when the picker already offers exactly the VM's options, in
@@ -1244,22 +1231,14 @@ public sealed partial class BackupsPage : Page
 
     /// <summary>Build <c>backup-destination-kind-select</c>'s items from the shared
     /// catalog (<c>BackupsViewModel.KindOptions()</c>) — Content = the localized
-    /// label (also what the row's kind-badge renders, so they cannot drift), Tag +
-    /// AutomationProperties.Name = the WIRE value. Name carries the wire value
-    /// (never the label) because the shared e2e's <c>driver.select</c> matches a
-    /// ComboBoxItem by Name EXACTLY on windows — the same value/label split as
-    /// <see cref="PopulateFolderSelector"/>'s conflict/paywall pickers.
+    /// label (also what the row's kind-badge renders, so they cannot drift), keyed
+    /// by the WIRE value (<see cref="PickerOption"/>).
     /// Pure catalog, no state — built once, not repopulated per dialog open.</summary>
     private void PopulateDestinationKindSelect()
     {
         DestinationKindSelect.Items.Clear();
         foreach (var opt in BackupsViewModel.KindOptions())
-        {
-            var label = S.Resolve(opt.label);
-            var item = new ComboBoxItem { Content = label, Tag = opt.value };
-            Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(item, opt.value);
-            DestinationKindSelect.Items.Add(item);
-        }
+            DestinationKindSelect.Items.Add(PickerOption.Create(S.Resolve(opt.label), opt.value));
     }
 
     /// The wire discriminator currently selected. No selection (dialog not yet

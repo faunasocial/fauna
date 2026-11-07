@@ -2,6 +2,7 @@ using System;
 using System.Threading.Tasks;
 using FaunaApp.Core.Services;
 using FaunaApp.Core.ViewModels;
+using FaunaApp.Helpers;
 using FaunaApp.UiIds;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
@@ -71,10 +72,7 @@ internal static class ReportSheetDialog
         var initial = vm.View;
         foreach (var option in initial.reasons)
         {
-            var label = S.Resolve(option.label);
-            var item = new ComboBoxItem { Content = label, Tag = option.reason };
-            AutomationProperties.SetName(item, option.reason);
-            reasonBox.Items.Add(item);
+            reasonBox.Items.Add(PickerOption.Create(S.Resolve(option.label), option.reason));
         }
 
         var painting = false;

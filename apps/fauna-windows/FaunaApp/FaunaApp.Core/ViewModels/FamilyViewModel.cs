@@ -894,7 +894,9 @@ public sealed class FamilyApprovalRow
     /// <c>AutomationProperties.Name</c> binds. Computed once in <see cref="From"/>
     /// via the shared <c>fauna_core::format::approval_display_text</c>
     /// (family-safety.md § Reach approvals; § Where logic lives) rather than a
-    /// per-kind ternary here.
+    /// per-kind ternary here. A held mail's arrival time follows the sender
+    /// ("&lt;sender&gt; · &lt;time&gt;", the shared <c>approval_timestamp_display</c> bucket);
+    /// every other kind, and a hold with no stamp, shows the sender alone.
     /// <para>
     /// A <c>mail_hold</c>'s <c>summary</c> is <b>deliberately empty</b>: a subject line is
     /// content, and the message is sealed to the ward, so the nest never sees it. Its peer is
@@ -917,7 +919,10 @@ public sealed class FamilyApprovalRow
     /// </summary>
     public required string DisplayText { get; init; }
 
-    internal static FamilyApprovalRow From(FfiFamilyApprovalEntry a) => new()
+    internal static FamilyApprovalRow From(FfiFamilyApprovalEntry a) =>
+        From(a, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(), DeviceOffset.UtcOffsetSeconds());
+
+    internal static FamilyApprovalRow From(FfiFamilyApprovalEntry a, long nowMs, int utcOffsetSeconds) => new()
     {
         SupervisedActorId = a.@supervisedActorId,
         SupervisedHandle = a.@supervisedHandle,
@@ -930,6 +935,17 @@ public sealed class FamilyApprovalRow
         Operation = a.@operation,
         Target = a.@target,
         CreatedAt = a.@createdAt,
-        DisplayText = FaunaFfiMethods.ApprovalDisplayText(a) ?? Strings.Get("family/approval_no_sender"),
+        DisplayText = RowText(a, nowMs, utcOffsetSeconds),
     };
+
+    /// <summary>"&lt;sender&gt; · &lt;time&gt;" for a held mail, the sender alone otherwise —
+    /// the shared <c>approval_item_text</c> join (tui and linux call it directly; this, like
+    /// web, android and Apple, joins the two shared halves itself, since only they cross
+    /// UniFFI).</summary>
+    private static string RowText(FfiFamilyApprovalEntry a, long nowMs, int utcOffsetSeconds)
+    {
+        var who = FaunaFfiMethods.ApprovalDisplayText(a) ?? Strings.Get("family/approval_no_sender");
+        var when = ValueFormat.ApprovalTimestamp(a, nowMs, utcOffsetSeconds);
+        return when is null ? who : $"{who} · {when}";
+    }
 }

@@ -574,3 +574,178 @@ async fn the_owner_reads_the_oracles_per_operation_record() {
     assert!(theirs.ops.is_empty(), "{theirs:?}");
     assert!(list(OTHER).await.is_empty());
 }
+
+/// One request straight through the custodian's execute core (the transport
+/// is the first test's; here the reads are the question): the response's
+/// `result`, or its `error`.
+async fn bunker_call(
+    state: &AppState,
+    signer_pubkey: &str,
+    client_pubkey: &str,
+    method: &str,
+    params: &[&str],
+) -> Result<String, String> {
+    use fauna_bridge_nostr::nip46::{Nip46Method, Nip46Request};
+    let req = Nip46Request {
+        id: "r".into(),
+        method: Nip46Method::parse(method),
+        params: params.iter().map(|s| s.to_string()).collect(),
+    };
+    let conn = state.db.conn().await;
+    let json = nostr::bunker::handle_request(
+        &conn,
+        &state.nest_identity.signing_key.to_bytes(),
+        signer_pubkey,
+        client_pubkey,
+        &req,
+        now_secs(),
+    )
+    .expect("a response, never an infrastructure error");
+    let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+    match v
+        .get("error")
+        .and_then(|e| e.as_str())
+        .filter(|e| !e.is_empty())
+    {
+        Some(e) => Err(e.to_string()),
+        None => Ok(v["result"].as_str().unwrap_or_default().to_string()),
+    }
+}
+
+/// Every request a bound client makes, against one state of the account:
+/// all served (`served`), or all refused with the uniform `unauthorized`.
+async fn expect_custodian(state: &AppState, signer: &str, client: &str, served: bool, why: &str) {
+    let peer = Keypair::generate().public_key_hex();
+    let event = r#"{"kind":1,"content":"x","tags":[],"created_at":1700000000}"#;
+    let connect = bunker_call(state, signer, client, "connect", &[signer]).await;
+    let sign = bunker_call(state, signer, client, "sign_event", &[event]).await;
+    let enc = bunker_call(state, signer, client, "nip44_encrypt", &[&peer, "hi"]).await;
+    if served {
+        assert_eq!(connect, Ok("ack".to_string()), "{why}: connect");
+        sign.unwrap_or_else(|e| panic!("{why}: sign_event refused: {e}"));
+        let ct = enc.unwrap_or_else(|e| panic!("{why}: nip44_encrypt refused: {e}"));
+        assert_eq!(
+            bunker_call(state, signer, client, "nip44_decrypt", &[&peer, &ct]).await,
+            Ok("hi".to_string()),
+            "{why}: nip44_decrypt"
+        );
+    } else {
+        let unauthorized = Err("unauthorized".to_string());
+        assert_eq!(connect, unauthorized, "{why}: connect");
+        assert_eq!(sign, unauthorized, "{why}: sign_event");
+        assert_eq!(enc, unauthorized, "{why}: nip44_encrypt");
+        assert_eq!(
+            bunker_call(state, signer, client, "nip44_decrypt", &[&peer, "AgAAAA"]).await,
+            unauthorized,
+            "{why}: nip44_decrypt"
+        );
+    }
+}
+
+/// The account's external-apps switch and its authority reach the Nostr
+/// custodian: a client bound BEFORE the switch went OFF — or before the
+/// account was locked out or suspended — is refused `connect`, `sign_event`
+/// and the NIP-44 pair with the uniform `unauthorized`, and switching back ON
+/// serves it again with nothing redone (`atproto-pds-full.md` § F1 detail,
+/// the kill-switch bullet; `nostr.md` § *A principal as a bunker client*).
+#[tokio::test]
+async fn the_external_apps_switch_and_the_accounts_authority_reach_the_custodian() {
+    let relay = spawn_relay().await;
+    let state = relay.state.clone();
+    state
+        .db
+        .create_user(&ACCOUNT, "free", "test")
+        .await
+        .unwrap();
+    link_custodial(&state, &hex::encode(ACCOUNT)).await;
+    state
+        .db
+        .record_atproto_oauth_grant(
+            &ACCOUNT,
+            b"family-1",
+            CLIENT,
+            Some("Oracle App"),
+            SCOPE,
+            &[],
+            "jkt",
+            i64::MAX,
+            None,
+            fauna_nest::db::atproto_pds::OAUTH_GRANT_ISSUER_NEST,
+            &PrincipalAttestation {
+                keys: AttestedKeys {
+                    holder_x25519: Some(HOLDER),
+                    writer_ed25519: None,
+                },
+                execution_form: ExecutionForm::Device,
+                manifest: None,
+            },
+        )
+        .await
+        .unwrap();
+    let principal_id = state
+        .db
+        .list_third_party_principals(&ACCOUNT)
+        .await
+        .unwrap()[0]
+        .principal_id
+        .clone();
+    mint_grant(&state, IdentityOpClass::NostrSignEvent).await;
+    mint_grant_to(&state, &[0x0F; 16], &HOLDER, IdentityOpClass::NostrNip44).await;
+    let binding = PrincipalBinding {
+        account: ACCOUNT,
+        principal_id,
+        token_scopes: vec![SCOPE.to_string()],
+        family_id: None,
+    };
+    let client = Keypair::generate().public_key_hex();
+    let signer = bind(&state, &binding, &client)
+        .await
+        .expect("bind while ON")
+        .signer_pubkey;
+    let check = |served: bool, why: &'static str| {
+        let (state, signer, client) = (state.clone(), signer.clone(), client.clone());
+        async move { expect_custodian(&state, &signer, &client, served, why).await }
+    };
+
+    check(true, "ON").await;
+
+    // OFF pauses the principal, the bound client with it.
+    state
+        .db
+        .set_atproto_external_apps_enabled(&ACCOUNT, false)
+        .await
+        .unwrap();
+    check(false, "switch OFF").await;
+    // ON again: the same client, no re-bind, no new grant.
+    state
+        .db
+        .set_atproto_external_apps_enabled(&ACCOUNT, true)
+        .await
+        .unwrap();
+    check(true, "switch back ON").await;
+
+    // A locked-out account's principals go with it; a lapsed lock is none.
+    let now = now_secs() as i64;
+    state
+        .db
+        .set_locked_until(&ACCOUNT, Some(now + 3600))
+        .await
+        .unwrap();
+    check(false, "locked out").await;
+    state
+        .db
+        .set_locked_until(&ACCOUNT, Some(now - 1))
+        .await
+        .unwrap();
+    check(true, "lock lapsed").await;
+
+    // A suspended account's principals go with it.
+    assert!(
+        state
+            .db
+            .suspend_user_now(&ACCOUNT, "test", "test")
+            .await
+            .unwrap()
+    );
+    check(false, "suspended").await;
+}

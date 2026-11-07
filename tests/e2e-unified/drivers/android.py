@@ -230,6 +230,55 @@ class AndroidBridgeDriver(HttpBridgeDriver):
             raise RuntimeError(f"android clipboard read refused: {reply['error']}")
         return reply.get("text")
 
+    # ── The documents provider, as another app's picker drives it ──────────
+    # (`DocumentsOps` on the androidTest bridge). The provider is guarded by
+    # MANAGE_DOCUMENTS, which `adb shell content` does not hold; the bridge runs
+    # in the app's own process, so its ContentResolver calls reach exactly the
+    # entry points a picker's do. A provider refusal raises (RuntimeError, or
+    # LookupError for a not-found).
+
+    DOCUMENTS_ROOT_ID = "fauna"
+
+    def documents_children(self, parent: str = DOCUMENTS_ROOT_ID) -> list[dict]:
+        """``parent``'s children as ``{id, name, flags}`` — the root lists the
+        account's presented sets."""
+        return list(self._get("/documents/children", {"parent": parent}).get("children", []))
+
+    def documents_create(self, parent: str, name: str) -> str:
+        """Create an empty document ``name`` in ``parent`` (``createDocument``);
+        its new document id."""
+        return self._post("/documents/create", {"parent": parent, "name": name})["document_id"]
+
+    def documents_open_write(self, document_id: str) -> int:
+        """Open ``document_id`` for write and hold the descriptor on the device —
+        an edit the user has open. ``documents_write_close`` ends it."""
+        return int(self._post("/documents/open-write", {"document_id": document_id})["handle"])
+
+    def documents_write_close(self, handle: int, body: bytes) -> None:
+        """Replace the held descriptor's bytes with ``body`` and close it — the
+        written close the provider ingests."""
+        import base64
+
+        self._post(
+            "/documents/write-close",
+            {"handle": handle, "body_b64": base64.b64encode(body).decode()},
+        )
+
+    def documents_write(self, document_id: str, body: bytes) -> None:
+        """One open → write → close of ``document_id``."""
+        self.documents_write_close(self.documents_open_write(document_id), body)
+
+    def documents_read(self, document_id: str) -> bytes:
+        """``document_id``'s bytes as the provider serves them."""
+        import base64
+
+        return base64.b64decode(self._get("/documents/read", {"document_id": document_id})["body_b64"])
+
+    def documents_parks(self) -> list[dict]:
+        """Each presented set's park read, in-process off the host's state DB:
+        ``{name, folder_id, access_revoked, unrecorded}``."""
+        return list(self._get("/documents/parks").get("parks", []))
+
     def app_log_text(self) -> str | None:
         """This launch's on-disk app log — the client's own account of itself,
         attached to every failing test's report by `helpers/app_log_section.py`.

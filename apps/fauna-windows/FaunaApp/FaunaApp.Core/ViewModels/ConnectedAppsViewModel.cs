@@ -316,15 +316,16 @@ internal partial class ConnectedAppsViewModel : ViewModelBase
         FaunaFfiMethods.ConnectedAppsRosterRowText(row).opensSettingsCard;
 
     /// <summary>The attributes of a <c>connected-apps-item</c>, packed into the one HelpText UIA
-    /// gives it (<see cref="AutomationAttributePack"/>): <c>revoked</c> (an empty value is not a
-    /// burned row), <c>status</c> — <c>paused</c> (the account's external-apps switch is OFF),
+    /// gives it (<see cref="AutomationAttributePack"/>): <c>revoked</c> — a mail app password or a
+    /// signer client the identity-succession burn killed (an empty value is not a burned
+    /// row), <c>status</c> — <c>paused</c> (the account's external-apps switch is OFF),
     /// <c>connected</c> or <c>not_connected</c>, as a value a reader can count beside the words —
     /// and, on a row a custodian served, <c>oracle_ops</c>, the operations in the current window.
     /// A row no custodian served leaves the key out, so the attribute reads as not set, never
     /// as zero.</summary>
     public static string RowAttributes(ConnectedAppRow row)
     {
-        var burned = row.@mail is { @revoked: true };
+        var burned = row.@mail is { @revoked: true } || row.@signerBurned;
         var attributes = new List<(string, string)>
         {
             ("revoked", burned ? "true" : ""),

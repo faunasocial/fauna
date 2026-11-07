@@ -153,7 +153,7 @@ Stamped 2026-10-01 at 065ed2e2c2.
 | linux | ✅ full | 0.1.5-dev+cbd813be standalone |
 | windows | ⚠ partial | |
 | macos | ✅ full | 0.1.5-dev+3f9f2b95 standalone |
-| ios | ✅ full | |
+| ios | ⚠ partial | |
 | android |  no run recorded | |
 | tui | ✅ full | 0.1.5-dev+02e5676e standalone |
 
@@ -205,7 +205,7 @@ Stamped 2026-10-01 at 065ed2e2c2.
 | 24 | app | `tests/e2e-unified/tests/test_atproto_settings.py::test_depth_selector_renders_at_off` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 25 | nest | `tests/e2e-unified/tests/test_atproto_hosted_account.py::test_hosting_again_after_a_retirement_mints_a_fresh_identity` | nest (linux): passed, nest (macos): passed |
 | 26 | nest | `tests/e2e-unified/tests/test_atproto_hosted_account.py::test_the_nest_announces_itself_to_the_relay_once_the_identity_resolves` | nest (linux): passed, nest (macos): passed |
-| 27 | app | `tests/e2e-unified/tests/test_connected_apps.py::test_a_typed_code_connects_the_app_and_revoke_ends_it` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 27 | app | `tests/e2e-unified/tests/test_connected_apps.py::test_a_typed_code_connects_the_app_and_revoke_ends_it` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): error, tui (linux): passed, tui (macos): passed |
 | 27 | app | `tests/e2e-unified/tests/test_connected_apps.py::test_a_revoke_bites_at_the_very_next_write_and_each_session_is_ceilinged` | web (linux): passed, linux (linux): passed, tui (linux): passed, tui (macos): passed |
 | 28 | app | `tests/e2e-unified/tests/test_atproto_settings.py::test_an_app_password_is_shown_again_on_another_device` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 29 | nest | `tests/e2e-unified/tests/test_atproto_pds_app_limits.py::test_an_app_signed_in_as_you_cannot_manage_app_passwords_or_delete_the_account` | nest (linux): passed, nest (macos): passed |

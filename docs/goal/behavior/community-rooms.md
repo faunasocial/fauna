@@ -203,7 +203,7 @@ The community class's entries, carried verbatim out of [`conversation-rooms.md`]
   the scheme's existing moves rather than new ones (reason 4). What the
   build *added* to the design is one ruling, above: the revoke is a
   rotation, not a roster removal.
-- **The room's search — its relay for a member homed elsewhere BUILT 2026-10-17, its client surface BUILT on tui 2026-10-19, the other six apps UNBUILT.** The five ids are in ui.yaml since 2026-10-19, and tui paints the shared manager's `ConversationsManager::room_search` on the room's thread view ([`room-search.md`](room-search.md) § Implementation status today names the pins); on the other six the `fauna.conversations.room.search` door below still serves API callers only. The door is same-nest — it resolves the room from this nest's own record — so a foreign member reaches it through its own nest: the relayed twin `fauna.conversations.room.search_remote` → `fauna.federation.conversation.room.search.fetch` (ruled 2026-10-16, built 2026-10-17) is owned by [`../architecture/federation.md`](../architecture/federation.md) § Federation residue surface (the *room search* row), and a room **post** hit is the discovery door a room post takes to a foreign member until the federated follow lands ([`../architecture/feed-read-model.md`](../architecture/feed-read-model.md) § The read model → *Opening a post the timeline never loaded* → *A post homed on another nest*); the client surface — the room's own search on its thread view — is specified since 2026-10-16 in [`room-search.md`](room-search.md) (its five element ids user-approved under rule A and in ui.yaml since 2026-10-19; [`../ui/conversations.md`](../ui/conversations.md) keeps the page's stub and § User actions rows) and is built tui first, the other six following in their trickle-down.
+- **The room's search — its relay for a member homed elsewhere BUILT 2026-10-17, its client surface BUILT on all 7 apps (tui 2026-10-19 first; [`room-search.md`](room-search.md) § Implementation status today owns each app's dates and pins).** The five ids are in ui.yaml since 2026-10-19, and every app paints the shared manager's `ConversationsManager::room_search` on the room's thread view. The door is same-nest — it resolves the room from this nest's own record — so a foreign member reaches it through its own nest: the relayed twin `fauna.conversations.room.search_remote` → `fauna.federation.conversation.room.search.fetch` (ruled 2026-10-16, built 2026-10-17) is owned by [`../architecture/federation.md`](../architecture/federation.md) § Federation residue surface (the *room search* row), and a room **post** hit is the discovery door a room post takes to a foreign member until the federated follow lands ([`../architecture/feed-read-model.md`](../architecture/feed-read-model.md) § The read model → *Opening a post the timeline never loaded* → *A post homed on another nest*); the client surface — the room's own search on its thread view — is specified since 2026-10-16 in [`room-search.md`](room-search.md) (its five element ids user-approved under rule A and in ui.yaml since 2026-10-19; [`../ui/conversations.md`](../ui/conversations.md) keeps the page's stub and § User actions rows) and is built tui first, the other six following in their trickle-down.
 - **The search index becomes readable — the first purpose of the read served
   end to end (2026-09-10, schema 58).**
   `fauna.conversations.room.search` is the door: a live floor member of any
@@ -447,8 +447,10 @@ The community class's entries, carried verbatim out of [`conversation-rooms.md`]
   editor, names it and saves; the room's verified set names it on the
   owner's seat; a member's message the labeler has something to say about
   paints a `content-label-badge` on the owner's bubble, and the founding
-  message sent before the set existed stays unlabelled. **Not built:** the
-  six-app lift.
+  message sent before the set existed stays unlabelled. The other six apps
+  carry the journey's mark; web paints the rows and the inspect panel in
+  `RoomLabelerRows.svelte` and `LabelerInspectPanel.svelte`, its mark added
+  2026-11-06 with the witness on the verify queue.
 - **Attribution lands — a community-room message is authored, not just sealed
   (2026-09-10; § The three classes → *Community* → *Who wrote it*).** The
   sealed plaintext of a `RoomSealed` envelope is now a **signed**
@@ -548,9 +550,13 @@ The community class's entries, carried verbatim out of [`conversation-rooms.md`]
   collapse into hosting the plane. So on web, founding and accepting an
   invitation are refused by name only while the tab's account runtime is not
   up (still assembling, or its start failed), and a community room's records
-  stay unopened for that window; web's paint of the founding and accepting
-  controls, and the web leg of `test_conversation_room_community.py`, are the
-  trickle-down's. The governance doors (`set_policy`,
+  stay unopened for that window. Web paints the founding and accepting
+  controls (`routes/conversations/+page.svelte`: the composer's
+  `recipient-picker-home-nest-toggle` and `recipient-picker-class`, the
+  `room-invitation` rows, and the room settings' `room-pending-invite` rows
+  and `room-nest-read-toggle`), and `test_conversation_room_community.py`
+  carries the web mark since 2026-11-06, its witness on the verify
+  queue. The governance doors (`set_policy`,
   `transfer_ownership`, `set_labelers`) need no reception key, and they work
   on web.
   **And the join, in the same landing.** `invite_to_room` signs the invitation

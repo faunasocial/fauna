@@ -196,7 +196,7 @@ object E2eLoudSurfaces {
         // `Arc` every call) — never an android-side count. A pair, not one
         // number: the waiter compares `completed` against the `started` it read
         // at plant time. A same-identity re-establish runs one pass, not a
-        // second loop (`CriticalAlertSweepDispatcher`).
+        // second loop (the shared `startCriticalAlertSweep`'s claim).
         val alerts = criticalAlertsRegistry()
         state.put(
             "alert_sweep_passes",

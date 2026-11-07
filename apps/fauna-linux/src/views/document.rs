@@ -605,6 +605,9 @@ pub(crate) fn build_link_preview_card(
 /// filename and size, never a bare icon (`conversations.md` § Attachments → *Retention*).
 /// The file button carries the same name and size. `dm-attachment-image` answers
 /// `get_attr(.., "state")` with `painted` (the picture's paintable) or `placeholder`.
+/// A painted picture is wrapped in a flat button, the feed `post-image`'s shape, so
+/// AT-SPI enumerates it and a click opens `image-lightbox` over the conversation from
+/// the texture already decoded (`conversations.md` § User actions).
 fn build_attachment(
     blob_hash: &str,
     filename: &str,
@@ -623,10 +626,21 @@ fn build_attachment(
             picture.set_paintable(Some(&texture));
             picture.set_can_shrink(true);
             picture.set_size_request(-1, 200);
-            picture.set_halign(gtk::Align::Start);
-            picture.set_tooltip_text(Some(&declared));
-            crate::testid::set_test_id(&picture, ids::DM_ATTACHMENT_IMAGE);
-            return picture.upcast();
+            let button = gtk::Button::new();
+            button.add_css_class("flat");
+            button.set_halign(gtk::Align::Start);
+            button.set_tooltip_text(Some(&declared));
+            button.set_child(Some(&picture));
+            crate::testid::set_test_id(&button, ids::DM_ATTACHMENT_IMAGE);
+            button.connect_clicked(move |b| {
+                let parent = b.root().and_then(|r| r.downcast::<gtk::Window>().ok());
+                crate::views::lightbox::show_image_lightbox_paintable(
+                    parent.as_ref(),
+                    &texture,
+                    crate::i18n::strings::c2pa::IMAGE_VIEWER,
+                );
+            });
+            return button.upcast();
         }
         let placeholder = gtk::Label::new(Some(&declared));
         placeholder.set_halign(gtk::Align::Start);

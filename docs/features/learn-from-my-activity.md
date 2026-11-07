@@ -66,7 +66,7 @@ Stamped 2026-10-01 at e5a7e5d758.
 | web | ✅ full | 0.1.5-dev+3b591c2e standalone |
 | linux | ✅ full | 0.1.5-dev+3b591c2e standalone |
 | windows | ✅ full | 0.1.5-dev+3b591c2e standalone |
-| macos | ⚠ partial | 0.1.5-dev+617b4b9c standalone |
+| macos | ✅ full | 0.1.5-dev+617b4b9c standalone |
 | ios | ⚠ partial | 0.1.5-dev+617b4b9c standalone |
 | android |  no run recorded | |
 | tui | ⚠ partial | 0.1.5-dev+3b591c2e standalone |
@@ -96,5 +96,5 @@ Stamped 2026-10-01 at e5a7e5d758.
 | 15 | app | `tests/e2e-unified/tests/test_engagement_cues.py::test_engagement_toggle_and_clear_activity_data` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
 | 16 | app | `tests/e2e-unified/tests/test_engagement_cues.py::test_what_one_device_collected_informs_the_feeds_on_your_other_device` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 17 | app | `tests/e2e-unified/tests/test_engagement_cues.py::test_a_video_played_to_its_end_derives_watch_complete_through_the_media_arm` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed |
-| 17 | app | `tests/e2e-unified/tests/test_engagement_cues.py::test_a_video_played_near_the_bottom_edge_still_counts_as_watched` | web (linux): passed, linux (linux): passed, macos (macos): failed, ios (macos): failed |
+| 17 | app | `tests/e2e-unified/tests/test_engagement_cues.py::test_a_video_played_near_the_bottom_edge_still_counts_as_watched` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): failed |
 <!-- features-render:end -->

@@ -58,6 +58,14 @@ ADB_SERVER_PORT = 18509
 #: What `--adb-server` is given for a venue run.
 ADB_SERVER_SPEC = f"tcp:127.0.0.1:{ADB_SERVER_PORT}"
 
+#: The serial of the venue's standing AVD, the one its `launchd` agents keep up
+#: (the first console port, so the first emulator the host starts). A run that
+#: names no other device drives this one: with a second AVD up beside it, adb
+#: with no `-s` refuses, so the verify queue's drain names it rather than
+#: relying on it being alone (delayed-testing.md § The verify queue, the device
+#: rule).
+VENUE_SERIAL = "emulator-5554"
+
 #: Local ports for `adb forward tcp:<p> tcp:18500`, one per device seat.
 BRIDGE_FORWARD_PORTS = range(18510, 18518)
 
@@ -269,7 +277,7 @@ def tunnel_spec(login: str = "", dev_vm_address: str = "") -> str:
         " \\\n".join(lines),
         "",
         "# Then, on the dev VM, an android e2e run names the tunnelled adb server:",
-        f"#   --app android --adb-server {ADB_SERVER_SPEC} --device-serial emulator-5554",
+        f"#   --app android --adb-server {ADB_SERVER_SPEC} --device-serial {VENUE_SERIAL}",
     ])
 
 
@@ -360,7 +368,15 @@ def launch_agents(login: str = "", dev_vm_address: str = "") -> str:
 
 
 def probe_venue(timeout: float = 5) -> tuple[bool, str]:
-    """`(up, one line saying why)`, asked of the venue's tunnelled adb server.
+    """`(up, one line saying why)` -- `venue_devices` read as up or down."""
+    ready, line = venue_devices(timeout)
+    return bool(ready), line
+
+
+def venue_devices(timeout: float = 5) -> tuple[list, str]:
+    """`(the serials in state device, one line saying why)`, asked of the
+    venue's tunnelled adb server; no serial when it is down. The verify queue's
+    drain reads the serials to tell a set's declared device is attached.
 
     Built from `android_device.adb_argv` with the venue's spec, never a hand-
     written `-H/-P` form: only `-L tcp:127.0.0.1:<port>` makes a client facing a
@@ -373,21 +389,21 @@ def probe_venue(timeout: float = 5) -> tuple[bool, str]:
     try:
         result = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
     except subprocess.TimeoutExpired:
-        return False, (f"emulator down: the adb server at {ADB_SERVER_SPEC} did not answer "
+        return [], (f"emulator down: the adb server at {ADB_SERVER_SPEC} did not answer "
                        f"in {timeout:g} s")
     except OSError as exc:
-        return False, f"emulator unknown: adb cannot run on this machine ({exc.strerror or exc})"
+        return [], f"emulator unknown: adb cannot run on this machine ({exc.strerror or exc})"
     if result.returncode != 0:
-        return False, (f"emulator down: nothing answers at {ADB_SERVER_SPEC} -- the venue on "
+        return [], (f"emulator down: nothing answers at {ADB_SERVER_SPEC} -- the venue on "
                        f"the emulator's machine is not installed, its tunnel is not up, or "
                        f"its adb server is stopped")
     rows = android_device.parse_adb_devices(result.stdout)
     ready = [serial for serial, state in rows if state == "device"]
     if not ready:
         seen = ", ".join(f"{serial} {state}" for serial, state in rows) or "none attached"
-        return False, (f"emulator down: the tunnel and adb server answer, but no device is "
+        return [], (f"emulator down: the tunnel and adb server answer, but no device is "
                        f"ready ({seen}) -- the emulator is stopped or still booting")
-    return True, f"emulator up: {ADB_SERVER_SPEC} serves {', '.join(ready)}"
+    return ready, f"emulator up: {ADB_SERVER_SPEC} serves {', '.join(ready)}"
 
 
 if __name__ == "__main__":

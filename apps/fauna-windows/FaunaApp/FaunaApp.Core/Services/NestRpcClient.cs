@@ -2549,17 +2549,10 @@ internal sealed class NestRpcClient : INestRpcClient, IAsyncDisposable
     }
 
     /// <inheritdoc />
-    public async Task RunCriticalAlertSweepAsync()
+    public async Task StartCriticalAlertSweepAsync(string nestUrl)
     {
         var nest = await ConnectedAsync().ConfigureAwait(false);
-        await FaunaFfiMethods.RunCriticalAlertSweep(nest, _crypto.SecretBytes).ConfigureAwait(false);
-    }
-
-    /// <inheritdoc />
-    public async Task RunCriticalAlertSweepLoopAsync()
-    {
-        var nest = await ConnectedAsync().ConfigureAwait(false);
-        await FaunaFfiMethods.RunCriticalAlertSweepLoop(nest, _crypto.SecretBytes).ConfigureAwait(false);
+        await FaunaFfiMethods.StartCriticalAlertSweep(nest, _crypto.SecretBytes, nestUrl).ConfigureAwait(false);
     }
 
     /// <inheritdoc />
@@ -2750,6 +2743,12 @@ internal sealed class NestRpcClient : INestRpcClient, IAsyncDisposable
     {
         var nest = await ConnectedAsync().ConfigureAwait(false);
         return await FaunaFfiMethods.MailSwitchesSet(nest, receiveEnabled, sendEnabled).ConfigureAwait(false);
+    }
+
+    public async Task<MailSwitches> MailScanResultVisibleSetAsync(bool scanResultVisible)
+    {
+        var nest = await ConnectedAsync().ConfigureAwait(false);
+        return await FaunaFfiMethods.MailScanResultVisibleSet(nest, scanResultVisible).ConfigureAwait(false);
     }
 
     public async Task<uniffi.fauna_client_mail_settings.MailQuotas> MailQuotasGetAsync()

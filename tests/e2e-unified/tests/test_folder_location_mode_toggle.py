@@ -41,8 +41,8 @@ per-app difference lives in `SyncLocationsActions.prepare_binding_channel`, not
 here. tui renders the switch wherever the shared rule
 (`LocationBindingsModel::mode_toggle`, fed by the agent's status reply) says its
 agent hosts a placeholder surface — a windows or linux host — so the tui leg runs
-on Windows and Linux, and declares its absence on macOS
-(`_require_placeholder_host`).
+on Windows and Linux; a macOS host owes no leg (the module's `host_platform`
+marker).
 
 The MUTATION is UI-driven throughout (the toggle click); VERIFICATION reads the
 rebuilt row's mode over the uniform `/element/attr?attr=state` contract,
@@ -56,7 +56,6 @@ import time
 import pytest
 
 from common.nest import start_nest_in_place, stop_nest
-from helpers.app_surface import declared_absence
 from helpers.folder_content import mountable_location, on_demand_mount_stands
 from helpers.waiting import wait_until
 
@@ -69,32 +68,17 @@ pytestmark = [
     # surface). macOS/iOS render the set-level `folder-on-demand-toggle` instead,
     # by design rather than by lag, so the other apps are DESELECTED by the
     # marker rather than skipped in-body (convention 7: a skip is not coverage).
-    # tui's macOS host is gated in-body with a declared reason
-    # (`_require_placeholder_host`).
+    # tui runs on all three hosts, but on macOS a bound location is
+    # always-resident BY DESIGN (on-demand-files.md § On-Demand Files; the File
+    # Provider domain yields to it and the set-level `folder-on-demand-toggle` is
+    # apple's switch), so no leg is owed there: the host marker keeps a macOS run
+    # from recording one (feature-catalog.md § The ledger, *Stale records*,
+    # ruling (i)).
     pytest.mark.windows,
     pytest.mark.linux,
     pytest.mark.tui,
+    pytest.mark.host_platform("linux", "windows"),
 ]
-
-
-def _require_placeholder_host(app) -> None:
-    """tui renders the switch only where its agent hosts a placeholder surface.
-
-    A windows host (cfapi) and a linux host (the agent's FUSE root) run the leg.
-    On macOS a bound location is always-resident BY DESIGN — the File Provider
-    domain yields to it, and the set-level `folder-on-demand-toggle` is apple's
-    switch — so that is a declared absence.
-    """
-    if not app.driver.is_tui() or sys.platform != "darwin":
-        return
-    declared_absence(
-        app.driver,
-        capability="per-binding on-demand switch on a macOS host (a bound location is always-resident)",
-        doc=(
-            "docs/goal/behavior/on-demand-files.md § On-Demand Files — \"on macOS a "
-            "bound location is always-resident by design (on-demand-files-apple.md § Apple File Provider binding)\""
-        ),
-    )
 
 
 _MODES = {"always", "on-demand"}
@@ -219,7 +203,6 @@ def test_folder_location_mode_toggle_flip_survives_re_entry(logged_in_app, reque
     """
     app = logged_in_app
     loc = app.sync_locations
-    _require_placeholder_host(app)
 
     name, scope, src = _bind_fresh_folder(app, request, tmp_path)
 
@@ -303,7 +286,6 @@ def test_folder_location_row_paints_and_flips_with_the_nest_down(
     """
     app = logged_in_app
     loc = app.sync_locations
-    _require_placeholder_host(app)
 
     name, scope, _src = _bind_fresh_folder(app, request, tmp_path)
     before = loc.mode_toggle_state(scope=scope)

@@ -527,6 +527,12 @@ def build_sync_agent() -> str:
     return str(binary)
 
 
+#: The workspace every test-built binary links: the inputs a helper binary (and
+#: the windows MSI, whose staged binaries link the same) shares with all of them
+#: beside its own crate.
+_EXAMPLE_SOURCE_ROOTS = ("libs", "Cargo.lock", "rust-toolchain.toml")
+
+
 def _example_newest_source_mtime(repo: Path) -> float:
     """Newest mtime across a test-only helper binary's build inputs
     (`tests/e2e-unified/helpers/helper_bins.py::build`): each links shared
@@ -536,7 +542,7 @@ def _example_newest_source_mtime(repo: Path) -> float:
     bis = _load_build_if_stale()
     return max(
         bis._source_newest(repo / rel, _NEST_SOURCE_EXCLUDES)
-        for rel in ("libs", "Cargo.lock", "rust-toolchain.toml")
+        for rel in _EXAMPLE_SOURCE_ROOTS
     )
 
 

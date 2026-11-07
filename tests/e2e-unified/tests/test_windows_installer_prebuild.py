@@ -170,23 +170,28 @@ def test_the_installed_agent_carries_the_surface_of_the_app_that_spawns_it():
     assert "fauna-credential-store/e2e-agent" in manifest["features"]["e2e-agent"]
 
 
-def test_every_staged_inputs_own_crate_and_flavour_stale_the_cached_msi():
-    """`msi_path` returns the cached MSI while its stamp is at least the newest
-    `SOURCE_PATTERNS` file, and only a stale MSI owes the prebuild. So a crate
-    an input is built from, left out of those patterns, edits without a rebuild
-    and the suite witnesses the old binary — as does a changed flavour, which is
+def test_every_staged_inputs_own_crate_and_flavour_stale_the_cached_msi(tmp_path, monkeypatch):
+    """`msi_path` returns the cached MSI while its stamp is at least
+    `source_mtime`, and only a stale MSI owes the prebuild. So a crate an input
+    is built from, left out of that reading, edits without a rebuild and the
+    suite witnesses the old binary — as does a changed flavour, which is
     declared in the registry. The agent's and the nest's crates were missing
-    until the agent's flavour changed."""
-    from pathlib import PurePosixPath
-
-    patterns = windows_installer.SOURCE_PATTERNS
-    for entry in helper_bins.REGISTRY.values():
-        if helper_bins._WINDOWS_INSTALLER_MODULE not in entry.modules:
-            continue
-        for rel in entry.sources:
-            source = PurePosixPath(rel, "src", "nested", "x.rs")
-            assert any(source.full_match(p) for p in patterns), (entry.name, rel)
-    assert "tests/e2e-unified/helpers/helper_bins.py" in patterns
+    until the agent's flavour changed; the own
+    `sources` of each registry entry the MSI stages are read from the registry
+    since, so a new input brings its crate with it."""
+    monkeypatch.setattr(windows_installer, "is_admin", lambda: True)
+    sources = [
+        rel
+        for entry in helper_bins.REGISTRY.values()
+        if helper_bins._WINDOWS_INSTALLER_MODULE in entry.modules
+        for rel in entry.sources
+    ]
+    assert sources
+    for i, rel in enumerate(sources):
+        repo = _msi_tree(tmp_path / str(i), stamp_mtime=2_000.0)
+        _touch(tmp_path / str(i) / rel / "src" / "nested" / "x.rs", 3_000.0)
+        assert windows_installer.msi_build_owed(repo), rel
+    assert "tests/e2e-unified/helpers/helper_bins.py" in windows_installer.SOURCE_PATTERNS
 
 
 def test_every_input_names_a_target_its_manifest_declares():
@@ -284,6 +289,57 @@ def test_elevated_owes_an_msi_only_past_a_stale_stamp(tmp_path, monkeypatch):
     assert windows_installer.msi_build_owed(
         _msi_tree(tmp_path / "stale", stamp_mtime=2_000.0, source_mtime=3_000.0)
     )
+
+
+def _touch(path: Path, mtime: float) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("x")
+    os.utime(path, (mtime, mtime))
+
+
+def test_a_libs_edit_no_pattern_names_stales_the_cached_msi(tmp_path, monkeypatch):
+    """Every staged binary links most of `libs/` — the agent, the nest service,
+    the release `fauna_ffi.dll` the publish bundles — so a `libs/` crate no
+    `SOURCE_PATTERNS` entry names is an input too. Read fresh, an elevated run
+    on a tree where only it changed installs an MSI built from older Rust."""
+    from pathlib import PurePosixPath
+
+    monkeypatch.setattr(windows_installer, "is_admin", lambda: True)
+    linked = "libs/fauna-sync-engine/src/lib.rs"
+    assert not any(PurePosixPath(linked).full_match(p) for p in windows_installer.SOURCE_PATTERNS)
+    repo = _msi_tree(tmp_path, stamp_mtime=2_000.0)
+    _touch(tmp_path / linked, 1_500.0)
+    assert not windows_installer.msi_build_owed(repo), "a stamp newer than the edit is cached"
+    _touch(tmp_path / linked, 3_000.0)
+    assert windows_installer.msi_build_owed(repo), "a libs edit past the stamp owes the MSI"
+
+
+@pytest.mark.parametrize("rel", ["Cargo.lock", "rust-toolchain.toml"])
+def test_the_lockfile_and_the_toolchain_pin_stale_the_cached_msi(tmp_path, monkeypatch, rel):
+    monkeypatch.setattr(windows_installer, "is_admin", lambda: True)
+    repo = _msi_tree(tmp_path, stamp_mtime=2_000.0)
+    _touch(tmp_path / rel, 3_000.0)
+    assert windows_installer.msi_build_owed(repo)
+
+
+def test_the_helper_bins_excluded_output_keeps_a_warm_msi_cached(tmp_path, monkeypatch):
+    """The workspace reading is the helper bins' own, excludes included: a
+    wasm-pack out-dir or the regenerated Go bindings under `libs/`, written by
+    another build after the stamp, must not make every warm run miss the cache."""
+    import fnmatch
+
+    monkeypatch.setattr(windows_installer, "is_admin", lambda: True)
+    repo = _msi_tree(tmp_path, stamp_mtime=2_000.0)
+    _touch(tmp_path / "libs" / "fauna-core" / "src" / "lib.rs", 1_500.0)
+    for rel in (
+        "libs/fauna-wasm/pkg/fauna_wasm.js",
+        "libs/fauna-wasm/pkg-test/fauna_wasm.js",
+        "libs/fauna-mail-go/fauna_ffi/fauna_ffi.go",
+    ):
+        path = tmp_path / rel
+        assert any(fnmatch.fnmatch(path.as_posix(), p) for p in common_nest._NEST_SOURCE_EXCLUDES), rel
+        _touch(path, 3_000.0)
+    assert not windows_installer.msi_build_owed(repo)
 
 
 def test_an_unreadable_stamp_owes_an_msi(tmp_path, monkeypatch):

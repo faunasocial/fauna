@@ -811,23 +811,50 @@ class Program
                 break;
 
             case "/element/scroll-into-view" when method == "POST":
-                var sivReq = await ReadJson<ElementRequest>(ctx.Request);
+                var sivReq = await ReadJson<ScrollIntoViewRequest>(ctx.Request);
+                if (sivReq.Whole)
+                {
+                    // The base driver's scroll_to contract (centre, whole element):
+                    // the reveal, then Actions.MakeWhole. `found` is "on screen";
+                    // the verdict and share ride along for the caller's diagnosis.
+                    var sivWhole = RequireActions().ScrollIntoViewWhole(sivReq.Id, sivReq.Index, sivReq.Scope);
+                    await WriteJson(ctx.Response, 200, sivWhole is null
+                        ? new { found = false, error = "not found" }
+                        : (object)new
+                        {
+                            found = sivWhole.OnScreen,
+                            whole = sivWhole.Verdict.ToString(),
+                            fraction = sivWhole.Fraction,
+                            moves = sivWhole.Moves,
+                            detail = sivWhole.Detail,
+                            error = sivWhole.OnScreen ? null : sivWhole.Detail,
+                        });
+                    break;
+                }
+                // The bare reveal: on screen at all (UIA's any-sliver IsOffscreen),
+                // wait_for's best-effort targeted scroll.
                 var sivFound = RequireActions().ScrollIntoView(sivReq.Id, sivReq.Index, sivReq.Scope);
                 await WriteJson(ctx.Response, 200, new { found = sivFound });
                 break;
 
-            // Targeted scroll to a MEASURED visibility fraction (Actions.
-            // ScrollIntoViewFraction) — the precise sibling of
-            // /element/scroll-into-view above, whose IsOffscreen-based "found"
-            // flips as soon as any sliver is on screen.
+            // Targeted scroll to a MEASURED visibility share (Actions.
+            // ScrollIntoViewFraction): the whole reveal above, answered as the share
+            // of the element's TRUE height that shows. `fraction` is null, with the
+            // reason in `error`, when no reading proved that height.
             case "/element/scroll-into-view-fraction" when method == "POST":
                 var sivfReq = await ReadJson<ScrollFractionRequest>(ctx.Request);
-                var sivfFraction = RequireActions().ScrollIntoViewFraction(
+                var sivf = RequireActions().ScrollIntoViewFraction(
                     sivfReq.Id, sivfReq.MinFraction, sivfReq.Index, sivfReq.Scope);
-                await WriteJson(ctx.Response, 200, new {
-                    found = sivfFraction.HasValue,
-                    fraction = sivfFraction ?? 0.0,
-                });
+                await WriteJson(ctx.Response, 200, sivf is null
+                    ? new { found = false }
+                    : (object)new
+                    {
+                        found = true,
+                        fraction = sivf.Fraction,
+                        whole = sivf.Verdict.ToString(),
+                        moves = sivf.Moves,
+                        error = sivf.Fraction is null ? sivf.Detail : null,
+                    });
                 break;
 
             case "/scroll" when method == "POST":
@@ -1166,6 +1193,9 @@ record SessionRequest(string App, string? Args, Dictionary<string, string>? Envi
                       string? PackageFamilyName = null, string? PackageAppId = null,
                       long? CpuAffinityMask = null, string? Aumid = null);
 record ElementRequest(string Id, int Index = 0, List<ScopeStep>? Scope = null);
+// Whole: the base driver's scroll_to contract (Actions.ScrollIntoViewWhole); absent or
+// false, the bare any-sliver reveal wait_for uses.
+record ScrollIntoViewRequest(string Id, int Index = 0, List<ScopeStep>? Scope = null, bool Whole = false);
 record TypeRequest(string Id, string Text, int Index = 0, List<ScopeStep>? Scope = null);
 record PhysicalTypeRequest(
     string Id, string Text, int Index = 0, List<ScopeStep>? Scope = null, int PreDelayMs = 0);

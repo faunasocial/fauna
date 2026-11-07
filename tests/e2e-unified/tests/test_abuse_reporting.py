@@ -303,7 +303,7 @@ def _wait_for_post_id(app, post_id, tag):
 
 def _report_post(app, post_id, reason):
     """Report the post ``post_id`` through its ⋯ verb; return the acknowledgement."""
-    idx = app.feed.post_index_by_id(post_id)
+    idx = app.feed.card_index_by_id(post_id)
     assert idx >= 0, f"the post {post_id} must be in the feed window to report it"
     app.report.open_from_post(app.feed, idx)
     app.report.choose_reason(reason)

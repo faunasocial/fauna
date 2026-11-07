@@ -303,8 +303,12 @@ pub enum PeerHostClass {
 pub struct ClassifiedPeerHost {
     pub class: PeerHostClass,
     /// The resolved address to dial, one the class was judged from. `None`
-    /// for a literal host (the literal *is* the dial target, no DNS) and for a
-    /// name that did not resolve (classed `Global`, the strictest).
+    /// for an IP literal host (the literal *is* the dial target, no DNS) and
+    /// for a name that did not resolve (classed `Global`, the strictest). A
+    /// localhost name is classed `Loopback` by its NAME, so it dials
+    /// `127.0.0.1` and is never resolved — a forwarding resolver's answer for
+    /// `x.localhost` would otherwise be admitted under the loopback-fixture
+    /// carve-out.
     pub dial_addr: Option<std::net::SocketAddr>,
 }
 
@@ -414,7 +418,10 @@ pub fn discovery_dial_admits(
 /// Establish a peer URL's [`PeerHostClass`] for [`discovery_dial_admits`],
 /// with the address the dial must use: a loopback literal by text, an IP
 /// literal by [`fauna_core::resolve::is_global_ip`] (no DNS, nothing to pin),
-/// a name by resolving it **once** and classifying that answer set
+/// a localhost name as `Loopback` dialing `127.0.0.1`
+/// ([`fauna_core::resolve::loopback_dial_addr`] — never resolved, so the class
+/// and the destination cannot part), any other name by resolving it **once**
+/// and classifying that answer set
 /// ([`classify_resolved_addrs`] — `NonGlobal` only when every address is).
 /// A name that does not resolve is classed `Global` — the strictest class, so
 /// an unresolvable name can only ever be *more* refused, never admitted
@@ -441,15 +448,20 @@ pub async fn classify_peer_host_resolving(peer_url: &str) -> Result<ClassifiedPe
             PeerHostClass::NonGlobal
         }
     };
+    let port = url.port_or_known_default().unwrap_or(443);
     let name = match host {
         url::Host::Ipv4(ip) => return Ok(literal(ip_class(ip.into()))),
         url::Host::Ipv6(ip) => return Ok(literal(ip_class(ip.into()))),
-        url::Host::Domain("localhost") => {
-            return Ok(literal(PeerHostClass::Loopback));
+        url::Host::Domain(name) => {
+            if let Some(dial_addr) = fauna_core::resolve::loopback_dial_addr(name, port) {
+                return Ok(ClassifiedPeerHost {
+                    class: PeerHostClass::Loopback,
+                    dial_addr: Some(dial_addr),
+                });
+            }
+            name
         }
-        url::Host::Domain(name) => name,
     };
-    let port = url.port_or_known_default().unwrap_or(443);
     let addrs: Vec<std::net::SocketAddr> = match tokio::net::lookup_host((name, port)).await {
         Ok(addrs) => addrs.collect(),
         Err(_) => Vec::new(),
@@ -3029,6 +3041,33 @@ mod tests {
             classify_peer_host("not a url").await,
             Err(PoolError::Resolve(_))
         ));
+    }
+
+    /// A localhost name is admitted by its NAME, so the dial goes to
+    /// `127.0.0.1` and the name is never resolved: whatever a forwarding resolver would answer for
+    /// `x.localhost`, the loopback-fixture carve-out reaches only this box.
+    #[tokio::test]
+    async fn a_localhost_name_dials_loopback_never_the_resolver() {
+        for (url, port) in [
+            ("http://localhost:8080/", 8080),
+            ("https://fauna-row-3951-probe.localhost:8443/", 8443),
+            ("https://A.LOCALHOST./", 443),
+            ("http://x.localhost/", 80),
+        ] {
+            let got = classify_peer_host_resolving(url).await.unwrap();
+            assert_eq!(got.class, PeerHostClass::Loopback, "{url}");
+            assert_eq!(
+                got.dial_addr,
+                Some(std::net::SocketAddr::from(([127, 0, 0, 1], port))),
+                "{url}"
+            );
+        }
+        // An IP literal is still its own dial target.
+        let lit = classify_peer_host_resolving("http://127.0.0.1:9/")
+            .await
+            .unwrap();
+        assert_eq!(lit.class, PeerHostClass::Loopback);
+        assert_eq!(lit.dial_addr, None);
     }
 
     /// One resolution's answer set decides both the class and the address

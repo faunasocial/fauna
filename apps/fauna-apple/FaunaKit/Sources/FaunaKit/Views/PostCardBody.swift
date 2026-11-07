@@ -485,9 +485,7 @@ public struct PostCardBody: View {
                 await vm.resolveLinkPreview(url)
             }
         }
-        .fullScreenCover(item: $lightboxItem) { item in
-            ImageLightbox(source: item.source, onDismiss: { lightboxItem = nil })
-        }
+        .imageLightbox(item: $lightboxItem)
     }
 }
 

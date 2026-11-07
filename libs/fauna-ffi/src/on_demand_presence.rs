@@ -16,7 +16,7 @@ use std::sync::{Arc, Mutex};
 use fauna_folders_machine::on_demand_presence::{self as odp, OnDemandPrefs};
 pub use fauna_folders_machine::on_demand_presence::{
     DesiredPresence, ForeignHold, PresencePlan, PresenceRemoval, PresenceRole, PresenceScope,
-    PresenceSet, RegisteredPresence,
+    PresenceSet, RegisteredPresence, SetPark,
 };
 
 use crate::{FfiError, general_err};
@@ -133,6 +133,17 @@ pub fn on_demand_presence_plan(
     let (actor_id, desired) = desired_presences(&actor_id_hex, &sets, stronger, &prefs)?;
     let owners: Option<BTreeMap<String, String>> = owners.map(|m| m.into_iter().collect());
     Ok(odp::plan(actor_id, &desired, &registered, owners.as_ref()))
+}
+
+/// The sets of `presences` whose row heads its device-local section with
+/// `folder-access-revoked-warning` — the one fold both capability-host apps
+/// call ([`odp::parked_presences`]), over each set's [`crate::sync_set_park`]
+/// read. Its membership is `binding_section`'s `parked` input.
+#[uniffi::export]
+pub fn on_demand_parked_presences(presences: Vec<PresenceSet>, reads: Vec<SetPark>) -> Vec<String> {
+    odp::parked_presences(&presences, &reads)
+        .into_iter()
+        .collect()
 }
 
 /// The scoped identifiers whose row carries the one-time OS enable notice

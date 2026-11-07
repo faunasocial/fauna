@@ -117,8 +117,10 @@ The invitation's entries, carried verbatim out of [`conversation-rooms.md`](conv
   `tests/e2e-unified/tests/test_conversation_room_community.py` witnesses the
   founder listing the member's invitation as pending, withdrawing it, the
   member's row leaving their list, and the re-invitation as the undo.
-  **Not built, declared:** the six apps behind tui do not paint the section
-  yet. And **a room
+  The six apps behind tui paint the section too, each carrying the
+  journey's mark; web's paint is in
+  `routes/conversations/+page.svelte`, its mark added 2026-11-06 with the
+  witness on the verify queue. And **a room
   homed on another nest lists nothing**: neither kind has a relay twin, so a
   member homed elsewhere — an admin included — neither sees nor withdraws
   (`room.remove`'s own bound; the room's home-nest members are unaffected).

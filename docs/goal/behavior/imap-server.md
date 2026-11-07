@@ -120,6 +120,10 @@ The following appear automatically after first AUTH; the MDA seeds them lazily o
 | Trash    | `\Trash`    |
 | Junk     | `\Junk`     |
 
+`\Inbox` is INBOX's role in the placement record only: RFC 6154 defines no INBOX attribute (IMAP identifies INBOX by name), so LIST shows none for it, and the five others carry their attribute in LIST unconditionally.
+
+**One owner.** The set and this table live in shared Rust, `fauna_protocol::email` (`STANDARD_MAILBOXES`, `standard_mailbox_attrs`, and `special_use_attrs` for the LIST form). The nest seeds, guards and journals from it, and sends each mailbox's LIST attributes in the `attrs` field of `fauna.bridges.list_mailboxes`'s `MailboxEntry`; the MDA writes them verbatim and keeps no table of its own. The COPY/MOVE spam-training trigger (§ `\Junk` flag-change ↔ spam-training contract) has only mailbox names in hand, so it keys on the Junk mailbox's name, a Go constant pinned to `fauna_protocol::email::JUNK_MAILBOX` by the Rust-generated `list_mailboxes` reply fixture. Because no other mailbox is ever given `\Junk`, and Junk cannot be renamed, testing the name is the same as testing the attribute.
+
 One additional name is **protected without being standard**: the guardian held mailbox ([`family-safety.md`](family-safety.md) § The mail gate) — never seeded, no SPECIAL-USE attribute, but CREATE/DELETE/RENAME refuse it exactly like the six.
 
 User-created mailboxes are flat or hierarchical with the canonical separator `/`. RFC 6154 special-use attributes other than the six above are not assigned — clients setting `\Archive` (etc.) on a non-standard mailbox lose the attribute on the next LIST.
@@ -289,7 +293,7 @@ Per `docs/goal/behavior/mail-spam.md` § Training signal sources, the `\Junk` fl
 - `MOVE` / `COPY` into a `\Junk`-marked mailbox → `label="spam"`, `source="imap_junk_move"`.
 - `MOVE` / `COPY` out of a `\Junk`-marked mailbox → `label="ham"`, `source="imap_junk_move"`.
 
-The MDA detects the `\Junk` mailbox via its SPECIAL-USE attribute (per § Standard mailboxes), not by the literal mailbox name — a locale-renamed Junk mailbox still fires. The MDA fires one event per wire action and never dedups; the one-lesson rule (a signal whose label matches the actor's newest recorded lesson for that message is a duplicate, so the MUA that pairs a flag-set with a MOVE teaches once) runs **nest-side**, on the `put_spam_model` carrying the history insert, not in the MDA. Labels, the source taxonomy, the dedup rule, and the classifier lifecycle (per-actor model storage, cross-actor isolation, cold-start, reset, encrypted-mode wrapping) are owned by `mail-spam.md` § Training signal sources; this section pins only the IMAP-side trigger contract above.
+The `\Junk` mailbox is the one mailbox carrying that SPECIAL-USE attribute; how the MDA recognises it is set out in § Standard mailboxes (*One owner*). The MDA fires one event per wire action and never dedups; the one-lesson rule (a signal whose label matches the actor's newest recorded lesson for that message is a duplicate, so the MUA that pairs a flag-set with a MOVE teaches once) runs **nest-side**, on the `put_spam_model` carrying the history insert, not in the MDA. Labels, the source taxonomy, the dedup rule, and the classifier lifecycle (per-actor model storage, cross-actor isolation, cold-start, reset, encrypted-mode wrapping) are owned by `mail-spam.md` § Training signal sources; this section pins only the IMAP-side trigger contract above.
 
 ### Tombstone retention
 
